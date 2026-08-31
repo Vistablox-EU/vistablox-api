@@ -24,6 +24,8 @@ export interface BetterAuthFactoryOptions {
   sendVerificationEmail?: (input: { to: string; verificationUrl: string }) => Promise<void>;
   sendPasswordResetEmail?: (input: { to: string; resetUrl: string }) => Promise<void>;
   onBackgroundError?: (error: unknown) => void;
+  allowPopulationInput?: boolean;
+  disableAutoSignIn?: boolean;
 }
 
 export function createBetterAuth(options: BetterAuthFactoryOptions) {
@@ -41,7 +43,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           type: ["customer", "staff_partner"],
           required: true,
           defaultValue: "customer",
-          input: false,
+          input: options.allowPopulationInput === true,
         },
       },
     },
@@ -69,6 +71,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       minPasswordLength: 12,
       maxPasswordLength: 128,
       requireEmailVerification: options.sendVerificationEmail !== undefined,
+      autoSignIn: options.disableAutoSignIn !== true,
       revokeSessionsOnPasswordReset: true,
       ...(options.sendPasswordResetEmail === undefined
         ? {}

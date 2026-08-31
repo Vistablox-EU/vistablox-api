@@ -20,6 +20,8 @@ model Account {
   staffWebAuthnCredentials StaffWebAuthnCredential[]
   staffWebAuthnChallenges StaffWebAuthnChallenge[]
   staffMfaSessions        StaffSessionMfa[]
+  staffInvitationsSent    StaffInvitation[] @relation("StaffInvitationIssuer")
+  acceptedStaffInvitation StaffInvitation?  @relation("StaffInvitationAcceptance")
   loginMethods            LoginMethod[]
   sessions                Session[]
   recoveryCases           AccountRecoveryCase[] @relation("RecoverySubject")
@@ -104,6 +106,35 @@ model StaffSessionMfa {
   @@index([accountId], map: "idx_staff_session_mfa_account")
   @@index([credentialId], map: "idx_staff_session_mfa_credential")
   @@map("staff_session_mfa")
+  @@schema("account")
+}
+
+model StaffInvitation {
+  id                   String    @id @map("invitation_id")
+  email                String
+  displayName          String    @map("display_name")
+  role                 String
+  legalPracticeId      String?   @map("legal_practice_id")
+  appraisalFirmId      String?   @map("appraisal_firm_id")
+  tokenHash            String    @unique @map("token_hash")
+  invitedByAccountId   String    @map("invited_by_account_id")
+  acceptedAccountId    String?   @unique @map("accepted_account_id")
+  claimId              String?   @map("claim_id")
+  claimedAt            DateTime? @map("claimed_at") @db.Timestamptz(6)
+  expiresAt            DateTime  @map("expires_at") @db.Timestamptz(6)
+  acceptedAt           DateTime? @map("accepted_at") @db.Timestamptz(6)
+  revokedAt            DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  invitedBy            Account   @relation("StaffInvitationIssuer", fields: [invitedByAccountId], references: [id])
+  acceptedAccount      Account?  @relation("StaffInvitationAcceptance", fields: [acceptedAccountId], references: [id])
+  legalPractice        LegalPractice? @relation(fields: [legalPracticeId], references: [id])
+  appraisalFirm        AppraisalFirm? @relation(fields: [appraisalFirmId], references: [id])
+
+  @@index([email], map: "idx_staff_invitations_email")
+  @@index([expiresAt], map: "idx_staff_invitations_expiry")
+  @@index([invitedByAccountId], map: "idx_staff_invitations_invited_by")
+  @@map("staff_invitations")
   @@schema("account")
 }
 
@@ -262,6 +293,7 @@ model LegalPractice {
   staffRoles       StaffRoleAssignment[]
   cases            OriginationCase[]
   targetEvents     WorkstreamAssignmentEvent[]
+  staffInvitations StaffInvitation[]
 
   @@map("legal_practices")
   @@schema("origination")
@@ -276,6 +308,7 @@ model AppraisalFirm {
   staffRoles       StaffRoleAssignment[]
   cases            OriginationCase[]
   targetEvents     WorkstreamAssignmentEvent[]
+  staffInvitations StaffInvitation[]
 
   @@map("appraisal_firms")
   @@schema("origination")

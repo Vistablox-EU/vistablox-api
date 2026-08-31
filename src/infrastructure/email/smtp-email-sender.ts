@@ -10,9 +10,17 @@ export interface PasswordResetEmail {
   resetUrl: string;
 }
 
+export interface StaffInvitationEmail {
+  to: string;
+  displayName: string;
+  invitationUrl: string;
+  expiresAt: Date;
+}
+
 export interface EmailSender {
   sendVerificationEmail(email: VerificationEmail): Promise<void>;
   sendPasswordResetEmail(email: PasswordResetEmail): Promise<void>;
+  sendStaffInvitationEmail(email: StaffInvitationEmail): Promise<void>;
 }
 
 export interface SmtpEmailSenderOptions {
@@ -53,6 +61,17 @@ export class SmtpEmailSender implements EmailSender {
       subject: "Reset your VistaBlox password",
       text: `Reset your VistaBlox password: ${email.resetUrl}`,
       html: `<p>Reset your VistaBlox password:</p><p><a href="${escapeHtml(email.resetUrl)}">Reset password</a></p>`,
+    });
+  }
+
+  public async sendStaffInvitationEmail(email: StaffInvitationEmail): Promise<void> {
+    const expiresAt = email.expiresAt.toISOString();
+    await this.transporter.sendMail({
+      from: this.options.from,
+      to: email.to,
+      subject: "Your VistaBlox staff invitation",
+      text: `Hello ${email.displayName}, accept your VistaBlox staff invitation before ${expiresAt}: ${email.invitationUrl}`,
+      html: `<p>Hello ${escapeHtml(email.displayName)},</p><p>Accept your VistaBlox staff invitation before ${escapeHtml(expiresAt)}:</p><p><a href="${escapeHtml(email.invitationUrl)}">Accept invitation</a></p>`,
     });
   }
 }

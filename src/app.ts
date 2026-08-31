@@ -17,6 +17,16 @@ import {
   createRequireStaffWebAuthn,
 } from "./modules/auth/api/require-staff-role.js";
 import { createStaffWebAuthnRouter } from "./modules/auth/api/staff-webauthn.router.js";
+import {
+  createInternalStaffInvitationRouter,
+  createPublicStaffInvitationRouter,
+} from "./modules/auth/api/staff-invitation.router.js";
+import {
+  AcceptStaffInvitationService,
+  IssueStaffInvitationService,
+} from "./modules/auth/application/staff-invitation.service.js";
+import type { StaffIdentityProvider } from "./modules/auth/application/staff-identity-provider.js";
+import type { StaffInvitationRepository } from "./modules/auth/repository/staff-invitation.repository.js";
 import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.service.js";
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
 import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
@@ -59,6 +69,17 @@ export interface AppDependencies {
     originationRepository: OriginationRepository;
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
+    staffInvitations?: {
+      repository: StaffInvitationRepository;
+      identities: StaffIdentityProvider;
+      sendEmail: (input: {
+        to: string;
+        displayName: string;
+        invitationUrl: string;
+        expiresAt: Date;
+      }) => Promise<void>;
+      acceptUrl: string;
+    };
   };
 }
 
@@ -106,6 +127,32 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.protectedApi.staffWebAuthnRepository,
       dependencies.protectedApi.staffWebAuthnCeremony,
     );
+    if (dependencies.protectedApi.staffInvitations !== undefined) {
+      const invitations = dependencies.protectedApi.staffInvitations;
+      const issueInvitation = new IssueStaffInvitationService(
+        invitations.repository,
+        invitations.identities,
+        invitations.sendEmail,
+        invitations.acceptUrl,
+      );
+      const acceptInvitation = new AcceptStaffInvitationService(
+        invitations.repository,
+        invitations.identities,
+      );
+      app.use(
+        "/v1/auth/staff-invitations",
+        createPublicStaffInvitationRouter(acceptInvitation),
+      );
+      app.use(
+        "/internal/v1/auth/staff-invitations",
+        createInternalStaffInvitationRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          issueInvitation,
+        ),
+      );
+    }
     app.use(
       "/internal/v1/auth/webauthn",
       createStaffWebAuthnRouter(

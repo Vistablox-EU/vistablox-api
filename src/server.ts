@@ -12,9 +12,11 @@ import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
 import { PrismaAccountRepository } from "./modules/account/repository/prisma-account.repository.js";
 import { createBetterAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
+import { BetterAuthStaffIdentityProvider } from "./modules/auth/infrastructure/better-auth-staff-identity.provider.js";
 import { BetterAuthSessionResolver } from "./modules/auth/infrastructure/better-auth-session.resolver.js";
 import { SimpleWebAuthnCeremony } from "./modules/auth/infrastructure/simple-webauthn.ceremony.js";
 import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/prisma-staff-webauthn.repository.js";
+import { PrismaStaffInvitationRepository } from "./modules/auth/repository/prisma-staff-invitation.repository.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 
@@ -24,6 +26,7 @@ const database = createPrismaClient(environment.DATABASE_URL);
 const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
+const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
 const authBaseUrl = new URL(environment.BETTER_AUTH_URL);
 const accountProvisioner = new AccountProvisioner(accountRepository);
 const emailSender = new SmtpEmailSender({
@@ -57,6 +60,17 @@ const auth = createBetterAuth({
     logger.error({ err: error }, "background authentication task failed");
   },
 });
+const staffProvisioningAuth = createBetterAuth({
+  database: authDatabase,
+  baseURL: environment.BETTER_AUTH_URL,
+  secret: environment.BETTER_AUTH_SECRET,
+  secureCookies: environment.NODE_ENV === "production",
+  trustedOrigins: environment.AUTH_TRUSTED_ORIGINS,
+  allowPopulationInput: true,
+  disableAutoSignIn: true,
+  onUserCreated: (user) => accountProvisioner.onUserCreated(user),
+  onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
+});
 const app = createApp({
   databaseProbe: new PrismaDatabaseProbe(database),
   offeringRepository: new PrismaOfferingRepository(database),
@@ -72,6 +86,14 @@ const app = createApp({
       rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
+    staffInvitations: {
+      repository: staffInvitationRepository,
+      identities: new BetterAuthStaffIdentityProvider(staffProvisioningAuth),
+      sendEmail: (email) => emailSender.sendStaffInvitationEmail(email),
+      acceptUrl:
+        environment.STAFF_INVITATION_ACCEPT_URL ??
+        new URL("/staff/accept-invitation", authBaseUrl).toString(),
+    },
   },
 });
 

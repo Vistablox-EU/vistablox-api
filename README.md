@@ -19,6 +19,8 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - mandatory per-session WebAuthn for staff/partner internal API access
 - direct SimpleWebAuthn registration/authentication with multiple credential support
 - one-time, session-bound WebAuthn challenges and success/failure audit records
+- WebAuthn-protected, invitation-only staff/partner provisioning with scoped roles
+- 72-hour single-use staff invitation tokens stored only as SHA-256 hashes
 - KYC/proof-of-address-gated owner intake at `POST /v1/origination-cases`
 - owner-scoped origination case list/detail reads with opaque cursor pagination
 - append-only initial submission revisions with mandatory evidence and audit logging
@@ -30,7 +32,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - Vitest API and domain tests
 - dependency boundary checks for the documented `router -> schema -> application service -> domain policy -> repository` layering
 
-Native-client OIDC, customer TOTP, staff invitation delivery, complete Better Auth event audit coverage, customer session/device management, provider callbacks, async reminder/expiry workers, and idempotency middleware remain subsequent implementation slices. Staff identities and active roles must currently be provisioned administratively; the first WebAuthn credential may then be enrolled, while adding any later credential requires an already WebAuthn-verified session. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
+Native-client OIDC, customer TOTP, complete Better Auth event audit coverage, customer session/device management, staff recovery/offboarding commands, provider callbacks, async reminder/expiry workers, and idempotency middleware remain subsequent implementation slices. A WebAuthn-verified administrator now provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
 
 ## Local setup
 
@@ -68,6 +70,8 @@ npm run db:migrate:deploy
 | `POST` | `/internal/v1/auth/webauthn/registration/verify` | Verify and store a staff credential; marks the session MFA-complete |
 | `POST` | `/internal/v1/auth/webauthn/authentication/options` | Begin mandatory staff session MFA |
 | `POST` | `/internal/v1/auth/webauthn/authentication/verify` | Verify a staff assertion and mark the session MFA-complete |
+| `POST` | `/internal/v1/auth/staff-invitations` | Issue a role-scoped staff/partner invitation; requires admin role and WebAuthn |
+| `POST` | `/v1/auth/staff-invitations/accept` | Accept an emailed invitation and set the initial password |
 | `GET` | `/v1/offerings?limit=20&after=...` | Cursor-paginated public offering teasers |
 | `POST` | `/v1/origination-cases` | Create an authenticated, eligibility-gated draft owner intake |
 | `GET` | `/v1/origination-cases?limit=20&after=...` | List the authenticated owner's cases |
