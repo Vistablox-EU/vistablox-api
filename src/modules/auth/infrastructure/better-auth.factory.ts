@@ -5,6 +5,7 @@ import type { Pool } from "pg";
 
 import type { AuthAuditSink } from "../application/auth-audit-sink.js";
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
+import { createBetterAuthStaffAccountGuardPlugin } from "./better-auth-staff-account-guard.plugin.js";
 
 export interface AuthUserSnapshot {
   id: string;
@@ -34,7 +35,8 @@ export interface BetterAuthFactoryOptions {
 }
 
 export function createBetterAuth(options: BetterAuthFactoryOptions) {
-  return betterAuth({
+  let clearStaffRecoveryRequirement = async (_betterAuthUserId: string): Promise<void> => {};
+  const auth = betterAuth({
     appName: "VistaBlox",
     baseURL: options.baseURL,
     basePath: "/api/auth",
@@ -49,6 +51,21 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           required: true,
           defaultValue: "customer",
           input: options.allowPopulationInput === true,
+        },
+        disabledAt: {
+          type: "date",
+          required: false,
+          input: false,
+        },
+        disabledReason: {
+          type: "string",
+          required: false,
+          input: false,
+        },
+        recoveryRequiredAt: {
+          type: "date",
+          required: false,
+          input: false,
         },
       },
     },
@@ -78,29 +95,27 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       requireEmailVerification: options.sendVerificationEmail !== undefined,
       autoSignIn: options.disableAutoSignIn !== true,
       revokeSessionsOnPasswordReset: true,
-      ...(options.authAuditSink === undefined
-        ? {}
-        : {
-            onPasswordReset: async ({ user }, request) => {
-              try {
-                const eventId =
-                  request?.headers.get("x-vistablox-auth-event-id")?.trim() || randomUUID();
-                const traceId = request?.headers.get("x-trace-id")?.trim() || null;
-                await options.authAuditSink?.record({
-                  eventKey: `better_auth:password_reset:${user.id}:${eventId}`,
-                  action: "authentication.password_reset",
-                  betterAuthUserId: user.id,
-                  attributeToSubject: true,
-                  resourceType: "account",
-                  resourceId: user.id,
-                  changes: { trace_id: traceId },
-                  occurredAt: new Date(),
-                });
-              } catch (error) {
-                options.onBackgroundError?.(error);
-              }
-            },
-          }),
+      onPasswordReset: async ({ user }, request) => {
+        await clearStaffRecoveryRequirement(user.id);
+        if (options.authAuditSink === undefined) return;
+        try {
+          const eventId =
+            request?.headers.get("x-vistablox-auth-event-id")?.trim() || randomUUID();
+          const traceId = request?.headers.get("x-trace-id")?.trim() || null;
+          await options.authAuditSink.record({
+            eventKey: `better_auth:password_reset:${user.id}:${eventId}`,
+            action: "authentication.password_reset",
+            betterAuthUserId: user.id,
+            attributeToSubject: true,
+            resourceType: "account",
+            resourceId: user.id,
+            changes: { trace_id: traceId },
+            occurredAt: new Date(),
+          });
+        } catch (error) {
+          options.onBackgroundError?.(error);
+        }
+      },
       ...(options.sendPasswordResetEmail === undefined
         ? {}
         : {
@@ -143,6 +158,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     },
     plugins: [
       haveIBeenPwned(),
+      createBetterAuthStaffAccountGuardPlugin(),
       ...(options.authAuditSink === undefined
         ? []
         : [
@@ -173,6 +189,21 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       },
     },
   });
+  clearStaffRecoveryRequirement = async (betterAuthUserId: string) => {
+    const context = await auth.$context;
+    const user = await context.internalAdapter.findUserById(betterAuthUserId);
+    const fields = user as (typeof user & Record<string, unknown>);
+    if (
+      user !== null &&
+      fields.population === "staff_partner" &&
+      fields.recoveryRequiredAt != null
+    ) {
+      await context.internalAdapter.updateUser(betterAuthUserId, {
+        recoveryRequiredAt: null,
+      });
+    }
+  };
+  return auth;
 }
 
 function toAuthUserSnapshot(user: {

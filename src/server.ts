@@ -13,11 +13,13 @@ import { AccountProvisioner } from "./modules/account/application/account-provis
 import { PrismaAccountRepository } from "./modules/account/repository/prisma-account.repository.js";
 import { createBetterAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
 import { BetterAuthStaffIdentityProvider } from "./modules/auth/infrastructure/better-auth-staff-identity.provider.js";
+import { BetterAuthStaffAccountAdministrator } from "./modules/auth/infrastructure/better-auth-staff-account-administrator.js";
 import { BetterAuthSessionResolver } from "./modules/auth/infrastructure/better-auth-session.resolver.js";
 import { SimpleWebAuthnCeremony } from "./modules/auth/infrastructure/simple-webauthn.ceremony.js";
 import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/prisma-staff-webauthn.repository.js";
 import { PrismaStaffInvitationRepository } from "./modules/auth/repository/prisma-staff-invitation.repository.js";
 import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit-sink.js";
+import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 
@@ -28,6 +30,7 @@ const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
 const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
+const staffAccountLifecycleRepository = new PrismaStaffAccountLifecycleRepository(database);
 const authAuditSink = new PrismaAuthAuditSink(database);
 const authBaseUrl = new URL(environment.BETTER_AUTH_URL);
 const accountProvisioner = new AccountProvisioner(accountRepository);
@@ -89,6 +92,13 @@ const app = createApp({
       rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
+    staffAccountLifecycle: {
+      repository: staffAccountLifecycleRepository,
+      administrator: new BetterAuthStaffAccountAdministrator(auth),
+      recoveryRedirectUrl:
+        environment.STAFF_RECOVERY_REDIRECT_URL ??
+        new URL("/staff/reset-password", authBaseUrl).toString(),
+    },
     staffInvitations: {
       repository: staffInvitationRepository,
       identities: new BetterAuthStaffIdentityProvider(staffProvisioningAuth),

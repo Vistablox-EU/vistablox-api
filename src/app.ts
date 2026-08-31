@@ -21,12 +21,19 @@ import {
   createInternalStaffInvitationRouter,
   createPublicStaffInvitationRouter,
 } from "./modules/auth/api/staff-invitation.router.js";
+import { createStaffAccountLifecycleRouter } from "./modules/auth/api/staff-account-lifecycle.router.js";
 import {
   AcceptStaffInvitationService,
   IssueStaffInvitationService,
 } from "./modules/auth/application/staff-invitation.service.js";
 import type { StaffIdentityProvider } from "./modules/auth/application/staff-identity-provider.js";
 import type { StaffInvitationRepository } from "./modules/auth/repository/staff-invitation.repository.js";
+import {
+  OffboardStaffAccountService,
+  RecoverStaffAccountService,
+} from "./modules/auth/application/staff-account-lifecycle.service.js";
+import type { StaffAccountAdministrator } from "./modules/auth/application/staff-account-administrator.js";
+import type { StaffAccountLifecycleRepository } from "./modules/auth/repository/staff-account-lifecycle.repository.js";
 import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.service.js";
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
 import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
@@ -69,6 +76,11 @@ export interface AppDependencies {
     originationRepository: OriginationRepository;
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
+    staffAccountLifecycle?: {
+      repository: StaffAccountLifecycleRepository;
+      administrator: StaffAccountAdministrator;
+      recoveryRedirectUrl: string;
+    };
     staffInvitations?: {
       repository: StaffInvitationRepository;
       identities: StaffIdentityProvider;
@@ -150,6 +162,26 @@ export function createApp(dependencies: AppDependencies): Express {
           requireAdminOperations,
           requireStaffWebAuthn,
           issueInvitation,
+        ),
+      );
+    }
+    if (dependencies.protectedApi.staffAccountLifecycle !== undefined) {
+      const lifecycle = dependencies.protectedApi.staffAccountLifecycle;
+      app.use(
+        "/internal/v1/auth/staff-accounts",
+        createStaffAccountLifecycleRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new RecoverStaffAccountService(
+            lifecycle.repository,
+            lifecycle.administrator,
+            lifecycle.recoveryRedirectUrl,
+          ),
+          new OffboardStaffAccountService(
+            lifecycle.repository,
+            lifecycle.administrator,
+          ),
         ),
       );
     }

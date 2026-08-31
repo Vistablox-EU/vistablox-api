@@ -26,6 +26,10 @@ const environmentSchema = z
       (value) => (value === "" ? undefined : value),
       z.url().optional(),
     ),
+    STAFF_RECOVERY_REDIRECT_URL: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.url().optional(),
+    ),
     AUTH_TRUSTED_ORIGINS: z
       .string()
       .default("http://localhost:3000")

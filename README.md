@@ -23,6 +23,8 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - 72-hour single-use staff invitation tokens stored only as SHA-256 hashes
 - idempotent Better Auth audit hooks for login, session, and password events
 - privacy-preserving failed-login correlation without storing raw login identifiers
+- WebAuthn-protected staff recovery that revokes sessions and credentials before reset delivery
+- immediate staff/partner offboarding with Better Auth login blocking, role revocation, and audit logging
 - KYC/proof-of-address-gated owner intake at `POST /v1/origination-cases`
 - owner-scoped origination case list/detail reads with opaque cursor pagination
 - append-only initial submission revisions with mandatory evidence and audit logging
@@ -34,7 +36,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - Vitest API and domain tests
 - dependency boundary checks for the documented `router -> schema -> application service -> domain policy -> repository` layering
 
-Native-client OIDC, customer TOTP, customer session/device management, staff recovery/offboarding commands, auth rate limiting, provider callbacks, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, and staff invitation actions now feed the unified audit trail with retry-safe event keys. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
+Native-client OIDC, customer TOTP, customer session/device management, auth rate limiting, provider callbacks, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
 
 ## Local setup
 
@@ -74,6 +76,8 @@ npm run db:migrate:deploy
 | `POST` | `/internal/v1/auth/webauthn/authentication/verify` | Verify a staff assertion and mark the session MFA-complete |
 | `POST` | `/internal/v1/auth/staff-invitations` | Issue a role-scoped staff/partner invitation; requires admin role and WebAuthn |
 | `POST` | `/v1/auth/staff-invitations/accept` | Accept an emailed invitation and set the initial password |
+| `POST` | `/internal/v1/auth/staff-accounts/:account_id/recovery` | Revoke staff sessions/WebAuthn credentials and email a password reset; requires another admin and WebAuthn |
+| `POST` | `/internal/v1/auth/staff-accounts/:account_id/offboard` | Disable staff login and revoke sessions, roles, and credentials; requires another admin and WebAuthn |
 | `GET` | `/v1/offerings?limit=20&after=...` | Cursor-paginated public offering teasers |
 | `POST` | `/v1/origination-cases` | Create an authenticated, eligibility-gated draft owner intake |
 | `GET` | `/v1/origination-cases?limit=20&after=...` | List the authenticated owner's cases |

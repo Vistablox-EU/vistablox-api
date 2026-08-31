@@ -12,6 +12,9 @@ export class BetterAuthSessionResolver implements SessionResolver {
     if (result === null) {
       return null;
     }
+    if (result.user.disabledAt != null || result.user.recoveryRequiredAt != null) {
+      return null;
+    }
 
     return {
       betterAuthUserId: result.user.id,
