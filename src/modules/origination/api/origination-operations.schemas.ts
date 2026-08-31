@@ -1,0 +1,108 @@
+import { z } from "zod";
+
+import { originationCaseStageSchema, ownedCaseSchema } from "./origination.schemas.js";
+
+export const operationsCaseListQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(20),
+  after: z.string().min(1).optional(),
+  stage: originationCaseStageSchema.optional(),
+});
+
+export const operationsCaseListResponseSchema = z.object({
+  data: z.array(ownedCaseSchema),
+  page: z.object({ next_cursor: z.string().nullable() }),
+});
+
+const operationsInformationRequestSchema = z.object({
+  request_id: z.string(),
+  status: z.enum(["proposed", "published", "answered", "withdrawn", "expired"]),
+  request_body: z.string(),
+  published_at: z.iso.datetime().nullable(),
+  due_at: z.iso.datetime().nullable(),
+  resolved_at: z.iso.datetime().nullable(),
+  resolution_type: z.enum(["resubmitted", "withdrawn", "expired"]).nullable(),
+  resolving_revision_id: z.string().nullable(),
+});
+
+export const operationsCaseDetailResponseSchema = z.object({
+  data: ownedCaseSchema.extend({
+    applicant_account_id: z.string(),
+    founder_review: z.object({
+      notes: z.string().nullable(),
+      reviewed_by_account_id: z.string().nullable(),
+      approved_at: z.iso.datetime().nullable(),
+      rejected_at: z.iso.datetime().nullable(),
+      rejection_reason_code: z.string().nullable(),
+      rejection_notes: z.string().nullable(),
+      ipo_period_days: z.number().int().positive().nullable(),
+      ipo_end_at: z.iso.datetime().nullable(),
+      ipo_value_eur: z.string().regex(/^\d+\.\d{2}$/).nullable(),
+    }),
+    submission: z
+      .object({
+        revision_id: z.string(),
+        revision_number: z.number().int().positive(),
+        submitted_at: z.iso.datetime(),
+        submitted_by_account_id: z.string(),
+        submission_data: z.json(),
+        evidence: z.array(
+          z.object({
+            evidence_id: z.string(),
+            document_type: z.string(),
+            status: z.string(),
+            document_ref: z.string(),
+            extract_dated: z.iso.datetime().nullable(),
+            uploaded_at: z.iso.datetime(),
+          }),
+        ),
+      })
+      .nullable(),
+    information_requests: z.array(operationsInformationRequestSchema),
+  }),
+});
+
+export const publishInformationRequestBodySchema = z.object({
+  request_body: z.string().trim().min(1).max(5000),
+});
+
+export const publishInformationRequestResponseSchema = z.object({
+  data: z.object({
+    request_id: z.string(),
+    case_id: z.string(),
+    status: z.literal("published"),
+    request_body: z.string(),
+    published_at: z.iso.datetime(),
+    due_at: z.iso.datetime(),
+  }),
+});
+
+export const founderDecisionBodySchema = z.discriminatedUnion("decision", [
+  z.object({
+    decision: z.literal("approve"),
+    founder_review_notes: z.string().trim().min(1).max(10000),
+    ipo_period_days: z.number().int().min(1).max(365),
+    ipo_value_eur: z
+      .string()
+      .regex(/^\d{1,13}\.\d{2}$/)
+      .refine((value) => BigInt(value.replace(".", "")) > 0n, "IPO value must be positive."),
+  }),
+  z.object({
+    decision: z.literal("reject"),
+    founder_review_notes: z.string().trim().min(1).max(10000),
+    rejection_reason_code: z.string().trim().min(1).max(100),
+    rejection_notes: z.string().trim().min(1).max(5000),
+  }),
+]);
+
+export const founderDecisionResponseSchema = z.object({
+  data: z.object({
+    case_id: z.string(),
+    stage: z.enum(["pre_offering_open", "rejected"]),
+    decided_at: z.iso.datetime(),
+    ipo_end_at: z.iso.datetime().nullable(),
+  }),
+});
+
+export type OperationsCaseListQuery = z.infer<typeof operationsCaseListQuerySchema>;
+export type PublishInformationRequestBody = z.infer<typeof publishInformationRequestBodySchema>;
+export type FounderDecisionBody = z.infer<typeof founderDecisionBodySchema>;
