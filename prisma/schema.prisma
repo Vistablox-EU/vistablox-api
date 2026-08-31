@@ -784,6 +784,7 @@ model ChainSettlementEvent {
 
 model AuditLog {
   id                String   @id @map("audit_log_id")
+  eventKey          String?  @unique @map("event_key")
   actorAccountId    String?  @map("actor_account_id")
   action            String
   resourceType      String   @map("resource_type")

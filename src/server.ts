@@ -17,6 +17,7 @@ import { BetterAuthSessionResolver } from "./modules/auth/infrastructure/better-
 import { SimpleWebAuthnCeremony } from "./modules/auth/infrastructure/simple-webauthn.ceremony.js";
 import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/prisma-staff-webauthn.repository.js";
 import { PrismaStaffInvitationRepository } from "./modules/auth/repository/prisma-staff-invitation.repository.js";
+import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit-sink.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 
@@ -27,6 +28,7 @@ const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
 const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
+const authAuditSink = new PrismaAuthAuditSink(database);
 const authBaseUrl = new URL(environment.BETTER_AUTH_URL);
 const accountProvisioner = new AccountProvisioner(accountRepository);
 const emailSender = new SmtpEmailSender({
@@ -56,6 +58,7 @@ const auth = createBetterAuth({
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
   sendVerificationEmail: (email) => emailSender.sendVerificationEmail(email),
   sendPasswordResetEmail: (email) => emailSender.sendPasswordResetEmail(email),
+  authAuditSink,
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");
   },

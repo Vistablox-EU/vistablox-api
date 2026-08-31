@@ -123,4 +123,25 @@ describe("VistaBlox API", () => {
       status: 404,
     });
   });
+
+  it("overwrites client-provided auth event IDs before Better Auth receives them", async () => {
+    let capturedEventId: string | string[] | undefined;
+    const app = createApp({
+      databaseProbe: { check: vi.fn() },
+      offeringRepository: { listPublic: vi.fn().mockResolvedValue([]) },
+      logger: pino({ level: "silent" }),
+      authHandler: (request, response) => {
+        capturedEventId = request.headers["x-vistablox-auth-event-id"];
+        response.status(204).end();
+      },
+    });
+
+    const response = await request(app)
+      .post("/api/auth/sign-in/email")
+      .set("x-vistablox-auth-event-id", "attacker-controlled-value");
+
+    expect(response.status).toBe(204);
+    expect(capturedEventId).toMatch(/^auth_evt_/);
+    expect(capturedEventId).not.toBe("attacker-controlled-value");
+  });
 });

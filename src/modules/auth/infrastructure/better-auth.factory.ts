@@ -1,6 +1,10 @@
 import { betterAuth } from "better-auth";
 import { haveIBeenPwned } from "better-auth/plugins";
+import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
+
+import type { AuthAuditSink } from "../application/auth-audit-sink.js";
+import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 
 export interface AuthUserSnapshot {
   id: string;
@@ -26,6 +30,7 @@ export interface BetterAuthFactoryOptions {
   onBackgroundError?: (error: unknown) => void;
   allowPopulationInput?: boolean;
   disableAutoSignIn?: boolean;
+  authAuditSink?: AuthAuditSink;
 }
 
 export function createBetterAuth(options: BetterAuthFactoryOptions) {
@@ -73,6 +78,29 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       requireEmailVerification: options.sendVerificationEmail !== undefined,
       autoSignIn: options.disableAutoSignIn !== true,
       revokeSessionsOnPasswordReset: true,
+      ...(options.authAuditSink === undefined
+        ? {}
+        : {
+            onPasswordReset: async ({ user }, request) => {
+              try {
+                const eventId =
+                  request?.headers.get("x-vistablox-auth-event-id")?.trim() || randomUUID();
+                const traceId = request?.headers.get("x-trace-id")?.trim() || null;
+                await options.authAuditSink?.record({
+                  eventKey: `better_auth:password_reset:${user.id}:${eventId}`,
+                  action: "authentication.password_reset",
+                  betterAuthUserId: user.id,
+                  attributeToSubject: true,
+                  resourceType: "account",
+                  resourceId: user.id,
+                  changes: { trace_id: traceId },
+                  occurredAt: new Date(),
+                });
+              } catch (error) {
+                options.onBackgroundError?.(error);
+              }
+            },
+          }),
       ...(options.sendPasswordResetEmail === undefined
         ? {}
         : {
@@ -113,7 +141,20 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         },
       },
     },
-    plugins: [haveIBeenPwned()],
+    plugins: [
+      haveIBeenPwned(),
+      ...(options.authAuditSink === undefined
+        ? []
+        : [
+            createBetterAuthAuditPlugin({
+              sink: options.authAuditSink,
+              identifierHashKey: options.secret,
+              ...(options.onBackgroundError === undefined
+                ? {}
+                : { onError: options.onBackgroundError }),
+            }),
+          ]),
+    ],
     advanced: {
       database: { joins: true },
       ipAddress: { disableIpTracking: true },

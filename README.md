@@ -21,6 +21,8 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - one-time, session-bound WebAuthn challenges and success/failure audit records
 - WebAuthn-protected, invitation-only staff/partner provisioning with scoped roles
 - 72-hour single-use staff invitation tokens stored only as SHA-256 hashes
+- idempotent Better Auth audit hooks for login, session, and password events
+- privacy-preserving failed-login correlation without storing raw login identifiers
 - KYC/proof-of-address-gated owner intake at `POST /v1/origination-cases`
 - owner-scoped origination case list/detail reads with opaque cursor pagination
 - append-only initial submission revisions with mandatory evidence and audit logging
@@ -32,7 +34,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - Vitest API and domain tests
 - dependency boundary checks for the documented `router -> schema -> application service -> domain policy -> repository` layering
 
-Native-client OIDC, customer TOTP, complete Better Auth event audit coverage, customer session/device management, staff recovery/offboarding commands, provider callbacks, async reminder/expiry workers, and idempotency middleware remain subsequent implementation slices. A WebAuthn-verified administrator now provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
+Native-client OIDC, customer TOTP, customer session/device management, staff recovery/offboarding commands, auth rate limiting, provider callbacks, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, and staff invitation actions now feed the unified audit trail with retry-safe event keys. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
 
 ## Local setup
 
