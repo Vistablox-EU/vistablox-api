@@ -34,7 +34,10 @@ function buildApp(options?: { databaseFailure?: boolean; offerings?: PublicOffer
     async (input: ListPublicOfferingsInput) =>
       (options?.offerings ?? [offering]).slice(0, input.limit),
   );
-  const offeringRepository: OfferingRepository = { listPublic };
+  const offeringRepository: OfferingRepository = {
+    listPublic,
+    getInvestorDetail: vi.fn().mockResolvedValue(null),
+  };
 
   return {
     app: createApp({ databaseProbe, offeringRepository, logger: pino({ level: "silent" }) }),
@@ -129,7 +132,10 @@ describe("VistaBlox API", () => {
     let capturedEventId: string | string[] | undefined;
     const app = createApp({
       databaseProbe: { check: vi.fn() },
-      offeringRepository: { listPublic: vi.fn().mockResolvedValue([]) },
+      offeringRepository: {
+        listPublic: vi.fn().mockResolvedValue([]),
+        getInvestorDetail: vi.fn().mockResolvedValue(null),
+      },
       logger: pino({ level: "silent" }),
       authHandler: (request, response) => {
         capturedEventId = request.headers["x-vistablox-auth-event-id"];
@@ -150,7 +156,10 @@ describe("VistaBlox API", () => {
     const store: RateLimitStore = { increment: vi.fn().mockResolvedValue(11) };
     const app = createApp({
       databaseProbe: { check: vi.fn() },
-      offeringRepository: { listPublic: vi.fn().mockResolvedValue([]) },
+      offeringRepository: {
+        listPublic: vi.fn().mockResolvedValue([]),
+        getInvestorDetail: vi.fn().mockResolvedValue(null),
+      },
       logger: pino({ level: "silent" }),
       authHandler: (_request, response) => response.status(204).end(),
       rateLimitStore: store,
@@ -166,7 +175,10 @@ describe("VistaBlox API", () => {
     const store: RateLimitStore = { increment: vi.fn().mockResolvedValue(301) };
     const app = createApp({
       databaseProbe: { check: vi.fn().mockResolvedValue(undefined) },
-      offeringRepository: { listPublic: vi.fn().mockResolvedValue([]) },
+      offeringRepository: {
+        listPublic: vi.fn().mockResolvedValue([]),
+        getInvestorDetail: vi.fn().mockResolvedValue(null),
+      },
       logger: pino({ level: "silent" }),
       rateLimitStore: store,
     });

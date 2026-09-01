@@ -53,7 +53,11 @@ import { EnrollTotpService, VerifyTotpService } from "./modules/auth/application
 import type { TotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
 import type { TotpRepository } from "./modules/auth/repository/totp.repository.js";
 import { createHealthRouter } from "./modules/health/health.router.js";
-import { createOfferingRouter } from "./modules/offering/api/offering.router.js";
+import {
+  createInvestorOfferingRouter,
+  createOfferingRouter,
+} from "./modules/offering/api/offering.router.js";
+import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
 import type { OfferingRepository } from "./modules/offering/repository/offering.repository.js";
 import { createOriginationRouter } from "./modules/origination/api/origination.router.js";
@@ -226,6 +230,13 @@ export function createApp(dependencies: AppDependencies): Express {
     const staffWebAuthnService = new StaffWebAuthnService(
       dependencies.protectedApi.staffWebAuthnRepository,
       dependencies.protectedApi.staffWebAuthnCeremony,
+    );
+    app.use(
+      "/v1/offerings",
+      createInvestorOfferingRouter(
+        requireAuthentication,
+        new GetInvestorOfferingService(dependencies.offeringRepository),
+      ),
     );
     if (dependencies.protectedApi.investorProfile !== undefined) {
       const investorProfile = dependencies.protectedApi.investorProfile;

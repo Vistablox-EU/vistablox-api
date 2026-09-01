@@ -88,7 +88,10 @@ function buildProtectedApp(options?: {
   return {
     app: createApp({
       databaseProbe: { check: vi.fn() },
-      offeringRepository: { listPublic: vi.fn().mockResolvedValue([]) },
+      offeringRepository: {
+        listPublic: vi.fn().mockResolvedValue([]),
+        getInvestorDetail: vi.fn().mockResolvedValue(null),
+      },
       logger: pino({ level: "silent" }),
       protectedApi: {
         accounts,
