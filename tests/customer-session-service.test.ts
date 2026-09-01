@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   ListOwnSessionsService,
+  RevokeAllOwnSessionsService,
   RevokeOwnSessionService,
 } from "../src/modules/auth/application/customer-session.service.js";
 import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
@@ -22,6 +23,20 @@ function summary(overrides: Partial<CustomerSessionSummary> = {}): CustomerSessi
     status: "active",
     revocationReason: null,
     betterAuthSessionId: "auth_session_01",
+    ...overrides,
+  };
+}
+
+function fakeRevoker(overrides: Partial<SessionRevoker> = {}): SessionRevoker {
+  return { revoke: vi.fn(), revokeAll: vi.fn(), ...overrides };
+}
+
+function fakeGrants(overrides: Partial<OidcGrantRepository> = {}): OidcGrantRepository {
+  return {
+    listForAccount: vi.fn(),
+    isOwnedByAccount: vi.fn(),
+    revoke: vi.fn(),
+    revokeAllForAccount: vi.fn(),
     ...overrides,
   };
 }
@@ -51,7 +66,7 @@ describe("RevokeOwnSessionService", () => {
       listForAccount: vi.fn(),
       findOwnedSessionToken: vi.fn().mockResolvedValue("tok_abc123"),
     };
-    const revoker: SessionRevoker = { revoke };
+    const revoker: SessionRevoker = fakeRevoker({ revoke });
     const service = new RevokeOwnSessionService(repository, revoker);
     const headers = { cookie: "vb_session=abc" };
 
@@ -67,7 +82,7 @@ describe("RevokeOwnSessionService", () => {
       listForAccount: vi.fn(),
       findOwnedSessionToken: vi.fn().mockResolvedValue(null),
     };
-    const service = new RevokeOwnSessionService(repository, { revoke });
+    const service = new RevokeOwnSessionService(repository, fakeRevoker({ revoke }));
 
     await expect(service.execute("acct_01", "sess_not_owned", {})).rejects.toMatchObject({
       code: "resource.not_found",
@@ -83,13 +98,11 @@ describe("ListOwnSessionsService with native OIDC grants", () => {
       listForAccount: vi.fn().mockResolvedValue([summary({ sessionId: "sess_01" })]),
       findOwnedSessionToken: vi.fn(),
     };
-    const grants: OidcGrantRepository = {
+    const grants: OidcGrantRepository = fakeGrants({
       listForAccount: vi.fn().mockResolvedValue([
         { grantId: "grant_01", createdAt: new Date("2026-08-30T09:00:00.000Z"), status: "active" },
       ]),
-      isOwnedByAccount: vi.fn(),
-      revoke: vi.fn(),
-    };
+    });
     const service = new ListOwnSessionsService(repository, grants);
 
     const result = await service.execute("acct_01", "grant_01");
@@ -130,12 +143,11 @@ describe("RevokeOwnSessionService with native OIDC grants", () => {
     };
     const revoke = vi.fn();
     const grantRevoke = vi.fn().mockResolvedValue(undefined);
-    const grants: OidcGrantRepository = {
-      listForAccount: vi.fn(),
+    const grants: OidcGrantRepository = fakeGrants({
       isOwnedByAccount: vi.fn().mockResolvedValue(true),
       revoke: grantRevoke,
-    };
-    const service = new RevokeOwnSessionService(repository, { revoke }, grants);
+    });
+    const service = new RevokeOwnSessionService(repository, fakeRevoker({ revoke }), grants);
 
     await service.execute("acct_01", "grant_01", {});
 
@@ -149,16 +161,40 @@ describe("RevokeOwnSessionService with native OIDC grants", () => {
       listForAccount: vi.fn(),
       findOwnedSessionToken: vi.fn().mockResolvedValue(null),
     };
-    const grants: OidcGrantRepository = {
-      listForAccount: vi.fn(),
+    const grants: OidcGrantRepository = fakeGrants({
       isOwnedByAccount: vi.fn().mockResolvedValue(false),
-      revoke: vi.fn(),
-    };
-    const service = new RevokeOwnSessionService(repository, { revoke: vi.fn() }, grants);
+    });
+    const service = new RevokeOwnSessionService(repository, fakeRevoker(), grants);
 
     await expect(service.execute("acct_01", "unknown_id", {})).rejects.toMatchObject({
       code: "resource.not_found",
       status: 404,
     });
+  });
+});
+
+describe("RevokeAllOwnSessionsService", () => {
+  it("revokes all web sessions and all native grants for the account", async () => {
+    const revokeAll = vi.fn().mockResolvedValue(undefined);
+    const revokeAllForAccount = vi.fn().mockResolvedValue(undefined);
+    const service = new RevokeAllOwnSessionsService(
+      fakeRevoker({ revokeAll }),
+      fakeGrants({ revokeAllForAccount }),
+    );
+    const headers = { cookie: "vb_session=abc" };
+
+    await service.execute("acct_01", headers);
+
+    expect(revokeAll).toHaveBeenCalledWith(headers);
+    expect(revokeAllForAccount).toHaveBeenCalledWith("acct_01");
+  });
+
+  it("revokes only web sessions when no grants repository is configured", async () => {
+    const revokeAll = vi.fn().mockResolvedValue(undefined);
+    const service = new RevokeAllOwnSessionsService(fakeRevoker({ revokeAll }));
+
+    await service.execute("acct_01", {});
+
+    expect(revokeAll).toHaveBeenCalledWith({});
   });
 });

@@ -51,4 +51,19 @@ export class PostgresOidcGrantRepository implements OidcGrantRepository {
       [grantId],
     );
   }
+
+  public async revokeAllForAccount(accountId: string): Promise<void> {
+    await this.pool.query(
+      `WITH account_grants AS (
+         SELECT g."id"
+         FROM "oidc_model_instances" g
+         JOIN "account"."accounts" a ON a."better_auth_user_id" = g."payload"->>'accountId'
+         WHERE a."account_id" = $1 AND g."model_name" = 'Grant'
+       )
+       DELETE FROM "oidc_model_instances"
+       WHERE "grant_id" IN (SELECT "id" FROM account_grants)
+          OR ("model_name" = 'Grant' AND "id" IN (SELECT "id" FROM account_grants))`,
+      [accountId],
+    );
+  }
 }

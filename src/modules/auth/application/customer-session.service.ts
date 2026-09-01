@@ -91,3 +91,22 @@ export class RevokeOwnSessionService {
     });
   }
 }
+
+// SESSION_MODEL.md: "lets the customer revoke one session, one grant, or
+// all of them". Matches "revoke all sessions" conventions elsewhere (GitHub,
+// Google, etc.): this also ends the caller's own current session/grant,
+// not just every other one — there is no separate "log out everywhere but
+// here" action.
+export class RevokeAllOwnSessionsService {
+  public constructor(
+    private readonly revoker: SessionRevoker,
+    private readonly grants?: OidcGrantRepository,
+  ) {}
+
+  public async execute(accountId: string, headers: IncomingHttpHeaders): Promise<void> {
+    await Promise.all([
+      this.revoker.revokeAll(headers),
+      this.grants === undefined ? undefined : this.grants.revokeAllForAccount(accountId),
+    ]);
+  }
+}
