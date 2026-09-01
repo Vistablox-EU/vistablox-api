@@ -112,7 +112,7 @@ export class GetInvestorOfferingService {
                 documents: record.currentDisclosurePack.documents.map((document) => ({
                   document_id: document.id,
                   document_type: document.documentType,
-                  document_ref: document.documentRef,
+                  download_path: `/v1/offerings/${encodeURIComponent(record.id)}/documents/${encodeURIComponent(document.id)}/download`,
                   is_core_reading: document.isCoreReading,
                 })),
               },

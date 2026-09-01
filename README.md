@@ -11,6 +11,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - liveness and database-readiness endpoints
 - first layered product slice: public offering teasers at `GET /v1/offerings`
 - authenticated full offering detail at `GET /v1/offerings/:offering_id`, including the current disclosure pack, material-change log, raise progress, and account-specific investment readiness
+- authenticated disclosure downloads streamed through the API from private MinIO storage; object references and presigned storage URLs are never exposed
 - self-hosted Better Auth core for email/password and optional Google login
 - verified-email delivery through provider-neutral SMTP
 - SMTP password-reset delivery with post-reset session revocation
@@ -137,6 +138,7 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `POST` | `/internal/v1/auth/staff-accounts/:account_id/offboard` | Disable staff login and revoke sessions, roles, and credentials; requires another admin and WebAuthn |
 | `GET` | `/v1/offerings?limit=20&after=...` | Cursor-paginated public offering teasers |
 | `GET` | `/v1/offerings/:offering_id` | Authenticated customer-only full offering detail, disclosure metadata, progress, and reservation-readiness blockers |
+| `GET` | `/v1/offerings/:offering_id/documents/:document_id/download` | Stream an authorized current or reservation-linked historical disclosure document from private storage |
 | `GET` | `/v1/investor-profile` | Read the authenticated customer's cross-domain investor profile aggregate |
 | `GET` | `/v1/investor-profile/reservations?limit=20&after=...` | Read account-scoped reservation history with the latest capital state |
 | `GET` | `/v1/investor-profile/positions?limit=20&after=...` | Read active and internally-settling portfolio positions |

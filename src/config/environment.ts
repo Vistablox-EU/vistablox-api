@@ -71,6 +71,21 @@ const environmentSchema = z
         )
         .optional(),
     ),
+    MINIO_ENDPOINT: optionalNonEmptyString(),
+    MINIO_PORT: z.coerce.number().int().min(1).max(65_535).default(9_000),
+    MINIO_USE_SSL: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    MINIO_ACCESS_KEY: optionalNonEmptyString(),
+    MINIO_SECRET_KEY: z.preprocess(
+      emptyStringToUndefined,
+      z.string().min(8).optional(),
+    ),
+    MINIO_DOCUMENT_BUCKET: z.preprocess(
+      emptyStringToUndefined,
+      z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
+    ),
     DIDIT_API_BASE_URL: z.url().default("https://verification.didit.me"),
     DIDIT_API_KEY: optionalNonEmptyString(),
     DIDIT_WORKFLOW_ID: optionalUuid(),
@@ -121,6 +136,24 @@ const environmentSchema = z
         message: "OIDC_NATIVE_REDIRECT_URIS must list at least one redirect URI",
       }),
   })
+  .refine(
+    (environment) => {
+      const values = [
+        environment.MINIO_ENDPOINT,
+        environment.MINIO_ACCESS_KEY,
+        environment.MINIO_SECRET_KEY,
+        environment.MINIO_DOCUMENT_BUCKET,
+      ];
+      return (
+        values.every((value) => value === undefined) ||
+        values.every((value) => value !== undefined)
+      );
+    },
+    {
+      message: "All MinIO document storage settings must be configured together",
+      path: ["MINIO_ENDPOINT"],
+    },
+  )
   .refine(
     (environment) =>
       (environment.GOOGLE_CLIENT_ID === undefined) ===

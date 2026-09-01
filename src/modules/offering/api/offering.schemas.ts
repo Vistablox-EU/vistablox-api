@@ -30,6 +30,11 @@ export const investorOfferingParamsSchema = z.object({
   offering_id: z.string().min(1),
 });
 
+export const disclosureDocumentParamsSchema = z.object({
+  offering_id: z.string().min(1),
+  document_id: z.string().min(1),
+});
+
 const currency = z.string().regex(/^\d+\.\d{2}$/);
 const nullableDateTime = z.iso.datetime().nullable();
 
@@ -76,7 +81,7 @@ export const investorOfferingDetailResponseSchema = z.object({
           z.object({
             document_id: z.string().min(1),
             document_type: z.string().min(1),
-            document_ref: z.string().min(1),
+            download_path: z.string().startsWith("/v1/offerings/"),
             is_core_reading: z.boolean(),
           }),
         ),

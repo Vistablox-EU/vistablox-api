@@ -58,6 +58,9 @@ import {
   createOfferingRouter,
 } from "./modules/offering/api/offering.router.js";
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
+import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
+import type { DisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
+import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
 import type { OfferingRepository } from "./modules/offering/repository/offering.repository.js";
 import { createOriginationRouter } from "./modules/origination/api/origination.router.js";
@@ -136,6 +139,10 @@ export interface AppDependencies {
     investorProfile?: {
       repository: InvestorProfileRepository;
       displayProfiles: ProtectedDisplayProfileProvider;
+    };
+    disclosureDocuments?: {
+      repository: DisclosureDocumentRepository;
+      store: DisclosureDocumentStore;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -236,6 +243,12 @@ export function createApp(dependencies: AppDependencies): Express {
       createInvestorOfferingRouter(
         requireAuthentication,
         new GetInvestorOfferingService(dependencies.offeringRepository),
+        dependencies.protectedApi.disclosureDocuments === undefined
+          ? undefined
+          : new DownloadDisclosureDocumentService(
+              dependencies.protectedApi.disclosureDocuments.repository,
+              dependencies.protectedApi.disclosureDocuments.store,
+            ),
       ),
     );
     if (dependencies.protectedApi.investorProfile !== undefined) {

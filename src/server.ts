@@ -43,10 +43,15 @@ import {
   UnavailableProtectedDisplayProfileProvider,
 } from "./infrastructure/profile/didit-protected-display-profile.provider.js";
 import { PrismaInvestorProfileRepository } from "./modules/investor-profile/repository/prisma-investor-profile.repository.js";
+import {
+  MinioDisclosureDocumentStore,
+  UnavailableDisclosureDocumentStore,
+} from "./infrastructure/storage/minio-disclosure-document.store.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
+const offeringRepository = new PrismaOfferingRepository(database);
 const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
@@ -213,9 +218,23 @@ const displayProfiles =
         },
       )
     : new UnavailableProtectedDisplayProfileProvider();
+const disclosureDocumentStore =
+  environment.MINIO_ENDPOINT !== undefined &&
+  environment.MINIO_ACCESS_KEY !== undefined &&
+  environment.MINIO_SECRET_KEY !== undefined &&
+  environment.MINIO_DOCUMENT_BUCKET !== undefined
+    ? new MinioDisclosureDocumentStore({
+        endPoint: environment.MINIO_ENDPOINT,
+        port: environment.MINIO_PORT,
+        useSSL: environment.MINIO_USE_SSL,
+        accessKey: environment.MINIO_ACCESS_KEY,
+        secretKey: environment.MINIO_SECRET_KEY,
+        bucket: environment.MINIO_DOCUMENT_BUCKET,
+      })
+    : new UnavailableDisclosureDocumentStore();
 const app = createApp({
   databaseProbe: new PrismaDatabaseProbe(database),
-  offeringRepository: new PrismaOfferingRepository(database),
+  offeringRepository,
   logger,
   authHandler: toNodeHandler(auth),
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
@@ -232,6 +251,10 @@ const app = createApp({
     investorProfile: {
       repository: new PrismaInvestorProfileRepository(database),
       displayProfiles,
+    },
+    disclosureDocuments: {
+      repository: offeringRepository,
+      store: disclosureDocumentStore,
     },
     totp: {
       repository: new PrismaTotpRepository(database),

@@ -1,9 +1,13 @@
+import { pipeline } from "node:stream/promises";
+
 import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
+import type { DownloadDisclosureDocumentService } from "../application/download-disclosure-document.service.js";
 import type { GetInvestorOfferingService } from "../application/get-investor-offering.service.js";
 import { ListPublicOfferingsService } from "../application/list-public-offerings.service.js";
 import {
+  disclosureDocumentParamsSchema,
   investorOfferingDetailResponseSchema,
   investorOfferingParamsSchema,
   listOfferingsQuerySchema,
@@ -25,6 +29,7 @@ export function createOfferingRouter(service: ListPublicOfferingsService): Route
 export function createInvestorOfferingRouter(
   requireAuthentication: RequestHandler,
   service: GetInvestorOfferingService,
+  downloadDocument?: DownloadDisclosureDocumentService,
 ): Router {
   const router = Router();
 
@@ -39,7 +44,40 @@ export function createInvestorOfferingRouter(
     response.json(investorOfferingDetailResponseSchema.parse(result));
   });
 
+  if (downloadDocument !== undefined) {
+    router.get(
+      "/:offering_id/documents/:document_id/download",
+      requireAuthentication,
+      async (request, response) => {
+        const context = requireCustomerContext(response.locals.authContext);
+        const params = disclosureDocumentParamsSchema.parse(request.params);
+        const download = await downloadDocument.execute({
+          accountId: context.accountId,
+          offeringId: params.offering_id,
+          documentId: params.document_id,
+        });
+        response.setHeader("Cache-Control", "private, no-store");
+        response.setHeader("Content-Type", download.contentType);
+        response.setHeader("Content-Length", String(download.contentLength));
+        response.setHeader(
+          "Content-Disposition",
+          `attachment; filename="${contentDispositionFileName(download.fileName)}"`,
+        );
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        await pipeline(download.body, response);
+      },
+    );
+  }
+
   return router;
+}
+
+function contentDispositionFileName(value: string): string {
+  const safe = value
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 120);
+  return safe || "disclosure-document";
 }
 
 function requireCustomerContext(

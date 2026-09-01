@@ -4,7 +4,11 @@ import { ZodError } from "zod";
 import { AppError } from "../errors/app-error.js";
 import { errorResponseSchema, type ErrorResponse } from "./error-schema.js";
 
-export const errorHandler: ErrorRequestHandler = (error, _request, response, _next) => {
+export const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
+  if (response.headersSent) {
+    next(error);
+    return;
+  }
   const normalized = normalizeError(error);
   const traceId = String(response.locals.traceId ?? "unknown");
 

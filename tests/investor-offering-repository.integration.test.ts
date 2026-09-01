@@ -19,6 +19,9 @@ describe.skipIf(databaseUrl === undefined)(
     const pivId = `piv_${suffix}`;
     const offeringId = `offering_${suffix}`;
     const disclosurePackId = `pack_${suffix}`;
+    const historicalDisclosurePackId = `pack_historical_${suffix}`;
+    const currentDocumentId = `document_kiis_${suffix}`;
+    const historicalDocumentId = `document_historical_${suffix}`;
     const reservationIds = {
       funded: `reservation_funded_${suffix}`,
       pending: `reservation_pending_${suffix}`,
@@ -120,7 +123,7 @@ describe.skipIf(databaseUrl === undefined)(
               documents: {
                 create: [
                   {
-                    id: `document_kiis_${suffix}`,
+                    id: currentDocumentId,
                     documentType: "ecsp_kiis",
                     documentRef: `offerings/${offeringId}/kiis-v2.pdf`,
                   },
@@ -144,6 +147,23 @@ describe.skipIf(databaseUrl === undefined)(
           },
         },
       });
+      await database.disclosurePack.create({
+        data: {
+          id: historicalDisclosurePackId,
+          offeringId,
+          version: 1,
+          publishedAt: new Date("2026-08-20T12:00:00.000Z"),
+          supersededAt: new Date("2026-08-30T12:00:00.000Z"),
+          isCurrent: false,
+          documents: {
+            create: {
+              id: historicalDocumentId,
+              documentType: "final_terms_sheet",
+              documentRef: `offerings/${offeringId}/terms-v1.pdf`,
+            },
+          },
+        },
+      });
       await database.reservation.createMany({
         data: [
           {
@@ -152,6 +172,7 @@ describe.skipIf(databaseUrl === undefined)(
             accountId,
             amountEur: "100000.00",
             reservationStage: "initiated",
+            disclosurePackVersionAtReservation: "1",
           },
           {
             id: reservationIds.pending,
@@ -212,7 +233,11 @@ describe.skipIf(databaseUrl === undefined)(
       await database.reservation.deleteMany({ where: { offeringId } });
       await database.materialityRecord.deleteMany({ where: { offeringId } });
       await database.disclosureDocument.deleteMany({
-        where: { disclosurePackId },
+        where: {
+          disclosurePackId: {
+            in: [disclosurePackId, historicalDisclosurePackId],
+          },
+        },
       });
       await database.disclosurePack.deleteMany({ where: { offeringId } });
       await database.offering.deleteMany({ where: { id: offeringId } });
@@ -276,6 +301,46 @@ describe.skipIf(databaseUrl === undefined)(
       });
       expect(JSON.stringify(result)).not.toContain("walletAddress");
       expect(JSON.stringify(result)).not.toContain("providerReference");
+    });
+
+    it("authorizes current documents generally and historical versions only through a reservation", async () => {
+      await expect(
+        repository.getAccessibleDocument({
+          accountId: `unrelated_${suffix}`,
+          offeringId,
+          documentId: currentDocumentId,
+        }),
+      ).resolves.toMatchObject({
+        documentReference: `offerings/${offeringId}/kiis-v2.pdf`,
+        disclosurePackVersion: 2,
+      });
+
+      await expect(
+        repository.getAccessibleDocument({
+          accountId,
+          offeringId,
+          documentId: historicalDocumentId,
+        }),
+      ).resolves.toMatchObject({
+        documentReference: `offerings/${offeringId}/terms-v1.pdf`,
+        disclosurePackVersion: 1,
+      });
+
+      await expect(
+        repository.getAccessibleDocument({
+          accountId: `unrelated_${suffix}`,
+          offeringId,
+          documentId: historicalDocumentId,
+        }),
+      ).resolves.toBeNull();
+
+      await expect(
+        repository.getAccessibleDocument({
+          accountId,
+          offeringId: `wrong_${suffix}`,
+          documentId: currentDocumentId,
+        }),
+      ).resolves.toBeNull();
     });
   },
 );

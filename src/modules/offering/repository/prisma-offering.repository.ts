@@ -6,8 +6,14 @@ import type {
   PublicOfferingRecord,
 } from "./offering.repository.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import type {
+  AccessibleDisclosureDocumentRecord,
+  DisclosureDocumentRepository,
+} from "./disclosure-document.repository.js";
 
-export class PrismaOfferingRepository implements OfferingRepository {
+export class PrismaOfferingRepository
+  implements OfferingRepository, DisclosureDocumentRepository
+{
   public constructor(private readonly database: DatabaseClient) {}
 
   public async listPublic(input: ListPublicOfferingsInput): Promise<PublicOfferingRecord[]> {
@@ -242,6 +248,53 @@ export class PrismaOfferingRepository implements OfferingRepository {
           account.walletRegistration.registeredAt !== null,
       },
     };
+  }
+
+  public async getAccessibleDocument(input: {
+    accountId: string;
+    offeringId: string;
+    documentId: string;
+  }): Promise<AccessibleDisclosureDocumentRecord | null> {
+    const rows = await this.database.$queryRaw<
+      Array<{
+        document_reference: string;
+        document_type: string;
+        disclosure_pack_version: number;
+      }>
+    >`
+      SELECT
+        document.document_ref AS document_reference,
+        document.document_type,
+        disclosure_pack.version AS disclosure_pack_version
+      FROM offering.disclosure_documents AS document
+      JOIN offering.disclosure_packs AS disclosure_pack
+        ON disclosure_pack.disclosure_pack_id = document.disclosure_pack_id
+      WHERE document.document_id = ${input.documentId}
+        AND disclosure_pack.offering_id = ${input.offeringId}
+        AND (
+          (
+            disclosure_pack.is_current = TRUE
+            AND disclosure_pack.superseded_at IS NULL
+          )
+          OR EXISTS (
+            SELECT 1
+            FROM offering.reservations AS reservation
+            WHERE reservation.offering_id = disclosure_pack.offering_id
+              AND reservation.account_id = ${input.accountId}
+              AND reservation.disclosure_pack_version_at_reservation =
+                disclosure_pack.version::text
+          )
+        )
+      LIMIT 1
+    `;
+    const row = rows[0];
+    return row === undefined
+      ? null
+      : {
+          documentReference: row.document_reference,
+          documentType: row.document_type,
+          disclosurePackVersion: row.disclosure_pack_version,
+        };
   }
 }
 

@@ -93,7 +93,14 @@ describe("authenticated investor offering detail", () => {
       },
       current_disclosure_pack: {
         version: 2,
-        documents: [{ document_type: "ecsp_kiis", is_core_reading: true }],
+        documents: [
+          {
+            document_type: "ecsp_kiis",
+            download_path:
+              "/v1/offerings/offering_01/documents/document_01/download",
+            is_core_reading: true,
+          },
+        ],
       },
       readiness: {
         investment_eligible: true,
@@ -105,6 +112,9 @@ describe("authenticated investor offering detail", () => {
         blockers: ["funding_rail_unavailable"],
       },
     });
+    expect(JSON.stringify(result)).not.toContain(
+      "documents/offering_01/kiis-v2.pdf",
+    );
   });
 
   it("reports every account and offering blocker without hiding disclosure access", async () => {
