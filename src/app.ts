@@ -74,6 +74,10 @@ import {
 } from "./modules/identity/api/kyc.router.js";
 import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import type { KycRepository } from "./modules/identity/repository/kyc.repository.js";
+import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
+import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
+import type { ProtectedDisplayProfileProvider } from "./modules/investor-profile/application/protected-display-profile.js";
+import type { InvestorProfileRepository } from "./modules/investor-profile/repository/investor-profile.repository.js";
 import { errorHandler } from "./shared/http/error-handler.js";
 import { notFoundHandler } from "./shared/http/not-found.js";
 import { requestContext } from "./shared/http/request-context.js";
@@ -98,6 +102,11 @@ export interface AppDependencies {
       applicationId: string;
       environment: "sandbox" | "live";
       proofOfAddressWorkflowId?: string;
+      invalidateDisplayProfile?: (accountId: string) => Promise<void>;
+    };
+    investorProfile?: {
+      repository: InvestorProfileRepository;
+      displayProfiles: ProtectedDisplayProfileProvider;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -162,6 +171,19 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.protectedApi.staffWebAuthnRepository,
       dependencies.protectedApi.staffWebAuthnCeremony,
     );
+    if (dependencies.protectedApi.investorProfile !== undefined) {
+      const investorProfile = dependencies.protectedApi.investorProfile;
+      app.use(
+        "/v1/investor-profile",
+        createInvestorProfileRouter(
+          requireAuthentication,
+          new GetInvestorProfileService(
+            investorProfile.repository,
+            investorProfile.displayProfiles,
+          ),
+        ),
+      );
+    }
     if (dependencies.protectedApi.kyc !== undefined) {
       const kyc = dependencies.protectedApi.kyc;
       app.use(
@@ -172,7 +194,7 @@ export function createApp(dependencies: AppDependencies): Express {
           new StartKycSessionService(kyc.repository, kyc.didit, {
             workflowId: kyc.workflowId,
             callbackUrl: kyc.callbackUrl,
-          }),
+          }, undefined, kyc.invalidateDisplayProfile),
           kyc.proofOfAddressWorkflowId === undefined
             ? undefined
             : new StartProofOfAddressSessionService(
@@ -196,7 +218,7 @@ export function createApp(dependencies: AppDependencies): Express {
             ...(kyc.proofOfAddressWorkflowId === undefined
               ? {}
               : { proofOfAddressWorkflowId: kyc.proofOfAddressWorkflowId }),
-          }),
+          }, kyc.invalidateDisplayProfile),
         ),
       );
     }

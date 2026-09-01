@@ -72,6 +72,7 @@ function didit(overrides: Partial<DiditClient> = {}): DiditClient {
       faceMatches: [{ status: "Approved", warnings: [] }],
       amlScreenings: [{ status: "Approved", totalHits: 0, warnings: [] }],
       proofOfAddressVerifications: [],
+      verifiedDisplayProfile: null,
     }),
     ...overrides,
   };
@@ -81,11 +82,13 @@ describe("KYC application services", () => {
   it("reserves and persists a provider session before returning its redirect", async () => {
     const storage = repository();
     const provider = didit();
+    const invalidateDisplayProfile = vi.fn().mockResolvedValue(undefined);
     const service = new StartKycSessionService(
       storage,
       provider,
       { workflowId, callbackUrl: "https://app.vistablox.eu/kyc/complete" },
       () => now,
+      invalidateDisplayProfile,
     );
 
     const result = await service.execute({
@@ -110,21 +113,25 @@ describe("KYC application services", () => {
     expect(storage.completeSessionStart).toHaveBeenCalledWith(
       expect.objectContaining({ accountId, diditReference: sessionId }),
     );
+    expect(invalidateDisplayProfile).toHaveBeenCalledWith(accountId);
   });
 
   it("fetches the authoritative decision and applies the local policy", async () => {
     const storage = repository();
     const provider = didit();
-    const service = new ProcessDiditWebhookService(storage, provider, {
-      workflowId,
-      applicationId,
-      environment: "sandbox",
-    });
+    const invalidateDisplayProfile = vi.fn().mockResolvedValue(undefined);
+    const service = new ProcessDiditWebhookService(
+      storage,
+      provider,
+      { workflowId, applicationId, environment: "sandbox" },
+      invalidateDisplayProfile,
+    );
 
     const result = await service.execute(webhookInput());
 
     expect(result).toEqual({ received: true });
     expect(provider.getDecision).toHaveBeenCalledWith(sessionId);
+    expect(invalidateDisplayProfile).toHaveBeenCalledWith(accountId);
     expect(storage.applyProviderOutcome).toHaveBeenCalledWith(
       expect.objectContaining({
         eventKey: "didit:webhook:c66c07b5-f3bc-40e4-9ec5-c1036f614bf9",
@@ -244,6 +251,7 @@ describe("KYC application services", () => {
             warnings: [],
           },
         ],
+        verifiedDisplayProfile: null,
       }),
     });
     const result = await new ProcessDiditWebhookService(storage, provider, {

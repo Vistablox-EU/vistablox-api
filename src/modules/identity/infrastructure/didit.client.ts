@@ -26,7 +26,12 @@ const featureSchema = z
     warnings: z.array(warningSchema).nullish(),
   })
   .passthrough();
-const identitySchema = featureSchema.extend({ date_of_birth: z.string().nullable().optional() });
+const identitySchema = featureSchema.extend({
+  date_of_birth: z.string().nullable().optional(),
+  first_name: z.string().nullable().optional(),
+  last_name: z.string().nullable().optional(),
+  full_name: z.string().nullable().optional(),
+});
 const amlSchema = featureSchema.extend({ total_hits: z.number().int().min(0).nullable().optional() });
 const proofOfAddressSchema = featureSchema.extend({
   issue_date: z.string().nullable().optional(),
@@ -130,6 +135,9 @@ export class HttpDiditClient implements DiditClient {
           warnings: toWarnings(feature.warnings),
         }),
       ),
+      verifiedDisplayProfile: toVerifiedDisplayProfile(
+        parsed.data.id_verifications ?? [],
+      ),
     };
   }
 
@@ -182,6 +190,31 @@ function toFeature(feature: z.infer<typeof featureSchema>) {
 
 function toWarnings(warnings: z.infer<typeof warningSchema>[] | null | undefined) {
   return (warnings ?? []).map((warning) => ({ risk: warning.risk ?? null }));
+}
+
+function toVerifiedDisplayProfile(
+  identities: z.infer<typeof identitySchema>[],
+) {
+  const identity = identities.find((candidate) => {
+    return (
+      candidate.status === "Approved" &&
+      nonEmpty(candidate.first_name) !== null &&
+      nonEmpty(candidate.last_name) !== null
+    );
+  });
+  if (identity === undefined) return null;
+  const givenName = nonEmpty(identity.first_name)!;
+  const familyName = nonEmpty(identity.last_name)!;
+  return {
+    givenName,
+    familyName,
+    fullDisplayName: nonEmpty(identity.full_name) ?? `${givenName} ${familyName}`,
+  };
+}
+
+function nonEmpty(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? "";
+  return trimmed.length === 0 ? null : trimmed;
 }
 
 async function safeJson(response: Response): Promise<unknown> {

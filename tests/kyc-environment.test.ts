@@ -61,4 +61,14 @@ describe("Didit environment configuration", () => {
       }),
     ).toThrow("DIDIT_POA_WORKFLOW_ID must differ from DIDIT_WORKFLOW_ID");
   });
+
+  it("accepts only Redis-compatible protected profile cache URLs", () => {
+    expect(
+      loadEnvironment({ ...base, PROFILE_CACHE_URL: "rediss://cache.example.test:6380" })
+        .PROFILE_CACHE_URL,
+    ).toBe("rediss://cache.example.test:6380");
+    expect(() =>
+      loadEnvironment({ ...base, PROFILE_CACHE_URL: "https://cache.example.test" }),
+    ).toThrow("PROFILE_CACHE_URL must be a Redis or TLS Redis URL");
+  });
 });

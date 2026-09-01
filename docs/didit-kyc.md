@@ -33,7 +33,7 @@ The baseline Didit workflow must include government-ID verification, liveness, f
 
 Persistent storage is deliberately limited to the provider session reference, exact provider status, local eligibility/substatus and reason, declared country codes, relevant timestamps, and eligibility dates. Full Didit responses, document numbers or images, facial/biometric data, addresses, dates of birth, session tokens, and raw webhook payloads are neither persisted nor logged.
 
-The Didit adapter temporarily projects the fetched response in memory to the minimum policy inputs: feature statuses, AML hit count and warning risk labels, date of birth for the age calculation, and POA issue date plus country code for residence/freshness checks. Those values are discarded after the eligibility outcome is computed.
+The Didit adapter temporarily projects the fetched response in memory to the minimum policy inputs: feature statuses, AML hit count and warning risk labels, date of birth for the age calculation, and POA issue date plus country code for residence/freshness checks. Those values are discarded after the eligibility outcome is computed. For an approved individual identity only, the adapter can also project given name, family name, and full display name into the separate protected profile cache described in [`investor-profile.md`](investor-profile.md); those fields are never written to PostgreSQL.
 
 ## Follow-on work
 

@@ -2,11 +2,13 @@ import "dotenv/config";
 
 import { toNodeHandler } from "better-auth/node";
 import { Pool } from "pg";
+import { createClient } from "redis";
 
 import { createApp } from "./app.js";
 import { loadEnvironment } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
+import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
@@ -25,6 +27,11 @@ import { PrismaOriginationRepository } from "./modules/origination/repository/pr
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
+import {
+  DiditProtectedDisplayProfileProvider,
+  UnavailableProtectedDisplayProfileProvider,
+} from "./infrastructure/profile/didit-protected-display-profile.provider.js";
+import { PrismaInvestorProfileRepository } from "./modules/investor-profile/repository/prisma-investor-profile.repository.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
@@ -37,6 +44,30 @@ const staffAccountLifecycleRepository = new PrismaStaffAccountLifecycleRepositor
 const authAuditSink = new PrismaAuthAuditSink(database);
 const authBaseUrl = new URL(environment.BETTER_AUTH_URL);
 const accountProvisioner = new AccountProvisioner(accountRepository);
+const profileCacheClient =
+  environment.PROFILE_CACHE_URL === undefined
+    ? undefined
+    : createClient({
+        url: environment.PROFILE_CACHE_URL,
+        socket: { connectTimeout: 3_000, reconnectStrategy: false },
+      });
+profileCacheClient?.on("error", (error) => {
+  logger.warn({ err: error }, "protected profile cache connection error");
+});
+if (profileCacheClient !== undefined) {
+  try {
+    await profileCacheClient.connect();
+  } catch (error) {
+    logger.warn(
+      { err: error },
+      "protected profile cache unavailable; investor names will be omitted",
+    );
+  }
+}
+const protectedProfileCache =
+  profileCacheClient?.isReady === true
+    ? new RedisProtectedProfileCache(profileCacheClient)
+    : undefined;
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -80,8 +111,16 @@ const staffProvisioningAuth = createBetterAuth({
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
 });
+const diditClient =
+  environment.DIDIT_API_KEY === undefined
+    ? undefined
+    : new HttpDiditClient({
+        baseUrl: environment.DIDIT_API_BASE_URL,
+        apiKey: environment.DIDIT_API_KEY,
+        timeoutMs: 4_000,
+      });
 const diditKyc =
-  environment.DIDIT_API_KEY !== undefined &&
+  diditClient !== undefined &&
   environment.DIDIT_WORKFLOW_ID !== undefined &&
   environment.DIDIT_CALLBACK_URL !== undefined &&
   environment.DIDIT_WEBHOOK_SECRET !== undefined &&
@@ -89,11 +128,7 @@ const diditKyc =
   environment.DIDIT_ENVIRONMENT !== undefined
     ? {
         repository: new PrismaKycRepository(database),
-        didit: new HttpDiditClient({
-          baseUrl: environment.DIDIT_API_BASE_URL,
-          apiKey: environment.DIDIT_API_KEY,
-          timeoutMs: 4_000,
-        }),
+        didit: diditClient,
         webhookVerifier: new DiditWebhookVerifier(environment.DIDIT_WEBHOOK_SECRET),
         workflowId: environment.DIDIT_WORKFLOW_ID,
         callbackUrl: environment.DIDIT_CALLBACK_URL,
@@ -102,8 +137,36 @@ const diditKyc =
         ...(environment.DIDIT_POA_WORKFLOW_ID === undefined
           ? {}
           : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),
+        ...(protectedProfileCache === undefined
+          ? {}
+          : {
+              invalidateDisplayProfile: async (accountId: string) => {
+                try {
+                  await protectedProfileCache.delete(accountId);
+                } catch (error) {
+                  logger.warn(
+                    { err: error, account_id: accountId },
+                    "protected display profile cache invalidation failed",
+                  );
+                }
+              },
+            }),
       }
     : undefined;
+const displayProfiles =
+  protectedProfileCache !== undefined && diditClient !== undefined
+    ? new DiditProtectedDisplayProfileProvider(
+        protectedProfileCache,
+        diditClient,
+        undefined,
+        (error, operation) => {
+          logger.warn(
+            { err: error, operation },
+            "protected display profile refresh failed",
+          );
+        },
+      )
+    : new UnavailableProtectedDisplayProfileProvider();
 const app = createApp({
   databaseProbe: new PrismaDatabaseProbe(database),
   offeringRepository: new PrismaOfferingRepository(database),
@@ -119,6 +182,10 @@ const app = createApp({
       rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
+    investorProfile: {
+      repository: new PrismaInvestorProfileRepository(database),
+      displayProfiles,
+    },
     ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
     staffAccountLifecycle: {
       repository: staffAccountLifecycleRepository,
@@ -148,7 +215,14 @@ const server = app.listen(environment.PORT, environment.HOST, () => {
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
   logger.info({ signal }, "shutting down");
   server.close(async (error) => {
-    await Promise.all([database.$disconnect(), authDatabase.end()]);
+    const shutdownTasks: Promise<unknown>[] = [
+      database.$disconnect(),
+      authDatabase.end(),
+    ];
+    if (profileCacheClient?.isOpen === true) {
+      shutdownTasks.push(profileCacheClient.close());
+    }
+    await Promise.all(shutdownTasks);
     if (error !== undefined) {
       logger.error({ err: error }, "HTTP server shutdown failed");
       process.exitCode = 1;

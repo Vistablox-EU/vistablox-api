@@ -26,6 +26,7 @@ function decision(
         warnings: [],
       },
     ],
+    verifiedDisplayProfile: null,
     ...overrides,
   };
 }

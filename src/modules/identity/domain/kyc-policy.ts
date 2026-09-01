@@ -63,6 +63,12 @@ export interface DiditProofOfAddressSummary extends DiditFeatureSummary {
   countryCode: string | null;
 }
 
+export interface DiditVerifiedDisplayProfile {
+  givenName: string;
+  familyName: string;
+  fullDisplayName: string;
+}
+
 export interface DiditDecisionSummary {
   sessionId: string;
   sessionKind: "user" | "business" | null;
@@ -74,6 +80,7 @@ export interface DiditDecisionSummary {
   faceMatches: DiditFeatureSummary[];
   amlScreenings: DiditAmlSummary[];
   proofOfAddressVerifications: DiditProofOfAddressSummary[];
+  verifiedDisplayProfile: DiditVerifiedDisplayProfile | null;
 }
 
 export interface KycPolicyOutcome {

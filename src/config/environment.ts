@@ -51,6 +51,16 @@ const environmentSchema = z
     SMTP_USER: z.string().min(1),
     SMTP_PASSWORD: z.string().min(1),
     SMTP_FROM: z.string().min(1),
+    PROFILE_CACHE_URL: z.preprocess(
+      emptyStringToUndefined,
+      z
+        .url()
+        .refine(
+          (value) => value.startsWith("redis://") || value.startsWith("rediss://"),
+          { message: "PROFILE_CACHE_URL must be a Redis or TLS Redis URL" },
+        )
+        .optional(),
+    ),
     DIDIT_API_BASE_URL: z.url().default("https://verification.didit.me"),
     DIDIT_API_KEY: optionalNonEmptyString(),
     DIDIT_WORKFLOW_ID: optionalUuid(),

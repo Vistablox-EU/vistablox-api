@@ -70,7 +70,9 @@ describe("Didit HTTP client", () => {
           {
             status: "Approved",
             date_of_birth: "1990-04-15",
-            first_name: "Must not escape adapter",
+            first_name: " Carmen ",
+            last_name: " Silva ",
+            full_name: " Carmen Silva ",
             document_number: "SECRET",
             warnings: [],
           },
@@ -120,6 +122,11 @@ describe("Didit HTTP client", () => {
           warnings: [],
         },
       ],
+      verifiedDisplayProfile: {
+        givenName: "Carmen",
+        familyName: "Silva",
+        fullDisplayName: "Carmen Silva",
+      },
     });
     expect(JSON.stringify(result)).not.toContain("SECRET");
     expect(JSON.stringify(result)).not.toContain("raw_images");

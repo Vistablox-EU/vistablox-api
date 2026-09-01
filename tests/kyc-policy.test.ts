@@ -21,6 +21,7 @@ function approvedDecision(overrides: Partial<DiditDecisionSummary> = {}): DiditD
     faceMatches: [{ status: "Approved", warnings: [] }],
     amlScreenings: [{ status: "Approved", totalHits: 0, warnings: [] }],
     proofOfAddressVerifications: [],
+    verifiedDisplayProfile: null,
     ...overrides,
   };
 }

@@ -12,6 +12,8 @@ export class StartKycSessionService {
     private readonly didit: DiditClient,
     private readonly configuration: { workflowId: string; callbackUrl: string },
     private readonly clock: () => Date = () => new Date(),
+    private readonly invalidateDisplayProfile: (accountId: string) => Promise<void> =
+      async () => {},
   ) {}
 
   public async execute(input: {
@@ -86,6 +88,7 @@ export class StartKycSessionService {
         detail: "The created identity verification session could not be activated.",
       });
     }
+    await this.invalidateDisplayProfile(input.accountId).catch(() => undefined);
     return {
       data: {
         verification_session_id: session.sessionId,
@@ -214,6 +217,8 @@ export class ProcessDiditWebhookService {
       environment: "sandbox" | "live";
       proofOfAddressWorkflowId?: string;
     },
+    private readonly invalidateDisplayProfile: (accountId: string) => Promise<void> =
+      async () => {},
   ) {}
 
   public async execute(input: {
@@ -290,6 +295,9 @@ export class ProcessDiditWebhookService {
         reason: "correlation_mismatch",
       });
       return { received: true as const, ignored: true as const };
+    }
+    if (purpose === "baseline_kyc") {
+      await this.invalidateDisplayProfile(target.accountId).catch(() => undefined);
     }
 
     const status = asDiditStatus(input.status);
