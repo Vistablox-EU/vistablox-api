@@ -402,6 +402,7 @@ export class PrismaKycRepository implements KycRepository {
           providerUpdatedAt: input.providerUpdatedAt,
           eligibilityState: input.outcome.eligibilityState,
           operationalSubstatus,
+          everRequiredManualReview: input.outcome.everRequiredManualReview,
           ...(input.outcome.lastVerifiedAt === null
             ? {}
             : { lastVerifiedAt: input.outcome.lastVerifiedAt }),
@@ -678,6 +679,7 @@ function toRecord(input: {
   taxResidenceCountryCode: string | null;
   proofOfAddressCurrentUntil: Date | null;
   lastVerifiedAt: Date | null;
+  everRequiredManualReview: boolean;
   renewalDueAt: Date | null;
 }): KycEligibilityRecord {
   return {
@@ -694,6 +696,7 @@ function toRecord(input: {
     taxResidenceCountryCode: input.taxResidenceCountryCode,
     proofOfAddressCurrentUntil: input.proofOfAddressCurrentUntil,
     lastVerifiedAt: input.lastVerifiedAt,
+    everRequiredManualReview: input.everRequiredManualReview,
     renewalDueAt: input.renewalDueAt,
   };
 }

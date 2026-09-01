@@ -6,6 +6,7 @@ import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type {
+  CloseCaseInput,
   FounderDecisionInput,
   OperationsCaseDetail,
   OriginationRepository,
@@ -117,6 +118,27 @@ function buildApp(options?: {
     stage: "submitted" as const,
     submittedAt: new Date("2026-09-01T12:00:00.000Z"),
   }));
+  const closeCase = vi.fn(async (input: CloseCaseInput) => ({
+    caseId: input.caseId,
+    stage: input.outcome,
+    closedAt: input.closedAt,
+  }));
+  const listCaseMessages = vi.fn().mockResolvedValue([
+    {
+      messageId: "msg_01",
+      authorAccountId: "acct_founder",
+      body: "Requesting an updated registry extract.",
+      createdAt: new Date("2026-09-01T10:00:00.000Z"),
+    },
+  ]);
+  const postCaseMessage = vi.fn(
+    async (input: { caseId: string; lane: string; authorAccountId: string; body: string; postedAt: Date }) => ({
+      messageId: "msg_02",
+      authorAccountId: input.authorAccountId,
+      body: input.body,
+      createdAt: input.postedAt,
+    }),
+  );
   const ownerCase = {
     ...operationsCase,
     stage: options?.ownerCaseStage ?? "waiting_on_applicant",
@@ -150,6 +172,9 @@ function buildApp(options?: {
     recordFounderDecision,
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    closeCase,
+    listCaseMessages,
+    postCaseMessage,
   };
 
   return {
@@ -172,6 +197,9 @@ function buildApp(options?: {
     publishInformationRequest,
     recordFounderDecision,
     resubmitAfterInformationRequest,
+    closeCase,
+    listCaseMessages,
+    postCaseMessage,
   };
 }
 
@@ -360,6 +388,173 @@ describe("founder review and information requests", () => {
 
     expect(response.status).toBe(404);
     expect(resubmitAfterInformationRequest).not.toHaveBeenCalled();
+  });
+});
+
+describe("closing a case (withdraw or late-stage reject)", () => {
+  it("denies the internal surface to a customer", async () => {
+    const { app, closeCase } = buildApp({ population: "customer", hasAdminRole: true });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/close")
+      .send({ outcome: "withdrawn", founder_review_notes: "Applicant emailed to withdraw." });
+
+    expect(response.status).toBe(403);
+    expect(closeCase).not.toHaveBeenCalled();
+  });
+
+  it("withdraws a case from the submitted stage on the applicant's behalf", async () => {
+    const { app, closeCase } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/close")
+      .send({ outcome: "withdrawn", founder_review_notes: "Applicant emailed to withdraw." });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ case_id: "case_01", stage: "withdrawn" });
+    expect(closeCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "withdrawn",
+        caseId: "case_01",
+        accountId: "acct_founder",
+        founderReviewNotes: "Applicant emailed to withdraw.",
+      }),
+    );
+  });
+
+  it("rejects a case that reached pre-offering open but ended up underfunded", async () => {
+    const { app, closeCase } = buildApp({
+      caseRecord: { ...operationsCase, stage: "pre_offering_open" },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/close")
+      .send({
+        outcome: "rejected",
+        founder_review_notes: "IPO period ended underfunded.",
+        rejection_reason_code: "IPO_PERIOD_UNDERFUNDED",
+        rejection_notes: "Only 40% of ipo_value_eur collected by ipo_end_at.",
+      });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ case_id: "case_01", stage: "rejected" });
+    expect(closeCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outcome: "rejected",
+        rejectionReasonCode: "IPO_PERIOD_UNDERFUNDED",
+      }),
+    );
+  });
+
+  it("refuses to withdraw or reject a case that has already reached a terminal stage", async () => {
+    const { app, closeCase } = buildApp({
+      caseRecord: { ...operationsCase, stage: "rejected" },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/close")
+      .send({ outcome: "withdrawn", founder_review_notes: "Too late." });
+
+    expect(response.status).toBe(409);
+    expect(closeCase).not.toHaveBeenCalled();
+  });
+
+  it("refuses a late-stage reject from a stage the lifecycle diagram doesn't allow it from", async () => {
+    const { app, closeCase } = buildApp({
+      caseRecord: { ...operationsCase, stage: "waiting_on_applicant" },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/close")
+      .send({
+        outcome: "rejected",
+        founder_review_notes: "Trying to reject too early.",
+        rejection_reason_code: "TEST",
+        rejection_notes: "TEST",
+      });
+
+    expect(response.status).toBe(409);
+    expect(closeCase).not.toHaveBeenCalled();
+  });
+});
+
+describe("operations case messages (internal_case and applicant lanes)", () => {
+  it("denies the internal surface to a customer", async () => {
+    const { app, listCaseMessages } = buildApp({ population: "customer", hasAdminRole: true });
+
+    const response = await request(app).get(
+      "/internal/v1/origination-cases/case_01/messages?lane=internal_case",
+    );
+
+    expect(response.status).toBe(403);
+    expect(listCaseMessages).not.toHaveBeenCalled();
+  });
+
+  it("reads the internal_case lane, which the founder is the only participant in", async () => {
+    const { app, listCaseMessages } = buildApp();
+
+    const response = await request(app).get(
+      "/internal/v1/origination-cases/case_01/messages?lane=internal_case",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      expect.objectContaining({ message_id: "msg_01", body: "Requesting an updated registry extract." }),
+    ]);
+    expect(listCaseMessages).toHaveBeenCalledWith("case_01", "internal_case");
+  });
+
+  it("reads the applicant lane too", async () => {
+    const { app, listCaseMessages } = buildApp();
+
+    const response = await request(app).get(
+      "/internal/v1/origination-cases/case_01/messages?lane=applicant",
+    );
+
+    expect(response.status).toBe(200);
+    expect(listCaseMessages).toHaveBeenCalledWith("case_01", "applicant");
+  });
+
+  it("rejects a lane query outside the fixed lane set", async () => {
+    const { app } = buildApp();
+
+    const response = await request(app).get(
+      "/internal/v1/origination-cases/case_01/messages?lane=legal_workstream",
+    );
+
+    expect(response.status).toBe(422);
+  });
+
+  it("posts to either lane as the founder", async () => {
+    const { app, postCaseMessage } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/messages")
+      .send({ lane: "internal_case", body: "Ownership evidence looks solid, proceeding to review." });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      body: "Ownership evidence looks solid, proceeding to review.",
+    });
+    expect(postCaseMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        caseId: "case_01",
+        lane: "internal_case",
+        authorAccountId: "acct_founder",
+        body: "Ownership evidence looks solid, proceeding to review.",
+      }),
+    );
+  });
+
+  it("404s posting to a case that doesn't exist", async () => {
+    const { app, postCaseMessage } = buildApp({ caseRecord: null });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_missing/messages")
+      .send({ lane: "applicant", body: "Hello" });
+
+    expect(response.status).toBe(404);
+    expect(postCaseMessage).not.toHaveBeenCalled();
   });
 });
 

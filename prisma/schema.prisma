@@ -284,6 +284,7 @@ model KycEligibility {
   taxResidenceCountryCode     String?   @map("tax_residence_country_code")
   proofOfAddressCurrentUntil  DateTime? @map("proof_of_address_current_until") @db.Timestamptz(6)
   lastVerifiedAt              DateTime? @map("last_verified_at") @db.Timestamptz(6)
+  everRequiredManualReview    Boolean   @default(false) @map("ever_required_manual_review")
   renewalDueAt                DateTime? @map("renewal_due_at") @db.Timestamptz(6)
   updatedAt                   DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
 
@@ -557,6 +558,7 @@ model CaseThread {
   case      OriginationCase @relation(fields: [caseId], references: [id])
   messages  CaseMessage[]
 
+  @@unique([caseId, lane], map: "case_threads_case_id_lane_key")
   @@index([caseId], map: "idx_case_threads_case")
   @@map("case_threads")
   @@schema("origination")

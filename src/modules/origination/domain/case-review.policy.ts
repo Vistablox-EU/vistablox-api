@@ -22,6 +22,24 @@ export function canRecordFounderDecision(input: {
   return input.stage === "submitted" && input.hasCurrentRevision;
 }
 
+// REAL_ESTATE_INTAKE_LIFECYCLE.md's state diagram, not PERMISSION_MATRIX.md's
+// shorthand "at any stage": withdrawn is reachable from every pre-terminal
+// stage up to (and including) an open pre-offering; rejected has exactly one
+// path here distinct from the submitted-stage initial review this module
+// already handles (RecordFounderDecisionService) — "ipo_period ends
+// underfunded, founder closes the case". expired has no manual path at all;
+// it's already fully automatic (ExpireOverdueInformationRequestsService).
+export type CaseClosureOutcome = "withdrawn" | "rejected";
+
+const closableFromStage: Record<CaseClosureOutcome, ReadonlySet<string>> = {
+  withdrawn: new Set(["draft", "submitted", "waiting_on_applicant", "pre_offering_open"]),
+  rejected: new Set(["pre_offering_open"]),
+};
+
+export function canCloseCase(input: { stage: string; outcome: CaseClosureOutcome }): boolean {
+  return closableFromStage[input.outcome].has(input.stage);
+}
+
 export function addBusinessDays(start: Date, businessDays: number): Date {
   if (!Number.isInteger(businessDays) || businessDays < 1) {
     throw new Error("Business-day duration must be a positive integer");

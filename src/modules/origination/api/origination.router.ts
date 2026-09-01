@@ -9,14 +9,21 @@ import {
   RespondToInformationRequestService,
 } from "../application/respond-to-information-request.service.js";
 import {
+  ListOwnCaseMessagesService,
+  PostOwnCaseMessageService,
+} from "../application/case-message.service.js";
+import {
   caseIdParamsSchema,
   createDraftIntakeBodySchema,
   createDraftIntakeResponseSchema,
   getOwnCaseResponseSchema,
   informationRequestParamsSchema,
+  listCaseMessagesResponseSchema,
   listInformationRequestsResponseSchema,
   listOwnCasesQuerySchema,
   listOwnCasesResponseSchema,
+  postCaseMessageBodySchema,
+  postCaseMessageResponseSchema,
   submitInitialCaseBodySchema,
   submitInitialCaseResponseSchema,
   resubmitCaseResponseSchema,
@@ -30,6 +37,8 @@ export function createOriginationRouter(
   submitInitialCase: SubmitInitialCaseService,
   listInformationRequests: ListOwnInformationRequestsService,
   respondToInformationRequest: RespondToInformationRequestService,
+  listOwnCaseMessages: ListOwnCaseMessagesService,
+  postOwnCaseMessage: PostOwnCaseMessageService,
 ): Router {
   const router = Router();
 
@@ -95,6 +104,25 @@ export function createOriginationRouter(
       response.status(201).json(resubmitCaseResponseSchema.parse(result));
     },
   );
+
+  router.get("/:case_id/messages", requireAuthentication, async (request, response) => {
+    const authContext = requireAuthContext(response.locals.authContext);
+    const params = caseIdParamsSchema.parse(request.params);
+    const result = await listOwnCaseMessages.execute(authContext.accountId, params.case_id);
+    response.json(listCaseMessagesResponseSchema.parse(result));
+  });
+
+  router.post("/:case_id/messages", requireAuthentication, async (request, response) => {
+    const authContext = requireAuthContext(response.locals.authContext);
+    const params = caseIdParamsSchema.parse(request.params);
+    const body = postCaseMessageBodySchema.parse(request.body);
+    const result = await postOwnCaseMessage.execute({
+      accountId: authContext.accountId,
+      caseId: params.case_id,
+      body: body.body,
+    });
+    response.status(201).json(postCaseMessageResponseSchema.parse(result));
+  });
 
   return router;
 }

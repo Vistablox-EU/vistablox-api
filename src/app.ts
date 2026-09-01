@@ -74,6 +74,7 @@ import {
 } from "./modules/origination/application/read-own-cases.service.js";
 import { SubmitInitialCaseService } from "./modules/origination/application/submit-initial-case.service.js";
 import {
+  CloseCaseService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
@@ -83,6 +84,12 @@ import {
   ListOwnInformationRequestsService,
   RespondToInformationRequestService,
 } from "./modules/origination/application/respond-to-information-request.service.js";
+import {
+  ListCaseMessagesForOperationsService,
+  ListOwnCaseMessagesService,
+  PostCaseMessageForOperationsService,
+  PostOwnCaseMessageService,
+} from "./modules/origination/application/case-message.service.js";
 import type { OriginationRepository } from "./modules/origination/repository/origination.repository.js";
 import {
   GetKycAccountForOperationsService,
@@ -425,6 +432,8 @@ export function createApp(dependencies: AppDependencies): Express {
         new SubmitInitialCaseService(originationRepository),
         new ListOwnInformationRequestsService(originationRepository),
         new RespondToInformationRequestService(originationRepository),
+        new ListOwnCaseMessagesService(originationRepository),
+        new PostOwnCaseMessageService(originationRepository),
       ),
     );
     app.use(
@@ -437,6 +446,9 @@ export function createApp(dependencies: AppDependencies): Express {
         new GetCaseForOperationsService(originationRepository),
         new PublishInformationRequestService(originationRepository),
         new RecordFounderDecisionService(originationRepository),
+        new CloseCaseService(originationRepository),
+        new ListCaseMessagesForOperationsService(originationRepository),
+        new PostCaseMessageForOperationsService(originationRepository),
       ),
     );
   }

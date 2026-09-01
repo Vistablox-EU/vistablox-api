@@ -149,6 +149,27 @@ export const resubmitCaseResponseSchema = z.object({
   }),
 });
 
+// Shared by both the owner-facing (always the applicant lane) and
+// operations-facing (either lane) message routes.
+export const caseMessageSchema = z.object({
+  message_id: z.string(),
+  author_account_id: z.string().nullable(),
+  body: z.string(),
+  created_at: z.iso.datetime(),
+});
+
+export const listCaseMessagesResponseSchema = z.object({
+  data: z.array(caseMessageSchema),
+});
+
+export const postCaseMessageBodySchema = z.object({
+  body: z.string().trim().min(1).max(5000),
+});
+
+export const postCaseMessageResponseSchema = z.object({
+  data: caseMessageSchema,
+});
+
 export type ListOwnCasesQuery = z.infer<typeof listOwnCasesQuerySchema>;
 export type OwnedCaseResponse = z.infer<typeof ownedCaseSchema>;
 export type SubmitInitialCaseBody = z.infer<typeof submitInitialCaseBodySchema>;

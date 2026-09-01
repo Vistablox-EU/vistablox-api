@@ -106,6 +106,10 @@ export const operationsKycAccountResponseSchema = z.object({
     proof_of_address_provider_updated_at: z.iso.datetime().nullable(),
     proof_of_address_current_until: z.iso.datetime().nullable(),
     last_verified_at: z.iso.datetime().nullable(),
+    // Why renewal_due_at is 12 vs. 24 months out (KYC_WORKFLOW.md's Renewal
+    // Policy) — not shown to the customer, whose own renewal_due_at date
+    // already reflects it.
+    ever_required_manual_review: z.boolean(),
     renewal_due_at: z.iso.datetime().nullable(),
   }),
 });

@@ -42,6 +42,9 @@ function repository(overrides: Partial<OriginationRepository> = {}): Origination
     recordFounderDecision: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(true),
+    closeCase: vi.fn(),
+    listCaseMessages: vi.fn().mockResolvedValue([]),
+    postCaseMessage: vi.fn(),
     ...overrides,
   };
 }

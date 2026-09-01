@@ -28,6 +28,7 @@ const eligibleRecord: KycEligibilityRecord = {
   taxResidenceCountryCode: "HR",
   proofOfAddressCurrentUntil: null,
   lastVerifiedAt: null,
+  everRequiredManualReview: true,
   renewalDueAt: null,
 };
 
@@ -77,6 +78,9 @@ function fakeOriginationRepository(): OriginationRepository {
     recordFounderDecision: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    closeCase: vi.fn(),
+    listCaseMessages: vi.fn().mockResolvedValue([]),
+    postCaseMessage: vi.fn(),
   };
 }
 
@@ -197,6 +201,7 @@ describe("operations KYC decision display", () => {
       operational_substatus: "kyc_manual_review",
       residence_country_code: "DE",
       tax_residence_country_code: "HR",
+      ever_required_manual_review: true,
     });
   });
 

@@ -5,6 +5,9 @@ import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
+  CaseMessageRecord,
+  ClosedCase,
+  CloseCaseInput,
   FounderDecisionInput,
   CreateDraftIntakeInput,
   CreatedDraftIntake,
@@ -20,6 +23,7 @@ import type {
   ResubmittedCase,
   SubmitInitialCaseInput,
   SubmittedCase,
+  ThreadLane,
 } from "./origination.repository.js";
 import { CaseReviewConflictError } from "./origination.repository.js";
 
@@ -758,6 +762,134 @@ export class PrismaOriginationRepository implements OriginationRepository {
       };
     });
   }
+
+  // REAL_ESTATE_INTAKE_LIFECYCLE.md's state diagram, distinct from
+  // recordFounderDecision above (the submitted-stage initial review):
+  // withdrawn is reachable from draft/submitted/waiting_on_applicant/
+  // pre_offering_open; the only other manual closure the diagram shows is
+  // pre_offering_open -> rejected ("ipo_period ends underfunded, founder
+  // closes the case"). expired has no manual path — see
+  // expireInformationRequest above.
+  public async closeCase(input: CloseCaseInput): Promise<ClosedCase | null> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return null;
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: { stage: true },
+      });
+      const closableFrom: Record<CloseCaseInput["outcome"], readonly string[]> = {
+        withdrawn: ["draft", "submitted", "waiting_on_applicant", "pre_offering_open"],
+        rejected: ["pre_offering_open"],
+      };
+      if (!closableFrom[input.outcome].includes(current.stage)) {
+        throw new CaseReviewConflictError(current.stage, "close the case");
+      }
+
+      await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: {
+          stage: input.outcome,
+          canReopen: false,
+          founderReviewNotes: input.founderReviewNotes,
+          reviewedByAccountId: input.accountId,
+          updatedAt: input.closedAt,
+          ...(input.outcome === "withdrawn"
+            ? { withdrawnAt: input.closedAt }
+            : {
+                rejectedAt: input.closedAt,
+                rejectionReasonCode: input.rejectionReasonCode,
+                rejectionNotes: input.rejectionNotes,
+              }),
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: `origination.case_${input.outcome}`,
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            previous_stage: current.stage,
+            new_stage: input.outcome,
+            ...(input.outcome === "rejected"
+              ? { rejection_reason_code: input.rejectionReasonCode }
+              : {}),
+          },
+          createdAt: input.closedAt,
+        },
+      });
+      return { caseId: input.caseId, stage: input.outcome, closedAt: input.closedAt };
+    });
+  }
+
+  public async listCaseMessages(caseId: string, lane: ThreadLane): Promise<CaseMessageRecord[]> {
+    const thread = await this.database.caseThread.findUnique({
+      where: { caseId_lane: { caseId, lane } },
+      select: {
+        messages: {
+          orderBy: { createdAt: "asc" },
+          select: { id: true, authorAccountId: true, body: true, createdAt: true },
+        },
+      },
+    });
+    return (thread?.messages ?? []).map(toCaseMessageRecord);
+  }
+
+  public async postCaseMessage(input: {
+    caseId: string;
+    lane: ThreadLane;
+    authorAccountId: string;
+    body: string;
+    postedAt: Date;
+  }): Promise<CaseMessageRecord | null> {
+    return this.database.$transaction(async (transaction) => {
+      const exists = await transaction.originationCase.findUnique({
+        where: { id: input.caseId },
+        select: { id: true },
+      });
+      if (exists === null) return null;
+
+      const thread = await transaction.caseThread.upsert({
+        where: { caseId_lane: { caseId: input.caseId, lane: input.lane } },
+        create: { id: `thread_${ulid()}`, caseId: input.caseId, lane: input.lane },
+        update: {},
+      });
+      const message = await transaction.caseMessage.create({
+        data: {
+          id: `msg_${ulid()}`,
+          threadId: thread.id,
+          authorAccountId: input.authorAccountId,
+          body: input.body,
+          createdAt: input.postedAt,
+        },
+        select: { id: true, authorAccountId: true, body: true, createdAt: true },
+      });
+      return toCaseMessageRecord(message);
+    });
+  }
+}
+
+function toCaseMessageRecord(input: {
+  id: string;
+  authorAccountId: string | null;
+  body: string;
+  createdAt: Date;
+}): CaseMessageRecord {
+  return {
+    messageId: input.id,
+    authorAccountId: input.authorAccountId,
+    body: input.body,
+    createdAt: input.createdAt,
+  };
 }
 
 const ownedCaseSelect = {

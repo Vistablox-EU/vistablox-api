@@ -27,7 +27,7 @@ Configure all of these values together or leave all of them empty to disable the
 
 `DIDIT_POA_WORKFLOW_ID` is optional and enables the separate owner proof-of-address route. That workflow must contain a Proof of Address feature and enforce the supported document types and three-month maximum document age.
 
-The baseline Didit workflow must include government-ID verification, liveness, face match, and AML screening. The local policy additionally requires age 18 or older and both declared residence countries to be in the documented EU/EEA allowlist. A successful baseline decision renews after 24 months and uses `kyc_verified_owner_poa_missing` until the separate proof-of-address workflow is complete. Approved proof-of-address evidence must match the declared residence country and remains current only until three calendar months after its document issue date.
+The baseline Didit workflow must include government-ID verification, liveness, face match, and AML screening. The local policy additionally requires age 18 or older and both declared residence countries to be in the documented EU/EEA allowlist. A successful baseline decision uses `kyc_verified_owner_poa_missing` until the separate proof-of-address workflow is complete, and renews after 24 months for a low-risk account or 12 months for one that has ever resolved to `kyc_manual_review` (`ever_required_manual_review`, latched permanently the first time that happens, per `KYC_WORKFLOW.md`'s Renewal Policy). Approved proof-of-address evidence must match the declared residence country and remains current only until three calendar months after its document issue date.
 
 ## Data boundary
 
@@ -43,4 +43,3 @@ The Didit adapter temporarily projects the fetched response in memory to the min
 
 - declared-versus-verified identity cross-validation and manual-review tooling
 - durable asynchronous webhook processing with reconciliation/alerting for stuck session starts
-- higher-risk renewal intervals and scheduled expiry/reminder workers
