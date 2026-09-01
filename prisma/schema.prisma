@@ -234,8 +234,12 @@ model AccountRecoveryCase {
 
 model KycEligibility {
   accountId                   String    @id @map("account_id")
-  diditReference              String?   @map("didit_reference")
+  diditReference              String?   @unique(map: "kyc_eligibility_didit_reference_key") @map("didit_reference")
   eligibilityState            String    @default("not_started") @map("eligibility_state")
+  providerStatus              String?   @map("provider_status")
+  operationalSubstatus        String    @default("kyc_not_started") @map("operational_substatus")
+  providerUpdatedAt           DateTime? @map("provider_updated_at") @db.Timestamptz(6)
+  sessionStartId              String?   @unique(map: "kyc_eligibility_session_start_id_key") @map("session_start_id")
   residenceCountryCode        String?   @map("residence_country_code")
   taxResidenceCountryCode     String?   @map("tax_residence_country_code")
   proofOfAddressCurrentUntil  DateTime? @map("proof_of_address_current_until") @db.Timestamptz(6)

@@ -51,6 +51,22 @@ const environmentSchema = z
     SMTP_USER: z.string().min(1),
     SMTP_PASSWORD: z.string().min(1),
     SMTP_FROM: z.string().min(1),
+    DIDIT_API_BASE_URL: z.url().default("https://verification.didit.me"),
+    DIDIT_API_KEY: optionalNonEmptyString(),
+    DIDIT_WORKFLOW_ID: optionalUuid(),
+    DIDIT_CALLBACK_URL: z.preprocess(
+      emptyStringToUndefined,
+      z.url().optional(),
+    ),
+    DIDIT_WEBHOOK_SECRET: z.preprocess(
+      emptyStringToUndefined,
+      z.string().min(16).optional(),
+    ),
+    DIDIT_APPLICATION_ID: optionalUuid(),
+    DIDIT_ENVIRONMENT: z.preprocess(
+      emptyStringToUndefined,
+      z.enum(["sandbox", "live"]).optional(),
+    ),
   })
   .refine(
     (environment) =>
@@ -60,10 +76,42 @@ const environmentSchema = z
       message: "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must be configured together",
       path: ["GOOGLE_CLIENT_ID"],
     },
+  )
+  .refine(
+    (environment) => {
+      const values = [
+        environment.DIDIT_API_KEY,
+        environment.DIDIT_WORKFLOW_ID,
+        environment.DIDIT_CALLBACK_URL,
+        environment.DIDIT_WEBHOOK_SECRET,
+        environment.DIDIT_APPLICATION_ID,
+        environment.DIDIT_ENVIRONMENT,
+      ];
+      return (
+        values.every((value) => value === undefined) ||
+        values.every((value) => value !== undefined)
+      );
+    },
+    {
+      message: "All Didit KYC settings must be configured together",
+      path: ["DIDIT_API_KEY"],
+    },
   );
 
 export type Environment = z.infer<typeof environmentSchema>;
 
 export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Environment {
   return environmentSchema.parse(source);
+}
+
+function emptyStringToUndefined(value: unknown): unknown {
+  return value === "" ? undefined : value;
+}
+
+function optionalNonEmptyString() {
+  return z.preprocess(emptyStringToUndefined, z.string().min(1).optional());
+}
+
+function optionalUuid() {
+  return z.preprocess(emptyStringToUndefined, z.string().uuid().optional());
 }

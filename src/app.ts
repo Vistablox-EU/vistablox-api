@@ -61,6 +61,18 @@ import {
   RespondToInformationRequestService,
 } from "./modules/origination/application/respond-to-information-request.service.js";
 import type { OriginationRepository } from "./modules/origination/repository/origination.repository.js";
+import {
+  GetKycStatusService,
+  ProcessDiditWebhookService,
+  StartKycSessionService,
+} from "./modules/identity/application/kyc.service.js";
+import type { DiditClient } from "./modules/identity/application/didit-client.js";
+import {
+  createDiditWebhookRouter,
+  createKycRouter,
+} from "./modules/identity/api/kyc.router.js";
+import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
+import type { KycRepository } from "./modules/identity/repository/kyc.repository.js";
 import { errorHandler } from "./shared/http/error-handler.js";
 import { notFoundHandler } from "./shared/http/not-found.js";
 import { requestContext } from "./shared/http/request-context.js";
@@ -76,6 +88,15 @@ export interface AppDependencies {
     originationRepository: OriginationRepository;
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
+    kyc?: {
+      repository: KycRepository;
+      didit: DiditClient;
+      webhookVerifier: DiditWebhookVerifier;
+      workflowId: string;
+      callbackUrl: string;
+      applicationId: string;
+      environment: "sandbox" | "live";
+    };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
       administrator: StaffAccountAdministrator;
@@ -139,6 +160,31 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.protectedApi.staffWebAuthnRepository,
       dependencies.protectedApi.staffWebAuthnCeremony,
     );
+    if (dependencies.protectedApi.kyc !== undefined) {
+      const kyc = dependencies.protectedApi.kyc;
+      app.use(
+        "/v1/kyc",
+        createKycRouter(
+          requireAuthentication,
+          new GetKycStatusService(kyc.repository),
+          new StartKycSessionService(kyc.repository, kyc.didit, {
+            workflowId: kyc.workflowId,
+            callbackUrl: kyc.callbackUrl,
+          }),
+        ),
+      );
+      app.use(
+        "/webhooks/didit",
+        createDiditWebhookRouter(
+          kyc.webhookVerifier,
+          new ProcessDiditWebhookService(kyc.repository, kyc.didit, {
+            workflowId: kyc.workflowId,
+            applicationId: kyc.applicationId,
+            environment: kyc.environment,
+          }),
+        ),
+      );
+    }
     if (dependencies.protectedApi.staffInvitations !== undefined) {
       const invitations = dependencies.protectedApi.staffInvitations;
       const issueInvitation = new IssueStaffInvitationService(

@@ -25,6 +25,10 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - privacy-preserving failed-login correlation without storing raw login identifiers
 - WebAuthn-protected staff recovery that revokes sessions and credentials before reset delivery
 - immediate staff/partner offboarding with Better Auth login blocking, role revocation, and audit logging
+- Didit v3 hosted individual-KYC session creation with opaque account correlation
+- HMAC-SHA256 V2 authenticated Didit webhooks with timestamp replay protection and event idempotency
+- webhook-then-fetch KYC decisions covering ID, liveness, face match, AML, age, and EU/EEA jurisdiction policy
+- privacy-minimized KYC persistence that excludes provider payloads, document data, biometrics, and addresses
 - KYC/proof-of-address-gated owner intake at `POST /v1/origination-cases`
 - owner-scoped origination case list/detail reads with opaque cursor pagination
 - append-only initial submission revisions with mandatory evidence and audit logging
@@ -36,7 +40,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - Vitest API and domain tests
 - dependency boundary checks for the documented `router -> schema -> application service -> domain policy -> repository` layering
 
-Native-client OIDC, customer TOTP, customer session/device management, auth rate limiting, provider callbacks, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
+Native-client OIDC, customer TOTP, customer session/device management, auth rate limiting, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Didit proof-of-address evidence, protected decision-display caching, cross-validation of declared identity data, and asynchronous webhook processing remain follow-on KYC work. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
 
 ## Local setup
 
@@ -51,6 +55,8 @@ npm run dev
 ```
 
 `DATABASE_URL` is the pooled runtime connection. `DIRECT_DATABASE_URL` must be the non-pooled connection used by Prisma migrations.
+
+Didit KYC remains disabled unless every `DIDIT_*` value in `.env.example` is configured. The provider webhook destination is `/webhooks/didit`; the callback URL is the frontend destination Didit uses after the hosted verification flow. See [`docs/didit-kyc.md`](docs/didit-kyc.md) for the reviewed workflow and data boundary.
 
 ## Commands
 
@@ -79,6 +85,9 @@ npm run db:migrate:deploy
 | `POST` | `/internal/v1/auth/staff-accounts/:account_id/recovery` | Revoke staff sessions/WebAuthn credentials and email a password reset; requires another admin and WebAuthn |
 | `POST` | `/internal/v1/auth/staff-accounts/:account_id/offboard` | Disable staff login and revoke sessions, roles, and credentials; requires another admin and WebAuthn |
 | `GET` | `/v1/offerings?limit=20&after=...` | Cursor-paginated public offering teasers |
+| `GET` | `/v1/kyc` | Read the authenticated customer's local eligibility status and renewal dates |
+| `POST` | `/v1/kyc/sessions` | Create one hosted Didit individual-KYC session for an eligible customer account |
+| `POST` | `/webhooks/didit` | Authenticate and idempotently process Didit status/data webhooks |
 | `POST` | `/v1/origination-cases` | Create an authenticated, eligibility-gated draft owner intake |
 | `GET` | `/v1/origination-cases?limit=20&after=...` | List the authenticated owner's cases |
 | `GET` | `/v1/origination-cases/:case_id` | Read one owner-scoped case; out-of-scope IDs return `404` |

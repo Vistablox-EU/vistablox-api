@@ -22,6 +22,9 @@ import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit
 import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
+import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
+import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
+import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
@@ -77,6 +80,27 @@ const staffProvisioningAuth = createBetterAuth({
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
 });
+const diditKyc =
+  environment.DIDIT_API_KEY !== undefined &&
+  environment.DIDIT_WORKFLOW_ID !== undefined &&
+  environment.DIDIT_CALLBACK_URL !== undefined &&
+  environment.DIDIT_WEBHOOK_SECRET !== undefined &&
+  environment.DIDIT_APPLICATION_ID !== undefined &&
+  environment.DIDIT_ENVIRONMENT !== undefined
+    ? {
+        repository: new PrismaKycRepository(database),
+        didit: new HttpDiditClient({
+          baseUrl: environment.DIDIT_API_BASE_URL,
+          apiKey: environment.DIDIT_API_KEY,
+          timeoutMs: 4_000,
+        }),
+        webhookVerifier: new DiditWebhookVerifier(environment.DIDIT_WEBHOOK_SECRET),
+        workflowId: environment.DIDIT_WORKFLOW_ID,
+        callbackUrl: environment.DIDIT_CALLBACK_URL,
+        applicationId: environment.DIDIT_APPLICATION_ID,
+        environment: environment.DIDIT_ENVIRONMENT,
+      }
+    : undefined;
 const app = createApp({
   databaseProbe: new PrismaDatabaseProbe(database),
   offeringRepository: new PrismaOfferingRepository(database),
@@ -92,6 +116,7 @@ const app = createApp({
       rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
+    ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
     staffAccountLifecycle: {
       repository: staffAccountLifecycleRepository,
       administrator: new BetterAuthStaffAccountAdministrator(auth),
