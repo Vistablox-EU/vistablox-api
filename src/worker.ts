@@ -17,6 +17,9 @@ import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-re
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import { RunOidcCleanupService } from "./modules/auth/application/oidc-cleanup.service.js";
 import { PostgresOidcCleanupRepository } from "./modules/auth/infrastructure/postgres-oidc-cleanup.repository.js";
+import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
+import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 
 const environment = loadEnvironment();
@@ -31,9 +34,15 @@ const emailSender = new SmtpEmailSender({
   password: environment.SMTP_PASSWORD,
   from: environment.SMTP_FROM,
 });
-const originationRepository = new PrismaOriginationRepository(database);
 const kycRepository = new PrismaKycRepository(database);
+const offeringRepository = new PrismaOfferingRepository(database);
 
+const boss = new PgBoss(environment.DATABASE_URL);
+boss.on("error", (error) => {
+  logger.error({ err: error }, "pg-boss error");
+});
+
+const originationRepository = new PrismaOriginationRepository(database, boss);
 const sendApplicantReminders = new SendApplicantResponseRemindersService(
   originationRepository,
   emailSender,
@@ -41,16 +50,9 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(originationRepository);
 const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
 const runOidcCleanup = new RunOidcCleanupService(new PostgresOidcCleanupRepository(authDatabase));
+const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 
-// AD-135's worker/queue runbook family and ASYNC_JOBS.md's retry baseline:
-// up to 5 attempts, exponential backoff with jitter (pg-boss's own
-// retryBackoff formula already includes jitter).
-const RETRY_OPTIONS = { retryLimit: 5, retryBackoff: true } as const;
-
-const boss = new PgBoss(environment.DATABASE_URL);
-boss.on("error", (error) => {
-  logger.error({ err: error }, "pg-boss error");
-});
+const RETRY_OPTIONS = JOB_RETRY_OPTIONS;
 
 async function runJob(name: string, run: (traceId: string) => Promise<JobRunSummary>): Promise<void> {
   const traceId = `req_${ulid()}`;
@@ -70,6 +72,7 @@ await boss.start();
 // NOTHING, so this is safe to run on every worker start.
 await boss.createQueue("case_timers.applicant_reminders");
 await boss.createQueue("case_timers.response_window_expiry");
+await boss.createQueue("case_timers.pre_offering_open_handoff");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.oidc_cleanup");
 
@@ -103,6 +106,31 @@ await boss.work("maintenance.kyc_renewal", async () => {
 });
 await boss.work("maintenance.oidc_cleanup", async () => {
   await runJob("maintenance.oidc_cleanup", () => runOidcCleanup.execute());
+});
+
+// AD-152: this job's trace_id is the originating approval request's own,
+// carried forward by the enqueue path — never a freshly minted one, unlike
+// runJob's scheduled jobs above which have no originating request.
+await boss.work("case_timers.pre_offering_open_handoff", async (jobs) => {
+  for (const job of jobs) {
+    const traceId =
+      typeof job.data === "object" && job.data !== null && "trace_id" in job.data
+        ? String((job.data as { trace_id: unknown }).trace_id)
+        : "unknown";
+    try {
+      const result = await openOfferingForApprovedCase.execute(job.data);
+      logger.info(
+        { trace_id: traceId, job: "case_timers.pre_offering_open_handoff", ...result },
+        "case timer job completed",
+      );
+    } catch (error) {
+      logger.error(
+        { err: error, trace_id: traceId, job: "case_timers.pre_offering_open_handoff" },
+        "case timer job failed",
+      );
+      throw error;
+    }
+  }
 });
 
 logger.info("VistaBlox worker started");
