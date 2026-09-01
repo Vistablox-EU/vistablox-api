@@ -6,6 +6,7 @@ import type {
   CustomerSessionSummary,
 } from "../repository/customer-session.repository.js";
 import type { OidcGrantRepository } from "../repository/oidc-grant.repository.js";
+import type { AuthAuditSink } from "./auth-audit-sink.js";
 import type { SessionRevoker } from "./session-revoker.js";
 
 export interface OwnSessionSummary extends CustomerSessionSummary {
@@ -63,6 +64,8 @@ export class RevokeOwnSessionService {
     private readonly repository: CustomerSessionRepository,
     private readonly revoker: SessionRevoker,
     private readonly grants?: OidcGrantRepository,
+    private readonly auditSink?: AuthAuditSink,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   public async execute(
@@ -72,14 +75,22 @@ export class RevokeOwnSessionService {
   ): Promise<void> {
     const token = await this.repository.findOwnedSessionToken(accountId, sessionId);
     if (token !== null) {
-      // Better Auth's own session.delete hook marks the mirror row revoked;
-      // there is no separate write to make here.
+      // Better Auth's own session.delete hook marks the mirror row revoked
+      // and writes the audit entry; there is no separate write to make here.
       await this.revoker.revoke(token, headers);
       return;
     }
 
     if (this.grants !== undefined && (await this.grants.isOwnedByAccount(accountId, sessionId))) {
       await this.grants.revoke(sessionId);
+      await recordGrantRevoked(
+        this.auditSink,
+        this.clock,
+        accountId,
+        sessionId,
+        "self_revoke_one",
+        headers,
+      );
       return;
     }
 
@@ -101,12 +112,56 @@ export class RevokeAllOwnSessionsService {
   public constructor(
     private readonly revoker: SessionRevoker,
     private readonly grants?: OidcGrantRepository,
+    private readonly auditSink?: AuthAuditSink,
+    private readonly clock: () => Date = () => new Date(),
   ) {}
 
   public async execute(accountId: string, headers: IncomingHttpHeaders): Promise<void> {
-    await Promise.all([
+    const [, revokedGrantIds] = await Promise.all([
       this.revoker.revokeAll(headers),
-      this.grants === undefined ? undefined : this.grants.revokeAllForAccount(accountId),
+      this.grants === undefined ? Promise.resolve<string[]>([]) : this.grants.revokeAllForAccount(accountId),
     ]);
+    await Promise.all(
+      revokedGrantIds.map((grantId) =>
+        recordGrantRevoked(this.auditSink, this.clock, accountId, grantId, "self_revoke_all", headers),
+      ),
+    );
   }
+}
+
+// Better Auth's own session revocation gets its audit.audit_log entry for
+// free via its session.delete hook (better-auth-audit.plugin.ts); grant
+// revocation has no such hook, since oidc-provider's own adapter doesn't
+// have one, so it's written explicitly here instead — the one place both
+// the single- and bulk-revoke paths above go through. Matches
+// SESSION_MODEL.md's "a self-revoke action should be recorded in
+// audit.audit_log the same as any other security-relevant action", and
+// reuses the same self_revoke_one/self_revoke_all reason vocabulary
+// better-auth-audit.plugin.ts already uses for web sessions.
+async function recordGrantRevoked(
+  auditSink: AuthAuditSink | undefined,
+  clock: () => Date,
+  accountId: string,
+  grantId: string,
+  reason: "self_revoke_one" | "self_revoke_all",
+  headers: IncomingHttpHeaders,
+): Promise<void> {
+  if (auditSink === undefined) return;
+  await auditSink.record({
+    eventKey: `oidc_grant:revoked:${grantId}`,
+    action: "authentication.oidc_grant_revoked",
+    betterAuthUserId: null,
+    accountId,
+    attributeToSubject: true,
+    resourceType: "oidc_grant",
+    resourceId: grantId,
+    changes: { trace_id: readTraceId(headers), reason },
+    occurredAt: clock(),
+  });
+}
+
+function readTraceId(headers: IncomingHttpHeaders): string | null {
+  const value = headers["x-trace-id"];
+  const traceId = Array.isArray(value) ? value[0] : value;
+  return traceId?.trim() || null;
 }

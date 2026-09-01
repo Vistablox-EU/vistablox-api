@@ -47,6 +47,7 @@ import {
 } from "./modules/auth/application/customer-session.service.js";
 import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
 import type { OidcGrantRepository } from "./modules/auth/repository/oidc-grant.repository.js";
+import type { AuthAuditSink } from "./modules/auth/application/auth-audit-sink.js";
 import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
 import { createOidcInteractionRouter } from "./modules/auth/api/oidc-interaction.router.js";
 import { createTotpRouter } from "./modules/auth/api/totp.router.js";
@@ -170,6 +171,7 @@ export interface AppDependencies {
       repository: CustomerSessionRepository;
       revoker: SessionRevoker;
       oidcGrants?: OidcGrantRepository;
+      auditSink?: AuthAuditSink;
     };
     oidc?: {
       provider: Provider;
@@ -290,8 +292,13 @@ export function createApp(dependencies: AppDependencies): Express {
             customerSessions.repository,
             customerSessions.revoker,
             customerSessions.oidcGrants,
+            customerSessions.auditSink,
           ),
-          new RevokeAllOwnSessionsService(customerSessions.revoker, customerSessions.oidcGrants),
+          new RevokeAllOwnSessionsService(
+            customerSessions.revoker,
+            customerSessions.oidcGrants,
+            customerSessions.auditSink,
+          ),
         ),
       );
     }

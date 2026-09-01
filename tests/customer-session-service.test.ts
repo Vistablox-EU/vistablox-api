@@ -5,6 +5,7 @@ import {
   RevokeAllOwnSessionsService,
   RevokeOwnSessionService,
 } from "../src/modules/auth/application/customer-session.service.js";
+import type { AuthAuditEvent, AuthAuditSink } from "../src/modules/auth/application/auth-audit-sink.js";
 import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
 import type {
   CustomerSessionRepository,
@@ -36,8 +37,18 @@ function fakeGrants(overrides: Partial<OidcGrantRepository> = {}): OidcGrantRepo
     listForAccount: vi.fn(),
     isOwnedByAccount: vi.fn(),
     revoke: vi.fn(),
-    revokeAllForAccount: vi.fn(),
+    revokeAllForAccount: vi.fn().mockResolvedValue([]),
     ...overrides,
+  };
+}
+
+function fakeAuditSink(): AuthAuditSink & { events: AuthAuditEvent[] } {
+  const events: AuthAuditEvent[] = [];
+  return {
+    events,
+    record: vi.fn(async (event: AuthAuditEvent) => {
+      events.push(event);
+    }),
   };
 }
 
@@ -156,6 +167,74 @@ describe("RevokeOwnSessionService with native OIDC grants", () => {
     expect(revoke).not.toHaveBeenCalled();
   });
 
+  it("records an audit.audit_log entry for the revoked grant, carrying the trace ID", async () => {
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedSessionToken: vi.fn().mockResolvedValue(null),
+    };
+    const grants: OidcGrantRepository = fakeGrants({
+      isOwnedByAccount: vi.fn().mockResolvedValue(true),
+      revoke: vi.fn().mockResolvedValue(undefined),
+    });
+    const auditSink = fakeAuditSink();
+    const clock = () => new Date("2026-09-01T15:00:00.000Z");
+    const service = new RevokeOwnSessionService(
+      repository,
+      fakeRevoker(),
+      grants,
+      auditSink,
+      clock,
+    );
+
+    await service.execute("acct_01", "grant_01", { "x-trace-id": "trace_abc" });
+
+    expect(auditSink.events).toEqual([
+      {
+        eventKey: "oidc_grant:revoked:grant_01",
+        action: "authentication.oidc_grant_revoked",
+        betterAuthUserId: null,
+        accountId: "acct_01",
+        attributeToSubject: true,
+        resourceType: "oidc_grant",
+        resourceId: "grant_01",
+        changes: { trace_id: "trace_abc", reason: "self_revoke_one" },
+        occurredAt: new Date("2026-09-01T15:00:00.000Z"),
+      },
+    ]);
+  });
+
+  it("does not throw when no audit sink is configured", async () => {
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedSessionToken: vi.fn().mockResolvedValue(null),
+    };
+    const grants: OidcGrantRepository = fakeGrants({
+      isOwnedByAccount: vi.fn().mockResolvedValue(true),
+      revoke: vi.fn().mockResolvedValue(undefined),
+    });
+    const service = new RevokeOwnSessionService(repository, fakeRevoker(), grants);
+
+    await expect(service.execute("acct_01", "grant_01", {})).resolves.toBeUndefined();
+  });
+
+  it("does not record an audit entry for a revoked web session (Better Auth's own hook already does)", async () => {
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedSessionToken: vi.fn().mockResolvedValue("tok_abc123"),
+    };
+    const auditSink = fakeAuditSink();
+    const service = new RevokeOwnSessionService(
+      repository,
+      fakeRevoker(),
+      fakeGrants(),
+      auditSink,
+    );
+
+    await service.execute("acct_01", "sess_01", {});
+
+    expect(auditSink.record).not.toHaveBeenCalled();
+  });
+
   it("rejects an ID that is neither an owned session nor an owned grant", async () => {
     const repository: CustomerSessionRepository = {
       listForAccount: vi.fn(),
@@ -176,7 +255,7 @@ describe("RevokeOwnSessionService with native OIDC grants", () => {
 describe("RevokeAllOwnSessionsService", () => {
   it("revokes all web sessions and all native grants for the account", async () => {
     const revokeAll = vi.fn().mockResolvedValue(undefined);
-    const revokeAllForAccount = vi.fn().mockResolvedValue(undefined);
+    const revokeAllForAccount = vi.fn().mockResolvedValue(["grant_01", "grant_02"]);
     const service = new RevokeAllOwnSessionsService(
       fakeRevoker({ revokeAll }),
       fakeGrants({ revokeAllForAccount }),
@@ -196,5 +275,45 @@ describe("RevokeAllOwnSessionsService", () => {
     await service.execute("acct_01", {});
 
     expect(revokeAll).toHaveBeenCalledWith({});
+  });
+
+  it("records one audit.audit_log entry per grant revoked in bulk", async () => {
+    const revokeAllForAccount = vi.fn().mockResolvedValue(["grant_01", "grant_02"]);
+    const auditSink = fakeAuditSink();
+    const clock = () => new Date("2026-09-01T15:00:00.000Z");
+    const service = new RevokeAllOwnSessionsService(
+      fakeRevoker(),
+      fakeGrants({ revokeAllForAccount }),
+      auditSink,
+      clock,
+    );
+
+    await service.execute("acct_01", { "x-trace-id": "trace_abc" });
+
+    expect(auditSink.events).toEqual([
+      expect.objectContaining({
+        eventKey: "oidc_grant:revoked:grant_01",
+        accountId: "acct_01",
+        resourceType: "oidc_grant",
+        resourceId: "grant_01",
+        changes: { trace_id: "trace_abc", reason: "self_revoke_all" },
+      }),
+      expect.objectContaining({
+        eventKey: "oidc_grant:revoked:grant_02",
+        accountId: "acct_01",
+        resourceType: "oidc_grant",
+        resourceId: "grant_02",
+        changes: { trace_id: "trace_abc", reason: "self_revoke_all" },
+      }),
+    ]);
+  });
+
+  it("records no audit entries when no grants were revoked", async () => {
+    const auditSink = fakeAuditSink();
+    const service = new RevokeAllOwnSessionsService(fakeRevoker(), fakeGrants(), auditSink);
+
+    await service.execute("acct_01", {});
+
+    expect(auditSink.record).not.toHaveBeenCalled();
   });
 });
