@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   addBusinessDays,
+  canCloseCase,
   canRecordFounderDecision,
   evaluateInformationRequestPublication,
   isApplicantReminderDue,
@@ -40,6 +41,22 @@ describe("origination founder-review policy", () => {
     expect(canRecordFounderDecision({ stage: "submitted", hasCurrentRevision: true })).toBe(true);
     expect(canRecordFounderDecision({ stage: "draft", hasCurrentRevision: true })).toBe(false);
     expect(canRecordFounderDecision({ stage: "submitted", hasCurrentRevision: false })).toBe(false);
+  });
+
+  it("allows withdrawal from every pre-terminal stage the lifecycle diagram shows, and no other", () => {
+    for (const stage of ["draft", "submitted", "waiting_on_applicant", "pre_offering_open"]) {
+      expect(canCloseCase({ stage, outcome: "withdrawn" })).toBe(true);
+    }
+    for (const stage of ["post_ipo_structuring", "approved_for_final_offering", "rejected", "withdrawn", "expired"]) {
+      expect(canCloseCase({ stage, outcome: "withdrawn" })).toBe(false);
+    }
+  });
+
+  it("allows a late-stage reject only from pre-offering open, distinct from the submitted-stage initial review", () => {
+    expect(canCloseCase({ stage: "pre_offering_open", outcome: "rejected" })).toBe(true);
+    expect(canCloseCase({ stage: "submitted", outcome: "rejected" })).toBe(false);
+    expect(canCloseCase({ stage: "waiting_on_applicant", outcome: "rejected" })).toBe(false);
+    expect(canCloseCase({ stage: "draft", outcome: "rejected" })).toBe(false);
   });
 
   it("adds the configured response window using weekdays", () => {

@@ -161,6 +161,32 @@ export interface RecordedFounderDecision {
   ipoEndAt: Date | null;
 }
 
+export type CloseCaseInput =
+  | {
+      outcome: "withdrawn";
+      accountId: string;
+      caseId: string;
+      traceId: string;
+      founderReviewNotes: string;
+      closedAt: Date;
+    }
+  | {
+      outcome: "rejected";
+      accountId: string;
+      caseId: string;
+      traceId: string;
+      founderReviewNotes: string;
+      rejectionReasonCode: string;
+      rejectionNotes: string;
+      closedAt: Date;
+    };
+
+export interface ClosedCase {
+  caseId: string;
+  stage: "withdrawn" | "rejected";
+  closedAt: Date;
+}
+
 export interface OriginationRepository {
   getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites>;
   createDraftIntake(input: CreateDraftIntakeInput): Promise<CreatedDraftIntake>;
@@ -203,6 +229,7 @@ export interface OriginationRepository {
   recordFounderDecision(
     input: FounderDecisionInput,
   ): Promise<RecordedFounderDecision | null>;
+  closeCase(input: CloseCaseInput): Promise<ClosedCase | null>;
   listPublishedInformationRequestsForTimers(): Promise<PublishedInformationRequestForTimer[]>;
   expireInformationRequest(input: {
     requestId: string;

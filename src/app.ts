@@ -74,6 +74,7 @@ import {
 } from "./modules/origination/application/read-own-cases.service.js";
 import { SubmitInitialCaseService } from "./modules/origination/application/submit-initial-case.service.js";
 import {
+  CloseCaseService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
@@ -437,6 +438,7 @@ export function createApp(dependencies: AppDependencies): Express {
         new GetCaseForOperationsService(originationRepository),
         new PublishInformationRequestService(originationRepository),
         new RecordFounderDecisionService(originationRepository),
+        new CloseCaseService(originationRepository),
       ),
     );
   }

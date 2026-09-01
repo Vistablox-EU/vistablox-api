@@ -83,6 +83,7 @@ function buildProtectedApp(options?: {
     recordFounderDecision: vi.fn().mockResolvedValue(null),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    closeCase: vi.fn().mockResolvedValue(null),
   };
 
   return {

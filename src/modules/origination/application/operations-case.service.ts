@@ -1,5 +1,6 @@
 import { AppError } from "../../../shared/errors/app-error.js";
 import type {
+  CloseCaseBody,
   FounderDecisionBody,
   OperationsCaseListQuery,
   PublishInformationRequestBody,
@@ -7,6 +8,7 @@ import type {
 import { originationCaseStageSchema } from "../api/origination.schemas.js";
 import {
   addBusinessDays,
+  canCloseCase,
   canRecordFounderDecision,
   evaluateInformationRequestPublication,
 } from "../domain/case-review.policy.js";
@@ -178,6 +180,71 @@ export class RecordFounderDecisionService {
     } catch (error) {
       if (error instanceof CaseReviewConflictError) {
         throw reviewConflictError("record a founder decision", error);
+      }
+      throw error;
+    }
+  }
+}
+
+// PERMISSION_MATRIX.md: "Reject, withdraw, or expire a case, at any stage" —
+// a distinct, later capability from RecordFounderDecisionService's
+// submitted-stage-only initial review above. Withdrawal is the applicant's
+// own choice in substance (AD-104: "costs the owner nothing"), but the
+// applicant-facing lane stays founder-mediated in phase 1
+// (PERMISSION_MATRIX.md: owner applicant cannot call this directly), so it's
+// recorded here rather than as a self-service endpoint.
+export class CloseCaseService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    accountId: string;
+    caseId: string;
+    traceId: string;
+    body: CloseCaseBody;
+  }) {
+    const originationCase = await this.repository.getCaseForOperations(input.caseId);
+    if (originationCase === null) throw caseNotFoundError();
+    if (!canCloseCase({ stage: originationCase.stage, outcome: input.body.outcome })) {
+      throw reviewConflictError("close the case");
+    }
+
+    const closedAt = this.clock();
+    try {
+      const closed = await this.repository.closeCase(
+        input.body.outcome === "withdrawn"
+          ? {
+              outcome: "withdrawn",
+              accountId: input.accountId,
+              caseId: input.caseId,
+              traceId: input.traceId,
+              founderReviewNotes: input.body.founder_review_notes,
+              closedAt,
+            }
+          : {
+              outcome: "rejected",
+              accountId: input.accountId,
+              caseId: input.caseId,
+              traceId: input.traceId,
+              founderReviewNotes: input.body.founder_review_notes,
+              rejectionReasonCode: input.body.rejection_reason_code,
+              rejectionNotes: input.body.rejection_notes,
+              closedAt,
+            },
+      );
+      if (closed === null) throw caseNotFoundError();
+      return {
+        data: {
+          case_id: closed.caseId,
+          stage: closed.stage,
+          closed_at: closed.closedAt.toISOString(),
+        },
+      };
+    } catch (error) {
+      if (error instanceof CaseReviewConflictError) {
+        throw reviewConflictError("close the case", error);
       }
       throw error;
     }

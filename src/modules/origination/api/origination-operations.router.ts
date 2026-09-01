@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
 import {
+  CloseCaseService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
@@ -9,6 +10,8 @@ import {
 } from "../application/operations-case.service.js";
 import { caseIdParamsSchema } from "./origination.schemas.js";
 import {
+  closeCaseBodySchema,
+  closeCaseResponseSchema,
   founderDecisionBodySchema,
   founderDecisionResponseSchema,
   operationsCaseDetailResponseSchema,
@@ -26,6 +29,7 @@ export function createOriginationOperationsRouter(
   getCase: GetCaseForOperationsService,
   publishInformationRequest: PublishInformationRequestService,
   recordDecision: RecordFounderDecisionService,
+  closeCase: CloseCaseService,
 ): Router {
   const router = Router();
   const staffOnly = [requireAuthentication, requireAdminOperations, requireStaffWebAuthn];
@@ -66,6 +70,19 @@ export function createOriginationOperationsRouter(
       body,
     });
     response.json(founderDecisionResponseSchema.parse(result));
+  });
+
+  router.post("/:case_id/close", ...staffOnly, async (request, response) => {
+    const authContext = requireAuthContext(response.locals.authContext);
+    const params = caseIdParamsSchema.parse(request.params);
+    const body = closeCaseBodySchema.parse(request.body);
+    const result = await closeCase.execute({
+      accountId: authContext.accountId,
+      caseId: params.case_id,
+      traceId: String(response.locals.traceId),
+      body,
+    });
+    response.json(closeCaseResponseSchema.parse(result));
   });
 
   return router;
