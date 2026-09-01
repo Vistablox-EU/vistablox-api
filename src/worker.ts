@@ -65,6 +65,14 @@ async function runJob(name: string, run: (traceId: string) => Promise<JobRunSumm
 
 await boss.start();
 
+// pg-boss v12 requires a queue to exist (queue.name has a foreign key from
+// job.name) before scheduling or working it; createQueue is ON CONFLICT DO
+// NOTHING, so this is safe to run on every worker start.
+await boss.createQueue("case_timers.applicant_reminders");
+await boss.createQueue("case_timers.response_window_expiry");
+await boss.createQueue("maintenance.kyc_renewal");
+await boss.createQueue("maintenance.oidc_cleanup");
+
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,

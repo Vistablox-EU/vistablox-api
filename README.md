@@ -79,6 +79,25 @@ node -e "const {generateKeyPairSync}=require('node:crypto');const {privateKey}=g
 
 The scheduled-job worker is a separate process from the API and must be started alongside it for reminders/expiry to run: `npm run worker:dev` locally, `npm run worker:start` against a build. It shares `DATABASE_URL`/SMTP configuration with the API; it also loads the same environment schema as the API (so `OIDC_JWKS`/`OIDC_NATIVE_REDIRECT_URIS` must be set for it to start even though the worker itself never uses them, the same way it already requires but never uses `BETTER_AUTH_SECRET`), but needs no worker-specific environment variables of its own.
 
+## Docker
+
+`docker-compose.yml` runs the whole stack — Postgres, Valkey, the API, and the worker — plus Mailpit as a local SMTP catcher (`http://localhost:8025`) so `docker compose up` works without real SMTP credentials.
+
+```bash
+cp .env.example .env
+# fill in BETTER_AUTH_SECRET, OIDC_JWKS (see the generator above), and
+# OIDC_NATIVE_REDIRECT_URIS at minimum
+docker compose up --build
+```
+
+The API is then at `http://localhost:3000`. `migrate` is a one-shot service that runs `prisma migrate deploy` before `api`/`worker` start (`depends_on: condition: service_completed_successfully`); rerunning `docker compose up` re-runs it, which is a no-op once migrations are already applied.
+
+`Dockerfile` is a multi-stage build with four targets (`docker build --target=<name>`): `deps`/`build` are intermediate stages that install full dependencies and compile (`prisma generate` then `tsc`); `migrate` reuses `build` since `prisma migrate deploy` needs the Prisma CLI (a devDependency) and the schema/migrations directory; `api` and `worker` copy only the compiled `dist/` output and production dependencies onto a fresh base — neither carries the Prisma CLI, TypeScript, or the schema/migrations directory; `oidc-provider`'s generator (`@prisma/adapter-pg`, no native query-engine binary) means plain `node:22-alpine` works with no glibc/OpenSSL matching concerns.
+
+Compose overrides `DATABASE_URL`, `PROFILE_CACHE_URL`, `RATE_LIMIT_CACHE_URL`, `BETTER_AUTH_URL`, and the `SMTP_*` values to point at the container network (`postgres`, `cache`, `mailpit`) regardless of what `.env` has for them; everything else — `BETTER_AUTH_SECRET`, `OIDC_JWKS`, `OIDC_NATIVE_REDIRECT_URIS`, and the optional `GOOGLE_*`/`DIDIT_*` toggles — comes from `.env` via `env_file`.
+
+This has been validated end to end in a real Docker daemon: a clean build of all four targets, `prisma migrate deploy` applying the repository's entire migration history (all 15 migrations, from the initial schema through `oidc_provider_store`) against a fresh Postgres container, and the running `api`/`worker` containers passing their healthchecks and serving real requests (including the OIDC discovery document) against the containerized Postgres/Redis. One real finding from that run, now fixed: Postgres 18's official image expects its volume mounted at `/var/lib/postgresql`, not `/var/lib/postgresql/data` (`docker-compose.yml` already reflects this); pg-boss v12 requires a queue to exist (`createQueue`, idempotent) before it can be scheduled or worked, which `worker.ts` now does on every start.
+
 ## Commands
 
 ```bash
@@ -90,6 +109,8 @@ npm run db:validate    # validate Prisma schema
 npm run db:generate    # regenerate Prisma client
 npm run db:migrate:dev # create/apply a development migration
 npm run db:migrate:deploy
+docker compose up --build   # run the full stack (Postgres, Valkey, API, worker, Mailpit) in containers
+docker compose down -v      # stop and remove containers + the Postgres volume
 ```
 
 ## HTTP surface currently available
