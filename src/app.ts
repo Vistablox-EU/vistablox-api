@@ -42,6 +42,7 @@ import type { SessionResolver } from "./modules/auth/application/session-resolve
 import { createCustomerSessionRouter } from "./modules/auth/api/customer-session.router.js";
 import {
   ListOwnSessionsService,
+  RevokeAllOwnSessionsService,
   RevokeOwnSessionService,
 } from "./modules/auth/application/customer-session.service.js";
 import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
@@ -290,6 +291,7 @@ export function createApp(dependencies: AppDependencies): Express {
             customerSessions.revoker,
             customerSessions.oidcGrants,
           ),
+          new RevokeAllOwnSessionsService(customerSessions.revoker, customerSessions.oidcGrants),
         ),
       );
     }

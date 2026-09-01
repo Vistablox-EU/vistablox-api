@@ -3,6 +3,7 @@ import { Router, type RequestHandler } from "express";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type {
   ListOwnSessionsService,
+  RevokeAllOwnSessionsService,
   RevokeOwnSessionService,
 } from "../application/customer-session.service.js";
 import { listOwnSessionsResponseSchema, sessionIdParamsSchema } from "./customer-session.schemas.js";
@@ -11,6 +12,7 @@ export function createCustomerSessionRouter(
   requireAuthentication: RequestHandler,
   listOwnSessions: ListOwnSessionsService,
   revokeOwnSession: RevokeOwnSessionService,
+  revokeAllOwnSessions: RevokeAllOwnSessionsService,
 ): Router {
   const router = Router();
 
@@ -33,6 +35,12 @@ export function createCustomerSessionRouter(
         })),
       }),
     );
+  });
+
+  router.post("/revoke-all", requireAuthentication, async (request, response) => {
+    const context = requireAuthContext(response.locals.authContext);
+    await revokeAllOwnSessions.execute(context.accountId, request.headers);
+    response.status(204).end();
   });
 
   router.post("/:session_id/revoke", requireAuthentication, async (request, response) => {

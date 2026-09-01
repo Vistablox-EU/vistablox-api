@@ -84,6 +84,42 @@ describe.skipIf(databaseUrl === undefined)("OIDC grant + cleanup PostgreSQL inte
     expect(await accessTokens.find(accessTokenId)).toBeUndefined();
   });
 
+  it("revokeAllForAccount deletes every grant and token for that account, leaving other accounts untouched", async () => {
+    const ownGrantA = `${suffix}_grant_all_a`;
+    const ownGrantB = `${suffix}_grant_all_b`;
+    const otherGrant = `${suffix}_grant_all_other`;
+    const ownTokenA = `${suffix}_at_all_a`;
+    const ownTokenB = `${suffix}_rt_all_b`;
+    const otherToken = `${suffix}_at_all_other`;
+    const accessTokens = new PostgresOidcAdapter(authPool, "AccessToken");
+    const refreshTokens = new PostgresOidcAdapter(authPool, "RefreshToken");
+    await grantModel.upsert(ownGrantA, { accountId: betterAuthUserId, clientId: "vistablox-native" });
+    await grantModel.upsert(ownGrantB, { accountId: betterAuthUserId, clientId: "vistablox-native" });
+    await grantModel.upsert(otherGrant, {
+      accountId: otherBetterAuthUserId,
+      clientId: "vistablox-native",
+    });
+    await accessTokens.upsert(ownTokenA, { accountId: betterAuthUserId, grantId: ownGrantA }, 600);
+    await refreshTokens.upsert(ownTokenB, { accountId: betterAuthUserId, grantId: ownGrantB }, 600);
+    await accessTokens.upsert(
+      otherToken,
+      { accountId: otherBetterAuthUserId, grantId: otherGrant },
+      600,
+    );
+
+    await grants.revokeAllForAccount(accountId);
+
+    expect(await grants.isOwnedByAccount(accountId, ownGrantA)).toBe(false);
+    expect(await grants.isOwnedByAccount(accountId, ownGrantB)).toBe(false);
+    expect(await accessTokens.find(ownTokenA)).toBeUndefined();
+    expect(await refreshTokens.find(ownTokenB)).toBeUndefined();
+    expect(await grants.isOwnedByAccount(otherAccountId, otherGrant)).toBe(true);
+    expect(await accessTokens.find(otherToken)).toEqual({
+      accountId: otherBetterAuthUserId,
+      grantId: otherGrant,
+    });
+  });
+
   it("deleteExpired removes only rows past their expiry", async () => {
     const expiredId = `${suffix}_expired`;
     const liveId = `${suffix}_live`;

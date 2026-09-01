@@ -5,12 +5,17 @@ import { describe, expect, it, vi } from "vitest";
 import { createCustomerSessionRouter } from "../src/modules/auth/api/customer-session.router.js";
 import {
   ListOwnSessionsService,
+  RevokeAllOwnSessionsService,
   RevokeOwnSessionService,
 } from "../src/modules/auth/application/customer-session.service.js";
 import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
 import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer-session.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
+
+function fakeRevoker(overrides: Partial<SessionRevoker> = {}): SessionRevoker {
+  return { revoke: vi.fn(), revokeAll: vi.fn(), ...overrides };
+}
 
 function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker) {
   const app = express();
@@ -29,6 +34,7 @@ function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker
       authenticated,
       new ListOwnSessionsService(repository),
       new RevokeOwnSessionService(repository, revoker),
+      new RevokeAllOwnSessionsService(revoker),
     ),
   );
   app.use(errorHandler);
@@ -54,7 +60,7 @@ describe("customer session API", () => {
       findOwnedSessionToken: vi.fn(),
     };
 
-    const response = await request(buildApp(repository, { revoke: vi.fn() })).get(
+    const response = await request(buildApp(repository, fakeRevoker())).get(
       "/v1/auth/sessions",
     );
 
@@ -82,7 +88,7 @@ describe("customer session API", () => {
       findOwnedSessionToken: vi.fn().mockResolvedValue("tok_abc123"),
     };
 
-    const response = await request(buildApp(repository, { revoke })).post(
+    const response = await request(buildApp(repository, fakeRevoker({ revoke }))).post(
       "/v1/auth/sessions/sess_01/revoke",
     );
 
@@ -96,11 +102,26 @@ describe("customer session API", () => {
       findOwnedSessionToken: vi.fn().mockResolvedValue(null),
     };
 
-    const response = await request(buildApp(repository, { revoke: vi.fn() })).post(
+    const response = await request(buildApp(repository, fakeRevoker())).post(
       "/v1/auth/sessions/sess_not_owned/revoke",
     );
 
     expect(response.status).toBe(404);
     expect(response.body).toMatchObject({ code: "resource.not_found", status: 404 });
+  });
+
+  it("revokes every session for the caller and returns 204", async () => {
+    const revokeAll = vi.fn().mockResolvedValue(undefined);
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedSessionToken: vi.fn(),
+    };
+
+    const response = await request(buildApp(repository, fakeRevoker({ revokeAll }))).post(
+      "/v1/auth/sessions/revoke-all",
+    );
+
+    expect(response.status).toBe(204);
+    expect(revokeAll).toHaveBeenCalledWith(expect.any(Object));
   });
 });
