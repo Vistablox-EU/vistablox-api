@@ -38,12 +38,13 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - founder-only origination review surface secured by active `admin_operations` assignment
 - structured information requests, owner resubmission as immutable revision N+1, and atomic request resolution
 - founder approval/rejection with review record, IPO terms, lifecycle transition, and audit logging
+- Redis/Valkey-backed general-purpose rate limiting across `/v1`, `/internal/v1`, and Better Auth's endpoints: a generous baseline tier keyed by `account_id` (or caller IP when unauthenticated), and a stricter tightened tier on fresh-auth attempts (Better Auth sign-in/sign-up/password-reset, staff WebAuthn ceremonies, staff invitation acceptance); fails open with a logged warning if the rate-limit cache is unavailable
 - Prisma 7 client using the PostgreSQL driver adapter
 - all eight documented PostgreSQL schemas and their current tables, relations, indexes, and explicit check constraints
 - Vitest API and domain tests
 - dependency boundary checks for the documented `router -> schema -> application service -> domain policy -> repository` layering
 
-Native-client OIDC, customer TOTP, customer session/device management, auth rate limiting, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Operations-review decision display, cross-validation of declared identity data, and asynchronous webhook processing remain follow-on KYC work. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
+Native-client OIDC, customer TOTP, customer session/device management, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Rate-limit tier thresholds are a fixed starting point (`src/shared/http/rate-limit.ts`) pending real production traffic to tune against, per `RATE_LIMITING.md`. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Operations-review decision display, cross-validation of declared identity data, and asynchronous webhook processing remain follow-on KYC work. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
 
 ## Local setup
 
@@ -60,6 +61,8 @@ npm run dev
 `DATABASE_URL` is the pooled runtime connection. `DIRECT_DATABASE_URL` must be the non-pooled connection used by Prisma migrations.
 
 Didit baseline KYC remains disabled unless the required `DIDIT_*` values in `.env.example` are configured together. `DIDIT_POA_WORKFLOW_ID` independently enables the owner-only hosted address workflow. `PROFILE_CACHE_URL` enables the short-lived Didit-verified display-name cache; the profile route remains available and omits names when the cache is absent or unavailable. The provider webhook destination is `/webhooks/didit`; the callback URL is the frontend destination Didit uses after either hosted verification flow. See [`docs/didit-kyc.md`](docs/didit-kyc.md) and [`docs/investor-profile.md`](docs/investor-profile.md) for the reviewed workflows and data boundaries.
+
+`RATE_LIMIT_CACHE_URL` enables the general-purpose `/v1` rate limiter (it may point at the same Redis/Valkey deployment as `PROFILE_CACHE_URL`); requests are allowed through unmetered, not blocked, while it is absent or unavailable.
 
 ## Commands
 

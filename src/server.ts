@@ -9,6 +9,7 @@ import { loadEnvironment } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
+import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
@@ -67,6 +68,27 @@ if (profileCacheClient !== undefined) {
 const protectedProfileCache =
   profileCacheClient?.isReady === true
     ? new RedisProtectedProfileCache(profileCacheClient)
+    : undefined;
+const rateLimitCacheClient =
+  environment.RATE_LIMIT_CACHE_URL === undefined
+    ? undefined
+    : createClient({
+        url: environment.RATE_LIMIT_CACHE_URL,
+        socket: { connectTimeout: 3_000, reconnectStrategy: false },
+      });
+rateLimitCacheClient?.on("error", (error) => {
+  logger.warn({ err: error }, "rate limit cache connection error");
+});
+if (rateLimitCacheClient !== undefined) {
+  try {
+    await rateLimitCacheClient.connect();
+  } catch (error) {
+    logger.warn({ err: error }, "rate limit cache unavailable; rate limiting is disabled");
+  }
+}
+const rateLimitStore =
+  rateLimitCacheClient?.isReady === true
+    ? new RedisRateLimitStore(rateLimitCacheClient)
     : undefined;
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
@@ -172,6 +194,7 @@ const app = createApp({
   offeringRepository: new PrismaOfferingRepository(database),
   logger,
   authHandler: toNodeHandler(auth),
+  ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
   protectedApi: {
     accounts: accountRepository,
     sessions: new BetterAuthSessionResolver(auth),
@@ -221,6 +244,9 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     ];
     if (profileCacheClient?.isOpen === true) {
       shutdownTasks.push(profileCacheClient.close());
+    }
+    if (rateLimitCacheClient?.isOpen === true) {
+      shutdownTasks.push(rateLimitCacheClient.close());
     }
     await Promise.all(shutdownTasks);
     if (error !== undefined) {

@@ -81,12 +81,19 @@ import type { InvestorProfileRepository } from "./modules/investor-profile/repos
 import { errorHandler } from "./shared/http/error-handler.js";
 import { notFoundHandler } from "./shared/http/not-found.js";
 import { requestContext } from "./shared/http/request-context.js";
+import {
+  BASELINE_RATE_LIMIT,
+  TIGHTENED_RATE_LIMIT,
+  createRateLimiter,
+} from "./shared/http/rate-limit.js";
+import type { RateLimitStore } from "./infrastructure/rate-limit/rate-limit-store.js";
 
 export interface AppDependencies {
   databaseProbe: DatabaseProbe;
   offeringRepository: OfferingRepository;
   logger: Logger;
   authHandler?: RequestHandler;
+  rateLimitStore?: RateLimitStore;
   protectedApi?: {
     accounts: AccountRepository;
     sessions: SessionResolver;
@@ -130,6 +137,14 @@ export interface AppDependencies {
 export function createApp(dependencies: AppDependencies): Express {
   const app = express();
   const listPublicOfferings = new ListPublicOfferingsService(dependencies.offeringRepository);
+  const baselineRateLimiter =
+    dependencies.rateLimitStore === undefined
+      ? undefined
+      : createRateLimiter(dependencies.rateLimitStore, BASELINE_RATE_LIMIT);
+  const tightenedRateLimiter =
+    dependencies.rateLimitStore === undefined
+      ? undefined
+      : createRateLimiter(dependencies.rateLimitStore, TIGHTENED_RATE_LIMIT);
 
   app.disable("x-powered-by");
   app.use(requestContext);
@@ -146,16 +161,25 @@ export function createApp(dependencies: AppDependencies): Express {
   });
   app.use(helmet());
   if (dependencies.authHandler !== undefined) {
-    app.all("/api/auth/*splat", dependencies.authHandler);
+    app.all(
+      "/api/auth/*splat",
+      ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
+      dependencies.authHandler,
+    );
   }
   app.use(express.json({ limit: "1mb", type: "application/json" }));
 
   app.use("/health", createHealthRouter(dependencies.databaseProbe));
-  app.use("/v1/offerings", createOfferingRouter(listPublicOfferings));
+  app.use(
+    "/v1/offerings",
+    ...(baselineRateLimiter === undefined ? [] : [baselineRateLimiter]),
+    createOfferingRouter(listPublicOfferings),
+  );
   if (dependencies.protectedApi !== undefined) {
     const requireAuthentication = createRequireAuthentication(
       dependencies.protectedApi.sessions,
       dependencies.protectedApi.accounts,
+      baselineRateLimiter,
     );
     const requireAdminOperations = createRequireAdminOperations(
       dependencies.protectedApi.accounts,
@@ -236,6 +260,7 @@ export function createApp(dependencies: AppDependencies): Express {
       );
       app.use(
         "/v1/auth/staff-invitations",
+        ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
         createPublicStaffInvitationRouter(acceptInvitation),
       );
       app.use(
@@ -270,6 +295,7 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     app.use(
       "/internal/v1/auth/webauthn",
+      ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
       createStaffWebAuthnRouter(
         requireAuthentication,
         requireStaffIdentity,
