@@ -38,6 +38,10 @@ import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
 import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
 import type { SessionResolver } from "./modules/auth/application/session-resolver.js";
+import { createTotpRouter } from "./modules/auth/api/totp.router.js";
+import { EnrollTotpService, VerifyTotpService } from "./modules/auth/application/totp.service.js";
+import type { TotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
+import type { TotpRepository } from "./modules/auth/repository/totp.repository.js";
 import { createHealthRouter } from "./modules/health/health.router.js";
 import { createOfferingRouter } from "./modules/offering/api/offering.router.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
@@ -131,6 +135,11 @@ export interface AppDependencies {
       }) => Promise<void>;
       acceptUrl: string;
     };
+    totp?: {
+      repository: TotpRepository;
+      provider: TotpProvider;
+      backupCodeHashKey: string;
+    };
   };
 }
 
@@ -205,6 +214,18 @@ export function createApp(dependencies: AppDependencies): Express {
             investorProfile.repository,
             investorProfile.displayProfiles,
           ),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.totp !== undefined) {
+      const totp = dependencies.protectedApi.totp;
+      app.use(
+        "/v1/auth/totp",
+        ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
+        createTotpRouter(
+          requireAuthentication,
+          new EnrollTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
+          new VerifyTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
         ),
       );
     }

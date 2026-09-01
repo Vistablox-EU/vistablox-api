@@ -23,6 +23,8 @@ import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/prisma-
 import { PrismaStaffInvitationRepository } from "./modules/auth/repository/prisma-staff-invitation.repository.js";
 import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit-sink.js";
 import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
+import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
+import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
@@ -208,6 +210,11 @@ const app = createApp({
     investorProfile: {
       repository: new PrismaInvestorProfileRepository(database),
       displayProfiles,
+    },
+    totp: {
+      repository: new PrismaTotpRepository(database),
+      provider: new OtplibTotpProvider(),
+      backupCodeHashKey: environment.BETTER_AUTH_SECRET,
     },
     ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
     staffAccountLifecycle: {
