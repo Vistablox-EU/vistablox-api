@@ -138,6 +138,7 @@ function buildApp(options?: {
       options !== undefined && "caseRecord" in options ? options.caseRecord : operationsCase,
     ),
     getApplicantResponseWindowBusinessDays: vi.fn().mockResolvedValue(10),
+    getInformationRequestReminderBusinessDays: vi.fn().mockResolvedValue([3, 7]),
     publishInformationRequest,
     getOwnedInformationRequest: vi.fn().mockResolvedValue(
       options !== undefined && "ownedRequest" in options
@@ -147,6 +148,8 @@ function buildApp(options?: {
     listOwnedInformationRequests: vi.fn().mockResolvedValue([informationRequest]),
     resubmitAfterInformationRequest,
     recordFounderDecision,
+    listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
+    expireInformationRequest: vi.fn().mockResolvedValue(false),
   };
 
   return {

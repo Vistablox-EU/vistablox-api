@@ -7,6 +7,7 @@ import type { SessionResolver } from "../application/session-resolver.js";
 export function createRequireAuthentication(
   sessions: SessionResolver,
   accounts: AccountRepository,
+  rateLimiter?: RequestHandler,
 ): RequestHandler {
   return async (request, response, next) => {
     try {
@@ -43,7 +44,11 @@ export function createRequireAuthentication(
         providerSessionId: identity.providerSessionId,
         population: identity.population,
       };
-      next();
+      if (rateLimiter === undefined) {
+        next();
+      } else {
+        rateLimiter(request, response, next);
+      }
     } catch (error) {
       next(error);
     }

@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/app.js";
 import type { DatabaseProbe } from "../src/infrastructure/database/database-probe.js";
+import type { RateLimitStore } from "../src/infrastructure/rate-limit/rate-limit-store.js";
 import type {
   ListPublicOfferingsInput,
   OfferingRepository,
@@ -143,5 +144,36 @@ describe("VistaBlox API", () => {
     expect(response.status).toBe(204);
     expect(capturedEventId).toMatch(/^auth_evt_/);
     expect(capturedEventId).not.toBe("attacker-controlled-value");
+  });
+
+  it("applies the tightened rate limit tier ahead of Better Auth's own endpoints", async () => {
+    const store: RateLimitStore = { increment: vi.fn().mockResolvedValue(11) };
+    const app = createApp({
+      databaseProbe: { check: vi.fn() },
+      offeringRepository: { listPublic: vi.fn().mockResolvedValue([]) },
+      logger: pino({ level: "silent" }),
+      authHandler: (_request, response) => response.status(204).end(),
+      rateLimitStore: store,
+    });
+
+    const response = await request(app).post("/api/auth/sign-in/email");
+
+    expect(response.status).toBe(429);
+    expect(response.body).toMatchObject({ code: "rate_limit.exceeded", status: 429 });
+  });
+
+  it("applies the baseline rate limit tier to the public offerings endpoint", async () => {
+    const store: RateLimitStore = { increment: vi.fn().mockResolvedValue(301) };
+    const app = createApp({
+      databaseProbe: { check: vi.fn().mockResolvedValue(undefined) },
+      offeringRepository: { listPublic: vi.fn().mockResolvedValue([]) },
+      logger: pino({ level: "silent" }),
+      rateLimitStore: store,
+    });
+
+    const response = await request(app).get("/v1/offerings?limit=20");
+
+    expect(response.status).toBe(429);
+    expect(response.body).toMatchObject({ code: "rate_limit.exceeded", status: 429 });
   });
 });

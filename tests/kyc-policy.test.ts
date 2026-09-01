@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   evaluateDiditOutcome,
+  isRenewalOverdue,
+  isRenewalReminderDue,
   type DiditDecisionSummary,
 } from "../src/modules/identity/domain/kyc-policy.js";
 
@@ -129,5 +131,35 @@ describe("Didit KYC policy", () => {
         occurredAt,
       }),
     ).toMatchObject({ operationalSubstatus: "kyc_integration_anomaly" });
+  });
+});
+
+describe("KYC renewal timer policy", () => {
+  it("treats renewal as overdue only once renewal_due_at has passed", () => {
+    const renewalDueAt = new Date("2028-09-01T00:00:00.000Z");
+    expect(
+      isRenewalOverdue({ renewalDueAt, now: new Date("2028-08-31T23:59:59.999Z") }),
+    ).toBe(false);
+    expect(isRenewalOverdue({ renewalDueAt, now: new Date("2028-09-01T00:00:00.001Z") })).toBe(
+      true,
+    );
+  });
+
+  it("matches the reminder date only on the exact lead-time day before renewal_due_at", () => {
+    const renewalDueAt = new Date("2028-09-01T00:00:00.000Z");
+    expect(
+      isRenewalReminderDue({
+        renewalDueAt,
+        today: new Date("2028-08-02T09:00:00.000Z"),
+        leadDays: 30,
+      }),
+    ).toBe(true);
+    expect(
+      isRenewalReminderDue({
+        renewalDueAt,
+        today: new Date("2028-08-01T09:00:00.000Z"),
+        leadDays: 30,
+      }),
+    ).toBe(false);
   });
 });

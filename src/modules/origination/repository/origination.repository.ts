@@ -122,6 +122,15 @@ export interface PublishedInformationRequest extends InformationRequestRecord {
 
 export type ResubmittedCase = SubmittedCase;
 
+export interface PublishedInformationRequestForTimer {
+  requestId: string;
+  caseId: string;
+  applicantAccountId: string;
+  applicantContactEmail: string | null;
+  publishedAt: Date;
+  dueAt: Date;
+}
+
 export type FounderDecisionInput =
   | {
       decision: "approve";
@@ -169,6 +178,7 @@ export interface OriginationRepository {
   }): Promise<OwnedOriginationCase[]>;
   getCaseForOperations(caseId: string): Promise<OperationsCaseDetail | null>;
   getApplicantResponseWindowBusinessDays(): Promise<number>;
+  getInformationRequestReminderBusinessDays(): Promise<number[]>;
   publishInformationRequest(input: {
     accountId: string;
     caseId: string;
@@ -193,6 +203,13 @@ export interface OriginationRepository {
   recordFounderDecision(
     input: FounderDecisionInput,
   ): Promise<RecordedFounderDecision | null>;
+  listPublishedInformationRequestsForTimers(): Promise<PublishedInformationRequestForTimer[]>;
+  expireInformationRequest(input: {
+    requestId: string;
+    caseId: string;
+    traceId: string;
+    expiredAt: Date;
+  }): Promise<boolean>;
 }
 
 export class CaseSubmissionConflictError extends Error {

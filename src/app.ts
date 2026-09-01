@@ -5,6 +5,7 @@ import express, {
   type Response,
 } from "express";
 import helmet from "helmet";
+import type Provider from "oidc-provider";
 import type { Logger } from "pino";
 import { pinoHttp } from "pino-http";
 
@@ -38,6 +39,19 @@ import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
 import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
 import type { SessionResolver } from "./modules/auth/application/session-resolver.js";
+import { createCustomerSessionRouter } from "./modules/auth/api/customer-session.router.js";
+import {
+  ListOwnSessionsService,
+  RevokeOwnSessionService,
+} from "./modules/auth/application/customer-session.service.js";
+import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
+import type { OidcGrantRepository } from "./modules/auth/repository/oidc-grant.repository.js";
+import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
+import { createOidcInteractionRouter } from "./modules/auth/api/oidc-interaction.router.js";
+import { createTotpRouter } from "./modules/auth/api/totp.router.js";
+import { EnrollTotpService, VerifyTotpService } from "./modules/auth/application/totp.service.js";
+import type { TotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
+import type { TotpRepository } from "./modules/auth/repository/totp.repository.js";
 import { createHealthRouter } from "./modules/health/health.router.js";
 import { createOfferingRouter } from "./modules/offering/api/offering.router.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
@@ -81,12 +95,19 @@ import type { InvestorProfileRepository } from "./modules/investor-profile/repos
 import { errorHandler } from "./shared/http/error-handler.js";
 import { notFoundHandler } from "./shared/http/not-found.js";
 import { requestContext } from "./shared/http/request-context.js";
+import {
+  BASELINE_RATE_LIMIT,
+  TIGHTENED_RATE_LIMIT,
+  createRateLimiter,
+} from "./shared/http/rate-limit.js";
+import type { RateLimitStore } from "./infrastructure/rate-limit/rate-limit-store.js";
 
 export interface AppDependencies {
   databaseProbe: DatabaseProbe;
   offeringRepository: OfferingRepository;
   logger: Logger;
   authHandler?: RequestHandler;
+  rateLimitStore?: RateLimitStore;
   protectedApi?: {
     accounts: AccountRepository;
     sessions: SessionResolver;
@@ -124,12 +145,34 @@ export interface AppDependencies {
       }) => Promise<void>;
       acceptUrl: string;
     };
+    totp?: {
+      repository: TotpRepository;
+      provider: TotpProvider;
+      backupCodeHashKey: string;
+    };
+    customerSessions?: {
+      repository: CustomerSessionRepository;
+      revoker: SessionRevoker;
+      oidcGrants?: OidcGrantRepository;
+    };
+    oidc?: {
+      provider: Provider;
+      betterAuthSessions: SessionResolver;
+    };
   };
 }
 
 export function createApp(dependencies: AppDependencies): Express {
   const app = express();
   const listPublicOfferings = new ListPublicOfferingsService(dependencies.offeringRepository);
+  const baselineRateLimiter =
+    dependencies.rateLimitStore === undefined
+      ? undefined
+      : createRateLimiter(dependencies.rateLimitStore, BASELINE_RATE_LIMIT);
+  const tightenedRateLimiter =
+    dependencies.rateLimitStore === undefined
+      ? undefined
+      : createRateLimiter(dependencies.rateLimitStore, TIGHTENED_RATE_LIMIT);
 
   app.disable("x-powered-by");
   app.use(requestContext);
@@ -146,16 +189,25 @@ export function createApp(dependencies: AppDependencies): Express {
   });
   app.use(helmet());
   if (dependencies.authHandler !== undefined) {
-    app.all("/api/auth/*splat", dependencies.authHandler);
+    app.all(
+      "/api/auth/*splat",
+      ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
+      dependencies.authHandler,
+    );
   }
   app.use(express.json({ limit: "1mb", type: "application/json" }));
 
   app.use("/health", createHealthRouter(dependencies.databaseProbe));
-  app.use("/v1/offerings", createOfferingRouter(listPublicOfferings));
+  app.use(
+    "/v1/offerings",
+    ...(baselineRateLimiter === undefined ? [] : [baselineRateLimiter]),
+    createOfferingRouter(listPublicOfferings),
+  );
   if (dependencies.protectedApi !== undefined) {
     const requireAuthentication = createRequireAuthentication(
       dependencies.protectedApi.sessions,
       dependencies.protectedApi.accounts,
+      baselineRateLimiter,
     );
     const requireAdminOperations = createRequireAdminOperations(
       dependencies.protectedApi.accounts,
@@ -183,6 +235,41 @@ export function createApp(dependencies: AppDependencies): Express {
           ),
         ),
       );
+    }
+    if (dependencies.protectedApi.totp !== undefined) {
+      const totp = dependencies.protectedApi.totp;
+      app.use(
+        "/v1/auth/totp",
+        ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
+        createTotpRouter(
+          requireAuthentication,
+          new EnrollTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
+          new VerifyTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.customerSessions !== undefined) {
+      const customerSessions = dependencies.protectedApi.customerSessions;
+      app.use(
+        "/v1/auth/sessions",
+        createCustomerSessionRouter(
+          requireAuthentication,
+          new ListOwnSessionsService(customerSessions.repository, customerSessions.oidcGrants),
+          new RevokeOwnSessionService(
+            customerSessions.repository,
+            customerSessions.revoker,
+            customerSessions.oidcGrants,
+          ),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.oidc !== undefined) {
+      const oidc = dependencies.protectedApi.oidc;
+      app.use(
+        "/oidc/interaction",
+        createOidcInteractionRouter(oidc.provider, oidc.betterAuthSessions),
+      );
+      app.use("/oidc", oidc.provider.callback());
     }
     if (dependencies.protectedApi.kyc !== undefined) {
       const kyc = dependencies.protectedApi.kyc;
@@ -236,6 +323,7 @@ export function createApp(dependencies: AppDependencies): Express {
       );
       app.use(
         "/v1/auth/staff-invitations",
+        ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
         createPublicStaffInvitationRouter(acceptInvitation),
       );
       app.use(
@@ -270,6 +358,7 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     app.use(
       "/internal/v1/auth/webauthn",
+      ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
       createStaffWebAuthnRouter(
         requireAuthentication,
         requireStaffIdentity,

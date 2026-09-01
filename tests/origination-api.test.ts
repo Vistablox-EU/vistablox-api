@@ -75,11 +75,14 @@ function buildProtectedApp(options?: {
     listCasesForOperations: vi.fn().mockResolvedValue([]),
     getCaseForOperations: vi.fn().mockResolvedValue(null),
     getApplicantResponseWindowBusinessDays: vi.fn().mockResolvedValue(10),
+    getInformationRequestReminderBusinessDays: vi.fn().mockResolvedValue([3, 7]),
     publishInformationRequest: vi.fn().mockResolvedValue(null),
     getOwnedInformationRequest: vi.fn().mockResolvedValue(null),
     listOwnedInformationRequests: vi.fn().mockResolvedValue(null),
     resubmitAfterInformationRequest: vi.fn().mockResolvedValue(null),
     recordFounderDecision: vi.fn().mockResolvedValue(null),
+    listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
+    expireInformationRequest: vi.fn().mockResolvedValue(false),
   };
 
   return {

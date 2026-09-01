@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 
 import type { AuthAuditSink } from "../application/auth-audit-sink.js";
+import type { SessionMirror } from "../application/session-mirror.js";
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 import { createBetterAuthStaffAccountGuardPlugin } from "./better-auth-staff-account-guard.plugin.js";
 
@@ -32,6 +33,7 @@ export interface BetterAuthFactoryOptions {
   allowPopulationInput?: boolean;
   disableAutoSignIn?: boolean;
   authAuditSink?: AuthAuditSink;
+  sessionMirror?: SessionMirror;
 }
 
 export function createBetterAuth(options: BetterAuthFactoryOptions) {
@@ -168,6 +170,9 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               ...(options.onBackgroundError === undefined
                 ? {}
                 : { onError: options.onBackgroundError }),
+              ...(options.sessionMirror === undefined
+                ? {}
+                : { sessionMirror: options.sessionMirror }),
             }),
           ]),
     ],

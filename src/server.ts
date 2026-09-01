@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import { toNodeHandler } from "better-auth/node";
+import type { JWKS } from "oidc-provider";
 import { Pool } from "pg";
 import { createClient } from "redis";
 
@@ -9,6 +10,7 @@ import { loadEnvironment } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
+import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
@@ -22,6 +24,15 @@ import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/prisma-
 import { PrismaStaffInvitationRepository } from "./modules/auth/repository/prisma-staff-invitation.repository.js";
 import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit-sink.js";
 import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
+import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
+import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
+import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
+import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
+import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
+import { PostgresOidcGrantRepository } from "./modules/auth/infrastructure/postgres-oidc-grant.repository.js";
+import { createOidcProvider } from "./modules/auth/infrastructure/oidc-provider.factory.js";
+import { OidcBearerSessionResolver } from "./modules/auth/infrastructure/oidc-bearer-session.resolver.js";
+import { CompositeSessionResolver } from "./modules/auth/application/composite-session.resolver.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
@@ -68,6 +79,27 @@ const protectedProfileCache =
   profileCacheClient?.isReady === true
     ? new RedisProtectedProfileCache(profileCacheClient)
     : undefined;
+const rateLimitCacheClient =
+  environment.RATE_LIMIT_CACHE_URL === undefined
+    ? undefined
+    : createClient({
+        url: environment.RATE_LIMIT_CACHE_URL,
+        socket: { connectTimeout: 3_000, reconnectStrategy: false },
+      });
+rateLimitCacheClient?.on("error", (error) => {
+  logger.warn({ err: error }, "rate limit cache connection error");
+});
+if (rateLimitCacheClient !== undefined) {
+  try {
+    await rateLimitCacheClient.connect();
+  } catch (error) {
+    logger.warn({ err: error }, "rate limit cache unavailable; rate limiting is disabled");
+  }
+}
+const rateLimitStore =
+  rateLimitCacheClient?.isReady === true
+    ? new RedisRateLimitStore(rateLimitCacheClient)
+    : undefined;
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -96,6 +128,7 @@ const auth = createBetterAuth({
   sendVerificationEmail: (email) => emailSender.sendVerificationEmail(email),
   sendPasswordResetEmail: (email) => emailSender.sendPasswordResetEmail(email),
   authAuditSink,
+  sessionMirror: new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET),
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");
   },
@@ -153,6 +186,19 @@ const diditKyc =
             }),
       }
     : undefined;
+const betterAuthSessionResolver = new BetterAuthSessionResolver(auth);
+const oidcProvider = createOidcProvider({
+  baseUrl: environment.BETTER_AUTH_URL,
+  pool: authDatabase,
+  cookieSecret: environment.BETTER_AUTH_SECRET,
+  jwks: environment.OIDC_JWKS as JWKS,
+  nativeRedirectUris: environment.OIDC_NATIVE_REDIRECT_URIS,
+  secureCookies: environment.NODE_ENV === "production",
+});
+const sessions = new CompositeSessionResolver([
+  new OidcBearerSessionResolver(oidcProvider),
+  betterAuthSessionResolver,
+]);
 const displayProfiles =
   protectedProfileCache !== undefined && diditClient !== undefined
     ? new DiditProtectedDisplayProfileProvider(
@@ -172,9 +218,10 @@ const app = createApp({
   offeringRepository: new PrismaOfferingRepository(database),
   logger,
   authHandler: toNodeHandler(auth),
+  ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
   protectedApi: {
     accounts: accountRepository,
-    sessions: new BetterAuthSessionResolver(auth),
+    sessions,
     originationRepository: new PrismaOriginationRepository(database),
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({
@@ -185,6 +232,20 @@ const app = createApp({
     investorProfile: {
       repository: new PrismaInvestorProfileRepository(database),
       displayProfiles,
+    },
+    totp: {
+      repository: new PrismaTotpRepository(database),
+      provider: new OtplibTotpProvider(),
+      backupCodeHashKey: environment.BETTER_AUTH_SECRET,
+    },
+    customerSessions: {
+      repository: new PrismaCustomerSessionRepository(database),
+      revoker: new BetterAuthSessionRevoker(auth),
+      oidcGrants: new PostgresOidcGrantRepository(authDatabase),
+    },
+    oidc: {
+      provider: oidcProvider,
+      betterAuthSessions: betterAuthSessionResolver,
     },
     ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
     staffAccountLifecycle: {
@@ -221,6 +282,9 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     ];
     if (profileCacheClient?.isOpen === true) {
       shutdownTasks.push(profileCacheClient.close());
+    }
+    if (rateLimitCacheClient?.isOpen === true) {
+      shutdownTasks.push(rateLimitCacheClient.close());
     }
     await Promise.all(shutdownTasks);
     if (error !== undefined) {

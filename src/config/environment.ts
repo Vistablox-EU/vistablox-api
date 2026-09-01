@@ -61,6 +61,16 @@ const environmentSchema = z
         )
         .optional(),
     ),
+    RATE_LIMIT_CACHE_URL: z.preprocess(
+      emptyStringToUndefined,
+      z
+        .url()
+        .refine(
+          (value) => value.startsWith("redis://") || value.startsWith("rediss://"),
+          { message: "RATE_LIMIT_CACHE_URL must be a Redis or TLS Redis URL" },
+        )
+        .optional(),
+    ),
     DIDIT_API_BASE_URL: z.url().default("https://verification.didit.me"),
     DIDIT_API_KEY: optionalNonEmptyString(),
     DIDIT_WORKFLOW_ID: optionalUuid(),
@@ -78,6 +88,38 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.enum(["sandbox", "live"]).optional(),
     ),
+    OIDC_JWKS: z
+      .string()
+      .min(1)
+      .refine(
+        (value) => {
+          try {
+            const parsed: unknown = JSON.parse(value);
+            return (
+              typeof parsed === "object" &&
+              parsed !== null &&
+              Array.isArray((parsed as { keys?: unknown }).keys) &&
+              (parsed as { keys: unknown[] }).keys.length > 0
+            );
+          } catch {
+            return false;
+          }
+        },
+        { message: "OIDC_JWKS must be a JSON Web Key Set (JSON with a non-empty keys array)" },
+      )
+      .transform((value) => JSON.parse(value) as { keys: Record<string, unknown>[] }),
+    OIDC_NATIVE_REDIRECT_URIS: z
+      .string()
+      .min(1)
+      .transform((value) =>
+        value
+          .split(",")
+          .map((uri) => uri.trim())
+          .filter(Boolean),
+      )
+      .refine((uris) => uris.length > 0, {
+        message: "OIDC_NATIVE_REDIRECT_URIS must list at least one redirect URI",
+      }),
   })
   .refine(
     (environment) =>

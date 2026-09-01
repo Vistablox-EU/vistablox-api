@@ -4,12 +4,18 @@ import type { BetterAuthPlugin } from "better-auth";
 import { createAuthMiddleware, isAPIError } from "better-auth/api";
 
 import type { AuthAuditEvent, AuthAuditSink } from "../application/auth-audit-sink.js";
+import type { SessionMirror } from "../application/session-mirror.js";
 
 export interface BetterAuthAuditPluginOptions {
   sink: AuthAuditSink;
   identifierHashKey: string;
   onError?: (error: unknown) => void;
   clock?: () => Date;
+  // Optional: mirrors session create/revoke into account.sessions
+  // (SESSION_MODEL.md) alongside the audit trail this plugin already writes.
+  sessionMirror?: SessionMirror;
+  sessionIdleMinutes?: number;
+  sessionAbsoluteHours?: number;
 }
 
 interface AuditContext {
@@ -23,9 +29,47 @@ export function createBetterAuthAuditPlugin(
   options: BetterAuthAuditPluginOptions,
 ): BetterAuthPlugin {
   const clock = options.clock ?? (() => new Date());
+  const idleMinutes = options.sessionIdleMinutes ?? 30;
+  const absoluteHours = options.sessionAbsoluteHours ?? 12;
   const record = async (event: AuthAuditEvent): Promise<void> => {
     try {
       await options.sink.record(event);
+    } catch (error) {
+      options.onError?.(error);
+    }
+  };
+  const mirrorCreated = async (
+    session: { id: string; userId: string; token: string; createdAt: Date },
+    context: AuditContext | null,
+    authMethod: string | null,
+  ): Promise<void> => {
+    if (options.sessionMirror === undefined) return;
+    try {
+      await options.sessionMirror.recordCreated({
+        betterAuthUserId: session.userId,
+        betterAuthSessionId: session.id,
+        betterAuthSessionToken: session.token,
+        authMethodAtLogin: authMethod,
+        userAgent: context?.headers?.get("user-agent") ?? null,
+        createdAt: session.createdAt,
+        idleExpiresAt: new Date(session.createdAt.getTime() + idleMinutes * 60_000),
+        absoluteExpiresAt: new Date(session.createdAt.getTime() + absoluteHours * 60 * 60_000),
+      });
+    } catch (error) {
+      options.onError?.(error);
+    }
+  };
+  const mirrorRevoked = async (
+    session: { id: string },
+    context: AuditContext | null,
+  ): Promise<void> => {
+    if (options.sessionMirror === undefined) return;
+    try {
+      await options.sessionMirror.recordRevoked({
+        betterAuthSessionId: session.id,
+        revokedAt: clock(),
+        reason: sessionRevocationReason(context?.path),
+      });
     } catch (error) {
       options.onError?.(error);
     }
@@ -93,10 +137,12 @@ export function createBetterAuthAuditPlugin(
                       occurredAt: session.createdAt,
                     });
                   }
+                  await mirrorCreated(session, context, method);
                 },
               },
               delete: {
                 after: async (session, context) => {
+                  await mirrorRevoked(session, context);
                   await record({
                     eventKey: `better_auth:session_revoked:${session.id}`,
                     action: "authentication.session_revoked",

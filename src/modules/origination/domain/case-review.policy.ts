@@ -36,3 +36,29 @@ export function addBusinessDays(start: Date, businessDays: number): Date {
   }
   return result;
 }
+
+export function isInformationRequestOverdue(input: { dueAt: Date; now: Date }): boolean {
+  return input.dueAt.getTime() < input.now.getTime();
+}
+
+// AD-193's day-3/day-7 cadence: a reminder is due on the UTC calendar day that
+// exactly matches one of the configured elapsed-business-day milestones from
+// publication. The scheduled job runs at most once a day, so this alone is
+// enough to send each milestone exactly once with no separate "sent" marker.
+export function isApplicantReminderDue(input: {
+  publishedAt: Date;
+  today: Date;
+  reminderBusinessDays: number[];
+}): boolean {
+  return input.reminderBusinessDays.some((days) =>
+    isSameUtcDate(addBusinessDays(input.publishedAt, days), input.today),
+  );
+}
+
+function isSameUtcDate(a: Date, b: Date): boolean {
+  return (
+    a.getUTCFullYear() === b.getUTCFullYear() &&
+    a.getUTCMonth() === b.getUTCMonth() &&
+    a.getUTCDate() === b.getUTCDate()
+  );
+}

@@ -15,6 +15,7 @@ import type {
   OriginationRepository,
   OwnedOriginationCase,
   PublishedInformationRequest,
+  PublishedInformationRequestForTimer,
   RecordedFounderDecision,
   ResubmittedCase,
   SubmitInitialCaseInput,
@@ -28,6 +29,10 @@ const propertyFloorSettingSchema = z.object({
 });
 
 const responseWindowSettingSchema = z.object({ business_days: z.number().int().min(1).max(60) });
+
+const reminderDaysSettingSchema = z.object({
+  business_days: z.array(z.number().int().min(1).max(60)).min(1),
+});
 
 export class PrismaOriginationRepository implements OriginationRepository {
   public constructor(private readonly database: DatabaseClient) {}
@@ -348,6 +353,19 @@ export class PrismaOriginationRepository implements OriginationRepository {
     return responseWindowSettingSchema.parse(setting.value).business_days;
   }
 
+  public async getInformationRequestReminderBusinessDays(): Promise<number[]> {
+    const setting = await this.database.platformSetting.findUnique({
+      where: { key: "origination.information_request_reminder_business_days" },
+      select: { value: true },
+    });
+    if (setting === null) {
+      throw new Error(
+        "Missing origination.information_request_reminder_business_days setting",
+      );
+    }
+    return reminderDaysSettingSchema.parse(setting.value).business_days;
+  }
+
   public async publishInformationRequest(input: {
     accountId: string;
     caseId: string;
@@ -426,6 +444,103 @@ export class PrismaOriginationRepository implements OriginationRepository {
         publishedAt: input.publishedAt,
         dueAt: input.dueAt,
       };
+    });
+  }
+
+  public async listPublishedInformationRequestsForTimers(): Promise<
+    PublishedInformationRequestForTimer[]
+  > {
+    const requests = await this.database.informationRequest.findMany({
+      where: { status: "published" },
+      select: {
+        id: true,
+        caseId: true,
+        publishedAt: true,
+        dueAt: true,
+        case: {
+          select: {
+            applicantAccountId: true,
+            applicant: { select: { protectedContactEmail: true } },
+          },
+        },
+      },
+    });
+    return requests
+      .filter((request) => request.publishedAt !== null && request.dueAt !== null)
+      .map((request) => ({
+        requestId: request.id,
+        caseId: request.caseId,
+        applicantAccountId: request.case.applicantAccountId,
+        applicantContactEmail: request.case.applicant.protectedContactEmail,
+        publishedAt: request.publishedAt as Date,
+        dueAt: request.dueAt as Date,
+      }));
+  }
+
+  public async expireInformationRequest(input: {
+    requestId: string;
+    caseId: string;
+    traceId: string;
+    expiredAt: Date;
+  }): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return false;
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: {
+          stage: true,
+          informationRequests: {
+            where: { id: input.requestId },
+            take: 1,
+            select: { id: true, status: true },
+          },
+        },
+      });
+      const request = current.informationRequests[0];
+      if (current.stage !== "waiting_on_applicant" || request?.status !== "published") {
+        return false;
+      }
+
+      await transaction.informationRequest.update({
+        where: { id: input.requestId },
+        data: {
+          status: "expired",
+          resolvedAt: input.expiredAt,
+          resolutionType: "expired",
+        },
+      });
+      await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: {
+          stage: "expired",
+          expiredAt: input.expiredAt,
+          updatedAt: input.expiredAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: null,
+          action: "origination.information_request_expired",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            request_id: input.requestId,
+            previous_stage: "waiting_on_applicant",
+            new_stage: "expired",
+          },
+          createdAt: input.expiredAt,
+        },
+      });
+      return true;
     });
   }
 

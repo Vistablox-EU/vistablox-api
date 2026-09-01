@@ -1,0 +1,109 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: vistablox
+      POSTGRES_PASSWORD: vistablox
+      POSTGRES_DB: vistablox
+    ports:
+      - "5432:5432"
+    volumes:
+      # postgres 18+'s official image wants the mount one level up from
+      # `data` (pg_ctlcluster-style, major-version-specific subdirectory),
+      # not directly at /var/lib/postgresql/data.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vistablox -d vistablox"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  cache:
+    image: valkey/valkey:8-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Local-dev-only SMTP catcher so `docker compose up` works without real
+  # SMTP credentials. Web UI at http://localhost:8025 shows sent mail.
+  mailpit:
+    image: axllent/mailpit:latest
+    ports:
+      - "8025:8025"
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DIRECT_DATABASE_URL: postgresql://vistablox:vistablox@postgres:5432/vistablox
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: api
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://vistablox:vistablox@postgres:5432/vistablox
+      PROFILE_CACHE_URL: redis://cache:6379
+      RATE_LIMIT_CACHE_URL: redis://cache:6379
+      BETTER_AUTH_URL: http://localhost:3000
+      AUTH_TRUSTED_ORIGINS: http://localhost:3000
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_SECURE: "false"
+      SMTP_USER: vistablox
+      SMTP_PASSWORD: vistablox
+      SMTP_FROM: VistaBlox <no-reply@vistablox.local>
+    depends_on:
+      postgres:
+        condition: service_healthy
+      cache:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      target: worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://vistablox:vistablox@postgres:5432/vistablox
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_SECURE: "false"
+      SMTP_USER: vistablox
+      SMTP_PASSWORD: vistablox
+      SMTP_FROM: VistaBlox <no-reply@vistablox.local>
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:

@@ -46,6 +46,9 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
     applyProviderOutcome: vi.fn().mockResolvedValue("applied"),
     applyProofOfAddressOutcome: vi.fn().mockResolvedValue("applied"),
     recordUnmatchedProviderEvent: vi.fn().mockResolvedValue(undefined),
+    getRenewalReminderLeadDays: vi.fn().mockResolvedValue(30),
+    listEligibleAccountsForRenewalTimer: vi.fn().mockResolvedValue([]),
+    transitionToRequiresRenewal: vi.fn().mockResolvedValue(false),
     ...overrides,
   };
 }

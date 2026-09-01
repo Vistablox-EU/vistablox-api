@@ -104,4 +104,13 @@ export interface KycRepository {
     receivedAt: Date;
     reason: "session_not_found" | "correlation_mismatch" | "configuration_mismatch";
   }): Promise<void>;
+  getRenewalReminderLeadDays(): Promise<number>;
+  listEligibleAccountsForRenewalTimer(): Promise<
+    Array<{ accountId: string; contactEmail: string | null; renewalDueAt: Date }>
+  >;
+  transitionToRequiresRenewal(input: {
+    accountId: string;
+    traceId: string;
+    transitionedAt: Date;
+  }): Promise<boolean>;
 }

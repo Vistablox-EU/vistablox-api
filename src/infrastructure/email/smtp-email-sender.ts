@@ -17,10 +17,22 @@ export interface StaffInvitationEmail {
   expiresAt: Date;
 }
 
+export interface ApplicantResponseReminderEmail {
+  to: string;
+  dueAt: Date;
+}
+
+export interface KycRenewalReminderEmail {
+  to: string;
+  renewalDueAt: Date;
+}
+
 export interface EmailSender {
   sendVerificationEmail(email: VerificationEmail): Promise<void>;
   sendPasswordResetEmail(email: PasswordResetEmail): Promise<void>;
   sendStaffInvitationEmail(email: StaffInvitationEmail): Promise<void>;
+  sendApplicantResponseReminderEmail(email: ApplicantResponseReminderEmail): Promise<void>;
+  sendKycRenewalReminderEmail(email: KycRenewalReminderEmail): Promise<void>;
 }
 
 export interface SmtpEmailSenderOptions {
@@ -72,6 +84,30 @@ export class SmtpEmailSender implements EmailSender {
       subject: "Your VistaBlox staff invitation",
       text: `Hello ${email.displayName}, accept your VistaBlox staff invitation before ${expiresAt}: ${email.invitationUrl}`,
       html: `<p>Hello ${escapeHtml(email.displayName)},</p><p>Accept your VistaBlox staff invitation before ${escapeHtml(expiresAt)}:</p><p><a href="${escapeHtml(email.invitationUrl)}">Accept invitation</a></p>`,
+    });
+  }
+
+  public async sendApplicantResponseReminderEmail(
+    email: ApplicantResponseReminderEmail,
+  ): Promise<void> {
+    const dueAt = email.dueAt.toISOString();
+    await this.transporter.sendMail({
+      from: this.options.from,
+      to: email.to,
+      subject: "Response needed on your VistaBlox origination case",
+      text: `VistaBlox is waiting on your response to an information request. Please respond before ${dueAt}, or the request will expire.`,
+      html: `<p>VistaBlox is waiting on your response to an information request.</p><p>Please respond before ${escapeHtml(dueAt)}, or the request will expire.</p>`,
+    });
+  }
+
+  public async sendKycRenewalReminderEmail(email: KycRenewalReminderEmail): Promise<void> {
+    const renewalDueAt = email.renewalDueAt.toISOString();
+    await this.transporter.sendMail({
+      from: this.options.from,
+      to: email.to,
+      subject: "Your VistaBlox identity verification needs renewal soon",
+      text: `Your VistaBlox identity verification is due for renewal by ${renewalDueAt}. Please sign in to renew it before then.`,
+      html: `<p>Your VistaBlox identity verification is due for renewal by ${escapeHtml(renewalDueAt)}.</p><p>Please sign in to renew it before then.</p>`,
     });
   }
 }
