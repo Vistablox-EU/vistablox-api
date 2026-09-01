@@ -15,6 +15,9 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
   const password = `A uniquely generated VistaBlox test password ${suffix}`;
   const accountId = `acct_${suffix}`;
   const credentialId = `credential_${suffix}`;
+  const rosterEmail = `staff-roster-${suffix}@example.test`;
+  const rosterPassword = `A uniquely generated VistaBlox roster password ${suffix}`;
+  const rosterAccountId = `acct_roster_${suffix}`;
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
   const resetUrls: string[] = [];
@@ -32,6 +35,7 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
   const administrator = new BetterAuthStaffAccountAdministrator(auth);
   const repository = new PrismaStaffAccountLifecycleRepository(database);
   let betterAuthUserId = "";
+  let rosterBetterAuthUserId = "";
 
   beforeAll(async () => {
     const signedUp = await auth.api.signUpEmail({
@@ -66,6 +70,29 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
         },
       },
     });
+
+    const rosterSignedUp = await auth.api.signUpEmail({
+      body: {
+        name: "Roster Test Staff",
+        email: rosterEmail,
+        password: rosterPassword,
+        population: "staff_partner",
+      },
+    });
+    rosterBetterAuthUserId = rosterSignedUp.user.id;
+    await database.account.create({
+      data: {
+        id: rosterAccountId,
+        betterAuthUserId: rosterBetterAuthUserId,
+        status: "active",
+        staffRoles: {
+          create: {
+            id: `role_roster_${suffix}`,
+            role: "admin_operations",
+          },
+        },
+      },
+    });
   }, 30_000);
 
   afterAll(async () => {
@@ -77,6 +104,16 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
       await database.account.deleteMany({ where: { id: accountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [
         betterAuthUserId,
+      ]);
+    }
+    if (rosterBetterAuthUserId !== "") {
+      await database.auditLog.deleteMany({
+        where: { OR: [{ actorAccountId: rosterAccountId }, { resourceId: rosterAccountId }] },
+      });
+      await database.staffRoleAssignment.deleteMany({ where: { accountId: rosterAccountId } });
+      await database.account.deleteMany({ where: { id: rosterAccountId } });
+      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [
+        rosterBetterAuthUserId,
       ]);
     }
     await Promise.all([database.$disconnect(), authPool.end()]);
@@ -180,6 +217,86 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
               "authentication.staff_account_recovery_started",
               "authentication.staff_account_offboarded",
             ],
+          },
+        },
+      }),
+    ).toBe(2);
+  }, 30_000);
+
+  it("rosters, grants, and revokes individual role assignments", async () => {
+    const rosterBeforeGrant = await repository.listStaffAccounts();
+    const rosteredTarget = rosterBeforeGrant.find((entry) => entry.accountId === rosterAccountId);
+    expect(rosteredTarget).toMatchObject({
+      accountId: rosterAccountId,
+      email: null,
+      status: "active",
+      roles: [expect.objectContaining({ role: "admin_operations", revokedAt: null })],
+    });
+
+    expect(
+      await repository.hasActiveRole({ accountId: rosterAccountId, role: "legal_partner" }),
+    ).toBe(false);
+
+    const granted = await repository.grantRole({
+      accountId: rosterAccountId,
+      role: "legal_partner",
+      legalPracticeId: `practice_${suffix}`,
+      appraisalFirmId: null,
+      actorAccountId: rosterAccountId,
+      traceId: `trace_grant_${suffix}`,
+      grantedAt: new Date(),
+    });
+    expect(granted).toMatchObject({
+      role: "legal_partner",
+      legalPracticeId: `practice_${suffix}`,
+      appraisalFirmId: null,
+      revokedAt: null,
+    });
+    expect(
+      await repository.hasActiveRole({ accountId: rosterAccountId, role: "legal_partner" }),
+    ).toBe(true);
+
+    const rosterAfterGrant = await repository.listStaffAccounts();
+    expect(
+      rosterAfterGrant.find((entry) => entry.accountId === rosterAccountId)?.roles,
+    ).toHaveLength(2);
+
+    const revoked = await repository.revokeRole({
+      accountId: rosterAccountId,
+      assignmentId: granted.assignmentId,
+      actorAccountId: rosterAccountId,
+      traceId: `trace_revoke_${suffix}`,
+      revokedAt: new Date(),
+    });
+    expect(revoked).toMatchObject({ assignmentId: granted.assignmentId, revokedAt: expect.any(Date) });
+    expect(
+      await repository.hasActiveRole({ accountId: rosterAccountId, role: "legal_partner" }),
+    ).toBe(false);
+
+    const repeatRevoke = await repository.revokeRole({
+      accountId: rosterAccountId,
+      assignmentId: granted.assignmentId,
+      actorAccountId: rosterAccountId,
+      traceId: `trace_revoke_again_${suffix}`,
+      revokedAt: new Date(),
+    });
+    expect(repeatRevoke).toBeNull();
+
+    const otherAccountRevoke = await repository.revokeRole({
+      accountId: `acct_nonexistent_${suffix}`,
+      assignmentId: granted.assignmentId,
+      actorAccountId: rosterAccountId,
+      traceId: `trace_revoke_wrong_account_${suffix}`,
+      revokedAt: new Date(),
+    });
+    expect(otherAccountRevoke).toBeNull();
+
+    expect(
+      await database.auditLog.count({
+        where: {
+          resourceId: rosterAccountId,
+          action: {
+            in: ["authentication.staff_role_granted", "authentication.staff_role_revoked"],
           },
         },
       }),

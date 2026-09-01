@@ -30,8 +30,11 @@ import {
 import type { StaffIdentityProvider } from "./modules/auth/application/staff-identity-provider.js";
 import type { StaffInvitationRepository } from "./modules/auth/repository/staff-invitation.repository.js";
 import {
+  GrantStaffRoleService,
+  ListStaffAccountsService,
   OffboardStaffAccountService,
   RecoverStaffAccountService,
+  RevokeStaffRoleService,
 } from "./modules/auth/application/staff-account-lifecycle.service.js";
 import type { StaffAccountAdministrator } from "./modules/auth/application/staff-account-administrator.js";
 import type { StaffAccountLifecycleRepository } from "./modules/auth/repository/staff-account-lifecycle.repository.js";
@@ -410,6 +413,9 @@ export function createApp(dependencies: AppDependencies): Express {
             lifecycle.repository,
             lifecycle.administrator,
           ),
+          new ListStaffAccountsService(lifecycle.repository),
+          new GrantStaffRoleService(lifecycle.repository),
+          new RevokeStaffRoleService(lifecycle.repository),
         ),
       );
     }
