@@ -50,6 +50,12 @@ function buildApp(options?: {
   listRows?: OwnedOriginationCase[];
   submissionConflict?: boolean;
   eligibilityState?: string;
+  caseMessages?: Array<{
+    messageId: string;
+    authorAccountId: string | null;
+    body: string;
+    createdAt: Date;
+  }>;
 }) {
   const sessions: SessionResolver = {
     resolve: vi.fn().mockResolvedValue({
@@ -75,6 +81,15 @@ function buildApp(options?: {
       submittedAt: new Date("2026-08-31T11:00:00.000Z"),
     };
   });
+  const listCaseMessages = vi.fn(async () => options?.caseMessages ?? []);
+  const postCaseMessage = vi.fn(
+    async (input: { caseId: string; lane: string; authorAccountId: string; body: string; postedAt: Date }) => ({
+      messageId: "msg_posted",
+      authorAccountId: input.authorAccountId,
+      body: input.body,
+      createdAt: input.postedAt,
+    }),
+  );
   const repository: OriginationRepository = {
     getIntakePrerequisites: vi.fn().mockResolvedValue({
       eligibilityState: options?.eligibilityState ?? "eligible",
@@ -99,6 +114,8 @@ function buildApp(options?: {
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     closeCase: vi.fn().mockResolvedValue(null),
+    listCaseMessages,
+    postCaseMessage,
   };
 
   return {
@@ -119,6 +136,8 @@ function buildApp(options?: {
     }),
     repository,
     submitInitialCase,
+    listCaseMessages,
+    postCaseMessage,
   };
 }
 
@@ -224,6 +243,81 @@ describe("owner origination-case workflow", () => {
         }),
       }),
     );
+  });
+});
+
+describe("owner case messages (applicant lane only)", () => {
+  it("reads the applicant lane on the owner's own case", async () => {
+    const { app, listCaseMessages } = buildApp({
+      caseMessages: [
+        {
+          messageId: "msg_01",
+          authorAccountId: "acct_founder",
+          body: "Please clarify the encumbrance status.",
+          createdAt: new Date("2026-09-01T09:00:00.000Z"),
+        },
+      ],
+    });
+
+    const response = await request(app).get("/v1/origination-cases/case_01/messages");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      expect.objectContaining({ message_id: "msg_01", author_account_id: "acct_founder" }),
+    ]);
+    expect(listCaseMessages).toHaveBeenCalledWith("case_01", "applicant");
+  });
+
+  it("404s reading messages on a case that isn't the caller's own", async () => {
+    const { app, listCaseMessages } = buildApp({ caseRecord: null });
+
+    const response = await request(app).get("/v1/origination-cases/case_01/messages");
+
+    expect(response.status).toBe(404);
+    expect(listCaseMessages).not.toHaveBeenCalled();
+  });
+
+  it("posts to the applicant lane as the owner, always — there is no other lane to choose", async () => {
+    const { app, postCaseMessage } = buildApp();
+
+    const response = await request(app)
+      .post("/v1/origination-cases/case_01/messages")
+      .send({ body: "Encumbrance was released in 2024, evidence attached." });
+
+    expect(response.status).toBe(201);
+    expect(response.body.data).toMatchObject({
+      body: "Encumbrance was released in 2024, evidence attached.",
+    });
+    expect(postCaseMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        caseId: "case_01",
+        lane: "applicant",
+        authorAccountId: "acct_01",
+        body: "Encumbrance was released in 2024, evidence attached.",
+      }),
+    );
+  });
+
+  it("404s posting to a case that isn't the caller's own", async () => {
+    const { app, postCaseMessage } = buildApp({ caseRecord: null });
+
+    const response = await request(app)
+      .post("/v1/origination-cases/case_01/messages")
+      .send({ body: "Hello" });
+
+    expect(response.status).toBe(404);
+    expect(postCaseMessage).not.toHaveBeenCalled();
+  });
+
+  it("rejects an empty message body", async () => {
+    const { app, postCaseMessage } = buildApp();
+
+    const response = await request(app)
+      .post("/v1/origination-cases/case_01/messages")
+      .send({ body: "" });
+
+    expect(response.status).toBe(422);
+    expect(postCaseMessage).not.toHaveBeenCalled();
   });
 });
 

@@ -8,15 +8,21 @@ import {
   PublishInformationRequestService,
   RecordFounderDecisionService,
 } from "../application/operations-case.service.js";
-import { caseIdParamsSchema } from "./origination.schemas.js";
+import {
+  ListCaseMessagesForOperationsService,
+  PostCaseMessageForOperationsService,
+} from "../application/case-message.service.js";
+import { caseIdParamsSchema, listCaseMessagesResponseSchema, postCaseMessageResponseSchema } from "./origination.schemas.js";
 import {
   closeCaseBodySchema,
   closeCaseResponseSchema,
   founderDecisionBodySchema,
   founderDecisionResponseSchema,
+  listCaseMessagesQuerySchema,
   operationsCaseDetailResponseSchema,
   operationsCaseListQuerySchema,
   operationsCaseListResponseSchema,
+  postOperationsCaseMessageBodySchema,
   publishInformationRequestBodySchema,
   publishInformationRequestResponseSchema,
 } from "./origination-operations.schemas.js";
@@ -30,6 +36,8 @@ export function createOriginationOperationsRouter(
   publishInformationRequest: PublishInformationRequestService,
   recordDecision: RecordFounderDecisionService,
   closeCase: CloseCaseService,
+  listCaseMessages: ListCaseMessagesForOperationsService,
+  postCaseMessage: PostCaseMessageForOperationsService,
 ): Router {
   const router = Router();
   const staffOnly = [requireAuthentication, requireAdminOperations, requireStaffWebAuthn];
@@ -83,6 +91,26 @@ export function createOriginationOperationsRouter(
       body,
     });
     response.json(closeCaseResponseSchema.parse(result));
+  });
+
+  router.get("/:case_id/messages", ...staffOnly, async (request, response) => {
+    const params = caseIdParamsSchema.parse(request.params);
+    const query = listCaseMessagesQuerySchema.parse(request.query);
+    const result = await listCaseMessages.execute(params.case_id, query.lane);
+    response.json(listCaseMessagesResponseSchema.parse(result));
+  });
+
+  router.post("/:case_id/messages", ...staffOnly, async (request, response) => {
+    const authContext = requireAuthContext(response.locals.authContext);
+    const params = caseIdParamsSchema.parse(request.params);
+    const body = postOperationsCaseMessageBodySchema.parse(request.body);
+    const result = await postCaseMessage.execute({
+      accountId: authContext.accountId,
+      caseId: params.case_id,
+      lane: body.lane,
+      body: body.body,
+    });
+    response.status(201).json(postCaseMessageResponseSchema.parse(result));
   });
 
   return router;

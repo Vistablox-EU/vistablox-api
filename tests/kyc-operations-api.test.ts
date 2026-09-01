@@ -79,6 +79,8 @@ function fakeOriginationRepository(): OriginationRepository {
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     closeCase: vi.fn(),
+    listCaseMessages: vi.fn().mockResolvedValue([]),
+    postCaseMessage: vi.fn(),
   };
 }
 

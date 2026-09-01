@@ -84,6 +84,8 @@ function buildProtectedApp(options?: {
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     closeCase: vi.fn().mockResolvedValue(null),
+    listCaseMessages: vi.fn().mockResolvedValue([]),
+    postCaseMessage: vi.fn().mockResolvedValue(null),
   };
 
   return {

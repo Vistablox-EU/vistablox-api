@@ -558,6 +558,7 @@ model CaseThread {
   case      OriginationCase @relation(fields: [caseId], references: [id])
   messages  CaseMessage[]
 
+  @@unique([caseId, lane], map: "case_threads_case_id_lane_key")
   @@index([caseId], map: "idx_case_threads_case")
   @@map("case_threads")
   @@schema("origination")

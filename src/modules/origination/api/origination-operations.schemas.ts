@@ -2,6 +2,21 @@ import { z } from "zod";
 
 import { originationCaseStageSchema, ownedCaseSchema } from "./origination.schemas.js";
 
+// The two human-postable lanes REAL_ESTATE_INTAKE_LIFECYCLE.md's Thread
+// Rules define (system_timeline is system-generated, not a lane a caller
+// selects). The owner-facing routes never take a lane at all — the
+// applicant has exactly one lane to reach and it's hardcoded there.
+const threadLaneSchema = z.enum(["internal_case", "applicant"]);
+
+export const listCaseMessagesQuerySchema = z.object({
+  lane: threadLaneSchema,
+});
+
+export const postOperationsCaseMessageBodySchema = z.object({
+  lane: threadLaneSchema,
+  body: z.string().trim().min(1).max(5000),
+});
+
 export const operationsCaseListQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   after: z.string().min(1).optional(),
@@ -134,3 +149,5 @@ export type OperationsCaseListQuery = z.infer<typeof operationsCaseListQuerySche
 export type PublishInformationRequestBody = z.infer<typeof publishInformationRequestBodySchema>;
 export type FounderDecisionBody = z.infer<typeof founderDecisionBodySchema>;
 export type CloseCaseBody = z.infer<typeof closeCaseBodySchema>;
+export type ListCaseMessagesQuery = z.infer<typeof listCaseMessagesQuerySchema>;
+export type PostOperationsCaseMessageBody = z.infer<typeof postOperationsCaseMessageBodySchema>;

@@ -187,6 +187,19 @@ export interface ClosedCase {
   closedAt: Date;
 }
 
+// REAL_ESTATE_INTAKE_LIFECYCLE.md's Thread Rules (AD-244's 2026-08-29
+// update): exactly three fixed lanes per case, no ad hoc ones.
+// system_timeline is system-generated and append-only, not a human-postable
+// chat lane, so it has no place in this type — nothing writes to it yet.
+export type ThreadLane = "internal_case" | "applicant";
+
+export interface CaseMessageRecord {
+  messageId: string;
+  authorAccountId: string | null;
+  body: string;
+  createdAt: Date;
+}
+
 export interface OriginationRepository {
   getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites>;
   createDraftIntake(input: CreateDraftIntakeInput): Promise<CreatedDraftIntake>;
@@ -230,6 +243,18 @@ export interface OriginationRepository {
     input: FounderDecisionInput,
   ): Promise<RecordedFounderDecision | null>;
   closeCase(input: CloseCaseInput): Promise<ClosedCase | null>;
+  // Ownership/existence scoping happens one level up (getOwnedCase for the
+  // applicant-lane owner routes, getCaseForOperations for staff), matching
+  // how every other write here separates that check from the write itself
+  // — so these two operate on caseId directly, usable from either side.
+  listCaseMessages(caseId: string, lane: ThreadLane): Promise<CaseMessageRecord[]>;
+  postCaseMessage(input: {
+    caseId: string;
+    lane: ThreadLane;
+    authorAccountId: string;
+    body: string;
+    postedAt: Date;
+  }): Promise<CaseMessageRecord | null>;
   listPublishedInformationRequestsForTimers(): Promise<PublishedInformationRequestForTimer[]>;
   expireInformationRequest(input: {
     requestId: string;

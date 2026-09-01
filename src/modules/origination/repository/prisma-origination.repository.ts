@@ -5,6 +5,7 @@ import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
+  CaseMessageRecord,
   ClosedCase,
   CloseCaseInput,
   FounderDecisionInput,
@@ -22,6 +23,7 @@ import type {
   ResubmittedCase,
   SubmitInitialCaseInput,
   SubmittedCase,
+  ThreadLane,
 } from "./origination.repository.js";
 import { CaseReviewConflictError } from "./origination.repository.js";
 
@@ -828,6 +830,66 @@ export class PrismaOriginationRepository implements OriginationRepository {
       return { caseId: input.caseId, stage: input.outcome, closedAt: input.closedAt };
     });
   }
+
+  public async listCaseMessages(caseId: string, lane: ThreadLane): Promise<CaseMessageRecord[]> {
+    const thread = await this.database.caseThread.findUnique({
+      where: { caseId_lane: { caseId, lane } },
+      select: {
+        messages: {
+          orderBy: { createdAt: "asc" },
+          select: { id: true, authorAccountId: true, body: true, createdAt: true },
+        },
+      },
+    });
+    return (thread?.messages ?? []).map(toCaseMessageRecord);
+  }
+
+  public async postCaseMessage(input: {
+    caseId: string;
+    lane: ThreadLane;
+    authorAccountId: string;
+    body: string;
+    postedAt: Date;
+  }): Promise<CaseMessageRecord | null> {
+    return this.database.$transaction(async (transaction) => {
+      const exists = await transaction.originationCase.findUnique({
+        where: { id: input.caseId },
+        select: { id: true },
+      });
+      if (exists === null) return null;
+
+      const thread = await transaction.caseThread.upsert({
+        where: { caseId_lane: { caseId: input.caseId, lane: input.lane } },
+        create: { id: `thread_${ulid()}`, caseId: input.caseId, lane: input.lane },
+        update: {},
+      });
+      const message = await transaction.caseMessage.create({
+        data: {
+          id: `msg_${ulid()}`,
+          threadId: thread.id,
+          authorAccountId: input.authorAccountId,
+          body: input.body,
+          createdAt: input.postedAt,
+        },
+        select: { id: true, authorAccountId: true, body: true, createdAt: true },
+      });
+      return toCaseMessageRecord(message);
+    });
+  }
+}
+
+function toCaseMessageRecord(input: {
+  id: string;
+  authorAccountId: string | null;
+  body: string;
+  createdAt: Date;
+}): CaseMessageRecord {
+  return {
+    messageId: input.id,
+    authorAccountId: input.authorAccountId,
+    body: input.body,
+    createdAt: input.createdAt,
+  };
 }
 
 const ownedCaseSelect = {
