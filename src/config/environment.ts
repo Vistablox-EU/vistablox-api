@@ -88,6 +88,38 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.enum(["sandbox", "live"]).optional(),
     ),
+    OIDC_JWKS: z
+      .string()
+      .min(1)
+      .refine(
+        (value) => {
+          try {
+            const parsed: unknown = JSON.parse(value);
+            return (
+              typeof parsed === "object" &&
+              parsed !== null &&
+              Array.isArray((parsed as { keys?: unknown }).keys) &&
+              (parsed as { keys: unknown[] }).keys.length > 0
+            );
+          } catch {
+            return false;
+          }
+        },
+        { message: "OIDC_JWKS must be a JSON Web Key Set (JSON with a non-empty keys array)" },
+      )
+      .transform((value) => JSON.parse(value) as { keys: Record<string, unknown>[] }),
+    OIDC_NATIVE_REDIRECT_URIS: z
+      .string()
+      .min(1)
+      .transform((value) =>
+        value
+          .split(",")
+          .map((uri) => uri.trim())
+          .filter(Boolean),
+      )
+      .refine((uris) => uris.length > 0, {
+        message: "OIDC_NATIVE_REDIRECT_URIS must list at least one redirect URI",
+      }),
   })
   .refine(
     (environment) =>

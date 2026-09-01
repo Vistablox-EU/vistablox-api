@@ -5,6 +5,7 @@ import express, {
   type Response,
 } from "express";
 import helmet from "helmet";
+import type Provider from "oidc-provider";
 import type { Logger } from "pino";
 import { pinoHttp } from "pino-http";
 
@@ -44,7 +45,9 @@ import {
   RevokeOwnSessionService,
 } from "./modules/auth/application/customer-session.service.js";
 import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
+import type { OidcGrantRepository } from "./modules/auth/repository/oidc-grant.repository.js";
 import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
+import { createOidcInteractionRouter } from "./modules/auth/api/oidc-interaction.router.js";
 import { createTotpRouter } from "./modules/auth/api/totp.router.js";
 import { EnrollTotpService, VerifyTotpService } from "./modules/auth/application/totp.service.js";
 import type { TotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
@@ -150,6 +153,11 @@ export interface AppDependencies {
     customerSessions?: {
       repository: CustomerSessionRepository;
       revoker: SessionRevoker;
+      oidcGrants?: OidcGrantRepository;
+    };
+    oidc?: {
+      provider: Provider;
+      betterAuthSessions: SessionResolver;
     };
   };
 }
@@ -246,10 +254,22 @@ export function createApp(dependencies: AppDependencies): Express {
         "/v1/auth/sessions",
         createCustomerSessionRouter(
           requireAuthentication,
-          new ListOwnSessionsService(customerSessions.repository),
-          new RevokeOwnSessionService(customerSessions.repository, customerSessions.revoker),
+          new ListOwnSessionsService(customerSessions.repository, customerSessions.oidcGrants),
+          new RevokeOwnSessionService(
+            customerSessions.repository,
+            customerSessions.revoker,
+            customerSessions.oidcGrants,
+          ),
         ),
       );
+    }
+    if (dependencies.protectedApi.oidc !== undefined) {
+      const oidc = dependencies.protectedApi.oidc;
+      app.use(
+        "/oidc/interaction",
+        createOidcInteractionRouter(oidc.provider, oidc.betterAuthSessions),
+      );
+      app.use("/oidc", oidc.provider.callback());
     }
     if (dependencies.protectedApi.kyc !== undefined) {
       const kyc = dependencies.protectedApi.kyc;

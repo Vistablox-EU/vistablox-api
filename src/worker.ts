@@ -1,6 +1,7 @@
 import "dotenv/config";
 
 import { PgBoss } from "pg-boss";
+import { Pool } from "pg";
 import { ulid } from "ulid";
 
 import { loadEnvironment } from "./config/environment.js";
@@ -14,11 +15,14 @@ import {
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
+import { RunOidcCleanupService } from "./modules/auth/application/oidc-cleanup.service.js";
+import { PostgresOidcCleanupRepository } from "./modules/auth/infrastructure/postgres-oidc-cleanup.repository.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
+const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -36,6 +40,7 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 );
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(originationRepository);
 const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
+const runOidcCleanup = new RunOidcCleanupService(new PostgresOidcCleanupRepository(authDatabase));
 
 // AD-135's worker/queue runbook family and ASYNC_JOBS.md's retry baseline:
 // up to 5 attempts, exponential backoff with jitter (pg-boss's own
@@ -72,6 +77,10 @@ await boss.schedule("maintenance.kyc_renewal", "0 9 * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
+await boss.schedule("maintenance.oidc_cleanup", "0 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
 
 await boss.work("case_timers.applicant_reminders", async () => {
   await runJob("case_timers.applicant_reminders", () => sendApplicantReminders.execute());
@@ -84,6 +93,9 @@ await boss.work("case_timers.response_window_expiry", async () => {
 await boss.work("maintenance.kyc_renewal", async () => {
   await runJob("maintenance.kyc_renewal", (traceId) => runKycRenewalTimer.execute(traceId));
 });
+await boss.work("maintenance.oidc_cleanup", async () => {
+  await runJob("maintenance.oidc_cleanup", () => runOidcCleanup.execute());
+});
 
 logger.info("VistaBlox worker started");
 
@@ -94,7 +106,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   } catch (error: unknown) {
     logger.error({ err: error }, "pg-boss shutdown failed");
   }
-  await database.$disconnect();
+  await Promise.all([database.$disconnect(), authDatabase.end()]);
 }
 
 process.once("SIGINT", () => void shutdown("SIGINT"));
