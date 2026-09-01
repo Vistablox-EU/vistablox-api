@@ -85,11 +85,13 @@ import {
 } from "./modules/origination/application/respond-to-information-request.service.js";
 import type { OriginationRepository } from "./modules/origination/repository/origination.repository.js";
 import {
+  GetKycAccountForOperationsService,
   GetKycStatusService,
   ProcessDiditWebhookService,
   StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "./modules/identity/application/kyc.service.js";
+import { createKycOperationsRouter } from "./modules/identity/api/kyc-operations.router.js";
 import type { DiditClient } from "./modules/identity/application/didit-client.js";
 import {
   createDiditWebhookRouter,
@@ -345,6 +347,15 @@ export function createApp(dependencies: AppDependencies): Express {
               ? {}
               : { proofOfAddressWorkflowId: kyc.proofOfAddressWorkflowId }),
           }, kyc.invalidateDisplayProfile),
+        ),
+      );
+      app.use(
+        "/internal/v1/kyc-accounts",
+        createKycOperationsRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new GetKycAccountForOperationsService(kyc.repository),
         ),
       );
     }

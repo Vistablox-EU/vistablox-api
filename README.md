@@ -32,6 +32,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - webhook-then-fetch KYC decisions covering ID, liveness, face match, AML, age, and EU/EEA jurisdiction policy
 - separate hosted Didit proof-of-address workflow with residence matching and three-month document freshness
 - privacy-minimized KYC persistence that excludes provider payloads, document data, biometrics, and addresses
+- WebAuthn-protected operations decision display at `GET /internal/v1/kyc-accounts/:account_id`: the same `admin_operations` + staff-WebAuthn gate as founder origination review, reading the same already-persisted, already privacy-minimized eligibility record — never the raw Didit artifacts, which were never persisted in the first place. Surfaces the operational detail the customer's own `GET /v1/kyc` intentionally omits (`operational_substatus`, the Didit provider reference, declared residence/tax-residence countries) so a reviewer can actually see why an account is stuck in `pending_manual_review` or similar, closing the first of `docs/didit-kyc.md`'s follow-on-work gaps; a missing record reports `404` rather than a misleading default, since an arbitrary staff-supplied `account_id` might just be a typo
 - authenticated investor profile aggregate at `GET /v1/investor-profile`
 - cursor-paginated investor reservation history and current portfolio subresources
 - Redis/Valkey-backed, 24-hour protected cache for Didit-verified display names
@@ -151,6 +152,7 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `POST` | `/v1/kyc/sessions` | Create one hosted Didit individual-KYC session for an eligible customer account |
 | `POST` | `/v1/kyc/proof-of-address/sessions` | Create an owner-only hosted Didit address-verification session after baseline KYC |
 | `POST` | `/webhooks/didit` | Authenticate and idempotently process Didit status/data webhooks |
+| `GET` | `/internal/v1/kyc-accounts/:account_id` | WebAuthn-protected founder/operations read of one account's operational KYC eligibility record |
 | `POST` | `/v1/origination-cases` | Create an authenticated, eligibility-gated draft owner intake |
 | `GET` | `/v1/origination-cases?limit=20&after=...` | List the authenticated owner's cases |
 | `GET` | `/v1/origination-cases/:case_id` | Read one owner-scoped case; out-of-scope IDs return `404` |

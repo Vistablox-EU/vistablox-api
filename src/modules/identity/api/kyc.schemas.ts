@@ -1,5 +1,50 @@
 import { z } from "zod";
 
+import { diditStatuses } from "../domain/kyc-policy.js";
+
+const eligibilityStateSchema = z.enum([
+  "not_started",
+  "in_progress",
+  "pending_manual_review",
+  "eligible",
+  "unsupported_jurisdiction",
+  "not_eligible",
+  "requires_renewal",
+  "suspended_restricted",
+]);
+
+const proofOfAddressStatusSchema = z.enum([
+  "not_started",
+  "creating",
+  "creation_failed",
+  "in_progress",
+  "pending_manual_review",
+  "current",
+  "insufficient",
+  "expired",
+  "restart_required",
+  "integration_anomaly",
+]);
+
+const operationalSubstatusSchema = z.enum([
+  "kyc_not_started",
+  "kyc_session_creating",
+  "kyc_session_creation_failed",
+  "kyc_session_open",
+  "kyc_pending",
+  "kyc_resubmission_pending",
+  "kyc_manual_review",
+  "kyc_verified_pending_policy_eval",
+  "kyc_verified",
+  "kyc_verified_owner_poa_missing",
+  "kyc_jurisdiction_blocked",
+  "kyc_failed",
+  "kyc_restart_required",
+  "kyc_reverification_required",
+  "kyc_restricted",
+  "kyc_integration_anomaly",
+]);
+
 export const startKycSessionBodySchema = z.object({
   residence_country_code: z.string().regex(/^[A-Z]{2}$/),
   tax_residence_country_code: z.string().regex(/^[A-Z]{2}$/),
@@ -28,28 +73,37 @@ export const startProofOfAddressSessionResponseSchema = z.object({
 
 export const kycStatusResponseSchema = z.object({
   data: z.object({
-    eligibility_state: z.enum([
-      "not_started",
-      "in_progress",
-      "pending_manual_review",
-      "eligible",
-      "unsupported_jurisdiction",
-      "not_eligible",
-      "requires_renewal",
-      "suspended_restricted",
-    ]),
-    proof_of_address_status: z.enum([
-      "not_started",
-      "creating",
-      "creation_failed",
-      "in_progress",
-      "pending_manual_review",
-      "current",
-      "insufficient",
-      "expired",
-      "restart_required",
-      "integration_anomaly",
-    ]),
+    eligibility_state: eligibilityStateSchema,
+    proof_of_address_status: proofOfAddressStatusSchema,
+    proof_of_address_current_until: z.iso.datetime().nullable(),
+    last_verified_at: z.iso.datetime().nullable(),
+    renewal_due_at: z.iso.datetime().nullable(),
+  }),
+});
+
+export const kycAccountIdParamsSchema = z.object({
+  account_id: z.string().min(1),
+});
+
+// Operations-only view for authorized reviewers (admin_operations + staff
+// WebAuthn): the same privacy-minimized eligibility record the customer's
+// own GET /v1/kyc reads from, plus the operational detail a reviewer needs
+// to understand *why* an account is stuck (operational_substatus, provider
+// reference IDs, declared countries) that the customer-facing view omits.
+// Never the raw Didit artifacts themselves (documents, biometrics, full
+// provider payloads) — those were never persisted in the first place.
+export const operationsKycAccountResponseSchema = z.object({
+  data: z.object({
+    account_id: z.string(),
+    eligibility_state: eligibilityStateSchema,
+    operational_substatus: operationalSubstatusSchema,
+    didit_reference: z.string().nullable(),
+    residence_country_code: z.string().nullable(),
+    tax_residence_country_code: z.string().nullable(),
+    proof_of_address_status: proofOfAddressStatusSchema,
+    proof_of_address_didit_reference: z.string().nullable(),
+    proof_of_address_provider_status: z.enum(diditStatuses).nullable(),
+    proof_of_address_provider_updated_at: z.iso.datetime().nullable(),
     proof_of_address_current_until: z.iso.datetime().nullable(),
     last_verified_at: z.iso.datetime().nullable(),
     renewal_due_at: z.iso.datetime().nullable(),
