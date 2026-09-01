@@ -12,5 +12,6 @@ export interface OidcGrantRepository {
   listForAccount(accountId: string): Promise<OidcGrantSummary[]>;
   isOwnedByAccount(accountId: string, grantId: string): Promise<boolean>;
   revoke(grantId: string): Promise<void>;
-  revokeAllForAccount(accountId: string): Promise<void>;
+  /** Returns the IDs of the grants that were revoked, for audit purposes. */
+  revokeAllForAccount(accountId: string): Promise<string[]>;
 }

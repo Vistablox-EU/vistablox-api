@@ -107,8 +107,9 @@ describe.skipIf(databaseUrl === undefined)("OIDC grant + cleanup PostgreSQL inte
       600,
     );
 
-    await grants.revokeAllForAccount(accountId);
+    const revokedGrantIds = await grants.revokeAllForAccount(accountId);
 
+    expect(revokedGrantIds.sort()).toEqual([ownGrantA, ownGrantB].sort());
     expect(await grants.isOwnedByAccount(accountId, ownGrantA)).toBe(false);
     expect(await grants.isOwnedByAccount(accountId, ownGrantB)).toBe(false);
     expect(await accessTokens.find(ownTokenA)).toBeUndefined();

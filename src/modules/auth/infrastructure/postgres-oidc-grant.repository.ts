@@ -52,18 +52,27 @@ export class PostgresOidcGrantRepository implements OidcGrantRepository {
     );
   }
 
-  public async revokeAllForAccount(accountId: string): Promise<void> {
-    await this.pool.query(
+  public async revokeAllForAccount(accountId: string): Promise<string[]> {
+    // account_grants is computed once and reused by both the delete and the
+    // final select, so the returned IDs are exactly the grants that existed
+    // (and were deleted) for this account, for the caller to audit — the
+    // data-modifying CTE runs exactly once regardless of whether its own
+    // output is read.
+    const result = await this.pool.query<{ id: string }>(
       `WITH account_grants AS (
          SELECT g."id"
          FROM "oidc_model_instances" g
          JOIN "account"."accounts" a ON a."better_auth_user_id" = g."payload"->>'accountId'
          WHERE a."account_id" = $1 AND g."model_name" = 'Grant'
+       ),
+       deleted AS (
+         DELETE FROM "oidc_model_instances"
+         WHERE "grant_id" IN (SELECT "id" FROM account_grants)
+            OR ("model_name" = 'Grant' AND "id" IN (SELECT "id" FROM account_grants))
        )
-       DELETE FROM "oidc_model_instances"
-       WHERE "grant_id" IN (SELECT "id" FROM account_grants)
-          OR ("model_name" = 'Grant' AND "id" IN (SELECT "id" FROM account_grants))`,
+       SELECT "id" FROM account_grants`,
       [accountId],
     );
+    return result.rows.map((row) => row.id);
   }
 }

@@ -47,6 +47,7 @@ import {
 } from "./modules/auth/application/customer-session.service.js";
 import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
 import type { OidcGrantRepository } from "./modules/auth/repository/oidc-grant.repository.js";
+import type { AuthAuditSink } from "./modules/auth/application/auth-audit-sink.js";
 import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
 import { createOidcInteractionRouter } from "./modules/auth/api/oidc-interaction.router.js";
 import { createTotpRouter } from "./modules/auth/api/totp.router.js";
@@ -84,11 +85,13 @@ import {
 } from "./modules/origination/application/respond-to-information-request.service.js";
 import type { OriginationRepository } from "./modules/origination/repository/origination.repository.js";
 import {
+  GetKycAccountForOperationsService,
   GetKycStatusService,
   ProcessDiditWebhookService,
   StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "./modules/identity/application/kyc.service.js";
+import { createKycOperationsRouter } from "./modules/identity/api/kyc-operations.router.js";
 import type { DiditClient } from "./modules/identity/application/didit-client.js";
 import {
   createDiditWebhookRouter,
@@ -170,6 +173,7 @@ export interface AppDependencies {
       repository: CustomerSessionRepository;
       revoker: SessionRevoker;
       oidcGrants?: OidcGrantRepository;
+      auditSink?: AuthAuditSink;
     };
     oidc?: {
       provider: Provider;
@@ -290,8 +294,13 @@ export function createApp(dependencies: AppDependencies): Express {
             customerSessions.repository,
             customerSessions.revoker,
             customerSessions.oidcGrants,
+            customerSessions.auditSink,
           ),
-          new RevokeAllOwnSessionsService(customerSessions.revoker, customerSessions.oidcGrants),
+          new RevokeAllOwnSessionsService(
+            customerSessions.revoker,
+            customerSessions.oidcGrants,
+            customerSessions.auditSink,
+          ),
         ),
       );
     }
@@ -338,6 +347,15 @@ export function createApp(dependencies: AppDependencies): Express {
               ? {}
               : { proofOfAddressWorkflowId: kyc.proofOfAddressWorkflowId }),
           }, kyc.invalidateDisplayProfile),
+        ),
+      );
+      app.use(
+        "/internal/v1/kyc-accounts",
+        createKycOperationsRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new GetKycAccountForOperationsService(kyc.repository),
         ),
       );
     }

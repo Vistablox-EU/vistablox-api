@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
 import {
+  GetKycAccountForOperationsService,
   GetKycStatusService,
   ProcessDiditWebhookService,
   StartProofOfAddressSessionService,
@@ -211,6 +212,86 @@ describe("KYC application services", () => {
       await new GetKycStatusService(storage, () => now).execute(accountId),
     ).toMatchObject({
       data: { eligibility_state: "eligible", proof_of_address_status: "expired" },
+    });
+  });
+
+  it("returns the full operational record to an authorized reviewer, including fields the customer view omits", async () => {
+    const storage = repository({
+      getForAccount: vi.fn().mockResolvedValue({
+        accountId,
+        diditReference: sessionId,
+        eligibilityState: "pending_manual_review",
+        operationalSubstatus: "kyc_manual_review",
+        proofOfAddressDiditReference: proofOfAddressSessionId,
+        proofOfAddressProviderStatus: "In Review",
+        proofOfAddressProviderUpdatedAt: now,
+        proofOfAddressStatus: "pending_manual_review",
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "HR",
+        proofOfAddressCurrentUntil: null,
+        lastVerifiedAt: null,
+        renewalDueAt: null,
+      }),
+    });
+
+    const result = await new GetKycAccountForOperationsService(storage, () => now).execute(
+      accountId,
+    );
+
+    expect(storage.getForAccount).toHaveBeenCalledWith(accountId);
+    expect(result).toEqual({
+      data: {
+        account_id: accountId,
+        eligibility_state: "pending_manual_review",
+        operational_substatus: "kyc_manual_review",
+        didit_reference: sessionId,
+        residence_country_code: "DE",
+        tax_residence_country_code: "HR",
+        proof_of_address_status: "pending_manual_review",
+        proof_of_address_didit_reference: proofOfAddressSessionId,
+        proof_of_address_provider_status: "In Review",
+        proof_of_address_provider_updated_at: now.toISOString(),
+        proof_of_address_current_until: null,
+        last_verified_at: null,
+        renewal_due_at: null,
+      },
+    });
+  });
+
+  it("resolves an elapsed proof-of-address the same way the customer-facing view does", async () => {
+    const storage = repository({
+      getForAccount: vi.fn().mockResolvedValue({
+        accountId,
+        diditReference: sessionId,
+        eligibilityState: "eligible",
+        operationalSubstatus: "kyc_verified",
+        proofOfAddressDiditReference: proofOfAddressSessionId,
+        proofOfAddressProviderStatus: "Approved",
+        proofOfAddressProviderUpdatedAt: now,
+        proofOfAddressStatus: "current",
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "HR",
+        proofOfAddressCurrentUntil: new Date("2026-09-01T11:59:59.000Z"),
+        lastVerifiedAt: now,
+        renewalDueAt: new Date("2028-09-01T12:00:00.000Z"),
+      }),
+    });
+
+    const result = await new GetKycAccountForOperationsService(storage, () => now).execute(
+      accountId,
+    );
+
+    expect(result.data.proof_of_address_status).toBe("expired");
+  });
+
+  it("reports 404 rather than a misleading default when no KYC record exists for the account", async () => {
+    const storage = repository({ getForAccount: vi.fn().mockResolvedValue(null) });
+
+    await expect(
+      new GetKycAccountForOperationsService(storage, () => now).execute("acct_unknown"),
+    ).rejects.toMatchObject({
+      code: "identity.kyc_account_not_found",
+      status: 404,
     });
   });
 

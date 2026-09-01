@@ -3,8 +3,11 @@ import { randomUUID } from "node:crypto";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { DiditClient } from "./didit-client.js";
 import { evaluateDiditOutcome, type DiditStatus } from "../domain/kyc-policy.js";
-import { evaluateProofOfAddressOutcome } from "../domain/proof-of-address-policy.js";
-import type { KycRepository } from "../repository/kyc.repository.js";
+import {
+  evaluateProofOfAddressOutcome,
+  type ProofOfAddressStatus,
+} from "../domain/proof-of-address-policy.js";
+import type { KycEligibilityRecord, KycRepository } from "../repository/kyc.repository.js";
 
 export class StartKycSessionService {
   public constructor(
@@ -107,16 +110,10 @@ export class GetKycStatusService {
 
   public async execute(accountId: string) {
     const record = await this.repository.getForAccount(accountId);
-    const proofOfAddressStatus =
-      record?.proofOfAddressStatus === "current" &&
-      record.proofOfAddressCurrentUntil !== null &&
-      record.proofOfAddressCurrentUntil <= this.clock()
-        ? "expired"
-        : record?.proofOfAddressStatus ?? "not_started";
     return {
       data: {
         eligibility_state: record?.eligibilityState ?? "not_started",
-        proof_of_address_status: proofOfAddressStatus,
+        proof_of_address_status: resolveProofOfAddressStatus(record, this.clock()),
         proof_of_address_current_until:
           record?.proofOfAddressCurrentUntil?.toISOString() ?? null,
         last_verified_at: record?.lastVerifiedAt?.toISOString() ?? null,
@@ -124,6 +121,64 @@ export class GetKycStatusService {
       },
     };
   }
+}
+
+// Operations-only lookup for authorized reviewers (admin_operations +
+// staff WebAuthn, enforced at the router). Unlike GetKycStatusService
+// above — which always answers for the caller's own, guaranteed-to-exist
+// account, defaulting a missing record to "not_started" — this is a
+// lookup by an arbitrary staff-supplied account_id, so a missing record
+// is reported as 404 rather than silently rendered as a plausible-looking
+// "not started" account that might just be a typo.
+export class GetKycAccountForOperationsService {
+  public constructor(
+    private readonly repository: KycRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(accountId: string) {
+    const record = await this.repository.getForAccount(accountId);
+    if (record === null) throw kycAccountNotFoundError();
+    return {
+      data: {
+        account_id: record.accountId,
+        eligibility_state: record.eligibilityState,
+        operational_substatus: record.operationalSubstatus,
+        didit_reference: record.diditReference,
+        residence_country_code: record.residenceCountryCode,
+        tax_residence_country_code: record.taxResidenceCountryCode,
+        proof_of_address_status: resolveProofOfAddressStatus(record, this.clock()),
+        proof_of_address_didit_reference: record.proofOfAddressDiditReference,
+        proof_of_address_provider_status: record.proofOfAddressProviderStatus,
+        proof_of_address_provider_updated_at:
+          record.proofOfAddressProviderUpdatedAt?.toISOString() ?? null,
+        proof_of_address_current_until:
+          record.proofOfAddressCurrentUntil?.toISOString() ?? null,
+        last_verified_at: record.lastVerifiedAt?.toISOString() ?? null,
+        renewal_due_at: record.renewalDueAt?.toISOString() ?? null,
+      },
+    };
+  }
+}
+
+function resolveProofOfAddressStatus(
+  record: KycEligibilityRecord | null,
+  now: Date,
+): ProofOfAddressStatus {
+  return record?.proofOfAddressStatus === "current" &&
+    record.proofOfAddressCurrentUntil !== null &&
+    record.proofOfAddressCurrentUntil <= now
+    ? "expired"
+    : record?.proofOfAddressStatus ?? "not_started";
+}
+
+function kycAccountNotFoundError(): AppError {
+  return new AppError({
+    code: "identity.kyc_account_not_found",
+    title: "KYC record not found",
+    status: 404,
+    detail: "No KYC eligibility record was found for that account.",
+  });
 }
 
 export class StartProofOfAddressSessionService {

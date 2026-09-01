@@ -8,12 +8,14 @@ export class PrismaAuthAuditSink implements AuthAuditSink {
 
   public async record(event: AuthAuditEvent): Promise<void> {
     const account =
-      event.betterAuthUserId === null
-        ? null
-        : await this.database.account.findUnique({
-            where: { betterAuthUserId: event.betterAuthUserId },
-            select: { id: true },
-          });
+      event.accountId !== undefined
+        ? { id: event.accountId }
+        : event.betterAuthUserId === null
+          ? null
+          : await this.database.account.findUnique({
+              where: { betterAuthUserId: event.betterAuthUserId },
+              select: { id: true },
+            });
     const resource = resolveResource(event, account?.id ?? null);
     await this.database.auditLog.createMany({
       data: [

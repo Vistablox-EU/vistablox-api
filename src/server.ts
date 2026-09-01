@@ -265,6 +265,7 @@ const app = createApp({
       repository: new PrismaCustomerSessionRepository(database),
       revoker: new BetterAuthSessionRevoker(auth),
       oidcGrants: new PostgresOidcGrantRepository(authDatabase),
+      auditSink: authAuditSink,
     },
     oidc: {
       provider: oidcProvider,
