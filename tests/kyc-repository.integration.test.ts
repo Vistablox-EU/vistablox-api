@@ -99,6 +99,7 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
         operationalSubstatus: "kyc_verified_owner_poa_missing" as const,
         reasonCode: "KYC_BASELINE_APPROVED",
         lastVerifiedAt: approvedAt,
+        everRequiredManualReview: false,
         renewalDueAt: new Date("2028-09-01T12:00:00.000Z"),
       },
     };
@@ -137,6 +138,7 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
           operationalSubstatus: "kyc_pending",
           reasonCode: "KYC_SESSION_PENDING",
           lastVerifiedAt: null,
+          everRequiredManualReview: false,
           renewalDueAt: null,
         },
       }),

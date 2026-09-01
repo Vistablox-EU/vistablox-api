@@ -22,6 +22,7 @@ export interface KycEligibilityRecord {
   taxResidenceCountryCode: string | null;
   proofOfAddressCurrentUntil: Date | null;
   lastVerifiedAt: Date | null;
+  everRequiredManualReview: boolean;
   renewalDueAt: Date | null;
 }
 

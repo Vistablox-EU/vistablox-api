@@ -89,7 +89,13 @@ export interface KycPolicyOutcome {
   reasonCode: string;
   lastVerifiedAt: Date | null;
   renewalDueAt: Date | null;
+  everRequiredManualReview: boolean;
 }
+
+// The status/decision-driven part of KycPolicyOutcome, before the renewal
+// interval (which depends on accumulated risk history, not just this one
+// decision) is layered on by evaluateDiditOutcome below.
+type StatusOutcome = Omit<KycPolicyOutcome, "everRequiredManualReview">;
 
 const supportedCountries = new Set([
   "AT", "BE", "BG", "HR", "CY", "CZ", "DK", "EE", "FI", "FR", "DE",
@@ -106,13 +112,39 @@ const manualReviewReasons = new Set([
   "AML_ADVERSE_MEDIA_REVIEW",
 ]);
 
+// AD-213's sibling renewal-policy rule (KYC_WORKFLOW.md's Renewal Policy):
+// 24 months for a low-risk supported-jurisdiction retail customer, 12 for
+// one who has ever required manual review. everRequiredManualReview is the
+// account's persisted history (input, from the caller's last-read record);
+// a status that itself resolves to kyc_manual_review on *this* decision
+// also counts, so the flag going forward reflects it even before the next
+// persisted read would.
 export function evaluateDiditOutcome(input: {
   status: DiditStatus | null;
   decision: DiditDecisionSummary | null;
   residenceCountryCode: string | null;
   taxResidenceCountryCode: string | null;
   occurredAt: Date;
+  everRequiredManualReview: boolean;
 }): KycPolicyOutcome {
+  const base = evaluateStatusOutcome(input);
+  const everRequiredManualReview =
+    input.everRequiredManualReview || base.operationalSubstatus === "kyc_manual_review";
+  if (base.eligibilityState !== "eligible") {
+    return { ...base, everRequiredManualReview };
+  }
+  const renewalDueAt = new Date(input.occurredAt);
+  renewalDueAt.setUTCMonth(renewalDueAt.getUTCMonth() + (everRequiredManualReview ? 12 : 24));
+  return { ...base, renewalDueAt, everRequiredManualReview };
+}
+
+function evaluateStatusOutcome(input: {
+  status: DiditStatus | null;
+  decision: DiditDecisionSummary | null;
+  residenceCountryCode: string | null;
+  taxResidenceCountryCode: string | null;
+  occurredAt: Date;
+}): StatusOutcome {
   switch (input.status) {
     case "Not Started":
       return outcome("not_started", "kyc_session_open", "KYC_SESSION_OPEN");
@@ -169,7 +201,7 @@ function evaluateApproved(input: {
   residenceCountryCode: string | null;
   taxResidenceCountryCode: string | null;
   occurredAt: Date;
-}): KycPolicyOutcome {
+}): StatusOutcome {
   if (
     input.residenceCountryCode === null ||
     input.taxResidenceCountryCode === null ||
@@ -241,14 +273,14 @@ function evaluateApproved(input: {
     );
   }
 
-  const renewalDueAt = new Date(input.occurredAt);
-  renewalDueAt.setUTCMonth(renewalDueAt.getUTCMonth() + 24);
   return {
     eligibilityState: "eligible",
     operationalSubstatus: "kyc_verified_owner_poa_missing",
     reasonCode: "KYC_BASELINE_APPROVED",
     lastVerifiedAt: input.occurredAt,
-    renewalDueAt,
+    // Set by evaluateDiditOutcome, once it knows the account's full
+    // manual-review history rather than just this one decision.
+    renewalDueAt: null,
   };
 }
 
@@ -280,7 +312,7 @@ function outcome(
   eligibilityState: KycEligibilityState,
   operationalSubstatus: KycOperationalSubstatus,
   reasonCode: string,
-): KycPolicyOutcome {
+): StatusOutcome {
   return {
     eligibilityState,
     operationalSubstatus,

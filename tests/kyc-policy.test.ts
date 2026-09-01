@@ -35,6 +35,7 @@ describe("Didit KYC policy", () => {
       decision: approvedDecision(),
       residenceCountryCode: "DE",
       taxResidenceCountryCode: "HR",
+      everRequiredManualReview: false,
       occurredAt,
     });
 
@@ -43,7 +44,56 @@ describe("Didit KYC policy", () => {
       operationalSubstatus: "kyc_verified_owner_poa_missing",
       reasonCode: "KYC_BASELINE_APPROVED",
       lastVerifiedAt: occurredAt,
+      everRequiredManualReview: false,
       renewalDueAt: new Date("2028-09-01T12:00:00.000Z"),
+    });
+  });
+
+  it("sets a 12-month renewal instead of 24 for an account with any manual-review history", () => {
+    const result = evaluateDiditOutcome({
+      status: "Approved",
+      decision: approvedDecision(),
+      residenceCountryCode: "DE",
+      taxResidenceCountryCode: "HR",
+      everRequiredManualReview: true,
+      occurredAt,
+    });
+
+    expect(result).toMatchObject({
+      eligibilityState: "eligible",
+      everRequiredManualReview: true,
+      renewalDueAt: new Date("2027-09-01T12:00:00.000Z"),
+    });
+  });
+
+  it("latches everRequiredManualReview once a decision resolves to manual review, even on a later clean approval", () => {
+    const flaggedByThisDecision = evaluateDiditOutcome({
+      status: "Approved",
+      decision: approvedDecision({
+        amlScreenings: [{ status: "Approved", totalHits: 1, warnings: [{ risk: "pep match" }] }],
+      }),
+      residenceCountryCode: "DE",
+      taxResidenceCountryCode: "HR",
+      everRequiredManualReview: false,
+      occurredAt,
+    });
+    expect(flaggedByThisDecision).toMatchObject({
+      eligibilityState: "pending_manual_review",
+      everRequiredManualReview: true,
+    });
+
+    const laterCleanApproval = evaluateDiditOutcome({
+      status: "Approved",
+      decision: approvedDecision(),
+      residenceCountryCode: "DE",
+      taxResidenceCountryCode: "HR",
+      everRequiredManualReview: true,
+      occurredAt,
+    });
+    expect(laterCleanApproval).toMatchObject({
+      eligibilityState: "eligible",
+      everRequiredManualReview: true,
+      renewalDueAt: new Date("2027-09-01T12:00:00.000Z"),
     });
   });
 
@@ -54,6 +104,7 @@ describe("Didit KYC policy", () => {
         decision: approvedDecision(),
         residenceCountryCode: "US",
         taxResidenceCountryCode: "DE",
+        everRequiredManualReview: false,
         occurredAt,
       }),
     ).toMatchObject({
@@ -72,6 +123,7 @@ describe("Didit KYC policy", () => {
           }),
           residenceCountryCode: "DE",
           taxResidenceCountryCode: "DE",
+          everRequiredManualReview: false,
           occurredAt,
         }),
       ).toMatchObject({ eligibilityState: "not_eligible", reasonCode: "AGE_UNDER_18" });
@@ -92,6 +144,7 @@ describe("Didit KYC policy", () => {
       }),
       residenceCountryCode: "DE",
       taxResidenceCountryCode: "DE",
+      everRequiredManualReview: false,
       occurredAt,
     });
     const incomplete = evaluateDiditOutcome({
@@ -99,6 +152,7 @@ describe("Didit KYC policy", () => {
       decision: approvedDecision({ faceMatches: [] }),
       residenceCountryCode: "DE",
       taxResidenceCountryCode: "DE",
+      everRequiredManualReview: false,
       occurredAt,
     });
 
@@ -119,6 +173,7 @@ describe("Didit KYC policy", () => {
         decision: null,
         residenceCountryCode: "DE",
         taxResidenceCountryCode: "DE",
+        everRequiredManualReview: false,
         occurredAt,
       }),
     ).toMatchObject({ eligibilityState: "requires_renewal" });
@@ -128,6 +183,7 @@ describe("Didit KYC policy", () => {
         decision: null,
         residenceCountryCode: "DE",
         taxResidenceCountryCode: "DE",
+        everRequiredManualReview: false,
         occurredAt,
       }),
     ).toMatchObject({ operationalSubstatus: "kyc_integration_anomaly" });

@@ -155,6 +155,7 @@ export class GetKycAccountForOperationsService {
         proof_of_address_current_until:
           record.proofOfAddressCurrentUntil?.toISOString() ?? null,
         last_verified_at: record.lastVerifiedAt?.toISOString() ?? null,
+        ever_required_manual_review: record.everRequiredManualReview,
         renewal_due_at: record.renewalDueAt?.toISOString() ?? null,
       },
     };
@@ -396,6 +397,7 @@ export class ProcessDiditWebhookService {
               decision,
               residenceCountryCode: target.residenceCountryCode,
               taxResidenceCountryCode: target.taxResidenceCountryCode,
+              everRequiredManualReview: target.everRequiredManualReview,
               occurredAt: receivedAt,
             }),
           })
