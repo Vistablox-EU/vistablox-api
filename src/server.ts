@@ -99,6 +99,9 @@ const diditKyc =
         callbackUrl: environment.DIDIT_CALLBACK_URL,
         applicationId: environment.DIDIT_APPLICATION_ID,
         environment: environment.DIDIT_ENVIRONMENT,
+        ...(environment.DIDIT_POA_WORKFLOW_ID === undefined
+          ? {}
+          : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),
       }
     : undefined;
 const app = createApp({

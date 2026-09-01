@@ -32,6 +32,7 @@ describe("Didit HTTP client", () => {
       accountId: "acct_01",
       callbackUrl: "https://app.vistablox.eu/kyc/complete",
       sessionStartId: "kyc_start_01",
+      purpose: "baseline_kyc",
       language: "en",
     });
 
@@ -49,7 +50,10 @@ describe("Didit HTTP client", () => {
       workflow_id: workflowId,
       vendor_data: "acct_01",
       callback: "https://app.vistablox.eu/kyc/complete",
-      metadata: { vistablox_session_start_id: "kyc_start_01" },
+      metadata: {
+        vistablox_session_start_id: "kyc_start_01",
+        vistablox_verification_purpose: "baseline_kyc",
+      },
       language: "en",
     });
   });
@@ -74,6 +78,19 @@ describe("Didit HTTP client", () => {
         liveness_checks: [{ status: "Approved", score: 99 }],
         face_matches: [{ status: "Approved", score: 98 }],
         aml_screenings: [{ status: "Approved", total_hits: 0, matches: [] }],
+        poa_verifications: [
+          {
+            status: "Approved",
+            issue_date: "2026-06-15",
+            issuing_state: "DEU",
+            poa_parsed_address: {
+              country: "DE",
+              street_1: "Must not escape adapter",
+            },
+            poa_address: "Private address",
+            warnings: [],
+          },
+        ],
         raw_images: ["private"],
       }),
     );
@@ -95,9 +112,18 @@ describe("Didit HTTP client", () => {
       livenessChecks: [{ status: "Approved", warnings: [] }],
       faceMatches: [{ status: "Approved", warnings: [] }],
       amlScreenings: [{ status: "Approved", totalHits: 0, warnings: [] }],
+      proofOfAddressVerifications: [
+        {
+          status: "Approved",
+          issueDate: "2026-06-15",
+          countryCode: "DE",
+          warnings: [],
+        },
+      ],
     });
     expect(JSON.stringify(result)).not.toContain("SECRET");
     expect(JSON.stringify(result)).not.toContain("raw_images");
+    expect(JSON.stringify(result)).not.toContain("Private address");
   });
 
   it("returns a safe provider error without response content", async () => {
@@ -116,6 +142,7 @@ describe("Didit HTTP client", () => {
         accountId: "acct_01",
         callbackUrl: "https://app.vistablox.eu/kyc/complete",
         sessionStartId: "kyc_start_01",
+        purpose: "baseline_kyc",
       }),
     ).rejects.toMatchObject({
       code: "identity.kyc_provider_unavailable",

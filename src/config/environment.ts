@@ -54,6 +54,7 @@ const environmentSchema = z
     DIDIT_API_BASE_URL: z.url().default("https://verification.didit.me"),
     DIDIT_API_KEY: optionalNonEmptyString(),
     DIDIT_WORKFLOW_ID: optionalUuid(),
+    DIDIT_POA_WORKFLOW_ID: optionalUuid(),
     DIDIT_CALLBACK_URL: z.preprocess(
       emptyStringToUndefined,
       z.url().optional(),
@@ -95,6 +96,24 @@ const environmentSchema = z
     {
       message: "All Didit KYC settings must be configured together",
       path: ["DIDIT_API_KEY"],
+    },
+  )
+  .refine(
+    (environment) =>
+      environment.DIDIT_POA_WORKFLOW_ID === undefined ||
+      environment.DIDIT_API_KEY !== undefined,
+    {
+      message: "DIDIT_POA_WORKFLOW_ID requires the Didit KYC integration",
+      path: ["DIDIT_POA_WORKFLOW_ID"],
+    },
+  )
+  .refine(
+    (environment) =>
+      environment.DIDIT_POA_WORKFLOW_ID === undefined ||
+      environment.DIDIT_POA_WORKFLOW_ID !== environment.DIDIT_WORKFLOW_ID,
+    {
+      message: "DIDIT_POA_WORKFLOW_ID must differ from DIDIT_WORKFLOW_ID",
+      path: ["DIDIT_POA_WORKFLOW_ID"],
     },
   );
 

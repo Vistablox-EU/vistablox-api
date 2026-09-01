@@ -58,6 +58,11 @@ export interface DiditAmlSummary extends DiditFeatureSummary {
   totalHits: number | null;
 }
 
+export interface DiditProofOfAddressSummary extends DiditFeatureSummary {
+  issueDate: string | null;
+  countryCode: string | null;
+}
+
 export interface DiditDecisionSummary {
   sessionId: string;
   sessionKind: "user" | "business" | null;
@@ -68,6 +73,7 @@ export interface DiditDecisionSummary {
   livenessChecks: DiditFeatureSummary[];
   faceMatches: DiditFeatureSummary[];
   amlScreenings: DiditAmlSummary[];
+  proofOfAddressVerifications: DiditProofOfAddressSummary[];
 }
 
 export interface KycPolicyOutcome {

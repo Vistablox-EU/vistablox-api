@@ -20,6 +20,7 @@ function approvedDecision(overrides: Partial<DiditDecisionSummary> = {}): DiditD
     livenessChecks: [{ status: "Approved", warnings: [] }],
     faceMatches: [{ status: "Approved", warnings: [] }],
     amlScreenings: [{ status: "Approved", totalHits: 0, warnings: [] }],
+    proofOfAddressVerifications: [],
     ...overrides,
   };
 }

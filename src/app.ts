@@ -64,6 +64,7 @@ import type { OriginationRepository } from "./modules/origination/repository/ori
 import {
   GetKycStatusService,
   ProcessDiditWebhookService,
+  StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "./modules/identity/application/kyc.service.js";
 import type { DiditClient } from "./modules/identity/application/didit-client.js";
@@ -96,6 +97,7 @@ export interface AppDependencies {
       callbackUrl: string;
       applicationId: string;
       environment: "sandbox" | "live";
+      proofOfAddressWorkflowId?: string;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -171,6 +173,16 @@ export function createApp(dependencies: AppDependencies): Express {
             workflowId: kyc.workflowId,
             callbackUrl: kyc.callbackUrl,
           }),
+          kyc.proofOfAddressWorkflowId === undefined
+            ? undefined
+            : new StartProofOfAddressSessionService(
+                kyc.repository,
+                kyc.didit,
+                {
+                  workflowId: kyc.proofOfAddressWorkflowId,
+                  callbackUrl: kyc.callbackUrl,
+                },
+              ),
         ),
       );
       app.use(
@@ -181,6 +193,9 @@ export function createApp(dependencies: AppDependencies): Express {
             workflowId: kyc.workflowId,
             applicationId: kyc.applicationId,
             environment: kyc.environment,
+            ...(kyc.proofOfAddressWorkflowId === undefined
+              ? {}
+              : { proofOfAddressWorkflowId: kyc.proofOfAddressWorkflowId }),
           }),
         ),
       );

@@ -28,6 +28,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - Didit v3 hosted individual-KYC session creation with opaque account correlation
 - HMAC-SHA256 V2 authenticated Didit webhooks with timestamp replay protection and event idempotency
 - webhook-then-fetch KYC decisions covering ID, liveness, face match, AML, age, and EU/EEA jurisdiction policy
+- separate hosted Didit proof-of-address workflow with residence matching and three-month document freshness
 - privacy-minimized KYC persistence that excludes provider payloads, document data, biometrics, and addresses
 - KYC/proof-of-address-gated owner intake at `POST /v1/origination-cases`
 - owner-scoped origination case list/detail reads with opaque cursor pagination
@@ -40,7 +41,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - Vitest API and domain tests
 - dependency boundary checks for the documented `router -> schema -> application service -> domain policy -> repository` layering
 
-Native-client OIDC, customer TOTP, customer session/device management, auth rate limiting, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Didit proof-of-address evidence, protected decision-display caching, cross-validation of declared identity data, and asynchronous webhook processing remain follow-on KYC work. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
+Native-client OIDC, customer TOTP, customer session/device management, auth rate limiting, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Protected decision-display caching, cross-validation of declared identity data, and asynchronous webhook processing remain follow-on KYC work. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
 
 ## Local setup
 
@@ -56,7 +57,7 @@ npm run dev
 
 `DATABASE_URL` is the pooled runtime connection. `DIRECT_DATABASE_URL` must be the non-pooled connection used by Prisma migrations.
 
-Didit KYC remains disabled unless every `DIDIT_*` value in `.env.example` is configured. The provider webhook destination is `/webhooks/didit`; the callback URL is the frontend destination Didit uses after the hosted verification flow. See [`docs/didit-kyc.md`](docs/didit-kyc.md) for the reviewed workflow and data boundary.
+Didit baseline KYC remains disabled unless the required `DIDIT_*` values in `.env.example` are configured together. `DIDIT_POA_WORKFLOW_ID` independently enables the owner-only hosted address workflow. The provider webhook destination is `/webhooks/didit`; the callback URL is the frontend destination Didit uses after either hosted verification flow. See [`docs/didit-kyc.md`](docs/didit-kyc.md) for the reviewed workflow and data boundary.
 
 ## Commands
 
@@ -87,6 +88,7 @@ npm run db:migrate:deploy
 | `GET` | `/v1/offerings?limit=20&after=...` | Cursor-paginated public offering teasers |
 | `GET` | `/v1/kyc` | Read the authenticated customer's local eligibility status and renewal dates |
 | `POST` | `/v1/kyc/sessions` | Create one hosted Didit individual-KYC session for an eligible customer account |
+| `POST` | `/v1/kyc/proof-of-address/sessions` | Create an owner-only hosted Didit address-verification session after baseline KYC |
 | `POST` | `/webhooks/didit` | Authenticate and idempotently process Didit status/data webhooks |
 | `POST` | `/v1/origination-cases` | Create an authenticated, eligibility-gated draft owner intake |
 | `GET` | `/v1/origination-cases?limit=20&after=...` | List the authenticated owner's cases |

@@ -28,6 +28,14 @@ const featureSchema = z
   .passthrough();
 const identitySchema = featureSchema.extend({ date_of_birth: z.string().nullable().optional() });
 const amlSchema = featureSchema.extend({ total_hits: z.number().int().min(0).nullable().optional() });
+const proofOfAddressSchema = featureSchema.extend({
+  issue_date: z.string().nullable().optional(),
+  issuing_state: z.string().nullable().optional(),
+  poa_parsed_address: z
+    .object({ country: z.string().nullable().optional() })
+    .passthrough()
+    .nullish(),
+});
 const decisionResponseSchema = z
   .object({
     session_id: z.string().uuid(),
@@ -39,6 +47,7 @@ const decisionResponseSchema = z
     liveness_checks: z.array(featureSchema).nullish(),
     face_matches: z.array(featureSchema).nullish(),
     aml_screenings: z.array(amlSchema).nullish(),
+    poa_verifications: z.array(proofOfAddressSchema).nullish(),
   })
   .passthrough();
 
@@ -57,6 +66,7 @@ export class HttpDiditClient implements DiditClient {
     accountId: string;
     callbackUrl: string;
     sessionStartId: string;
+    purpose: "baseline_kyc" | "owner_proof_of_address";
     language?: string;
   }) {
     const response = await this.request("/v3/session/", {
@@ -65,7 +75,10 @@ export class HttpDiditClient implements DiditClient {
         workflow_id: input.workflowId,
         vendor_data: input.accountId,
         callback: input.callbackUrl,
-        metadata: { vistablox_session_start_id: input.sessionStartId },
+        metadata: {
+          vistablox_session_start_id: input.sessionStartId,
+          vistablox_verification_purpose: input.purpose,
+        },
         ...(input.language === undefined ? {} : { language: input.language }),
       }),
     });
@@ -108,6 +121,15 @@ export class HttpDiditClient implements DiditClient {
         totalHits: feature.total_hits ?? null,
         warnings: toWarnings(feature.warnings),
       })),
+      proofOfAddressVerifications: (parsed.data.poa_verifications ?? []).map(
+        (feature) => ({
+          status: feature.status,
+          issueDate: feature.issue_date ?? null,
+          countryCode:
+            feature.poa_parsed_address?.country ?? feature.issuing_state ?? null,
+          warnings: toWarnings(feature.warnings),
+        }),
+      ),
     };
   }
 

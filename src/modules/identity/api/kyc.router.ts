@@ -4,6 +4,7 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import {
   GetKycStatusService,
   ProcessDiditWebhookService,
+  StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "../application/kyc.service.js";
 import { DiditWebhookVerifier } from "../infrastructure/didit-webhook-verifier.js";
@@ -11,6 +12,8 @@ import {
   diditWebhookBodySchema,
   diditWebhookResponseSchema,
   kycStatusResponseSchema,
+  startProofOfAddressSessionBodySchema,
+  startProofOfAddressSessionResponseSchema,
   startKycSessionBodySchema,
   startKycSessionResponseSchema,
 } from "./kyc.schemas.js";
@@ -19,6 +22,7 @@ export function createKycRouter(
   requireAuthentication: RequestHandler,
   getStatus: GetKycStatusService,
   startSession: StartKycSessionService,
+  startProofOfAddressSession?: StartProofOfAddressSessionService,
 ): Router {
   const router = Router();
   router.get("/", requireAuthentication, async (_request, response) => {
@@ -40,6 +44,25 @@ export function createKycRouter(
     response.setHeader("Cache-Control", "no-store");
     response.status(201).json(startKycSessionResponseSchema.parse(result));
   });
+  if (startProofOfAddressSession !== undefined) {
+    router.post(
+      "/proof-of-address/sessions",
+      requireAuthentication,
+      async (request, response) => {
+        const context = requireCustomerContext(response.locals.authContext);
+        const body = startProofOfAddressSessionBodySchema.parse(request.body);
+        const result = await startProofOfAddressSession.execute({
+          accountId: context.accountId,
+          traceId: String(response.locals.traceId),
+          ...(body.language === undefined ? {} : { language: body.language }),
+        });
+        response.setHeader("Cache-Control", "no-store");
+        response
+          .status(201)
+          .json(startProofOfAddressSessionResponseSchema.parse(result));
+      },
+    );
+  }
   return router;
 }
 

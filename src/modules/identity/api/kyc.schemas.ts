@@ -14,6 +14,18 @@ export const startKycSessionResponseSchema = z.object({
   }),
 });
 
+export const startProofOfAddressSessionBodySchema = z.object({
+  language: z.string().regex(/^[a-z]{2}$/).optional(),
+});
+
+export const startProofOfAddressSessionResponseSchema = z.object({
+  data: z.object({
+    verification_session_id: z.string().uuid(),
+    verification_url: z.url(),
+    proof_of_address_status: z.literal("in_progress"),
+  }),
+});
+
 export const kycStatusResponseSchema = z.object({
   data: z.object({
     eligibility_state: z.enum([
@@ -25,6 +37,18 @@ export const kycStatusResponseSchema = z.object({
       "not_eligible",
       "requires_renewal",
       "suspended_restricted",
+    ]),
+    proof_of_address_status: z.enum([
+      "not_started",
+      "creating",
+      "creation_failed",
+      "in_progress",
+      "pending_manual_review",
+      "current",
+      "insufficient",
+      "expired",
+      "restart_required",
+      "integration_anomaly",
     ]),
     proof_of_address_current_until: z.iso.datetime().nullable(),
     last_verified_at: z.iso.datetime().nullable(),
