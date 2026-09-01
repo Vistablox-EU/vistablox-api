@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import { z } from "zod";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import type {
@@ -16,8 +17,21 @@ import type {
   KycRepository,
 } from "./kyc.repository.js";
 
+const renewalLeadDaysSettingSchema = z.object({ days: z.number().int().min(1).max(365) });
+
 export class PrismaKycRepository implements KycRepository {
   public constructor(private readonly database: DatabaseClient) {}
+
+  public async getRenewalReminderLeadDays(): Promise<number> {
+    const setting = await this.database.platformSetting.findUnique({
+      where: { key: "identity.kyc_renewal_reminder_lead_days" },
+      select: { value: true },
+    });
+    if (setting === null) {
+      throw new Error("Missing identity.kyc_renewal_reminder_lead_days setting");
+    }
+    return renewalLeadDaysSettingSchema.parse(setting.value).days;
+  }
 
   public async getForAccount(accountId: string): Promise<KycEligibilityRecord | null> {
     const record = await this.database.kycEligibility.findUnique({ where: { accountId } });
@@ -557,6 +571,68 @@ export class PrismaKycRepository implements KycRepository {
         },
       ],
       skipDuplicates: true,
+    });
+  }
+
+  public async listEligibleAccountsForRenewalTimer(): Promise<
+    Array<{ accountId: string; contactEmail: string | null; renewalDueAt: Date }>
+  > {
+    const rows = await this.database.kycEligibility.findMany({
+      where: { eligibilityState: "eligible", renewalDueAt: { not: null } },
+      select: {
+        accountId: true,
+        renewalDueAt: true,
+        account: { select: { protectedContactEmail: true } },
+      },
+    });
+    return rows.map((row) => ({
+      accountId: row.accountId,
+      contactEmail: row.account.protectedContactEmail,
+      renewalDueAt: row.renewalDueAt as Date,
+    }));
+  }
+
+  public async transitionToRequiresRenewal(input: {
+    accountId: string;
+    traceId: string;
+    transitionedAt: Date;
+  }): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      const updated = await transaction.kycEligibility.updateMany({
+        where: { accountId: input.accountId, eligibilityState: "eligible" },
+        data: {
+          eligibilityState: "requires_renewal",
+          updatedAt: input.transitionedAt,
+        },
+      });
+      if (updated.count !== 1) return false;
+
+      await transaction.kycEligibilityHistory.create({
+        data: {
+          id: `kych_${ulid()}`,
+          accountId: input.accountId,
+          previousState: "eligible",
+          newState: "requires_renewal",
+          reasonCode: "KYC_RENEWAL_DUE",
+          changedAt: input.transitionedAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: null,
+          action: "identity.kyc_renewal_due",
+          resourceType: "kyc_eligibility",
+          resourceId: input.accountId,
+          changes: {
+            trace_id: input.traceId,
+            previous_state: "eligible",
+            new_state: "requires_renewal",
+          },
+          createdAt: input.transitionedAt,
+        },
+      });
+      return true;
     });
   }
 }

@@ -252,6 +252,30 @@ function evaluateApproved(input: {
   };
 }
 
+// AD-213: the renewal job owns renewal_due_at end to end — an advance
+// reminder on a configurable lead time, then an automatic transition to
+// requires_renewal once the date passes. Both checks run at most once a day,
+// so no separate "reminder already sent" marker is needed: isRenewalReminderDue
+// matches exactly one calendar day, and the transition is naturally idempotent
+// since a renewed/transitioned record no longer matches its own query.
+export function isRenewalReminderDue(input: {
+  renewalDueAt: Date;
+  today: Date;
+  leadDays: number;
+}): boolean {
+  const reminderDate = new Date(input.renewalDueAt);
+  reminderDate.setUTCDate(reminderDate.getUTCDate() - input.leadDays);
+  return (
+    reminderDate.getUTCFullYear() === input.today.getUTCFullYear() &&
+    reminderDate.getUTCMonth() === input.today.getUTCMonth() &&
+    reminderDate.getUTCDate() === input.today.getUTCDate()
+  );
+}
+
+export function isRenewalOverdue(input: { renewalDueAt: Date; now: Date }): boolean {
+  return input.renewalDueAt.getTime() < input.now.getTime();
+}
+
 function outcome(
   eligibilityState: KycEligibilityState,
   operationalSubstatus: KycOperationalSubstatus,

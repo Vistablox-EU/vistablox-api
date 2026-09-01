@@ -39,12 +39,13 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - structured information requests, owner resubmission as immutable revision N+1, and atomic request resolution
 - founder approval/rejection with review record, IPO terms, lifecycle transition, and audit logging
 - Redis/Valkey-backed general-purpose rate limiting across `/v1`, `/internal/v1`, and Better Auth's endpoints: a generous baseline tier keyed by `account_id` (or caller IP when unauthenticated), and a stricter tightened tier on fresh-auth attempts (Better Auth sign-in/sign-up/password-reset, staff WebAuthn ceremonies, staff invitation acceptance); fails open with a logged warning if the rate-limit cache is unavailable
+- a dedicated `pg-boss` worker process (`npm run worker:dev` / `npm run worker:start`) running the `case_timers`/`maintenance` scheduled jobs: applicant response-window reminders and automatic expiry once `due_at` passes, plus KYC renewal reminders and the automatic `requires_renewal` transition once `renewal_due_at` passes
 - Prisma 7 client using the PostgreSQL driver adapter
 - all eight documented PostgreSQL schemas and their current tables, relations, indexes, and explicit check constraints
 - Vitest API and domain tests
 - dependency boundary checks for the documented `router -> schema -> application service -> domain policy -> repository` layering
 
-Native-client OIDC, customer TOTP, customer session/device management, async reminder/expiry workers, and general API idempotency middleware remain subsequent implementation slices. Rate-limit tier thresholds are a fixed starting point (`src/shared/http/rate-limit.ts`) pending real production traffic to tune against, per `RATE_LIMITING.md`. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Operations-review decision display, cross-validation of declared identity data, and asynchronous webhook processing remain follow-on KYC work. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
+Native-client OIDC, customer TOTP, customer session/device management, and general API idempotency middleware remain subsequent implementation slices. Rate-limit tier thresholds are a fixed starting point (`src/shared/http/rate-limit.ts`) pending real production traffic to tune against, per `RATE_LIMITING.md`. Better Auth login success/failure, session creation/revocation, password change/reset, WebAuthn outcomes, staff invitation actions, recovery, and offboarding now feed the unified audit trail. A WebAuthn-verified administrator provisions staff and partner identities through single-use email invitations; after acceptance, the invited user signs in and enrolls a first WebAuthn credential, while adding any later credential requires an already WebAuthn-verified session. That same protected admin surface can initiate a staff reset or immediately offboard an identity; the code intentionally does not enable Better Auth's impersonation-capable admin plugin. Operations-review decision display, cross-validation of declared identity data, and asynchronous webhook processing remain follow-on KYC work. Information-request due dates currently exclude Saturdays and Sundays; a jurisdiction-aware holiday calendar remains future work.
 
 ## Local setup
 
@@ -64,11 +65,15 @@ Didit baseline KYC remains disabled unless the required `DIDIT_*` values in `.en
 
 `RATE_LIMIT_CACHE_URL` enables the general-purpose `/v1` rate limiter (it may point at the same Redis/Valkey deployment as `PROFILE_CACHE_URL`); requests are allowed through unmetered, not blocked, while it is absent or unavailable.
 
+The scheduled-job worker is a separate process from the API and must be started alongside it for reminders/expiry to run: `npm run worker:dev` locally, `npm run worker:start` against a build. It shares `DATABASE_URL`/SMTP configuration with the API and needs no additional environment variables.
+
 ## Commands
 
 ```bash
 npm run check          # type checking, architecture rules, tests
 npm run build          # production TypeScript build
+npm run worker:dev     # run the pg-boss scheduled-job worker (watch mode)
+npm run worker:start   # run the built worker
 npm run db:validate    # validate Prisma schema
 npm run db:generate    # regenerate Prisma client
 npm run db:migrate:dev # create/apply a development migration
