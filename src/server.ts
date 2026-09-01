@@ -25,6 +25,9 @@ import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit
 import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
 import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
 import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
+import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
+import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
+import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
@@ -120,6 +123,7 @@ const auth = createBetterAuth({
   sendVerificationEmail: (email) => emailSender.sendVerificationEmail(email),
   sendPasswordResetEmail: (email) => emailSender.sendPasswordResetEmail(email),
   authAuditSink,
+  sessionMirror: new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET),
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");
   },
@@ -215,6 +219,10 @@ const app = createApp({
       repository: new PrismaTotpRepository(database),
       provider: new OtplibTotpProvider(),
       backupCodeHashKey: environment.BETTER_AUTH_SECRET,
+    },
+    customerSessions: {
+      repository: new PrismaCustomerSessionRepository(database),
+      revoker: new BetterAuthSessionRevoker(auth),
     },
     ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
     staffAccountLifecycle: {

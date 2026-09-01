@@ -38,6 +38,13 @@ import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
 import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
 import type { SessionResolver } from "./modules/auth/application/session-resolver.js";
+import { createCustomerSessionRouter } from "./modules/auth/api/customer-session.router.js";
+import {
+  ListOwnSessionsService,
+  RevokeOwnSessionService,
+} from "./modules/auth/application/customer-session.service.js";
+import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
+import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
 import { createTotpRouter } from "./modules/auth/api/totp.router.js";
 import { EnrollTotpService, VerifyTotpService } from "./modules/auth/application/totp.service.js";
 import type { TotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
@@ -140,6 +147,10 @@ export interface AppDependencies {
       provider: TotpProvider;
       backupCodeHashKey: string;
     };
+    customerSessions?: {
+      repository: CustomerSessionRepository;
+      revoker: SessionRevoker;
+    };
   };
 }
 
@@ -226,6 +237,17 @@ export function createApp(dependencies: AppDependencies): Express {
           requireAuthentication,
           new EnrollTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
           new VerifyTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.customerSessions !== undefined) {
+      const customerSessions = dependencies.protectedApi.customerSessions;
+      app.use(
+        "/v1/auth/sessions",
+        createCustomerSessionRouter(
+          requireAuthentication,
+          new ListOwnSessionsService(customerSessions.repository),
+          new RevokeOwnSessionService(customerSessions.repository, customerSessions.revoker),
         ),
       );
     }
