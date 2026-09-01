@@ -90,6 +90,10 @@ import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/did
 import type { KycRepository } from "./modules/identity/repository/kyc.repository.js";
 import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
 import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
+import {
+  ListInvestorCurrentPositionsService,
+  ListInvestorReservationsService,
+} from "./modules/investor-profile/application/list-investor-activity.service.js";
 import type { ProtectedDisplayProfileProvider } from "./modules/investor-profile/application/protected-display-profile.js";
 import type { InvestorProfileRepository } from "./modules/investor-profile/repository/investor-profile.repository.js";
 import { errorHandler } from "./shared/http/error-handler.js";
@@ -233,6 +237,8 @@ export function createApp(dependencies: AppDependencies): Express {
             investorProfile.repository,
             investorProfile.displayProfiles,
           ),
+          new ListInvestorReservationsService(investorProfile.repository),
+          new ListInvestorCurrentPositionsService(investorProfile.repository),
         ),
       );
     }

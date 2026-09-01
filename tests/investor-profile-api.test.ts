@@ -4,6 +4,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createInvestorProfileRouter } from "../src/modules/investor-profile/api/investor-profile.router.js";
 import { GetInvestorProfileService } from "../src/modules/investor-profile/application/get-investor-profile.service.js";
+import {
+  ListInvestorCurrentPositionsService,
+  ListInvestorReservationsService,
+} from "../src/modules/investor-profile/application/list-investor-activity.service.js";
 import type { ProtectedDisplayProfileProvider } from "../src/modules/investor-profile/application/protected-display-profile.js";
 import type { InvestorProfileRepository } from "../src/modules/investor-profile/repository/investor-profile.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
@@ -21,6 +25,8 @@ const repository: InvestorProfileRepository = {
     activePositionCount: 0,
     walletRegistration: null,
   }),
+  listReservations: vi.fn().mockResolvedValue([]),
+  listCurrentPositions: vi.fn().mockResolvedValue([]),
 };
 const displayProfiles: ProtectedDisplayProfileProvider = {
   get: vi.fn().mockResolvedValue(null),
@@ -42,6 +48,8 @@ function appFor(population: "customer" | "staff_partner") {
     createInvestorProfileRouter(
       authenticated,
       new GetInvestorProfileService(repository, displayProfiles),
+      new ListInvestorReservationsService(repository),
+      new ListInvestorCurrentPositionsService(repository),
     ),
   );
   app.use(errorHandler);
@@ -82,4 +90,17 @@ describe("investor profile API", () => {
       status: 403,
     });
   });
+
+  it.each(["reservations", "positions"])(
+    "serves customer-only paginated %s with no-store caching",
+    async (resource) => {
+      const response = await request(appFor("customer")).get(
+        `/v1/investor-profile/${resource}?limit=10`,
+      );
+
+      expect(response.status).toBe(200);
+      expect(response.headers["cache-control"]).toBe("no-store");
+      expect(response.body).toEqual({ data: [], page: { next_cursor: null } });
+    },
+  );
 });

@@ -31,6 +31,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - separate hosted Didit proof-of-address workflow with residence matching and three-month document freshness
 - privacy-minimized KYC persistence that excludes provider payloads, document data, biometrics, and addresses
 - authenticated investor profile aggregate at `GET /v1/investor-profile`
+- cursor-paginated investor reservation history and current portfolio subresources
 - Redis/Valkey-backed, 24-hour protected cache for Didit-verified display names
 - KYC/proof-of-address-gated owner intake at `POST /v1/origination-cases`
 - owner-scoped origination case list/detail reads with opaque cursor pagination
@@ -133,6 +134,8 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `POST` | `/internal/v1/auth/staff-accounts/:account_id/offboard` | Disable staff login and revoke sessions, roles, and credentials; requires another admin and WebAuthn |
 | `GET` | `/v1/offerings?limit=20&after=...` | Cursor-paginated public offering teasers |
 | `GET` | `/v1/investor-profile` | Read the authenticated customer's cross-domain investor profile aggregate |
+| `GET` | `/v1/investor-profile/reservations?limit=20&after=...` | Read account-scoped reservation history with the latest capital state |
+| `GET` | `/v1/investor-profile/positions?limit=20&after=...` | Read active and internally-settling portfolio positions |
 | `POST` | `/v1/auth/totp/enroll` | Enroll (or re-enroll) a customer TOTP factor; returns the `otpauth://` URI, secret, and one-time backup codes |
 | `POST` | `/v1/auth/totp/verify` | Verify a customer TOTP code or one-time backup code |
 | `GET` | `/v1/auth/sessions` | List the authenticated customer's own web sessions and native OIDC grants as one list |
