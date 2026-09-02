@@ -783,7 +783,7 @@ export class PrismaOfferingRepository
           effectiveRightsEndAt: true,
           disclosurePacks: {
             where: { isCurrent: true, supersededAt: null },
-            select: { version: true },
+            select: { version: true, documents: { select: { documentType: true } } },
             take: 1,
           },
         },
@@ -793,6 +793,18 @@ export class PrismaOfferingRepository
         !isReconfirmationWindowOpen({ effectiveRightsEndAt: offering.effectiveRightsEndAt, now: input.reconfirmedAt })
       ) {
         return { reconfirmedAt: null, conflict: "window_closed" as const };
+      }
+
+      // AD-037: "An investor must not be able to reconfirm against an
+      // incomplete, draft, or superseded pack." No current pack at all is
+      // the same failure as an incomplete one — isCompleteDisclosurePack([])
+      // is false — so a missing pack doesn't need its own branch here.
+      const currentPack = offering.disclosurePacks[0];
+      const currentDocumentTypes = (currentPack?.documents ?? []).map(
+        (document) => document.documentType as DisclosureDocumentType,
+      );
+      if (!isCompleteDisclosurePack(currentDocumentTypes)) {
+        return { reconfirmedAt: null, conflict: "disclosure_pack_incomplete" as const };
       }
 
       await transaction.reservation.update({

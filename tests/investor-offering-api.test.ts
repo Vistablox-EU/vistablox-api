@@ -401,6 +401,23 @@ describe("POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm
     expect(response.body.code).toBe("offering.reconfirmation_window_closed");
   });
 
+  it("409s when the current disclosure pack is incomplete", async () => {
+    const { app } = buildReconfirmApp({
+      repository: {
+        reconfirmReservation: vi
+          .fn()
+          .mockResolvedValue({ reconfirmedAt: null, conflict: "disclosure_pack_incomplete" }),
+      },
+    });
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_01/reconfirm",
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("offering.reconfirmation_disclosure_pack_incomplete");
+  });
+
   it("does not expose the reconfirm action to staff identities", async () => {
     const { app, finalization } = buildReconfirmApp({ population: "staff_partner" });
 

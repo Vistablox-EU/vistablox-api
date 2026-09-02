@@ -6,9 +6,10 @@ import type { FinalizeOfferingRepository } from "../repository/finalize-offering
  * PAYMENT_FLOWS.md's "Silence rule": each investor must explicitly
  * reconfirm during the active reconfirmation window opened by
  * FinalizeOfferingService's publish step — no reconfirmation by expiry
- * means the reservation lapses rather than silently finalizing. Ownership
- * and window-open checks happen atomically inside the repository call
- * (AD-146 discipline), not just against an advisory read.
+ * means the reservation lapses rather than silently finalizing. Ownership,
+ * window-open, and disclosure-pack-completeness (AD-037) checks all happen
+ * atomically inside the repository call (AD-146 discipline), not just
+ * against an advisory read.
  */
 export class ReconfirmReservationService {
   public constructor(
@@ -50,6 +51,14 @@ export class ReconfirmReservationService {
         title: "Reservation cannot be reconfirmed",
         status: 409,
         detail: "The reconfirmation window for this offering has already closed.",
+      });
+    }
+    if (result.conflict === "disclosure_pack_incomplete") {
+      throw new AppError({
+        code: "offering.reconfirmation_disclosure_pack_incomplete",
+        title: "Reservation cannot be reconfirmed",
+        status: 409,
+        detail: "The current disclosure pack for this offering is incomplete; reconfirmation is not yet available.",
       });
     }
 

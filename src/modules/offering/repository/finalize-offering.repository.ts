@@ -29,7 +29,11 @@ export interface ReconfirmReservationInput {
   reconfirmedAt: Date;
 }
 
-export type ReconfirmReservationConflict = "not_found" | "not_awaiting_reconfirmation" | "window_closed";
+export type ReconfirmReservationConflict =
+  | "not_found"
+  | "not_awaiting_reconfirmation"
+  | "window_closed"
+  | "disclosure_pack_incomplete";
 
 export interface ReconfirmReservationResult {
   reconfirmedAt: Date | null;
