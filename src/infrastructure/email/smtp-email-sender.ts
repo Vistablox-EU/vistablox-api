@@ -32,6 +32,11 @@ export interface ReconfirmationReminderEmail {
   effectiveRightsEndAt: Date;
 }
 
+export interface ReconfirmationWindowOpenedEmail {
+  to: string;
+  effectiveRightsEndAt: Date;
+}
+
 export interface EmailSender {
   sendVerificationEmail(email: VerificationEmail): Promise<void>;
   sendPasswordResetEmail(email: PasswordResetEmail): Promise<void>;
@@ -39,6 +44,7 @@ export interface EmailSender {
   sendApplicantResponseReminderEmail(email: ApplicantResponseReminderEmail): Promise<void>;
   sendKycRenewalReminderEmail(email: KycRenewalReminderEmail): Promise<void>;
   sendReconfirmationReminderEmail(email: ReconfirmationReminderEmail): Promise<void>;
+  sendReconfirmationWindowOpenedEmail(email: ReconfirmationWindowOpenedEmail): Promise<void>;
 }
 
 export interface SmtpEmailSenderOptions {
@@ -125,6 +131,17 @@ export class SmtpEmailSender implements EmailSender {
       subject: "Action needed: reconfirm your VistaBlox reservation",
       text: `An offering you reserved into has published its final terms. Please sign in to reconfirm your reservation before ${effectiveRightsEndAt}, or it will lapse.`,
       html: `<p>An offering you reserved into has published its final terms.</p><p>Please sign in to reconfirm your reservation before ${escapeHtml(effectiveRightsEndAt)}, or it will lapse.</p>`,
+    });
+  }
+
+  public async sendReconfirmationWindowOpenedEmail(email: ReconfirmationWindowOpenedEmail): Promise<void> {
+    const effectiveRightsEndAt = email.effectiveRightsEndAt.toISOString();
+    await this.transporter.sendMail({
+      from: this.options.from,
+      to: email.to,
+      subject: "VistaBlox has published final terms for your reservation",
+      text: `An offering you reserved into has published its final terms and locked disclosure package. Please sign in to review them and reconfirm your reservation before ${effectiveRightsEndAt}, or it will lapse.`,
+      html: `<p>An offering you reserved into has published its final terms and locked disclosure package.</p><p>Please sign in to review them and reconfirm your reservation before ${escapeHtml(effectiveRightsEndAt)}, or it will lapse.</p>`,
     });
   }
 }

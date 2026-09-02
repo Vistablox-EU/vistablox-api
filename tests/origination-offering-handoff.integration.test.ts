@@ -22,20 +22,22 @@ describe.skipIf(databaseUrl === undefined)(
     const revisionId = `rev_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const offeringRepository = new PrismaOfferingRepository(database);
-    const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
     // PgBoss's constructor eagerly validates its connection string (unlike
     // PrismaClient/pg.Pool above, which connect lazily), so it must not be
     // constructed at describe-body scope: that body runs even when skipIf
     // skips every test, and databaseUrl is undefined in that case.
     let boss: PgBoss;
     let originationRepository: PrismaOriginationRepository;
+    let offeringRepository: PrismaOfferingRepository;
+    let openOfferingForApprovedCase: OpenOfferingForApprovedCaseService;
     let pivId = "";
     let offeringId = "";
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
       originationRepository = new PrismaOriginationRepository(database, boss);
+      offeringRepository = new PrismaOfferingRepository(database, boss);
+      openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
       await boss.start();
       await boss.createQueue("case_timers.pre_offering_open_handoff");
 

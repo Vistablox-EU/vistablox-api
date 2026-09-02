@@ -53,7 +53,6 @@ import {
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
-const offeringRepository = new PrismaOfferingRepository(database);
 const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const jobQueue = new PgBoss(environment.DATABASE_URL);
 jobQueue.on("error", (error) => {
@@ -64,6 +63,8 @@ await jobQueue.start();
 // to run here even if the worker process hasn't started yet on a fresh
 // deploy — a send() would otherwise fail against a queue that doesn't exist.
 await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
+await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
+const offeringRepository = new PrismaOfferingRepository(database, jobQueue);
 const originationRepository = new PrismaOriginationRepository(database, jobQueue);
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);

@@ -1,6 +1,8 @@
+import type { PgBoss } from "pg-boss";
 import { ulid } from "ulid";
 import { z } from "zod";
 
+import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import { toCents } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import type {
@@ -58,6 +60,11 @@ import type {
   RecordReconfirmationReminderSentInput,
   ReservationAwaitingReconfirmationReminder,
 } from "./reconfirmation-reminder.repository.js";
+import type {
+  ReconfirmationWindowOpenedNotificationRepository,
+  RecordReconfirmationWindowOpenedNotificationSentInput,
+  ReservationForReconfirmationWindowOpenedNotification,
+} from "./reconfirmation-window-opened-notification.repository.js";
 
 const reconfirmationReminderIntervalHoursSettingSchema = z.object({ hours: z.number().int().min(1).max(168) });
 
@@ -70,9 +77,13 @@ export class PrismaOfferingRepository
     MaterialityRepository,
     DisclosurePackRepository,
     ReconfirmationReminderRepository,
+    ReconfirmationWindowOpenedNotificationRepository,
     ReservationRepository
 {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly pgBoss: PgBoss,
+  ) {}
 
   public async openOfferingForApprovedCase(
     input: OpenOfferingForApprovedCaseInput,
@@ -705,6 +716,7 @@ export class PrismaOfferingRepository
 
       let reservationsAwaitingReconfirmation = 0;
       let reservationsCancelled = 0;
+      const reservationIdsAwaitingReconfirmation: string[] = [];
       for (const reservation of reservations) {
         const funded =
           reservation.latest_capital_state !== null &&
@@ -725,6 +737,7 @@ export class PrismaOfferingRepository
             },
           });
           reservationsAwaitingReconfirmation += 1;
+          reservationIdsAwaitingReconfirmation.push(reservation.reservation_id);
         } else {
           await transaction.reservation.update({
             where: { id: reservation.reservation_id },
@@ -771,6 +784,26 @@ export class PrismaOfferingRepository
           createdAt: input.publishedAt,
         },
       });
+
+      // AD-214 / PAYMENT_FLOWS.md's Start-event meaning: "investor
+      // notification is sent" — durably handed off (AD-145) rather than
+      // sent synchronously here, the same cross-domain discipline
+      // case_timers.pre_offering_open_handoff already established. Never
+      // enqueued when nothing moved to awaiting_reconfirmation (an
+      // all-cancelled publish, though target_not_reached would already have
+      // blocked that in practice).
+      if (reservationIdsAwaitingReconfirmation.length > 0) {
+        await enqueueTransactionalJob(
+          this.pgBoss,
+          transaction,
+          "case_timers.offering_reconfirmation_window_opened",
+          {
+            offering_id: input.offeringId,
+            reservation_ids: reservationIdsAwaitingReconfirmation,
+          },
+          input.traceId,
+        );
+      }
 
       return {
         published: {
@@ -1273,6 +1306,63 @@ export class PrismaOfferingRepository
         id: `audit_${ulid()}`,
         actorAccountId: null,
         action: "offering.reconfirmation_reminder_sent",
+        resourceType: "reservation",
+        resourceId: input.reservationId,
+        changes: { trace_id: input.traceId },
+        createdAt: input.sentAt,
+      },
+    });
+  }
+
+  public async getReservationsForReconfirmationWindowOpenedNotification(
+    reservationIds: string[],
+  ): Promise<ReservationForReconfirmationWindowOpenedNotification[]> {
+    // Selects a raw timestamp and derives the boolean below in JS, rather
+    // than a SQL-computed boolean column — the same "was X already done"
+    // shape listReservationsAwaitingReconfirmationForReminders already
+    // proves out (last_reminder_sent_at), instead of an untested pattern.
+    const rows = await this.database.$queryRaw<
+      Array<{
+        reservation_id: string;
+        contact_email: string | null;
+        effective_rights_end_at: Date;
+        notification_sent_at: Date | null;
+      }>
+    >`
+      SELECT
+        reservation.reservation_id,
+        account.protected_contact_email AS contact_email,
+        offering.effective_rights_end_at,
+        already_sent.created_at AS notification_sent_at
+      FROM offering.reservations AS reservation
+      JOIN offering.offerings AS offering ON offering.offering_id = reservation.offering_id
+      JOIN account.accounts AS account ON account.account_id = reservation.account_id
+      LEFT JOIN LATERAL (
+        SELECT audit_log.created_at
+        FROM audit.audit_log AS audit_log
+        WHERE audit_log.resource_type = 'reservation'
+          AND audit_log.resource_id = reservation.reservation_id
+          AND audit_log.action = 'offering.reconfirmation_window_opened_notification_sent'
+        LIMIT 1
+      ) AS already_sent ON TRUE
+      WHERE reservation.reservation_id = ANY(${reservationIds})
+    `;
+    return rows.map((row) => ({
+      reservationId: row.reservation_id,
+      contactEmail: row.contact_email,
+      effectiveRightsEndAt: row.effective_rights_end_at,
+      notificationAlreadySent: row.notification_sent_at !== null,
+    }));
+  }
+
+  public async recordReconfirmationWindowOpenedNotificationSent(
+    input: RecordReconfirmationWindowOpenedNotificationSentInput,
+  ): Promise<void> {
+    await this.database.auditLog.create({
+      data: {
+        id: `audit_${ulid()}`,
+        actorAccountId: null,
+        action: "offering.reconfirmation_window_opened_notification_sent",
         resourceType: "reservation",
         resourceId: input.reservationId,
         changes: { trace_id: input.traceId },

@@ -22,6 +22,7 @@ import { ExpireUnfundedReservationsService } from "./modules/offering/applicatio
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
+import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
@@ -40,13 +41,13 @@ const emailSender = new SmtpEmailSender({
   from: environment.SMTP_FROM,
 });
 const kycRepository = new PrismaKycRepository(database);
-const offeringRepository = new PrismaOfferingRepository(database);
 
 const boss = new PgBoss(environment.DATABASE_URL);
 boss.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
 });
 
+const offeringRepository = new PrismaOfferingRepository(database, boss);
 const originationRepository = new PrismaOriginationRepository(database, boss);
 const sendApplicantReminders = new SendApplicantResponseRemindersService(
   originationRepository,
@@ -59,6 +60,7 @@ const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offer
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
 const sendReconfirmationReminders = new SendReconfirmationRemindersService(offeringRepository, emailSender);
+const notifyReconfirmationWindowOpened = new NotifyReconfirmationWindowOpenedService(offeringRepository, emailSender);
 const coinbaseCdpClient =
   environment.COINBASE_CDP_API_KEY_ID === undefined || environment.COINBASE_CDP_API_KEY_SECRET === undefined
     ? undefined
@@ -98,6 +100,7 @@ await boss.createQueue("case_timers.pre_offering_open_handoff");
 await boss.createQueue("case_timers.reservation_unfunded_expiry");
 await boss.createQueue("case_timers.offering_reconfirmation_window_close");
 await boss.createQueue("case_timers.offering_reconfirmation_reminders");
+await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.oidc_cleanup");
 // Only registered when Coinbase CDP credentials are configured — unlike
@@ -208,6 +211,31 @@ await boss.work("case_timers.pre_offering_open_handoff", async (jobs) => {
     } catch (error) {
       logger.error(
         { err: error, trace_id: traceId, job: "case_timers.pre_offering_open_handoff" },
+        "case timer job failed",
+      );
+      throw error;
+    }
+  }
+});
+
+// AD-152: this job's trace_id is the originating publishFinalOfferingTerms
+// request's own, carried forward by the enqueue path — the same pattern
+// case_timers.pre_offering_open_handoff above already uses.
+await boss.work("case_timers.offering_reconfirmation_window_opened", async (jobs) => {
+  for (const job of jobs) {
+    const traceId =
+      typeof job.data === "object" && job.data !== null && "trace_id" in job.data
+        ? String((job.data as { trace_id: unknown }).trace_id)
+        : "unknown";
+    try {
+      const result = await notifyReconfirmationWindowOpened.execute(job.data);
+      logger.info(
+        { trace_id: traceId, job: "case_timers.offering_reconfirmation_window_opened", ...result },
+        "case timer job completed",
+      );
+    } catch (error) {
+      logger.error(
+        { err: error, trace_id: traceId, job: "case_timers.offering_reconfirmation_window_opened" },
         "case timer job failed",
       );
       throw error;

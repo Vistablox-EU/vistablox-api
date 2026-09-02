@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 
+import { PgBoss } from "pg-boss";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import { disclosureDocumentTypes } from "../src/modules/offering/domain/disclosure-pack.policy.js";
+import { NotifyReconfirmationWindowOpenedService } from "../src/modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -30,9 +33,17 @@ describe.skipIf(databaseUrl === undefined)(
     };
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string (unlike
+    // PrismaClient/pg.Pool above, which connect lazily), so it must not be
+    // constructed at describe-body scope: that body runs even when skipIf
+    // skips every test, and databaseUrl is undefined in that case.
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
 
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [
@@ -252,7 +263,7 @@ describe.skipIf(databaseUrl === undefined)(
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [
         betterAuthUserId,
       ]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("returns full disclosure, readiness inputs, and canonical raise progress", async () => {
@@ -354,7 +365,11 @@ describe.skipIf(databaseUrl === undefined)(
     const betterAuthUserId = `auth_reserve_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string, so it
+    // must not be constructed at describe-body scope (see the previous
+    // describe block's comment for why).
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
     const offeringIds: string[] = [];
     const pivIds: string[] = [];
     const caseIds: string[] = [];
@@ -409,6 +424,9 @@ describe.skipIf(databaseUrl === undefined)(
     }
 
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [betterAuthUserId, "Reservation Creation Investor", `reserve-${suffix}@example.test`, true, "customer"],
@@ -426,7 +444,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.property.deleteMany({ where: { id: { in: propertyIds } } });
       await database.account.deleteMany({ where: { id: accountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("creates a reservation, a matching money event, and an audit trail", async () => {
@@ -669,7 +687,11 @@ describe.skipIf(databaseUrl === undefined)(
     const unfundedAccountId = `account_finalize_unfunded_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string, so it
+    // must not be constructed at describe-body scope (see the first
+    // describe block's comment for why).
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
     const offeringIds: string[] = [];
     const pivIds: string[] = [];
     const caseIds: string[] = [];
@@ -740,6 +762,13 @@ describe.skipIf(databaseUrl === undefined)(
     }
 
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
+      // publishFinalOfferingTerms enqueues the AD-214/AD-145 window-opened
+      // notification handoff inside its own transaction — the queue must
+      // already exist or that send() fails against a queue that doesn't.
+      await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)',
         [
@@ -792,7 +821,7 @@ describe.skipIf(databaseUrl === undefined)(
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [
         [`auth_${fundedAccountId}`, `auth_${unfundedAccountId}`],
       ]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("publishes final terms, moving the funded reservation to awaiting_reconfirmation and cancelling the unfunded one, without creating a position yet", async () => {
@@ -868,6 +897,103 @@ describe.skipIf(databaseUrl === undefined)(
           where: { resourceId: offeringId, action: "offering.final_terms_published" },
         }),
       ).toBe(1);
+    });
+
+    it("durably enqueues the reconfirmation-window-opened notification job, and processing it is replay-safe", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_window_opened_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      const traceId = `trace_window_opened_${suffix}`;
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId,
+        publishedAt,
+      });
+
+      // AD-145: the handoff must be durably queued in the same transaction
+      // as the state change, not sent synchronously — assert the row exists
+      // in pgboss.job directly, the same technique
+      // origination-offering-handoff.integration.test.ts already uses for
+      // case_timers.pre_offering_open_handoff.
+      const enqueued = await authPool.query<{
+        name: string;
+        data: { offering_id: string; reservation_ids: string[]; trace_id: string };
+      }>("SELECT name, data FROM pgboss.job WHERE name = $1 AND data->>'offering_id' = $2", [
+        "case_timers.offering_reconfirmation_window_opened",
+        offeringId,
+      ]);
+      expect(enqueued.rows).toHaveLength(1);
+      expect(enqueued.rows[0]?.data).toEqual({
+        offering_id: offeringId,
+        reservation_ids: [reservationId],
+        trace_id: traceId,
+      });
+
+      // fundedAccountId's own fixture never sets protectedContactEmail, so
+      // whether the service actually emails depends on live DB state rather
+      // than something safe to hard-code here — read it back rather than
+      // assuming, the same approach the reconfirmation-reminder integration
+      // test above already takes for the same shared fixture account.
+      const account = await database.account.findUnique({ where: { id: fundedAccountId } });
+      const expectedActed = account?.protectedContactEmail == null ? 0 : 1;
+      const email: EmailSender = {
+        sendVerificationEmail: vi.fn(),
+        sendPasswordResetEmail: vi.fn(),
+        sendStaffInvitationEmail: vi.fn(),
+        sendApplicantResponseReminderEmail: vi.fn(),
+        sendKycRenewalReminderEmail: vi.fn(),
+        sendReconfirmationReminderEmail: vi.fn(),
+        sendReconfirmationWindowOpenedEmail: vi.fn().mockResolvedValue(undefined),
+      };
+      const notifyService = new NotifyReconfirmationWindowOpenedService(repository, email);
+
+      const summary = await notifyService.execute(enqueued.rows[0]?.data);
+      expect(summary).toEqual({ checked: 1, acted: expectedActed });
+      expect(
+        await database.auditLog.count({
+          where: {
+            resourceId: reservationId,
+            resourceType: "reservation",
+            action: "offering.reconfirmation_window_opened_notification_sent",
+          },
+        }),
+      ).toBe(expectedActed);
+
+      // Replaying the same job payload (as pg-boss would on a retry) must
+      // not double-email the investor or create a second audit row — the
+      // same replay-safety origination's own handoff test already checks.
+      const replayed = await notifyService.execute(enqueued.rows[0]?.data);
+      expect(replayed).toEqual({ checked: 1, acted: 0 });
+      expect(
+        await database.auditLog.count({
+          where: {
+            resourceId: reservationId,
+            resourceType: "reservation",
+            action: "offering.reconfirmation_window_opened_notification_sent",
+          },
+        }),
+      ).toBe(expectedActed);
     });
 
     it("reports offering_not_found for an unknown offering", async () => {
@@ -1862,11 +1988,18 @@ describe.skipIf(databaseUrl === undefined)(
     const caseId = `case_handoff_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string, so it
+    // must not be constructed at describe-body scope (see the first
+    // describe block's comment for why).
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
     let pivId = "";
     let offeringId = "";
 
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [betterAuthUserId, "Handoff Repository Applicant", `handoff-repo-${suffix}@example.test`, true, "customer"],
@@ -1906,7 +2039,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.property.deleteMany({ where: { id: propertyId } });
       await database.account.deleteMany({ where: { id: accountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("opens a browsable pre-offering shell and is idempotent on replay", async () => {
