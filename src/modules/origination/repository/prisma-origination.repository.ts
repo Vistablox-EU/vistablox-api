@@ -1,8 +1,10 @@
+import type { PgBoss } from "pg-boss";
 import { ulid } from "ulid";
 import { z } from "zod";
 
 import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import { CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
   CaseMessageRecord,
@@ -39,7 +41,10 @@ const reminderDaysSettingSchema = z.object({
 });
 
 export class PrismaOriginationRepository implements OriginationRepository {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly pgBoss: PgBoss,
+  ) {}
 
   public async getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites> {
     const [eligibility, floorSetting] = await Promise.all([
@@ -699,7 +704,7 @@ export class PrismaOriginationRepository implements OriginationRepository {
 
       const current = await transaction.originationCase.findUniqueOrThrow({
         where: { id: input.caseId },
-        select: { stage: true, currentSubmissionRevisionId: true },
+        select: { stage: true, currentSubmissionRevisionId: true, propertyId: true },
       });
       if (current.stage !== "submitted" || current.currentSubmissionRevisionId === null) {
         throw new CaseReviewConflictError(current.stage, "record a founder decision");
@@ -732,6 +737,24 @@ export class PrismaOriginationRepository implements OriginationRepository {
                 updatedAt: input.decidedAt,
               },
       });
+      if (input.decision === "approve") {
+        // AD-145: origination approval never writes into the offering
+        // domain's tables directly — it durably hands off, in this same
+        // transaction, to the job that opens the Piv/Offering shell the
+        // now-`pre_offering_open` property needs to be browsable and
+        // reservation-ready.
+        await enqueueTransactionalJob(
+          this.pgBoss,
+          transaction,
+          "case_timers.pre_offering_open_handoff",
+          {
+            case_id: input.caseId,
+            property_id: current.propertyId,
+            ipo_value_eur: input.ipoValueEur,
+          },
+          input.traceId,
+        );
+      }
       await transaction.auditLog.create({
         data: {
           id: `audit_${ulid()}`,

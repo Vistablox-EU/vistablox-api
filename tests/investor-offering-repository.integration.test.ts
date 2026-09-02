@@ -344,3 +344,108 @@ describe.skipIf(databaseUrl === undefined)(
     });
   },
 );
+
+describe.skipIf(databaseUrl === undefined)(
+  "origination approval offering handoff PostgreSQL integration",
+  () => {
+    const suffix = randomUUID();
+    const accountId = `account_handoff_${suffix}`;
+    const betterAuthUserId = `auth_handoff_${suffix}`;
+    const propertyId = `property_handoff_${suffix}`;
+    const caseId = `case_handoff_${suffix}`;
+    const authPool = new Pool({ connectionString: databaseUrl });
+    const database = createPrismaClient(databaseUrl ?? "");
+    const repository = new PrismaOfferingRepository(database);
+    let pivId = "";
+    let offeringId = "";
+
+    beforeAll(async () => {
+      await authPool.query(
+        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
+        [betterAuthUserId, "Handoff Repository Applicant", `handoff-repo-${suffix}@example.test`, true, "customer"],
+      );
+      await database.account.create({ data: { id: accountId, betterAuthUserId } });
+      await database.property.create({
+        data: {
+          id: propertyId,
+          countryCode: "RS",
+          city: "Novi Sad",
+          addressLine: "Repository Handoff Test 1",
+          ownerDeclaredValueEur: "220000.00",
+        },
+      });
+      await database.originationCase.create({
+        data: {
+          id: caseId,
+          propertyId,
+          applicantAccountId: accountId,
+          stage: "pre_offering_open",
+          legalExecutionEventRefs: [],
+          legalDocumentRefs: [],
+          appraisalDocumentRefs: [],
+        },
+      });
+    });
+
+    afterAll(async () => {
+      await database.auditLog.deleteMany({
+        where: offeringId === "" ? { resourceId: caseId } : { resourceId: offeringId, resourceType: "offering" },
+      });
+      if (pivId !== "") {
+        await database.offering.deleteMany({ where: { pivId } });
+        await database.piv.deleteMany({ where: { id: pivId } });
+      }
+      await database.originationCase.deleteMany({ where: { id: caseId } });
+      await database.property.deleteMany({ where: { id: propertyId } });
+      await database.account.deleteMany({ where: { id: accountId } });
+      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
+      await Promise.all([database.$disconnect(), authPool.end()]);
+    });
+
+    it("opens a browsable pre-offering shell and is idempotent on replay", async () => {
+      const opened = await repository.openOfferingForApprovedCase({
+        caseId,
+        propertyId,
+        ipoValueEur: "220000.00",
+        traceId: `trace_${suffix}`,
+        openedAt: new Date("2026-09-01T19:00:00.000Z"),
+      });
+      pivId = opened.pivId;
+      offeringId = opened.offeringId;
+
+      expect(await database.piv.findUnique({ where: { id: opened.pivId } })).toMatchObject({
+        propertyId,
+        caseId,
+        structurePattern: "default_aligned",
+        legalName: null,
+        incorporatedAt: null,
+      });
+      const offering = await database.offering.findUnique({ where: { id: opened.offeringId } });
+      expect(offering).toMatchObject({ pivId: opened.pivId, status: "pre_offering" });
+      expect(offering?.minimumRaiseEur.toFixed(2)).toBe("220000.00");
+      expect(offering?.targetRaiseEur.toFixed(2)).toBe("220000.00");
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: opened.offeringId, action: "offering.opened_for_approved_case" },
+        }),
+      ).toBe(1);
+
+      const replayed = await repository.openOfferingForApprovedCase({
+        caseId,
+        propertyId,
+        ipoValueEur: "220000.00",
+        traceId: `trace_replay_${suffix}`,
+        openedAt: new Date("2026-09-01T19:05:00.000Z"),
+      });
+
+      expect(replayed).toEqual(opened);
+      expect(await database.piv.count({ where: { propertyId } })).toBe(1);
+      expect(await database.offering.count({ where: { pivId: opened.pivId } })).toBe(1);
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: opened.offeringId, action: "offering.opened_for_approved_case" },
+        }),
+      ).toBe(1);
+    });
+  },
+);

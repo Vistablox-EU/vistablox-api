@@ -3,6 +3,7 @@ import "dotenv/config";
 import { toNodeHandler } from "better-auth/node";
 import type { JWKS } from "oidc-provider";
 import { Pool } from "pg";
+import { PgBoss } from "pg-boss";
 import { createClient } from "redis";
 
 import { createApp } from "./app.js";
@@ -53,6 +54,16 @@ const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
 const offeringRepository = new PrismaOfferingRepository(database);
 const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
+const jobQueue = new PgBoss(environment.DATABASE_URL);
+jobQueue.on("error", (error) => {
+  logger.error({ err: error }, "pg-boss error");
+});
+await jobQueue.start();
+// Mirrors worker.ts: createQueue is ON CONFLICT DO NOTHING, so this is safe
+// to run here even if the worker process hasn't started yet on a fresh
+// deploy — a send() would otherwise fail against a queue that doesn't exist.
+await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
+const originationRepository = new PrismaOriginationRepository(database, jobQueue);
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
 const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
@@ -241,7 +252,7 @@ const app = createApp({
   protectedApi: {
     accounts: accountRepository,
     sessions,
-    originationRepository: new PrismaOriginationRepository(database),
+    originationRepository,
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({
       rpName: environment.WEBAUTHN_RP_NAME,
@@ -303,6 +314,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     const shutdownTasks: Promise<unknown>[] = [
       database.$disconnect(),
       authDatabase.end(),
+      jobQueue.stop(),
     ];
     if (profileCacheClient?.isOpen === true) {
       shutdownTasks.push(profileCacheClient.close());

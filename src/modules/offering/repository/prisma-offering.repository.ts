@@ -1,3 +1,5 @@
+import { ulid } from "ulid";
+
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import type {
   InvestorOfferingDetailRecord,
@@ -10,11 +12,74 @@ import type {
   AccessibleDisclosureDocumentRecord,
   DisclosureDocumentRepository,
 } from "./disclosure-document.repository.js";
+import type {
+  OfferingOriginationHandoffRepository,
+  OpenedOffering,
+  OpenOfferingForApprovedCaseInput,
+} from "./offering-origination-handoff.repository.js";
 
 export class PrismaOfferingRepository
-  implements OfferingRepository, DisclosureDocumentRepository
+  implements OfferingRepository, DisclosureDocumentRepository, OfferingOriginationHandoffRepository
 {
   public constructor(private readonly database: DatabaseClient) {}
+
+  public async openOfferingForApprovedCase(
+    input: OpenOfferingForApprovedCaseInput,
+  ): Promise<OpenedOffering> {
+    return this.database.$transaction(async (transaction) => {
+      const existingPiv = await transaction.piv.findUnique({
+        where: { propertyId: input.propertyId },
+        select: { id: true, offerings: { select: { id: true }, take: 1 } },
+      });
+      if (existingPiv !== null) {
+        const existingOffering = existingPiv.offerings[0];
+        if (existingOffering !== undefined) {
+          return { pivId: existingPiv.id, offeringId: existingOffering.id };
+        }
+        const offering = await transaction.offering.create({
+          data: {
+            id: `offering_${ulid()}`,
+            pivId: existingPiv.id,
+            minimumRaiseEur: input.ipoValueEur,
+            targetRaiseEur: input.ipoValueEur,
+          },
+          select: { id: true },
+        });
+        return { pivId: existingPiv.id, offeringId: offering.id };
+      }
+
+      const piv = await transaction.piv.create({
+        data: { id: `piv_${ulid()}`, propertyId: input.propertyId, caseId: input.caseId },
+        select: { id: true },
+      });
+      const offering = await transaction.offering.create({
+        data: {
+          id: `offering_${ulid()}`,
+          pivId: piv.id,
+          minimumRaiseEur: input.ipoValueEur,
+          targetRaiseEur: input.ipoValueEur,
+        },
+        select: { id: true },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: null,
+          action: "offering.opened_for_approved_case",
+          resourceType: "offering",
+          resourceId: offering.id,
+          changes: {
+            trace_id: input.traceId,
+            case_id: input.caseId,
+            piv_id: piv.id,
+            target_raise_eur: input.ipoValueEur,
+          },
+          createdAt: input.openedAt,
+        },
+      });
+      return { pivId: piv.id, offeringId: offering.id };
+    });
+  }
 
   public async listPublic(input: ListPublicOfferingsInput): Promise<PublicOfferingRecord[]> {
     const rows = await this.database.offering.findMany({
