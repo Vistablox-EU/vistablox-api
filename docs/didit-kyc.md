@@ -7,8 +7,8 @@ This slice implements the baseline B2C workflow described in the backend design 
 1. An authenticated customer calls `POST /v1/kyc/sessions` with ISO 3166-1 alpha-2 residence and tax-residence declarations.
 2. VistaBlox reserves a local session start, then creates a Didit v3 hosted session. The VistaBlox `account_id` is opaque `vendor_data`; a unique local start ID is provider metadata.
 3. Didit sends `status.updated` or `data.updated` to `POST /webhooks/didit`.
-4. VistaBlox verifies `X-Signature-V2`, enforces the five-minute timestamp window, correlates application/environment/workflow/session/account, and deduplicates `event_id`.
-5. For decision-bearing statuses, VistaBlox fetches the current decision from Didit before applying local policy. It does not trust redirect parameters or a webhook status alone.
+4. VistaBlox verifies `X-Signature-V2` and the five-minute timestamp window, then durably enqueues the verified body and acknowledges immediately (`AD-062`/`ASYNC_JOBS.md`'s Webhook Handling Rule: "workers, not synchronous HTTP request handlers, own the heavy business processing") — the handler itself never calls Didit or touches eligibility state.
+5. The `provider_events.didit_webhook` worker job (`src/worker.ts`) consumes that event: it correlates application/environment/workflow/session/account, deduplicates `event_id`, and — for decision-bearing statuses — fetches the current decision from Didit before applying local policy. It does not trust redirect parameters or a webhook status alone. A retried or duplicate-delivered job is a safe no-op, the same `event_id` deduplication already covered a synchronous redelivery before this change.
 
 Owner proof of address uses the same authenticated webhook-then-fetch pattern but a separate Didit Address Verification workflow. `POST /v1/kyc/proof-of-address/sessions` is available only when baseline KYC is eligible and no current address evidence already exists. The document is captured and retained by Didit, not uploaded through VistaBlox.
 
@@ -42,4 +42,4 @@ The Didit adapter temporarily projects the fetched response in memory to the min
 ## Follow-on work
 
 - declared-versus-verified identity cross-validation and manual-review tooling
-- durable asynchronous webhook processing with reconciliation/alerting for stuck session starts
+- reconciliation/alerting for a session start stuck in `kyc_session_creating` or `kyc_session_open` (or the proof-of-address equivalents) past a reasonable time. Durable asynchronous webhook processing itself is now built (`provider_events.didit_webhook`, `src/worker.ts` — see Runtime flow above), and one concrete way a session used to get stuck this way is now fixed too: `StartKycSessionService` used to leave the row at `kyc_session_creating` forever if `completeSessionStart`'s own persistence failed after a live Didit session was already created, since nothing called `failSessionStart` to unblock a retry; it now does. What's still missing is a scheduled sweep for the harder cases nothing calls `failSessionStart` for today — a crash between reserving the session start and completing or failing it, or a Didit webhook that simply never arrives after a session opened (the only mechanism that ever advances `kyc_session_open` is that webhook; nothing polls Didit for it the way `case_timers.reservation_onramp_poll` polls Coinbase)

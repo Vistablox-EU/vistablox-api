@@ -108,7 +108,7 @@ import type { OriginationRepository } from "./modules/origination/repository/ori
 import {
   GetKycAccountForOperationsService,
   GetKycStatusService,
-  ProcessDiditWebhookService,
+  ReceiveDiditWebhookService,
   StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "./modules/identity/application/kyc.service.js";
@@ -159,8 +159,6 @@ export interface AppDependencies {
       webhookVerifier: DiditWebhookVerifier;
       workflowId: string;
       callbackUrl: string;
-      applicationId: string;
-      environment: "sandbox" | "live";
       proofOfAddressWorkflowId?: string;
       invalidateDisplayProfile?: (accountId: string) => Promise<void>;
     };
@@ -405,14 +403,7 @@ export function createApp(dependencies: AppDependencies): Express {
         "/webhooks/didit",
         createDiditWebhookRouter(
           kyc.webhookVerifier,
-          new ProcessDiditWebhookService(kyc.repository, kyc.didit, {
-            workflowId: kyc.workflowId,
-            applicationId: kyc.applicationId,
-            environment: kyc.environment,
-            ...(kyc.proofOfAddressWorkflowId === undefined
-              ? {}
-              : { proofOfAddressWorkflowId: kyc.proofOfAddressWorkflowId }),
-          }, kyc.invalidateDisplayProfile),
+          new ReceiveDiditWebhookService(kyc.repository),
         ),
       );
       app.use(

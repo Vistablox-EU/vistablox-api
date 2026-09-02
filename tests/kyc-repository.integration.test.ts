@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { PgBoss } from "pg-boss";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
@@ -20,11 +21,20 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
   const betterAuthUserId = `auth_${suffix}`;
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
-  const repository = new PrismaKycRepository(database);
+  // PgBoss's constructor eagerly validates its connection string, so it
+  // must not be constructed at describe-body scope (matches every other
+  // integration test file's own PrismaOfferingRepository/
+  // PrismaOriginationRepository wiring): that body runs even when skipIf
+  // skips every test, and databaseUrl is undefined in that case.
+  let boss: PgBoss;
+  let repository: PrismaKycRepository;
   const startedAt = new Date("2026-09-01T10:00:00.000Z");
   const approvedAt = new Date("2026-09-01T12:00:00.000Z");
 
   beforeAll(async () => {
+    boss = new PgBoss(databaseUrl ?? "");
+    repository = new PrismaKycRepository(database, boss);
+    await boss.start();
     await authPool.query(
       'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
       [betterAuthUserId, "KYC Test User", `kyc-${suffix}@example.test`, true, "customer"],
@@ -51,7 +61,7 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
     await database.kycEligibility.deleteMany({ where: { accountId } });
     await database.account.deleteMany({ where: { id: accountId } });
     await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
-    await Promise.all([database.$disconnect(), authPool.end()]);
+    await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
   });
 
   it("serializes session creation and idempotently applies a provider outcome", async () => {
@@ -214,6 +224,37 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
     });
     expect(JSON.stringify(proofOfAddressReceipt?.changes)).not.toContain("poa_address");
     expect(JSON.stringify(proofOfAddressReceipt?.changes)).not.toContain("issue_date");
+  });
+
+  it("durably enqueues webhook processing with the verified body intact", async () => {
+    const enqueueEventId = randomUUID();
+    const input = {
+      eventId: enqueueEventId,
+      webhookType: "status.updated",
+      applicationId: "app_01",
+      environment: "sandbox",
+      sessionId: diditReference,
+      sessionKind: "user",
+      workflowId: "workflow_01",
+      vendorData: accountId,
+      status: "Approved",
+      createdAt: Math.floor(approvedAt.getTime() / 1_000),
+      traceId: `trace_enqueue_${suffix}`,
+    };
+
+    await repository.enqueueDiditWebhookProcessing(input);
+
+    // AD-145/AD-062: the enqueued job's own durable row *is* the receipt —
+    // assert it directly against pgboss.job, the same technique
+    // origination-offering-handoff.integration.test.ts and
+    // investor-offering-repository.integration.test.ts already use for
+    // their own AD-145 handoffs.
+    const enqueued = await authPool.query<{ name: string; data: typeof input }>(
+      "SELECT name, data FROM pgboss.job WHERE name = $1 AND data->>'eventId' = $2",
+      ["provider_events.didit_webhook", enqueueEventId],
+    );
+    expect(enqueued.rows).toHaveLength(1);
+    expect(enqueued.rows[0]?.data).toEqual(input);
   });
 
   it("rejects provider statuses outside the reviewed contract", async () => {

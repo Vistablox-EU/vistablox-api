@@ -10,6 +10,7 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
     findByDiditReference: vi.fn(),
     findByProofOfAddressDiditReference: vi.fn(),
     hasProcessedProviderEvent: vi.fn(),
+    enqueueDiditWebhookProcessing: vi.fn(),
     reserveSessionStart: vi.fn(),
     completeSessionStart: vi.fn(),
     failSessionStart: vi.fn(),

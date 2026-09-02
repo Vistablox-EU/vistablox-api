@@ -1,7 +1,9 @@
+import type { PgBoss } from "pg-boss";
 import { ulid } from "ulid";
 import { z } from "zod";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import { JOB_RETRY_OPTIONS } from "../../../shared/jobs/enqueue-job.js";
 import type {
   DiditStatus,
   KycEligibilityState,
@@ -20,7 +22,51 @@ import type {
 const renewalLeadDaysSettingSchema = z.object({ days: z.number().int().min(1).max(365) });
 
 export class PrismaKycRepository implements KycRepository {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly pgBoss: PgBoss,
+  ) {}
+
+  // AD-062 / ASYNC_JOBS.md's Webhook Handling Rule: "the endpoint verifies
+  // authenticity and schema... the downstream job is enqueued... the HTTP
+  // response returns quickly after durable receipt... workers own the
+  // actual business processing." No other write needs to happen atomically
+  // alongside this one (unlike enqueueTransactionalJob's callers elsewhere,
+  // which bind an enqueue to an existing state-change transaction), so this
+  // is a plain durable send rather than a transaction-bound one — pg-boss's
+  // own job row, holding the verified webhook body, *is* the durable
+  // receipt ASYNC_JOBS.md's diagram calls for.
+  public async enqueueDiditWebhookProcessing(input: {
+    eventId: string;
+    webhookType: string;
+    applicationId: string;
+    environment: string;
+    sessionId: string;
+    sessionKind: string | null;
+    workflowId: string | null;
+    vendorData: string | null;
+    status: string;
+    createdAt: number;
+    traceId: string;
+  }): Promise<void> {
+    await this.pgBoss.send(
+      "provider_events.didit_webhook",
+      {
+        eventId: input.eventId,
+        webhookType: input.webhookType,
+        applicationId: input.applicationId,
+        environment: input.environment,
+        sessionId: input.sessionId,
+        sessionKind: input.sessionKind,
+        workflowId: input.workflowId,
+        vendorData: input.vendorData,
+        status: input.status,
+        createdAt: input.createdAt,
+        traceId: input.traceId,
+      },
+      JOB_RETRY_OPTIONS,
+    );
+  }
 
   public async getRenewalReminderLeadDays(): Promise<number> {
     const setting = await this.database.platformSetting.findUnique({

@@ -2,9 +2,11 @@ import "dotenv/config";
 
 import { PgBoss } from "pg-boss";
 import { Pool } from "pg";
+import { createClient } from "redis";
 import { ulid } from "ulid";
 
 import { loadEnvironment } from "./config/environment.js";
+import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
@@ -13,6 +15,8 @@ import {
   SendApplicantResponseRemindersService,
 } from "./modules/origination/application/case-timer.service.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
+import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
+import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import { RunOidcCleanupService } from "./modules/auth/application/oidc-cleanup.service.js";
@@ -40,12 +44,87 @@ const emailSender = new SmtpEmailSender({
   password: environment.SMTP_PASSWORD,
   from: environment.SMTP_FROM,
 });
-const kycRepository = new PrismaKycRepository(database);
-
 const boss = new PgBoss(environment.DATABASE_URL);
 boss.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
 });
+
+const kycRepository = new PrismaKycRepository(database, boss);
+// Mirrors server.ts's own protected-profile-cache wiring: the display-name
+// cache invalidation that used to run inline inside the webhook HTTP
+// request (ProcessDiditWebhookService) now runs here instead, since that
+// service itself moved to this worker (see provider_events.didit_webhook
+// below) — this process needs the same best-effort Redis capability
+// server.ts already has to preserve that behavior unchanged.
+const profileCacheClient =
+  environment.PROFILE_CACHE_URL === undefined
+    ? undefined
+    : createClient({
+        url: environment.PROFILE_CACHE_URL,
+        socket: { connectTimeout: 3_000, reconnectStrategy: false },
+      });
+profileCacheClient?.on("error", (error) => {
+  logger.warn({ err: error }, "protected profile cache connection error");
+});
+if (profileCacheClient !== undefined) {
+  try {
+    await profileCacheClient.connect();
+  } catch (error) {
+    logger.warn(
+      { err: error },
+      "protected profile cache unavailable; display-name invalidation on KYC events will be skipped",
+    );
+  }
+}
+const protectedProfileCache =
+  profileCacheClient?.isReady === true
+    ? new RedisProtectedProfileCache(profileCacheClient)
+    : undefined;
+const diditClient =
+  environment.DIDIT_API_KEY === undefined
+    ? undefined
+    : new HttpDiditClient({
+        baseUrl: environment.DIDIT_API_BASE_URL,
+        apiKey: environment.DIDIT_API_KEY,
+        timeoutMs: 4_000,
+      });
+// Same "configure all six together or leave all empty" gate server.ts uses
+// for diditKyc — this worker only needs four of the six (callbackUrl and
+// webhookSecret are session-start/signature-verification concerns that stay
+// in the API process), but checking all six keeps the two processes'
+// notion of "is Didit configured" from ever disagreeing.
+const processDiditWebhook =
+  diditClient !== undefined &&
+  environment.DIDIT_WORKFLOW_ID !== undefined &&
+  environment.DIDIT_CALLBACK_URL !== undefined &&
+  environment.DIDIT_WEBHOOK_SECRET !== undefined &&
+  environment.DIDIT_APPLICATION_ID !== undefined &&
+  environment.DIDIT_ENVIRONMENT !== undefined
+    ? new ProcessDiditWebhookService(
+        kycRepository,
+        diditClient,
+        {
+          workflowId: environment.DIDIT_WORKFLOW_ID,
+          applicationId: environment.DIDIT_APPLICATION_ID,
+          environment: environment.DIDIT_ENVIRONMENT,
+          ...(environment.DIDIT_POA_WORKFLOW_ID === undefined
+            ? {}
+            : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),
+        },
+        protectedProfileCache === undefined
+          ? undefined
+          : async (accountId: string) => {
+              try {
+                await protectedProfileCache.delete(accountId);
+              } catch (error) {
+                logger.warn(
+                  { err: error, account_id: accountId },
+                  "protected display profile cache invalidation failed",
+                );
+              }
+            },
+      )
+    : undefined;
 
 const offeringRepository = new PrismaOfferingRepository(database, boss);
 const originationRepository = new PrismaOriginationRepository(database, boss);
@@ -109,6 +188,11 @@ await boss.createQueue("maintenance.oidc_cleanup");
 // creation itself when the same credentials are present.
 if (pollOnrampTransactions !== undefined) {
   await boss.createQueue("case_timers.reservation_onramp_poll");
+}
+// Only registered when Didit is configured, the same all-or-nothing gate
+// as processDiditWebhook's own construction above.
+if (processDiditWebhook !== undefined) {
+  await boss.createQueue("provider_events.didit_webhook");
 }
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
@@ -243,6 +327,42 @@ await boss.work("case_timers.offering_reconfirmation_window_opened", async (jobs
   }
 });
 
+if (processDiditWebhook !== undefined) {
+  // AD-062 / ASYNC_JOBS.md's Webhook Handling Rule: this is the "workers
+  // own the actual business processing" half — ReceiveDiditWebhookService
+  // (kyc.router.ts's POST /webhooks/didit handler) only durably enqueues
+  // the already signature-verified, schema-validated body and acknowledges
+  // fast; this consumes that job and runs the same fetch-decision-then-
+  // apply-policy logic ProcessDiditWebhookService always has, unchanged.
+  // Unlike the other event-triggered jobs above, this payload's own field
+  // names are camelCase (traceId, not trace_id) — it isn't enqueued through
+  // enqueueTransactionalJob's snake_case convention, since there's no other
+  // write in the same transaction to bind the enqueue to; the payload
+  // shape instead matches ProcessDiditWebhookService.execute's own
+  // long-standing input type directly (see kyc.service.ts).
+  await boss.work("provider_events.didit_webhook", async (jobs) => {
+    for (const job of jobs) {
+      const traceId =
+        typeof job.data === "object" && job.data !== null && "traceId" in job.data
+          ? String((job.data as { traceId: unknown }).traceId)
+          : "unknown";
+      try {
+        const result = await processDiditWebhook.execute(job.data);
+        logger.info(
+          { trace_id: traceId, job: "provider_events.didit_webhook", ...result },
+          "case timer job completed",
+        );
+      } catch (error) {
+        logger.error(
+          { err: error, trace_id: traceId, job: "provider_events.didit_webhook" },
+          "case timer job failed",
+        );
+        throw error;
+      }
+    }
+  });
+}
+
 logger.info("VistaBlox worker started");
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
@@ -252,7 +372,13 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   } catch (error: unknown) {
     logger.error({ err: error }, "pg-boss shutdown failed");
   }
-  await Promise.all([database.$disconnect(), authDatabase.end()]);
+  await Promise.all([
+    database.$disconnect(),
+    authDatabase.end(),
+    profileCacheClient?.isReady === true
+      ? profileCacheClient.quit().catch(() => undefined)
+      : Promise.resolve(),
+  ]);
 }
 
 process.once("SIGINT", () => void shutdown("SIGINT"));
