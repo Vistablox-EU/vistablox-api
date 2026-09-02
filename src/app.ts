@@ -64,8 +64,11 @@ import {
 } from "./modules/offering/api/offering.router.js";
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
+import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
+import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
 import type { DisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
+import type { ReservationRepository } from "./modules/offering/repository/reservation.repository.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
 import type { OfferingRepository } from "./modules/offering/repository/offering.repository.js";
 import { createOriginationRouter } from "./modules/origination/api/origination.router.js";
@@ -158,6 +161,12 @@ export interface AppDependencies {
     disclosureDocuments?: {
       repository: DisclosureDocumentRepository;
       store: DisclosureDocumentStore;
+    };
+    reservations?: {
+      repository: ReservationRepository;
+      coinbase: CoinbaseCdpClient;
+      blockchain: string;
+      buildRedirectUrl: (reservationId: string) => string;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -264,6 +273,17 @@ export function createApp(dependencies: AppDependencies): Express {
           : new DownloadDisclosureDocumentService(
               dependencies.protectedApi.disclosureDocuments.repository,
               dependencies.protectedApi.disclosureDocuments.store,
+            ),
+        dependencies.protectedApi.reservations === undefined
+          ? undefined
+          : new CreateReservationService(
+              dependencies.offeringRepository,
+              dependencies.protectedApi.reservations.repository,
+              dependencies.protectedApi.reservations.coinbase,
+              {
+                blockchain: dependencies.protectedApi.reservations.blockchain,
+                buildRedirectUrl: dependencies.protectedApi.reservations.buildRedirectUrl,
+              },
             ),
       ),
     );

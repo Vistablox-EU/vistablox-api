@@ -346,6 +346,198 @@ describe.skipIf(databaseUrl === undefined)(
 );
 
 describe.skipIf(databaseUrl === undefined)(
+  "reservation creation PostgreSQL integration (AD-146)",
+  () => {
+    const suffix = randomUUID();
+    const accountId = `account_reserve_${suffix}`;
+    const betterAuthUserId = `auth_reserve_${suffix}`;
+    const authPool = new Pool({ connectionString: databaseUrl });
+    const database = createPrismaClient(databaseUrl ?? "");
+    const repository = new PrismaOfferingRepository(database);
+    const offeringIds: string[] = [];
+    const pivIds: string[] = [];
+    const caseIds: string[] = [];
+    const propertyIds: string[] = [];
+
+    async function createOffering(input: {
+      targetRaiseEur: string;
+      status?: string;
+    }): Promise<string> {
+      const id = randomUUID();
+      const propertyId = `property_reserve_${id}`;
+      const caseId = `case_reserve_${id}`;
+      const pivId = `piv_reserve_${id}`;
+      const offeringId = `offering_reserve_${id}`;
+      await database.property.create({
+        data: {
+          id: propertyId,
+          countryCode: "DE",
+          city: "Leipzig",
+          addressLine: "Reservation Test 1",
+          ownerDeclaredValueEur: "600000.00",
+        },
+      });
+      await database.originationCase.create({
+        data: {
+          id: caseId,
+          propertyId,
+          applicantAccountId: accountId,
+          stage: "approved_for_final_offering",
+          legalExecutionEventRefs: [],
+          legalDocumentRefs: [],
+          appraisalDocumentRefs: [],
+        },
+      });
+      await database.piv.create({
+        data: { id: pivId, propertyId, caseId },
+      });
+      await database.offering.create({
+        data: {
+          id: offeringId,
+          pivId,
+          minimumRaiseEur: input.targetRaiseEur,
+          targetRaiseEur: input.targetRaiseEur,
+          status: input.status ?? "pre_offering",
+        },
+      });
+      propertyIds.push(propertyId);
+      caseIds.push(caseId);
+      pivIds.push(pivId);
+      offeringIds.push(offeringId);
+      return offeringId;
+    }
+
+    beforeAll(async () => {
+      await authPool.query(
+        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
+        [betterAuthUserId, "Reservation Creation Investor", `reserve-${suffix}@example.test`, true, "customer"],
+      );
+      await database.account.create({ data: { id: accountId, betterAuthUserId } });
+    });
+
+    afterAll(async () => {
+      await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
+      await database.auditLog.deleteMany({ where: { resourceType: "reservation" } });
+      await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
+      await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
+      await database.piv.deleteMany({ where: { id: { in: pivIds } } });
+      await database.originationCase.deleteMany({ where: { id: { in: caseIds } } });
+      await database.property.deleteMany({ where: { id: { in: propertyIds } } });
+      await database.account.deleteMany({ where: { id: accountId } });
+      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
+      await Promise.all([database.$disconnect(), authPool.end()]);
+    });
+
+    it("creates a reservation, a matching money event, and an audit trail", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+
+      const result = await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId,
+        amountEur: "400.00",
+        disclosurePackVersionAtReservation: "1",
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T10:00:00.000Z"),
+      });
+
+      expect(result).toEqual({
+        conflict: null,
+        reservation: { reservationId, createdAt: new Date("2026-09-02T10:00:00.000Z") },
+      });
+      const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
+      expect(reservation).toMatchObject({ offeringId, accountId, reservationStage: "initiated" });
+      expect(reservation?.amountEur.toFixed(2)).toBe("400.00");
+      const moneyEvents = await database.moneyEvent.findMany({ where: { reservationId } });
+      expect(moneyEvents).toMatchObject([{ provider: "coinbase_cdp", capitalState: "initiated" }]);
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: reservationId, action: "offering.reservation_created" },
+        }),
+      ).toBe(1);
+    });
+
+    it("rejects an amount that would exceed remaining capacity without writing a row", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      await repository.createReservation({
+        reservationId: `reservation_${randomUUID()}`,
+        offeringId,
+        accountId,
+        amountEur: "400.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+
+      const rejectedId = `reservation_${randomUUID()}`;
+      const result = await repository.createReservation({
+        reservationId: rejectedId,
+        offeringId,
+        accountId,
+        amountEur: "700.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+
+      expect(result).toEqual({ conflict: "capacity_exceeded", reservation: null });
+      expect(await database.reservation.findUnique({ where: { id: rejectedId } })).toBeNull();
+    });
+
+    it("rejects a reservation on an offering that is not pre_offering", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00", status: "final_offering" });
+
+      const result = await repository.createReservation({
+        reservationId: `reservation_${randomUUID()}`,
+        offeringId,
+        accountId,
+        amountEur: "1.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+
+      expect(result).toEqual({ conflict: "offering_not_open", reservation: null });
+    });
+
+    it("serializes concurrent reservations so combined capacity is never oversold (AD-146)", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+
+      const [first, second] = await Promise.all([
+        repository.createReservation({
+          reservationId: `reservation_${randomUUID()}`,
+          offeringId,
+          accountId,
+          amountEur: "600.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date(),
+        }),
+        repository.createReservation({
+          reservationId: `reservation_${randomUUID()}`,
+          offeringId,
+          accountId,
+          amountEur: "600.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date(),
+        }),
+      ]);
+
+      const outcomes = [first, second];
+      expect(outcomes.filter((outcome) => outcome.conflict === null)).toHaveLength(1);
+      expect(outcomes.filter((outcome) => outcome.conflict === "capacity_exceeded")).toHaveLength(1);
+      const reservedRows = await database.reservation.aggregate({
+        where: { offeringId, reservationStage: { notIn: ["cancelled", "lapsed"] } },
+        _sum: { amountEur: true },
+      });
+      expect(reservedRows._sum.amountEur?.toFixed(2)).toBe("600.00");
+    });
+  },
+);
+
+describe.skipIf(databaseUrl === undefined)(
   "origination approval offering handoff PostgreSQL integration",
   () => {
     const suffix = randomUUID();

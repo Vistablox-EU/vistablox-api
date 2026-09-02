@@ -103,6 +103,15 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.enum(["sandbox", "live"]).optional(),
     ),
+    COINBASE_CDP_API_BASE_URL: z.url().default("https://api.developer.coinbase.com"),
+    COINBASE_CDP_PAY_HOSTED_URL: z.url().default("https://pay.coinbase.com/buy/select-asset"),
+    COINBASE_CDP_API_KEY_ID: optionalUuid(),
+    COINBASE_CDP_API_KEY_SECRET: optionalNonEmptyString(),
+    COINBASE_ONRAMP_BLOCKCHAIN: z.string().min(1).default("base"),
+    COINBASE_ONRAMP_REDIRECT_URL: z.preprocess(
+      emptyStringToUndefined,
+      z.url().optional(),
+    ),
     OIDC_JWKS: z
       .string()
       .min(1)
@@ -199,6 +208,23 @@ const environmentSchema = z
     {
       message: "DIDIT_POA_WORKFLOW_ID must differ from DIDIT_WORKFLOW_ID",
       path: ["DIDIT_POA_WORKFLOW_ID"],
+    },
+  )
+  .refine(
+    (environment) => {
+      const values = [
+        environment.COINBASE_CDP_API_KEY_ID,
+        environment.COINBASE_CDP_API_KEY_SECRET,
+        environment.COINBASE_ONRAMP_REDIRECT_URL,
+      ];
+      return (
+        values.every((value) => value === undefined) ||
+        values.every((value) => value !== undefined)
+      );
+    },
+    {
+      message: "All Coinbase CDP onramp settings must be configured together",
+      path: ["COINBASE_CDP_API_KEY_ID"],
     },
   );
 

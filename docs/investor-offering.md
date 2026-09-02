@@ -20,21 +20,31 @@ Current-pack documents are accessible to any authenticated customer, matching `A
 
 The download response uses `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and `Cache-Control: private, no-store`. Object-store failures are mapped to provider-neutral `503` errors before streaming starts. See [`document-storage.md`](document-storage.md) for the runtime and deployment implementation.
 
-## Why reservation creation is closed
+## Reservation creation
 
-As checked on 2026-09-01, Stripe's current Onramp destination-network table does not list EURC as a supported destination asset. It also states that USDC on Base is not supported in the EU. That conflicts with the documented VistaBlox phase-1 requirement for an investor-initiated EUR-to-EURC purchase on Base. Stripe also labels the Onramp API as a public-preview product requiring access approval.
+`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
 
-Authoritative references:
+```json
+{
+  "data": {
+    "reservation_id": "reservation_...",
+    "offering_id": "offering_...",
+    "amount_eur": "1000.00",
+    "status": "initiated",
+    "expires_at": "2026-09-02T10:15:00.000Z",
+    "onramp": { "url": "https://pay.coinbase.com/buy/select-asset?...", "channel_id": "..." }
+  }
+}
+```
 
-- [Stripe Crypto Onramp supported networks and currencies](https://docs.stripe.com/crypto/onramp)
-- [Stripe embedded Onramp integration](https://docs.stripe.com/crypto/onramp/embedded?locale=en-GB)
-- [Stripe Onramp Sessions API](https://docs.stripe.com/api/crypto/onramp_sessions?lang=go)
+The reservation row and its first `money.money_events` row (`capital_state: "initiated"`) are written inside one transaction that also re-verifies, under a row lock on the `offerings` row, that the offering is still `pre_offering` and that the requested amount still fits the offering's remaining capacity (`AD-146`: the same check `GetInvestorOfferingService`'s `reservation.blockers` reports is advisory only — this is the atomic, authoritative one, sharing its rule set via `domain/reservation-eligibility.policy.ts` so the two can never disagree). A losing concurrent request gets `409 offering.reservation_not_available` (offering closed between read and write) or `422 offering.reservation_amount_exceeds_capacity` (amount no longer fits), never a silent oversell.
 
-The API therefore returns `funding_rail_unavailable` and does not create a reservation. It also returns `disclosure_pack_unavailable` when no non-empty current pack exists. Silently substituting USDC, another network, or another provider would alter the financial and legal architecture. Creating the reservation before the rail exists would consume hard offering capacity, while the current design has no expiry/release rule for an unfunded `initiated` or `eurc_purchase_pending` hold.
+After the reservation is durably created, the CDP onramp session token call happens synchronously in the request path, the same way `StartKycSessionService` calls Didit — not through a job (`AD-145` governs cross-domain *state transitions*, not a single external call whose whole purpose is "start now, hand the client a URL"). If that call fails, a `purchase_failed` money event is recorded and the error propagates; the reservation row is deliberately left in place rather than unwound, because the already-decided capacity policy (reserve immediately, auto-expire if unfunded) already covers this case identically to an investor who simply never completes the purchase.
 
-Before enabling reservation writes, the architecture needs both:
+**The funding rail stays closed by default.** Both `GetInvestorOfferingService` and `CreateReservationService` take a `fundingRailAvailable` flag that defaults to `false`, so `POST .../reservations` currently returns `409` with `funding_rail_unavailable` even though the endpoint exists — matching the pre-existing "never create an unfunded capacity hold" guardrail. Turning it on needs, in addition to the code in this repository:
 
-1. a supported and approved funding rail whose asset/network combination matches the legally selected flow; and
-2. explicit timeout, retry, cancellation, and capacity-release rules for abandoned and failed purchases.
+1. a scheduled sweep that expires unfunded `initiated` reservations after 15 minutes and releases their held capacity (decided, not yet built — no worker job exists for it yet, unlike the capacity check itself which is already enforced atomically regardless of the flag);
+2. a scheduled poll of Coinbase's buy-transaction-status endpoint to advance `capital_state` past `eurc_purchase_pending` (no onramp/offramp webhook exists to push this — confirmed against CDP's own docs, not assumed); and
+3. live confirmation that Coinbase CDP actually supports EUR and the configured network for this account — the same category of "verify before flipping the switch" risk that broke the prior Stripe-based design, named as still open in `AD-255`.
 
-Once those decisions exist, the existing readiness projection can open without changing the response contract, and the reservation write can be added behind the shared idempotency middleware and an atomic capacity check.
+See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/Backend/15-Decisions-and-Rationale/ARCHITECTURE_DECISIONS.md) for the full provider decision and its "Still Open" list, and `docs/coinbase-cdp-onramp.md` for the client's exact REST surface.

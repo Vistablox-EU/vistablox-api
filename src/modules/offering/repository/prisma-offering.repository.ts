@@ -1,5 +1,6 @@
 import { ulid } from "ulid";
 
+import { toCents } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import type {
   InvestorOfferingDetailRecord,
@@ -17,9 +18,19 @@ import type {
   OpenedOffering,
   OpenOfferingForApprovedCaseInput,
 } from "./offering-origination-handoff.repository.js";
+import type {
+  AdvanceReservationCapitalStateInput,
+  CreateReservationInput,
+  CreateReservationResult,
+  ReservationRepository,
+} from "./reservation.repository.js";
 
 export class PrismaOfferingRepository
-  implements OfferingRepository, DisclosureDocumentRepository, OfferingOriginationHandoffRepository
+  implements
+    OfferingRepository,
+    DisclosureDocumentRepository,
+    OfferingOriginationHandoffRepository,
+    ReservationRepository
 {
   public constructor(private readonly database: DatabaseClient) {}
 
@@ -213,7 +224,7 @@ export class PrismaOfferingRepository
             select: { eligibilityState: true, renewalDueAt: true },
           },
           walletRegistration: {
-            select: { registeredAt: true },
+            select: { walletAddress: true, registeredAt: true },
           },
         },
       }),
@@ -308,6 +319,7 @@ export class PrismaOfferingRepository
         kycEligibilityState: account.kycEligibility?.eligibilityState ?? null,
         kycRenewalDueAt: account.kycEligibility?.renewalDueAt ?? null,
         walletProvisioned: account.walletRegistration !== null,
+        walletAddress: account.walletRegistration?.walletAddress ?? null,
         payoutWalletRegistered:
           account.walletRegistration !== null &&
           account.walletRegistration.registeredAt !== null,
@@ -360,6 +372,97 @@ export class PrismaOfferingRepository
           documentType: row.document_type,
           disclosurePackVersion: row.disclosure_pack_version,
         };
+  }
+
+  public async createReservation(input: CreateReservationInput): Promise<CreateReservationResult> {
+    return this.database.$transaction(async (transaction) => {
+      // AD-146: lock the offering row so concurrent reservation attempts
+      // against the same offering serialize, matching the FOR UPDATE
+      // pattern PrismaOriginationRepository.submitInitialCase already uses.
+      const locked = await transaction.$queryRaw<
+        Array<{ offering_id: string; status: string; target_raise_eur: string }>
+      >`
+        SELECT offering_id, status, target_raise_eur::text
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined || offering.status !== "pre_offering") {
+        return { reservation: null, conflict: "offering_not_open" as const };
+      }
+
+      const reservedRows = await transaction.$queryRaw<Array<{ reserved_capacity_eur: string }>>`
+        SELECT COALESCE(
+          SUM(amount_eur) FILTER (WHERE reservation_stage NOT IN ('cancelled', 'lapsed')),
+          0
+        )::text AS reserved_capacity_eur
+        FROM offering.reservations
+        WHERE offering_id = ${input.offeringId}
+      `;
+      const reservedCapacityEur = reservedRows[0]?.reserved_capacity_eur ?? "0";
+      const remainingCents = toCents(offering.target_raise_eur) - toCents(reservedCapacityEur);
+      if (toCents(input.amountEur) > (remainingCents > 0n ? remainingCents : 0n)) {
+        return { reservation: null, conflict: "capacity_exceeded" as const };
+      }
+
+      await transaction.reservation.create({
+        data: {
+          id: input.reservationId,
+          offeringId: input.offeringId,
+          accountId: input.accountId,
+          amountEur: input.amountEur,
+          reservationStage: "initiated",
+          disclosurePackVersionAtReservation: input.disclosurePackVersionAtReservation,
+          createdAt: input.createdAt,
+        },
+      });
+      await transaction.moneyEvent.create({
+        data: {
+          id: `money_event_${ulid()}`,
+          reservationId: input.reservationId,
+          provider: "coinbase_cdp",
+          capitalState: "initiated",
+          amountEur: input.amountEur,
+          recordedAt: input.createdAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.reservation_created",
+          resourceType: "reservation",
+          resourceId: input.reservationId,
+          changes: {
+            trace_id: input.traceId,
+            offering_id: input.offeringId,
+            amount_eur: input.amountEur,
+          },
+          createdAt: input.createdAt,
+        },
+      });
+
+      return {
+        reservation: { reservationId: input.reservationId, createdAt: input.createdAt },
+        conflict: null,
+      };
+    });
+  }
+
+  public async recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<void> {
+    await this.database.moneyEvent.create({
+      data: {
+        id: `money_event_${ulid()}`,
+        reservationId: input.reservationId,
+        provider: input.provider,
+        providerReference: input.providerReference,
+        capitalState: input.capitalState,
+        amountEur: input.amountEur,
+        amountEurc: input.amountEurc,
+        recordedAt: input.recordedAt,
+      },
+    });
   }
 }
 

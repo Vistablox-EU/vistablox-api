@@ -3,10 +3,13 @@ import { pipeline } from "node:stream/promises";
 import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
+import type { CreateReservationService } from "../application/create-reservation.service.js";
 import type { DownloadDisclosureDocumentService } from "../application/download-disclosure-document.service.js";
 import type { GetInvestorOfferingService } from "../application/get-investor-offering.service.js";
 import { ListPublicOfferingsService } from "../application/list-public-offerings.service.js";
 import {
+  createReservationBodySchema,
+  createReservationResponseSchema,
   disclosureDocumentParamsSchema,
   investorOfferingDetailResponseSchema,
   investorOfferingParamsSchema,
@@ -30,6 +33,7 @@ export function createInvestorOfferingRouter(
   requireAuthentication: RequestHandler,
   service: GetInvestorOfferingService,
   downloadDocument?: DownloadDisclosureDocumentService,
+  createReservation?: CreateReservationService,
 ): Router {
   const router = Router();
 
@@ -43,6 +47,22 @@ export function createInvestorOfferingRouter(
     response.setHeader("Cache-Control", "no-store");
     response.json(investorOfferingDetailResponseSchema.parse(result));
   });
+
+  if (createReservation !== undefined) {
+    router.post("/:offering_id/reservations", requireAuthentication, async (request, response) => {
+      const context = requireCustomerContext(response.locals.authContext);
+      const params = investorOfferingParamsSchema.parse(request.params);
+      const body = createReservationBodySchema.parse(request.body);
+      const result = await createReservation.execute({
+        offeringId: params.offering_id,
+        accountId: context.accountId,
+        amountEur: body.amount_eur,
+        traceId: String(response.locals.traceId),
+      });
+      response.setHeader("Cache-Control", "no-store");
+      response.status(201).json(createReservationResponseSchema.parse(result));
+    });
+  }
 
   if (downloadDocument !== undefined) {
     router.get(

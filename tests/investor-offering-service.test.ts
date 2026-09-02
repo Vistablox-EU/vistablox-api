@@ -59,6 +59,7 @@ function detail(
       kycEligibilityState: "eligible",
       kycRenewalDueAt: new Date("2027-01-01T12:00:00.000Z"),
       walletProvisioned: true,
+      walletAddress: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
       payoutWalletRegistered: true,
     },
     ...overrides,
@@ -127,6 +128,7 @@ describe("authenticated investor offering detail", () => {
         kycEligibilityState: "eligible",
         kycRenewalDueAt: currentTime,
         walletProvisioned: false,
+        walletAddress: null,
         payoutWalletRegistered: false,
       },
     });

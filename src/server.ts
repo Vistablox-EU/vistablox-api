@@ -35,6 +35,7 @@ import { createOidcProvider } from "./modules/auth/infrastructure/oidc-provider.
 import { OidcBearerSessionResolver } from "./modules/auth/infrastructure/oidc-bearer-session.resolver.js";
 import { CompositeSessionResolver } from "./modules/auth/application/composite-session.resolver.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
@@ -202,6 +203,19 @@ const diditKyc =
             }),
       }
     : undefined;
+const onrampRedirectUrl = environment.COINBASE_ONRAMP_REDIRECT_URL;
+const coinbaseCdpClient =
+  environment.COINBASE_CDP_API_KEY_ID === undefined ||
+  environment.COINBASE_CDP_API_KEY_SECRET === undefined ||
+  environment.COINBASE_ONRAMP_REDIRECT_URL === undefined
+    ? undefined
+    : new HttpCoinbaseCdpClient({
+        baseUrl: environment.COINBASE_CDP_API_BASE_URL,
+        payHostedUrl: environment.COINBASE_CDP_PAY_HOSTED_URL,
+        apiKeyId: environment.COINBASE_CDP_API_KEY_ID,
+        apiKeySecret: environment.COINBASE_CDP_API_KEY_SECRET,
+        timeoutMs: 8_000,
+      });
 const betterAuthSessionResolver = new BetterAuthSessionResolver(auth);
 const oidcProvider = createOidcProvider({
   baseUrl: environment.BETTER_AUTH_URL,
@@ -267,6 +281,17 @@ const app = createApp({
       repository: offeringRepository,
       store: disclosureDocumentStore,
     },
+    ...(coinbaseCdpClient === undefined || onrampRedirectUrl === undefined
+      ? {}
+      : {
+          reservations: {
+            repository: offeringRepository,
+            coinbase: coinbaseCdpClient,
+            blockchain: environment.COINBASE_ONRAMP_BLOCKCHAIN,
+            buildRedirectUrl: (reservationId: string) =>
+              `${onrampRedirectUrl}?reservation_id=${encodeURIComponent(reservationId)}`,
+          },
+        }),
     totp: {
       repository: new PrismaTotpRepository(database),
       provider: new OtplibTotpProvider(),
