@@ -52,6 +52,8 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
     getRenewalReminderLeadDays: vi.fn().mockResolvedValue(30),
     listEligibleAccountsForRenewalTimer: vi.fn().mockResolvedValue([]),
     transitionToRequiresRenewal: vi.fn().mockResolvedValue(false),
+    listStuckSessionCreationsForTimer: vi.fn().mockResolvedValue([]),
+    listStuckOpenSessionsForTimer: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }

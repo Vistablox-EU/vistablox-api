@@ -257,6 +257,73 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
     expect(enqueued.rows[0]?.data).toEqual(input);
   });
 
+  it("lists a stuck session creation, then a stuck open session, as the same row transitions between them", async () => {
+    const stuckSuffix = randomUUID();
+    const stuckAccountId = `acct_stuck_${stuckSuffix}`;
+    const stuckBetterAuthUserId = `auth_stuck_${stuckSuffix}`;
+    const stuckSessionStartId = `kyc_start_stuck_${stuckSuffix}`;
+    const stuckDiditReference = randomUUID();
+
+    await authPool.query(
+      'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
+      [stuckBetterAuthUserId, "Stuck Session Test User", `kyc-stuck-${stuckSuffix}@example.test`, true, "customer"],
+    );
+    await database.account.create({
+      data: { id: stuckAccountId, betterAuthUserId: stuckBetterAuthUserId },
+    });
+
+    try {
+      expect(
+        await repository.reserveSessionStart({
+          accountId: stuckAccountId,
+          sessionStartId: stuckSessionStartId,
+          residenceCountryCode: "DE",
+          taxResidenceCountryCode: "DE",
+          traceId: `trace_${stuckSuffix}`,
+          startedAt,
+        }),
+      ).toBe(true);
+
+      // Still kyc_session_creating: appears in the creation-stuck list, not
+      // the open-stuck list.
+      const creating = await repository.listStuckSessionCreationsForTimer();
+      expect(creating.find((row) => row.accountId === stuckAccountId)).toMatchObject({
+        kind: "baseline",
+        sessionStartId: stuckSessionStartId,
+      });
+      const openWhileCreating = await repository.listStuckOpenSessionsForTimer();
+      expect(openWhileCreating.find((row) => row.accountId === stuckAccountId)).toBeUndefined();
+
+      expect(
+        await repository.completeSessionStart({
+          accountId: stuckAccountId,
+          sessionStartId: stuckSessionStartId,
+          diditReference: stuckDiditReference,
+          providerStatus: "Not Started",
+          traceId: `trace_${stuckSuffix}`,
+          completedAt: startedAt,
+        }),
+      ).toBe(true);
+
+      // Now kyc_session_open: appears in the open-stuck list, no longer in
+      // the creation-stuck list.
+      const open = await repository.listStuckOpenSessionsForTimer();
+      expect(open.find((row) => row.accountId === stuckAccountId)).toMatchObject({
+        kind: "baseline",
+        diditReference: stuckDiditReference,
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "DE",
+        everRequiredManualReview: false,
+      });
+      const creatingWhileOpen = await repository.listStuckSessionCreationsForTimer();
+      expect(creatingWhileOpen.find((row) => row.accountId === stuckAccountId)).toBeUndefined();
+    } finally {
+      await database.kycEligibility.deleteMany({ where: { accountId: stuckAccountId } });
+      await database.account.deleteMany({ where: { id: stuckAccountId } });
+      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [stuckBetterAuthUserId]);
+    }
+  });
+
   it("rejects provider statuses outside the reviewed contract", async () => {
     await expect(
       database.kycEligibility.update({

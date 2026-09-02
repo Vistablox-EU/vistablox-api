@@ -127,4 +127,23 @@ export interface KycRepository {
     traceId: string;
     transitionedAt: Date;
   }): Promise<boolean>;
+  listStuckSessionCreationsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      sessionStartId: string;
+      updatedAt: Date;
+    }>
+  >;
+  listStuckOpenSessionsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      diditReference: string;
+      residenceCountryCode: string | null;
+      taxResidenceCountryCode: string | null;
+      everRequiredManualReview: boolean;
+      updatedAt: Date;
+    }>
+  >;
 }

@@ -682,6 +682,88 @@ export class PrismaKycRepository implements KycRepository {
       return true;
     });
   }
+
+  public async listStuckSessionCreationsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      sessionStartId: string;
+      updatedAt: Date;
+    }>
+  > {
+    const rows = await this.database.$queryRaw<
+      Array<{ account_id: string; kind: "baseline" | "proof_of_address"; session_start_id: string; updated_at: Date }>
+    >`
+      SELECT account_id, 'baseline' AS kind, session_start_id, updated_at
+      FROM identity.kyc_eligibility
+      WHERE operational_substatus = 'kyc_session_creating'
+      UNION ALL
+      SELECT account_id, 'proof_of_address' AS kind, proof_of_address_session_start_id, updated_at
+      FROM identity.kyc_eligibility
+      WHERE proof_of_address_status = 'creating'
+    `;
+    return rows.map((row) => ({
+      accountId: row.account_id,
+      kind: row.kind,
+      sessionStartId: row.session_start_id,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  public async listStuckOpenSessionsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      diditReference: string;
+      residenceCountryCode: string | null;
+      taxResidenceCountryCode: string | null;
+      everRequiredManualReview: boolean;
+      updatedAt: Date;
+    }>
+  > {
+    const rows = await this.database.$queryRaw<
+      Array<{
+        account_id: string;
+        kind: "baseline" | "proof_of_address";
+        didit_reference: string;
+        residence_country_code: string | null;
+        tax_residence_country_code: string | null;
+        ever_required_manual_review: boolean;
+        updated_at: Date;
+      }>
+    >`
+      SELECT
+        account_id,
+        'baseline' AS kind,
+        didit_reference,
+        residence_country_code,
+        tax_residence_country_code,
+        ever_required_manual_review,
+        updated_at
+      FROM identity.kyc_eligibility
+      WHERE operational_substatus = 'kyc_session_open'
+      UNION ALL
+      SELECT
+        account_id,
+        'proof_of_address' AS kind,
+        proof_of_address_didit_reference,
+        residence_country_code,
+        NULL AS tax_residence_country_code,
+        ever_required_manual_review,
+        updated_at
+      FROM identity.kyc_eligibility
+      WHERE proof_of_address_status = 'in_progress'
+    `;
+    return rows.map((row) => ({
+      accountId: row.account_id,
+      kind: row.kind,
+      diditReference: row.didit_reference,
+      residenceCountryCode: row.residence_country_code,
+      taxResidenceCountryCode: row.tax_residence_country_code,
+      everRequiredManualReview: row.ever_required_manual_review,
+      updatedAt: row.updated_at,
+    }));
+  }
 }
 
 function canStartSession(substatus: string): boolean {

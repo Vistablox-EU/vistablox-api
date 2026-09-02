@@ -18,6 +18,10 @@ import { PrismaOriginationRepository } from "./modules/origination/repository/pr
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
+import {
+  ExpireStuckSessionCreationsService,
+  ReconcileStuckOpenSessionsService,
+} from "./modules/identity/application/kyc-stuck-session.service.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import { RunOidcCleanupService } from "./modules/auth/application/oidc-cleanup.service.js";
 import { PostgresOidcCleanupRepository } from "./modules/auth/infrastructure/postgres-oidc-cleanup.repository.js";
@@ -125,6 +129,13 @@ const processDiditWebhook =
             },
       )
     : undefined;
+const expireStuckSessionCreations = new ExpireStuckSessionCreationsService(kycRepository);
+// Only needs a live DiditClient (to re-query a session's current status),
+// not the full six-variable Didit config processDiditWebhook above checks
+// — diditClient !== undefined is already equivalent in practice, since
+// environment.ts's own refine enforces all six configured together or none.
+const reconcileStuckOpenSessions =
+  diditClient === undefined ? undefined : new ReconcileStuckOpenSessionsService(kycRepository, diditClient);
 
 const offeringRepository = new PrismaOfferingRepository(database, boss);
 const originationRepository = new PrismaOriginationRepository(database, boss);
@@ -182,6 +193,7 @@ await boss.createQueue("case_timers.offering_reconfirmation_reminders");
 await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.oidc_cleanup");
+await boss.createQueue("maintenance.kyc_stuck_session_expiry");
 // Only registered when Coinbase CDP credentials are configured — unlike
 // every other job here, this one's sole dependency (the onramp REST client)
 // is genuinely optional, matching how server.ts only wires reservation
@@ -193,6 +205,9 @@ if (pollOnrampTransactions !== undefined) {
 // as processDiditWebhook's own construction above.
 if (processDiditWebhook !== undefined) {
   await boss.createQueue("provider_events.didit_webhook");
+}
+if (reconcileStuckOpenSessions !== undefined) {
+  await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
 }
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
@@ -211,6 +226,21 @@ await boss.schedule("maintenance.oidc_cleanup", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
+// Hourly is generous headroom either side of both thresholds this pair
+// checks against (15 minutes for a stuck session creation, an hour before
+// the first reconciliation re-check of a stuck open session) — there is no
+// promised recovery time to keep pace with here, unlike the 15-minute
+// unfunded-reservation sweep above.
+await boss.schedule("maintenance.kyc_stuck_session_expiry", "0 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
+if (reconcileStuckOpenSessions !== undefined) {
+  await boss.schedule("maintenance.kyc_stuck_session_reconciliation", "0 * * * *", null, {
+    tz: "UTC",
+    ...RETRY_OPTIONS,
+  });
+}
 // Every minute, not hourly like the other timers above: the capacity-hold
 // policy decided alongside AD-255 promises unfunded capacity is released
 // within ~15 minutes, and a stale hold blocks other investors from an
@@ -256,6 +286,18 @@ await boss.work("maintenance.kyc_renewal", async () => {
 await boss.work("maintenance.oidc_cleanup", async () => {
   await runJob("maintenance.oidc_cleanup", () => runOidcCleanup.execute());
 });
+await boss.work("maintenance.kyc_stuck_session_expiry", async () => {
+  await runJob("maintenance.kyc_stuck_session_expiry", (traceId) =>
+    expireStuckSessionCreations.execute(traceId),
+  );
+});
+if (reconcileStuckOpenSessions !== undefined) {
+  await boss.work("maintenance.kyc_stuck_session_reconciliation", async () => {
+    await runJob("maintenance.kyc_stuck_session_reconciliation", (traceId) =>
+      reconcileStuckOpenSessions.execute(traceId),
+    );
+  });
+}
 await boss.work("case_timers.reservation_unfunded_expiry", async () => {
   await runJob("case_timers.reservation_unfunded_expiry", (traceId) =>
     expireUnfundedReservations.execute(traceId),
