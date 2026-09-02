@@ -61,6 +61,7 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
       walletProvisioned: true,
       walletAddress,
       payoutWalletRegistered: false,
+      recoveryCooldownEndsAt: null,
     },
     ...overrides,
   };
@@ -180,6 +181,7 @@ describe("CreateReservationService", () => {
         walletProvisioned: false,
         walletAddress: null,
         payoutWalletRegistered: false,
+        recoveryCooldownEndsAt: null,
       },
     });
     const service = new CreateReservationService(offeringRepository(record), reservationRepository(), coinbase(), {

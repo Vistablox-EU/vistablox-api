@@ -10,6 +10,7 @@ import type { Logger } from "pino";
 import { pinoHttp } from "pino-http";
 
 import type { DatabaseProbe } from "./infrastructure/database/database-probe.js";
+import type { EmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import type { AccountRepository } from "./modules/account/repository/account.repository.js";
 import { createRequireAuthentication } from "./modules/auth/api/require-authentication.js";
 import {
@@ -38,6 +39,17 @@ import {
 } from "./modules/auth/application/staff-account-lifecycle.service.js";
 import type { StaffAccountAdministrator } from "./modules/auth/application/staff-account-administrator.js";
 import type { StaffAccountLifecycleRepository } from "./modules/auth/repository/staff-account-lifecycle.repository.js";
+import { createAccountRecoveryRouter } from "./modules/auth/api/account-recovery.router.js";
+import {
+  CompleteAccountRecoveryService,
+  CreateRecoveryDiditSessionService,
+  DecideAccountRecoveryCaseService,
+  GetAccountRecoveryCaseService,
+  OpenAccountRecoveryCaseService,
+  RecordPrimaryRecoveryReviewService,
+} from "./modules/auth/application/account-recovery.service.js";
+import type { CustomerAccountAdministrator } from "./modules/auth/application/customer-account-administrator.js";
+import type { AccountRecoveryRepository } from "./modules/auth/repository/account-recovery.repository.js";
 import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.service.js";
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
 import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
@@ -183,6 +195,21 @@ export interface AppDependencies {
       repository: StaffAccountLifecycleRepository;
       administrator: StaffAccountAdministrator;
       recoveryRedirectUrl: string;
+    };
+    accountRecovery?: {
+      repository: AccountRecoveryRepository;
+      administrator: CustomerAccountAdministrator;
+      didit: DiditClient;
+      workflowId: string;
+      callbackUrl: string;
+      recoveryRedirectUrl: string;
+      // Sent synchronously from the request, mirroring RecoverStaffAccountService's
+      // and IssueStaffInvitationService's precedent for staff-initiated admin
+      // actions — unlike the customer-facing reminder jobs in worker.ts, a staff
+      // reviewer is directly waiting on the result here. Every call site wraps
+      // this in try/catch as best-effort; only the administrator's own
+      // password-reset email (better-auth's own send path) is a hard failure.
+      emailSender: EmailSender;
     };
     staffInvitations?: {
       repository: StaffInvitationRepository;
@@ -463,6 +490,35 @@ export function createApp(dependencies: AppDependencies): Express {
           new ListStaffAccountsService(lifecycle.repository),
           new GrantStaffRoleService(lifecycle.repository),
           new RevokeStaffRoleService(lifecycle.repository),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.accountRecovery !== undefined) {
+      const recovery = dependencies.protectedApi.accountRecovery;
+      app.use(
+        "/internal/v1/account-recovery-cases",
+        createAccountRecoveryRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new OpenAccountRecoveryCaseService(
+            recovery.repository,
+            recovery.administrator,
+            recovery.emailSender,
+          ),
+          new CreateRecoveryDiditSessionService(recovery.repository, recovery.didit, {
+            workflowId: recovery.workflowId,
+            callbackUrl: recovery.callbackUrl,
+          }),
+          new GetAccountRecoveryCaseService(recovery.repository, recovery.didit),
+          new RecordPrimaryRecoveryReviewService(recovery.repository),
+          new DecideAccountRecoveryCaseService(recovery.repository, recovery.emailSender),
+          new CompleteAccountRecoveryService(
+            recovery.repository,
+            recovery.administrator,
+            recovery.emailSender,
+            recovery.recoveryRedirectUrl,
+          ),
         ),
       );
     }

@@ -71,7 +71,7 @@ export class HttpDiditClient implements DiditClient {
     accountId: string;
     callbackUrl: string;
     sessionStartId: string;
-    purpose: "baseline_kyc" | "owner_proof_of_address";
+    purpose: "baseline_kyc" | "owner_proof_of_address" | "account_recovery";
     language?: string;
   }) {
     const response = await this.request("/v3/session/", {

@@ -114,6 +114,7 @@ export const investorOfferingDetailResponseSchema = z.object({
           "offering_not_open",
           "capacity_exhausted",
           "funding_rail_unavailable",
+          "recovery_cooldown_active",
         ]),
       ),
     }),
