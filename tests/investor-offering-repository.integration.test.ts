@@ -534,6 +534,67 @@ describe.skipIf(databaseUrl === undefined)(
       });
       expect(reservedRows._sum.amountEur?.toFixed(2)).toBe("600.00");
     });
+
+    it("lists only initiated reservations for the expiry timer, and expiring one is idempotent", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const initiatedId = `reservation_${randomUUID()}`;
+      const cancelledId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId: initiatedId,
+        offeringId,
+        accountId,
+        amountEur: "100.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T09:00:00.000Z"),
+      });
+      await database.reservation.create({
+        data: {
+          id: cancelledId,
+          offeringId,
+          accountId,
+          amountEur: "50.00",
+          reservationStage: "cancelled",
+        },
+      });
+
+      const forTimers = await repository.listInitiatedReservationsForTimers();
+      expect(forTimers.map((r) => r.reservationId)).toContain(initiatedId);
+      expect(forTimers.map((r) => r.reservationId)).not.toContain(cancelledId);
+
+      const expiredAt = new Date("2026-09-02T09:20:00.000Z");
+      const firstAttempt = await repository.expireReservation({
+        reservationId: initiatedId,
+        traceId: `trace_${suffix}`,
+        expiredAt,
+      });
+      expect(firstAttempt).toBe(true);
+      const lapsed = await database.reservation.findUnique({ where: { id: initiatedId } });
+      expect(lapsed?.reservationStage).toBe("lapsed");
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: initiatedId, action: "offering.reservation_lapsed" },
+        }),
+      ).toBe(1);
+
+      const secondAttempt = await repository.expireReservation({
+        reservationId: initiatedId,
+        traceId: `trace_${suffix}`,
+        expiredAt,
+      });
+      expect(secondAttempt).toBe(false);
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: initiatedId, action: "offering.reservation_lapsed" },
+        }),
+      ).toBe(1);
+
+      const capacityAfterExpiry = await database.reservation.aggregate({
+        where: { offeringId, reservationStage: { notIn: ["cancelled", "lapsed"] } },
+        _sum: { amountEur: true },
+      });
+      expect(capacityAfterExpiry._sum.amountEur).toBeNull();
+    });
   },
 );
 

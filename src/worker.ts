@@ -18,6 +18,7 @@ import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.re
 import { RunOidcCleanupService } from "./modules/auth/application/oidc-cleanup.service.js";
 import { PostgresOidcCleanupRepository } from "./modules/auth/infrastructure/postgres-oidc-cleanup.repository.js";
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
+import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
@@ -51,6 +52,7 @@ const expireOverdueRequests = new ExpireOverdueInformationRequestsService(origin
 const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
 const runOidcCleanup = new RunOidcCleanupService(new PostgresOidcCleanupRepository(authDatabase));
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
+const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 
 const RETRY_OPTIONS = JOB_RETRY_OPTIONS;
 
@@ -73,6 +75,7 @@ await boss.start();
 await boss.createQueue("case_timers.applicant_reminders");
 await boss.createQueue("case_timers.response_window_expiry");
 await boss.createQueue("case_timers.pre_offering_open_handoff");
+await boss.createQueue("case_timers.reservation_unfunded_expiry");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.oidc_cleanup");
 
@@ -92,6 +95,15 @@ await boss.schedule("maintenance.oidc_cleanup", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
+// Every minute, not hourly like the other timers above: the capacity-hold
+// policy decided alongside AD-255 promises unfunded capacity is released
+// within ~15 minutes, and a stale hold blocks other investors from an
+// offering that may be close to full — a coarser sweep would silently widen
+// that window.
+await boss.schedule("case_timers.reservation_unfunded_expiry", "* * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
 
 await boss.work("case_timers.applicant_reminders", async () => {
   await runJob("case_timers.applicant_reminders", () => sendApplicantReminders.execute());
@@ -106,6 +118,11 @@ await boss.work("maintenance.kyc_renewal", async () => {
 });
 await boss.work("maintenance.oidc_cleanup", async () => {
   await runJob("maintenance.oidc_cleanup", () => runOidcCleanup.execute());
+});
+await boss.work("case_timers.reservation_unfunded_expiry", async () => {
+  await runJob("case_timers.reservation_unfunded_expiry", (traceId) =>
+    expireUnfundedReservations.execute(traceId),
+  );
 });
 
 // AD-152: this job's trace_id is the originating approval request's own,

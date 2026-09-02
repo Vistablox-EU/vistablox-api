@@ -84,3 +84,18 @@ export function computeReservationBlockers(input: {
 
   return blockers;
 }
+
+/**
+ * The capacity-hold policy decided alongside AD-255: reserve capacity
+ * immediately at creation, auto-expire and release it if the reservation is
+ * still unfunded 15 minutes later. Only 'initiated' reservations are ever
+ * eligible — once a reservation moves past that (reconfirmed, finalized,
+ * already cancelled/lapsed), this predicate no longer applies to it.
+ */
+export function isReservationExpired(input: {
+  createdAt: Date;
+  now: Date;
+  expiryMinutes: number;
+}): boolean {
+  return input.createdAt.getTime() + input.expiryMinutes * 60_000 < input.now.getTime();
+}

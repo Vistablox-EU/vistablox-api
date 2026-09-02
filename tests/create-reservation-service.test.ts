@@ -85,6 +85,8 @@ function reservationRepository(
   return {
     createReservation,
     recordMoneyEvent: vi.fn().mockResolvedValue(undefined),
+    listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
+    expireReservation: vi.fn().mockResolvedValue(false),
     ...overrides,
   } as ReservationRepository & { createReservation: ReturnType<typeof vi.fn> };
 }

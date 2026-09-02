@@ -30,6 +30,19 @@ export interface AdvanceReservationCapitalStateInput {
   recordedAt: Date;
 }
 
+export interface InitiatedReservationForTimer {
+  reservationId: string;
+  offeringId: string;
+  accountId: string;
+  createdAt: Date;
+}
+
+export interface ExpireReservationInput {
+  reservationId: string;
+  traceId: string;
+  expiredAt: Date;
+}
+
 /**
  * The one place that performs AD-146's atomic, transaction-scoped capacity
  * check: createReservation locks the offering row (matching the origination
@@ -43,4 +56,8 @@ export interface AdvanceReservationCapitalStateInput {
 export interface ReservationRepository {
   createReservation(input: CreateReservationInput): Promise<CreateReservationResult>;
   recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<void>;
+  /** Mirrors listPublishedInformationRequestsForTimers: an unfiltered list — the domain policy (isReservationExpired), not SQL, decides which of these are actually due. */
+  listInitiatedReservationsForTimers(): Promise<InitiatedReservationForTimer[]>;
+  /** Idempotent: returns false (no-op) if the reservation is no longer 'initiated' by the time this runs, matching expireInformationRequest's existence/state-check pattern. */
+  expireReservation(input: ExpireReservationInput): Promise<boolean>;
 }

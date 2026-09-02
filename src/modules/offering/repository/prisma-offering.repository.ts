@@ -22,6 +22,8 @@ import type {
   AdvanceReservationCapitalStateInput,
   CreateReservationInput,
   CreateReservationResult,
+  ExpireReservationInput,
+  InitiatedReservationForTimer,
   ReservationRepository,
 } from "./reservation.repository.js";
 
@@ -462,6 +464,58 @@ export class PrismaOfferingRepository
         amountEurc: input.amountEurc,
         recordedAt: input.recordedAt,
       },
+    });
+  }
+
+  public async listInitiatedReservationsForTimers(): Promise<InitiatedReservationForTimer[]> {
+    const rows = await this.database.reservation.findMany({
+      where: { reservationStage: "initiated" },
+      select: { id: true, offeringId: true, accountId: true, createdAt: true },
+    });
+    return rows.map((row) => ({
+      reservationId: row.id,
+      offeringId: row.offeringId,
+      accountId: row.accountId,
+      createdAt: row.createdAt,
+    }));
+  }
+
+  public async expireReservation(input: ExpireReservationInput): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ reservation_id: string }>>`
+        SELECT reservation_id
+        FROM offering.reservations
+        WHERE reservation_id = ${input.reservationId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return false;
+
+      const current = await transaction.reservation.findUniqueOrThrow({
+        where: { id: input.reservationId },
+        select: { reservationStage: true },
+      });
+      if (current.reservationStage !== "initiated") return false;
+
+      await transaction.reservation.update({
+        where: { id: input.reservationId },
+        data: { reservationStage: "lapsed" },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: null,
+          action: "offering.reservation_lapsed",
+          resourceType: "reservation",
+          resourceId: input.reservationId,
+          changes: {
+            trace_id: input.traceId,
+            previous_stage: "initiated",
+            new_stage: "lapsed",
+          },
+          createdAt: input.expiredAt,
+        },
+      });
+      return true;
     });
   }
 }
