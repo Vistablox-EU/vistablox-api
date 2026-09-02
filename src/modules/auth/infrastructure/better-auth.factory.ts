@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
 import { haveIBeenPwned } from "better-auth/plugins";
+import { expo } from "@better-auth/expo";
 import { randomUUID } from "node:crypto";
 import type { Pool } from "pg";
 
@@ -159,6 +160,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       },
     },
     plugins: [
+      expo(),
       haveIBeenPwned(),
       createBetterAuthStaffAccountGuardPlugin(),
       ...(options.authAuditSink === undefined

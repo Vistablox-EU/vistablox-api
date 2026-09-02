@@ -12,6 +12,7 @@ import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
+import { PrismaIdempotencyStore } from "./infrastructure/idempotency/prisma-idempotency-store.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
@@ -132,12 +133,19 @@ const emailSender = new SmtpEmailSender({
   password: environment.SMTP_PASSWORD,
   from: environment.SMTP_FROM,
 });
+// The Expo dev client always connects through the `exp://` scheme rather than
+// the app's own custom scheme (already covered by AUTH_TRUSTED_ORIGINS), so
+// these wildcards are only needed — and only safe — outside production.
+const trustedOrigins =
+  environment.NODE_ENV === "production"
+    ? environment.AUTH_TRUSTED_ORIGINS
+    : [...environment.AUTH_TRUSTED_ORIGINS, "exp://", "exp://**", "exp://192.168.*.*:*/**"];
 const auth = createBetterAuth({
   database: authDatabase,
   baseURL: environment.BETTER_AUTH_URL,
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
-  trustedOrigins: environment.AUTH_TRUSTED_ORIGINS,
+  trustedOrigins,
   ...(environment.GOOGLE_CLIENT_ID === undefined ||
   environment.GOOGLE_CLIENT_SECRET === undefined
     ? {}
@@ -162,7 +170,7 @@ const staffProvisioningAuth = createBetterAuth({
   baseURL: environment.BETTER_AUTH_URL,
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
-  trustedOrigins: environment.AUTH_TRUSTED_ORIGINS,
+  trustedOrigins,
   allowPopulationInput: true,
   disableAutoSignIn: true,
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
@@ -307,6 +315,11 @@ const app = createApp({
               `${onrampRedirectUrl}?reservation_id=${encodeURIComponent(reservationId)}`,
           },
         }),
+    disclosurePublication: {
+      repository: offeringRepository,
+      store: disclosureDocumentStore,
+      idempotencyStore: new PrismaIdempotencyStore(database),
+    },
     totp: {
       repository: new PrismaTotpRepository(database),
       provider: new OtplibTotpProvider(),
