@@ -137,6 +137,8 @@ export interface AppDependencies {
   logger: Logger;
   authHandler?: RequestHandler;
   rateLimitStore?: RateLimitStore;
+  /** Never true unless a human has done the live Coinbase EUR/Base verification AD-255 leaves open — see docs/investor-offering.md. Defaults false. */
+  reservationFundingRailEnabled?: boolean;
   protectedApi?: {
     accounts: AccountRepository;
     sessions: SessionResolver;
@@ -267,7 +269,11 @@ export function createApp(dependencies: AppDependencies): Express {
       "/v1/offerings",
       createInvestorOfferingRouter(
         requireAuthentication,
-        new GetInvestorOfferingService(dependencies.offeringRepository),
+        new GetInvestorOfferingService(
+          dependencies.offeringRepository,
+          undefined,
+          dependencies.reservationFundingRailEnabled ?? false,
+        ),
         dependencies.protectedApi.disclosureDocuments === undefined
           ? undefined
           : new DownloadDisclosureDocumentService(
@@ -283,6 +289,7 @@ export function createApp(dependencies: AppDependencies): Express {
               {
                 blockchain: dependencies.protectedApi.reservations.blockchain,
                 buildRedirectUrl: dependencies.protectedApi.reservations.buildRedirectUrl,
+                fundingRailAvailable: dependencies.reservationFundingRailEnabled ?? false,
               },
             ),
       ),

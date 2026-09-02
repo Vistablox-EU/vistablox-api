@@ -24,6 +24,7 @@ import type {
   CreateReservationResult,
   ExpireReservationInput,
   InitiatedReservationForTimer,
+  PendingPurchaseReservationForTimer,
   ReservationRepository,
 } from "./reservation.repository.js";
 
@@ -468,15 +469,60 @@ export class PrismaOfferingRepository
   }
 
   public async listInitiatedReservationsForTimers(): Promise<InitiatedReservationForTimer[]> {
-    const rows = await this.database.reservation.findMany({
-      where: { reservationStage: "initiated" },
-      select: { id: true, offeringId: true, accountId: true, createdAt: true },
-    });
+    const rows = await this.database.$queryRaw<
+      Array<{
+        reservation_id: string;
+        offering_id: string;
+        account_id: string;
+        created_at: Date;
+        latest_capital_state: string | null;
+      }>
+    >`
+      SELECT
+        reservation.reservation_id,
+        reservation.offering_id,
+        reservation.account_id,
+        reservation.created_at,
+        latest_money.capital_state AS latest_capital_state
+      FROM offering.reservations AS reservation
+      LEFT JOIN LATERAL (
+        SELECT money_event.capital_state
+        FROM money.money_events AS money_event
+        WHERE money_event.reservation_id = reservation.reservation_id
+        ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+        LIMIT 1
+      ) AS latest_money ON TRUE
+      WHERE reservation.reservation_stage = 'initiated'
+    `;
     return rows.map((row) => ({
-      reservationId: row.id,
-      offeringId: row.offeringId,
-      accountId: row.accountId,
-      createdAt: row.createdAt,
+      reservationId: row.reservation_id,
+      offeringId: row.offering_id,
+      accountId: row.account_id,
+      createdAt: row.created_at,
+      latestCapitalState: row.latest_capital_state,
+    }));
+  }
+
+  public async listPendingPurchaseReservationsForTimers(): Promise<PendingPurchaseReservationForTimer[]> {
+    const rows = await this.database.$queryRaw<
+      Array<{ reservation_id: string; account_id: string; amount_eur: string }>
+    >`
+      SELECT reservation.reservation_id, reservation.account_id, reservation.amount_eur::text
+      FROM offering.reservations AS reservation
+      JOIN LATERAL (
+        SELECT money_event.capital_state
+        FROM money.money_events AS money_event
+        WHERE money_event.reservation_id = reservation.reservation_id
+        ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+        LIMIT 1
+      ) AS latest_money ON TRUE
+      WHERE reservation.reservation_stage = 'initiated'
+        AND latest_money.capital_state = 'eurc_purchase_pending'
+    `;
+    return rows.map((row) => ({
+      reservationId: row.reservation_id,
+      accountId: row.account_id,
+      amountEur: row.amount_eur,
     }));
   }
 

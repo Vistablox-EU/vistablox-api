@@ -595,6 +595,68 @@ describe.skipIf(databaseUrl === undefined)(
       });
       expect(capacityAfterExpiry._sum.amountEur).toBeNull();
     });
+
+    it("reports the latest capital state per reservation and finds only eurc_purchase_pending ones for the onramp poll", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const fundedId = `reservation_${randomUUID()}`;
+      const pendingId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId: fundedId,
+        offeringId,
+        accountId,
+        amountEur: "200.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.createReservation({
+        reservationId: pendingId,
+        offeringId,
+        accountId,
+        amountEur: "300.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: fundedId,
+        provider: "coinbase_cdp",
+        providerReference: "channel_01",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "200.00",
+        amountEurc: null,
+        recordedAt: new Date("2026-09-02T09:00:00.000Z"),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: fundedId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_01",
+        capitalState: "eurc_reserved",
+        amountEur: "200.00",
+        amountEurc: "190.000000",
+        recordedAt: new Date("2026-09-02T09:05:00.000Z"),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: pendingId,
+        provider: "coinbase_cdp",
+        providerReference: "channel_02",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "300.00",
+        amountEurc: null,
+        recordedAt: new Date("2026-09-02T09:00:00.000Z"),
+      });
+
+      const forTimers = await repository.listInitiatedReservationsForTimers();
+      expect(forTimers.find((r) => r.reservationId === fundedId)?.latestCapitalState).toBe("eurc_reserved");
+      expect(forTimers.find((r) => r.reservationId === pendingId)?.latestCapitalState).toBe(
+        "eurc_purchase_pending",
+      );
+
+      const pendingPurchases = await repository.listPendingPurchaseReservationsForTimers();
+      const pendingIds = pendingPurchases.map((r) => r.reservationId);
+      expect(pendingIds).toContain(pendingId);
+      expect(pendingIds).not.toContain(fundedId);
+    });
   },
 );
 

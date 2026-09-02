@@ -35,12 +35,20 @@ export interface InitiatedReservationForTimer {
   offeringId: string;
   accountId: string;
   createdAt: Date;
+  /** The reservation's latest money_events.capital_state, or null if it somehow has none yet. FUNDED_CAPITAL_STATES-listed values must never be auto-expired even past the 15-minute window. */
+  latestCapitalState: string | null;
 }
 
 export interface ExpireReservationInput {
   reservationId: string;
   traceId: string;
   expiredAt: Date;
+}
+
+export interface PendingPurchaseReservationForTimer {
+  reservationId: string;
+  accountId: string;
+  amountEur: string;
 }
 
 /**
@@ -60,4 +68,6 @@ export interface ReservationRepository {
   listInitiatedReservationsForTimers(): Promise<InitiatedReservationForTimer[]>;
   /** Idempotent: returns false (no-op) if the reservation is no longer 'initiated' by the time this runs, matching expireInformationRequest's existence/state-check pattern. */
   expireReservation(input: ExpireReservationInput): Promise<boolean>;
+  /** Reservations whose latest money event is still eurc_purchase_pending — the ones a Coinbase transaction-status poll can still move forward. */
+  listPendingPurchaseReservationsForTimers(): Promise<PendingPurchaseReservationForTimer[]>;
 }

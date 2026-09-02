@@ -1,5 +1,5 @@
 import type { JobRunSummary } from "../../../shared/jobs/job-run-summary.js";
-import { isReservationExpired } from "../domain/reservation-eligibility.policy.js";
+import { isReservationExpired, isReservationFunded } from "../domain/reservation-eligibility.policy.js";
 import type { ReservationRepository } from "../repository/reservation.repository.js";
 
 /**
@@ -27,6 +27,11 @@ export class ExpireUnfundedReservationsService {
       if (!isReservationExpired({ createdAt: reservation.createdAt, now, expiryMinutes: this.expiryMinutes })) {
         continue;
       }
+      // A reservation whose money already arrived must never be swept away
+      // just because reservationStage is still 'initiated' — capital_state
+      // and reservationStage are separate state machines (AD-253), and a
+      // successful purchase advances only the former.
+      if (isReservationFunded(reservation.latestCapitalState)) continue;
       const expired = await this.repository.expireReservation({
         reservationId: reservation.reservationId,
         traceId,

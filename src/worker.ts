@@ -19,7 +19,9 @@ import { RunOidcCleanupService } from "./modules/auth/application/oidc-cleanup.s
 import { PostgresOidcCleanupRepository } from "./modules/auth/infrastructure/postgres-oidc-cleanup.repository.js";
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
+import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 
@@ -53,6 +55,20 @@ const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSen
 const runOidcCleanup = new RunOidcCleanupService(new PostgresOidcCleanupRepository(authDatabase));
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
+const coinbaseCdpClient =
+  environment.COINBASE_CDP_API_KEY_ID === undefined || environment.COINBASE_CDP_API_KEY_SECRET === undefined
+    ? undefined
+    : new HttpCoinbaseCdpClient({
+        baseUrl: environment.COINBASE_CDP_API_BASE_URL,
+        payHostedUrl: environment.COINBASE_CDP_PAY_HOSTED_URL,
+        apiKeyId: environment.COINBASE_CDP_API_KEY_ID,
+        apiKeySecret: environment.COINBASE_CDP_API_KEY_SECRET,
+        timeoutMs: 8_000,
+      });
+const pollOnrampTransactions =
+  coinbaseCdpClient === undefined
+    ? undefined
+    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient);
 
 const RETRY_OPTIONS = JOB_RETRY_OPTIONS;
 
@@ -78,6 +94,13 @@ await boss.createQueue("case_timers.pre_offering_open_handoff");
 await boss.createQueue("case_timers.reservation_unfunded_expiry");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.oidc_cleanup");
+// Only registered when Coinbase CDP credentials are configured — unlike
+// every other job here, this one's sole dependency (the onramp REST client)
+// is genuinely optional, matching how server.ts only wires reservation
+// creation itself when the same credentials are present.
+if (pollOnrampTransactions !== undefined) {
+  await boss.createQueue("case_timers.reservation_onramp_poll");
+}
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
   tz: "UTC",
@@ -104,6 +127,12 @@ await boss.schedule("case_timers.reservation_unfunded_expiry", "* * * * *", null
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
+if (pollOnrampTransactions !== undefined) {
+  await boss.schedule("case_timers.reservation_onramp_poll", "* * * * *", null, {
+    tz: "UTC",
+    ...RETRY_OPTIONS,
+  });
+}
 
 await boss.work("case_timers.applicant_reminders", async () => {
   await runJob("case_timers.applicant_reminders", () => sendApplicantReminders.execute());
@@ -124,6 +153,11 @@ await boss.work("case_timers.reservation_unfunded_expiry", async () => {
     expireUnfundedReservations.execute(traceId),
   );
 });
+if (pollOnrampTransactions !== undefined) {
+  await boss.work("case_timers.reservation_onramp_poll", async () => {
+    await runJob("case_timers.reservation_onramp_poll", () => pollOnrampTransactions.execute());
+  });
+}
 
 // AD-152: this job's trace_id is the originating approval request's own,
 // carried forward by the enqueue path — never a freshly minted one, unlike

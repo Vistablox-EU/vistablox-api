@@ -216,6 +216,14 @@ const coinbaseCdpClient =
         apiKeySecret: environment.COINBASE_CDP_API_KEY_SECRET,
         timeoutMs: 8_000,
       });
+// Necessary but not sufficient on its own: RESERVATION_FUNDING_RAIL_ENABLED
+// is the human "I've verified this live" switch, but it can never actually
+// open the rail without a configured Coinbase client to serve it — an
+// operator who sets one without the other should not get a confusing
+// half-enabled state (readiness reporting available with no route to act on
+// it, or vice versa).
+const reservationFundingRailEnabled =
+  environment.RESERVATION_FUNDING_RAIL_ENABLED && coinbaseCdpClient !== undefined;
 const betterAuthSessionResolver = new BetterAuthSessionResolver(auth);
 const oidcProvider = createOidcProvider({
   baseUrl: environment.BETTER_AUTH_URL,
@@ -263,6 +271,7 @@ const app = createApp({
   logger,
   authHandler: toNodeHandler(auth),
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
+  reservationFundingRailEnabled,
   protectedApi: {
     accounts: accountRepository,
     sessions,

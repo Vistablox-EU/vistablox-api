@@ -112,6 +112,15 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.url().optional(),
     ),
+    // A human decision, not something this codebase can verify on its own
+    // (AD-255's "Still Open" item: live confirmation Coinbase actually
+    // supports EUR/Base for this account). Stays false until someone who has
+    // done that verification deliberately sets it — see
+    // docs/investor-offering.md's pre-launch checklist.
+    RESERVATION_FUNDING_RAIL_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     OIDC_JWKS: z
       .string()
       .min(1)

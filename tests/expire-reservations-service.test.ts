@@ -14,6 +14,7 @@ function reservation(
     offeringId: "offering_01",
     accountId: "account_01",
     createdAt: new Date("2026-09-02T10:00:00.000Z"),
+    latestCapitalState: "initiated",
     ...overrides,
   };
 }
@@ -24,6 +25,7 @@ function repository(overrides: Partial<ReservationRepository> = {}): Reservation
     recordMoneyEvent: vi.fn(),
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn().mockResolvedValue(true),
+    listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -88,6 +90,27 @@ describe("ExpireUnfundedReservationsService", () => {
 
     const summary = await service.execute("req_trace_01");
 
+    expect(summary).toEqual({ checked: 1, acted: 0 });
+  });
+
+  it("never expires a reservation whose money already arrived, however old it is", async () => {
+    const funded = reservation({
+      reservationId: "reservation_funded",
+      createdAt: new Date("2026-09-02T09:00:00.000Z"),
+      latestCapitalState: "eurc_reserved",
+    });
+    const expireReservation = vi.fn().mockResolvedValue(true);
+    const service = new ExpireUnfundedReservationsService(
+      repository({
+        listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([funded]),
+        expireReservation,
+      }),
+      () => new Date("2026-09-02T10:00:00.000Z"),
+    );
+
+    const summary = await service.execute("req_trace_01");
+
+    expect(expireReservation).not.toHaveBeenCalled();
     expect(summary).toEqual({ checked: 1, acted: 0 });
   });
 

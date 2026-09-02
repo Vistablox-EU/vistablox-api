@@ -14,6 +14,20 @@ export type ReservationBlocker = (typeof reservationBlockers)[number];
 
 export type AccountReadinessStatus = "active" | "recovery_review" | "suspended_restricted";
 
+/**
+ * money.money_events.capital_state values meaning EURC has actually landed
+ * for a reservation, in some form (AD-253). The exact same three values are
+ * also hardcoded directly into the getInvestorDetail raw SQL's funded_eur
+ * projection in prisma-offering.repository.ts — keep both in sync if this
+ * ever changes; the SQL wasn't switched to interpolate this constant to
+ * avoid touching a working, tested query for a stylistic dedup.
+ */
+export const FUNDED_CAPITAL_STATES = ["eurc_reserved", "reconfirmation_pending", "eurc_finalized"] as const;
+
+export function isReservationFunded(latestCapitalState: string | null): boolean {
+  return latestCapitalState !== null && (FUNDED_CAPITAL_STATES as readonly string[]).includes(latestCapitalState);
+}
+
 export function isKycCurrent(input: {
   kycEligibilityState: string | null;
   kycRenewalDueAt: Date | null;
