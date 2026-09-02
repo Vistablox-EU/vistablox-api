@@ -35,6 +35,7 @@ import {
   isReconfirmationWindowOpen,
 } from "../domain/finalization.policy.js";
 import { materialityResetTriggered } from "../domain/materiality.policy.js";
+import { isCompleteDisclosurePack, isCoreReadingDocumentType, type DisclosureDocumentType } from "../domain/disclosure-pack.policy.js";
 import type {
   CommitOfferingFinalizationInput,
   CommitOfferingFinalizationResult,
@@ -46,6 +47,11 @@ import type {
   ReconfirmReservationResult,
 } from "./finalize-offering.repository.js";
 import type { ClassifyMaterialityInput, ClassifyMaterialityResult, MaterialityRepository } from "./materiality.repository.js";
+import type {
+  DisclosurePackRepository,
+  PublishDisclosurePackInput,
+  PublishDisclosurePackResult,
+} from "./disclosure-pack.repository.js";
 
 export class PrismaOfferingRepository
   implements
@@ -54,6 +60,7 @@ export class PrismaOfferingRepository
     OfferingOriginationHandoffRepository,
     FinalizeOfferingRepository,
     MaterialityRepository,
+    DisclosurePackRepository,
     ReservationRepository
 {
   public constructor(private readonly database: DatabaseClient) {}
@@ -1059,6 +1066,99 @@ export class PrismaOfferingRepository
           classifiedAt: input.classifiedAt,
           effectiveRightsEndAt,
           reservationsReset,
+        },
+        conflict: null,
+      };
+    });
+  }
+
+  public async publishDisclosurePack(input: PublishDisclosurePackInput): Promise<PublishDisclosurePackResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ offering_id: string; status: string }>>`
+        SELECT offering_id, status
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined) {
+        return { published: null, conflict: "offering_not_found" as const };
+      }
+      // Same window every other offering-lifecycle write in this module
+      // operates in — AD-046 puts post-finalization content changes through
+      // a separate amendment/consent path this codebase does not build.
+      if (offering.status !== "pre_offering") {
+        return { published: null, conflict: "not_open" as const };
+      }
+
+      const current = await transaction.disclosurePack.findFirst({
+        where: { offeringId: input.offeringId, isCurrent: true, supersededAt: null },
+        orderBy: [{ version: "desc" }],
+      });
+      if (current !== null) {
+        await transaction.disclosurePack.update({
+          where: { id: current.id },
+          data: { isCurrent: false, supersededAt: input.publishedAt },
+        });
+      }
+
+      const version = (current?.version ?? 0) + 1;
+      const disclosurePackId = `pack_${ulid()}`;
+      const created = await transaction.disclosurePack.create({
+        data: {
+          id: disclosurePackId,
+          offeringId: input.offeringId,
+          version,
+          publishedAt: input.publishedAt,
+          isCurrent: true,
+          documents: {
+            create: input.documents.map((document) => ({
+              id: `document_${ulid()}`,
+              documentType: document.documentType,
+              documentRef: document.documentRef,
+              isCoreReading: isCoreReadingDocumentType(document.documentType),
+            })),
+          },
+        },
+        include: { documents: true },
+      });
+
+      const documentTypes = input.documents.map((document) => document.documentType);
+      const isComplete = isCompleteDisclosurePack(documentTypes);
+
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.disclosure_pack_published",
+          resourceType: "offering",
+          resourceId: input.offeringId,
+          changes: {
+            trace_id: input.traceId,
+            disclosure_pack_id: disclosurePackId,
+            version,
+            document_types: documentTypes,
+            is_complete: isComplete,
+            superseded_pack_id: current?.id ?? null,
+          },
+          createdAt: input.publishedAt,
+        },
+      });
+
+      return {
+        published: {
+          disclosurePackId,
+          offeringId: input.offeringId,
+          version,
+          publishedAt: input.publishedAt,
+          documents: created.documents.map((document) => ({
+            documentId: document.id,
+            documentType: document.documentType as DisclosureDocumentType,
+            documentRef: document.documentRef,
+            isCoreReading: document.isCoreReading,
+          })),
+          isComplete,
+          supersededPackId: current?.id ?? null,
         },
         conflict: null,
       };

@@ -162,4 +162,44 @@ Response (`201`):
 
 Every created record also appears immediately in the investor-facing `change_log` (`GET /v1/offerings/:offering_id`'s response) — that read path already existed before this endpoint did, so no separate wiring was needed on the read side.
 
-**Known, deliberately unresolved gap:** `AD-038` also states a per-se-material change "always resets the disclosure pack." No application code anywhere in this codebase creates or republishes a `disclosure_packs` row — the `disclosure_packs`/`disclosure_documents` tables have version/`is_current`/`superseded_at` columns, but only read paths exist (`GetInvestorOfferingService`, `DownloadDisclosureDocumentService`). Disclosure-pack authoring (staff uploading new documents, versioning, superseding the prior pack) is a separate, materially larger, still-unbuilt prerequisite feature — this endpoint records the classification and applies the reconfirmation-window consequence, but does not and cannot also publish a new disclosure pack as a side effect. `materiality_records` also has no column linking a record to the disclosure-pack version it prompted, for the same reason.
+**Known, deliberately unresolved gap:** `AD-038` also states a per-se-material change "always resets the disclosure pack." Disclosure-pack authoring is now built (see the next section) but this endpoint does not call it automatically — classifying a change as `per_se_material` resets the reconfirmation window but does not, by itself, publish a new disclosure pack. Republishing is a separate staff action (`POST /internal/v1/offerings/:offering_id/disclosure-packs`), left as a deliberate manual step rather than an automatic side effect, since the actual updated document content (what changed, and its `document_ref`) is not something a materiality classification's `change_description` free text can supply. `materiality_records` also has no column linking a record to the disclosure-pack version it prompted, for the same reason.
+
+## Disclosure-pack authoring
+
+`POST /internal/v1/offerings/:offering_id/disclosure-packs` publishes a new `disclosure_packs` version and immediately supersedes whatever was previously current (`is_current: false`, `superseded_at` set) — staff-gated identically to `/finalize` and `/materiality-records` (`admin_operations` role plus staff WebAuthn). Before this endpoint existed, nothing in this codebase could create a disclosure pack at all: `DisclosureDocumentStore` (the MinIO wrapper) only ever had a `.get()` method, `DisclosureDocumentRepository` only ever had a read path, and no origination-handoff or other flow ever wrote a `disclosure_packs` row — every disclosure pack in this codebase's tests was hand-seeded directly through Prisma, which is also, in effect, the only way one has ever existed in a real environment. That mattered beyond `AD-038`'s reset case: `hasDisclosurePack`/the `disclosure_pack_unavailable` blocker already gates *ordinary* reservation creation, well before an offering ever reaches publish or reconfirm.
+
+Request body:
+
+```json
+{
+  "documents": [
+    { "document_type": "ecsp_kiis", "document_ref": "documents/kiis-v2.pdf" },
+    { "document_type": "final_terms_sheet", "document_ref": "documents/terms-v2.pdf" }
+  ]
+}
+```
+
+`document_type` is a closed enum of the 11 document kinds `AD-037`/`VISTABLOX_BACKEND_DISCUSSION.md`'s "Mandatory Core Pack" table names (`ecsp_kiis`, `priips_kid`, `final_offer_summary`, `final_terms_sheet`, `issuer_offeror_structure_sheet`, `investor_rights_payout_waterfall_summary`, `risk_factors_summary`, `property_appraisal_summary`, `fees_costs_tax_liquidity_summary`, `withdrawal_cancellation_supplement_rights_notice`, `full_prospectus`) — rejected with `422` if duplicated within one request. `document_ref` is a trusted, already-uploaded storage reference (`z.string().trim().min(1).max(500)`), the exact same shape origination's own document intake already uses (`submitInitialCaseBodySchema`'s `document_type`/`document_ref` pair) — this codebase has no file-upload endpoint for any document kind, disclosure documents included, so getting the underlying file into MinIO is a process this API does not perform. `is_core_reading` is never client-supplied: it's computed server-side from `document_type` (`isCoreReadingDocumentType`, `domain/disclosure-pack.policy.ts`), true for every mandatory type except `full_prospectus` — CORE_TABLES.md's own comment on that column already frames this as deterministic ("false only for the full prospectus").
+
+This is deliberately **one reusable staff primitive**, not logic wired into any single flow. The documented model implies at least three distinct moments a new version gets published — an initial pre-offering pack (whatever `hasDisclosurePack` gates ordinary reservations on), the version-locked pack tied to `final_offering_published_at` (`AD-037`), and a republished pack after a materiality reset (`AD-038`, still a manual follow-up call — see the previous section) — but all three are the same mechanical action, so this endpoint doesn't hard-code which moment it's being called for. It only requires the offering still be `pre_offering` (`404 offering.not_found` for an unknown offering, `409 offering.disclosure_pack_not_available` otherwise — `AD-046` puts post-finalization content changes through a separate amendment/consent path this codebase does not build).
+
+Response (`201`):
+
+```json
+{
+  "data": {
+    "disclosure_pack_id": "pack_...",
+    "offering_id": "offering_...",
+    "version": 2,
+    "published_at": "2026-09-06T12:00:00.000Z",
+    "documents": [
+      { "document_id": "document_...", "document_type": "ecsp_kiis", "is_core_reading": true },
+      { "document_id": "document_...", "document_type": "final_terms_sheet", "is_core_reading": true }
+    ],
+    "is_complete": false,
+    "superseded_pack_id": "pack_..."
+  }
+}
+```
+
+`is_complete` reports whether every one of the 11 mandatory document types is present in *this* pack — informational only, not a hard gate on this endpoint. A pack published before final terms is legitimately allowed to be partial (`hasDisclosurePack` only ever required at least one document, never all eleven), so requiring full completeness on every publish would make the initial pre-offering moment unbuildable. **Known, deliberately unresolved gap:** `AD-037` separately states reconfirmation "must be blocked if the pack is incomplete" — `reconfirmReservation` does not check `is_complete` today, so completeness is reported but not yet enforced where `AD-037` actually wants it enforced. Wiring that check into `reconfirmReservation` is a small, well-specified follow-on, not built in this pass.

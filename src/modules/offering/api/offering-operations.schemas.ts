@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { disclosureDocumentTypes } from "../domain/disclosure-pack.policy.js";
 import { materialityClassifications, materialityThresholdTypes } from "../domain/materiality.policy.js";
 
 export const finalizeOfferingBodySchema = z.object({
@@ -53,3 +54,49 @@ export const classifyMaterialityResponseSchema = z.object({
 
 export type ClassifyMaterialityBody = z.infer<typeof classifyMaterialityBodySchema>;
 export type ClassifyMaterialityResponse = z.infer<typeof classifyMaterialityResponseSchema>;
+
+export const publishDisclosurePackBodySchema = z.object({
+  documents: z
+    .array(
+      z.object({
+        document_type: z.enum(disclosureDocumentTypes),
+        document_ref: z.string().trim().min(1).max(500),
+      }),
+    )
+    .min(1)
+    .max(disclosureDocumentTypes.length)
+    .superRefine((documents, ctx) => {
+      const seen = new Set<string>();
+      documents.forEach((document, index) => {
+        if (seen.has(document.document_type)) {
+          ctx.addIssue({
+            code: "custom",
+            path: [index, "document_type"],
+            message: `document_type "${document.document_type}" is duplicated in this request.`,
+          });
+        }
+        seen.add(document.document_type);
+      });
+    }),
+});
+
+export const publishDisclosurePackResponseSchema = z.object({
+  data: z.object({
+    disclosure_pack_id: z.string().min(1),
+    offering_id: z.string().min(1),
+    version: z.number().int().positive(),
+    published_at: z.iso.datetime(),
+    documents: z.array(
+      z.object({
+        document_id: z.string().min(1),
+        document_type: z.enum(disclosureDocumentTypes),
+        is_core_reading: z.boolean(),
+      }),
+    ),
+    is_complete: z.boolean(),
+    superseded_pack_id: z.string().nullable(),
+  }),
+});
+
+export type PublishDisclosurePackBody = z.infer<typeof publishDisclosurePackBodySchema>;
+export type PublishDisclosurePackResponse = z.infer<typeof publishDisclosurePackResponseSchema>;

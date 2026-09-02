@@ -5,13 +5,15 @@ import { describe, expect, it, vi } from "vitest";
 import { createOfferingOperationsRouter } from "../src/modules/offering/api/offering-operations.router.js";
 import { ClassifyMaterialityService } from "../src/modules/offering/application/classify-materiality.service.js";
 import { FinalizeOfferingService } from "../src/modules/offering/application/finalize-offering.service.js";
+import { PublishDisclosurePackService } from "../src/modules/offering/application/publish-disclosure-pack.service.js";
 import { AppError } from "../src/shared/errors/app-error.js";
+import type { DisclosurePackRepository } from "../src/modules/offering/repository/disclosure-pack.repository.js";
 import type { FinalizeOfferingRepository } from "../src/modules/offering/repository/finalize-offering.repository.js";
 import type { MaterialityRepository } from "../src/modules/offering/repository/materiality.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
-type Repository = FinalizeOfferingRepository & MaterialityRepository;
+type Repository = FinalizeOfferingRepository & MaterialityRepository & DisclosurePackRepository;
 
 function buildApp(options?: {
   repository?: Partial<Repository>;
@@ -69,6 +71,25 @@ function buildApp(options?: {
       },
       conflict: null,
     }),
+    publishDisclosurePack: vi.fn().mockResolvedValue({
+      published: {
+        disclosurePackId: "pack_01",
+        offeringId: "offering_01",
+        version: 2,
+        publishedAt: new Date("2026-09-06T12:00:00.000Z"),
+        documents: [
+          {
+            documentId: "document_01",
+            documentType: "ecsp_kiis",
+            documentRef: "documents/kiis-v2.pdf",
+            isCoreReading: true,
+          },
+        ],
+        isComplete: false,
+        supersededPackId: "pack_00",
+      },
+      conflict: null,
+    }),
     ...options?.repository,
   };
 
@@ -83,6 +104,7 @@ function buildApp(options?: {
       requireStaffWebAuthn,
       new FinalizeOfferingService(repository, () => new Date("2026-09-02T12:00:00.000Z")),
       new ClassifyMaterialityService(repository, () => new Date("2026-09-05T12:00:00.000Z")),
+      new PublishDisclosurePackService(repository, () => new Date("2026-09-06T12:00:00.000Z")),
     ),
   );
   app.use(errorHandler);
@@ -275,5 +297,116 @@ describe("POST /internal/v1/offerings/:offering_id/materiality-records", () => {
 
     expect(response.status).toBe(403);
     expect(repository.classifyMateriality).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /internal/v1/offerings/:offering_id/disclosure-packs", () => {
+  it("publishes a new disclosure pack version and reports the outcome", async () => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/disclosure-packs")
+      .send({
+        documents: [{ document_type: "ecsp_kiis", document_ref: "documents/kiis-v2.pdf" }],
+      });
+
+    expect(response.status).toBe(201);
+    expect(response.body).toEqual({
+      data: {
+        disclosure_pack_id: "pack_01",
+        offering_id: "offering_01",
+        version: 2,
+        published_at: "2026-09-06T12:00:00.000Z",
+        documents: [{ document_id: "document_01", document_type: "ecsp_kiis", is_core_reading: true }],
+        is_complete: false,
+        superseded_pack_id: "pack_00",
+      },
+    });
+    expect(repository.publishDisclosurePack).toHaveBeenCalledWith(
+      expect.objectContaining({
+        offeringId: "offering_01",
+        accountId: "account_founder",
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v2.pdf" }],
+      }),
+    );
+  });
+
+  it("rejects an empty documents array before touching the repository", async () => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/disclosure-packs")
+      .send({ documents: [] });
+
+    expect(response.status).toBe(422);
+    expect(repository.publishDisclosurePack).not.toHaveBeenCalled();
+  });
+
+  it("rejects a duplicated document_type before touching the repository", async () => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/disclosure-packs")
+      .send({
+        documents: [
+          { document_type: "ecsp_kiis", document_ref: "documents/kiis-v1.pdf" },
+          { document_type: "ecsp_kiis", document_ref: "documents/kiis-v2.pdf" },
+        ],
+      });
+
+    expect(response.status).toBe(422);
+    expect(repository.publishDisclosurePack).not.toHaveBeenCalled();
+  });
+
+  it("rejects an unknown document_type before touching the repository", async () => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/disclosure-packs")
+      .send({ documents: [{ document_type: "marketing_flyer", document_ref: "documents/flyer.pdf" }] });
+
+    expect(response.status).toBe(422);
+    expect(repository.publishDisclosurePack).not.toHaveBeenCalled();
+  });
+
+  it("reports a 404 for an unknown offering", async () => {
+    const { app } = buildApp({
+      repository: {
+        publishDisclosurePack: vi.fn().mockResolvedValue({ published: null, conflict: "offering_not_found" }),
+      },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_missing/disclosure-packs")
+      .send({ documents: [{ document_type: "ecsp_kiis", document_ref: "documents/kiis-v1.pdf" }] });
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe("offering.not_found");
+  });
+
+  it("reports a 409 when the offering is not open for a disclosure pack update", async () => {
+    const { app } = buildApp({
+      repository: {
+        publishDisclosurePack: vi.fn().mockResolvedValue({ published: null, conflict: "not_open" }),
+      },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/disclosure-packs")
+      .send({ documents: [{ document_type: "ecsp_kiis", document_ref: "documents/kiis-v1.pdf" }] });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("offering.disclosure_pack_not_available");
+  });
+
+  it("never reaches the service without the admin_operations role", async () => {
+    const { app, repository } = buildApp({ denyAdminOperations: true });
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/disclosure-packs")
+      .send({ documents: [{ document_type: "ecsp_kiis", document_ref: "documents/kiis-v1.pdf" }] });
+
+    expect(response.status).toBe(403);
+    expect(repository.publishDisclosurePack).not.toHaveBeenCalled();
   });
 });

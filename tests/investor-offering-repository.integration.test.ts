@@ -757,6 +757,10 @@ describe.skipIf(databaseUrl === undefined)(
     afterAll(async () => {
       await database.positionLedger.deleteMany({ where: { pivId: { in: pivIds } } });
       await database.materialityRecord.deleteMany({ where: { offeringId: { in: offeringIds } } });
+      await database.disclosureDocument.deleteMany({
+        where: { disclosurePack: { offeringId: { in: offeringIds } } },
+      });
+      await database.disclosurePack.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
       await database.auditLog.deleteMany({ where: { resourceId: { in: offeringIds }, resourceType: "offering" } });
       await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
@@ -1447,6 +1451,137 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       expect(result).toEqual({ classified: null, conflict: "no_active_reconfirmation_window" });
+    });
+
+    it("publishes an initial disclosure pack as version 1, with no prior pack to supersede", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const publishedAt = new Date("2026-09-01T09:00:00.000Z");
+
+      const result = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [
+          { documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" },
+          { documentType: "final_terms_sheet", documentRef: "documents/terms-v1.pdf" },
+        ],
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+
+      expect(result.conflict).toBeNull();
+      expect(result.published).toMatchObject({
+        offeringId,
+        version: 1,
+        publishedAt,
+        isComplete: false,
+        supersededPackId: null,
+      });
+      expect(result.published?.documents).toHaveLength(2);
+      expect(result.published?.documents.find((d) => d.documentType === "ecsp_kiis")).toMatchObject({
+        documentRef: "documents/kiis-v1.pdf",
+        isCoreReading: true,
+      });
+
+      if (result.published === null) throw new Error("expected a published disclosure pack");
+      const pack = await database.disclosurePack.findUnique({ where: { id: result.published.disclosurePackId } });
+      expect(pack).toMatchObject({ offeringId, version: 1, isCurrent: true, supersededAt: null });
+
+      const documents = await database.disclosureDocument.findMany({
+        where: { disclosurePackId: result.published.disclosurePackId },
+      });
+      expect(documents).toHaveLength(2);
+
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: offeringId, action: "offering.disclosure_pack_published" },
+        }),
+      ).toBe(1);
+    });
+
+    it("supersedes the prior current pack and increments the version, reporting completeness once every mandatory document is present", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const first = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+      if (first.published === null) throw new Error("expected the first pack to publish");
+
+      const republishedAt = new Date("2026-09-02T12:00:00.000Z");
+      const second = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [
+          { documentType: "ecsp_kiis", documentRef: "documents/kiis-v2.pdf" },
+          { documentType: "priips_kid", documentRef: "documents/kid-v2.pdf" },
+          { documentType: "final_offer_summary", documentRef: "documents/offer-summary-v2.pdf" },
+          { documentType: "final_terms_sheet", documentRef: "documents/terms-v2.pdf" },
+          { documentType: "issuer_offeror_structure_sheet", documentRef: "documents/structure-v2.pdf" },
+          {
+            documentType: "investor_rights_payout_waterfall_summary",
+            documentRef: "documents/rights-v2.pdf",
+          },
+          { documentType: "risk_factors_summary", documentRef: "documents/risks-v2.pdf" },
+          { documentType: "property_appraisal_summary", documentRef: "documents/appraisal-v2.pdf" },
+          { documentType: "fees_costs_tax_liquidity_summary", documentRef: "documents/fees-v2.pdf" },
+          {
+            documentType: "withdrawal_cancellation_supplement_rights_notice",
+            documentRef: "documents/withdrawal-v2.pdf",
+          },
+          { documentType: "full_prospectus", documentRef: "documents/prospectus-v2.pdf" },
+        ],
+        traceId: `trace_${suffix}`,
+        publishedAt: republishedAt,
+      });
+
+      expect(second.conflict).toBeNull();
+      expect(second.published).toMatchObject({
+        offeringId,
+        version: 2,
+        publishedAt: republishedAt,
+        isComplete: true,
+        supersededPackId: first.published.disclosurePackId,
+      });
+      expect(second.published?.documents.find((d) => d.documentType === "full_prospectus")).toMatchObject({
+        isCoreReading: false,
+      });
+
+      const supersededPack = await database.disclosurePack.findUnique({
+        where: { id: first.published.disclosurePackId },
+      });
+      expect(supersededPack).toMatchObject({ isCurrent: false, supersededAt: republishedAt });
+
+      if (second.published === null) throw new Error("expected the second pack to publish");
+      const currentPack = await database.disclosurePack.findUnique({ where: { id: second.published.disclosurePackId } });
+      expect(currentPack).toMatchObject({ isCurrent: true, version: 2 });
+    });
+
+    it("reports offering_not_found for an unknown offering", async () => {
+      const result = await repository.publishDisclosurePack({
+        offeringId: `offering_missing_${suffix}`,
+        accountId: "account_founder",
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date(),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "offering_not_found" });
+    });
+
+    it("reports not_open once the offering has already committed to final_offering", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00", status: "final_offering" });
+
+      const result = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date(),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "not_open" });
     });
   },
 );
