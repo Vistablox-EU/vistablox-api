@@ -9,7 +9,12 @@ import type { FinalizeOfferingRepository } from "../repository/finalize-offering
  * create positions. Each investor must separately reconfirm
  * (ReconfirmReservationService), and only once the window closes does the
  * scheduled commit batch (CommitOfferingFinalizationService) actually
- * create settlement.position_ledger rows. See
+ * create settlement.position_ledger rows. Also requires a complete, current
+ * disclosure pack to already exist (PAYMENT_FLOWS.md step 4 bundles
+ * publishing that package together with this step) — the same
+ * completeness rule ReconfirmReservationService enforces at reconfirmation
+ * time, checked here too so the window never opens against a pack no
+ * investor could actually act on. See
  * docs/investor-offering.md#1-publishing-final-terms-founder-triggered.
  */
 export class FinalizeOfferingService {
@@ -57,6 +62,15 @@ export class FinalizeOfferingService {
         title: "Offering cannot be finalized",
         status: 409,
         detail: "This offering has not yet collected its full target raise (AD-245: no partial-funding path).",
+      });
+    }
+    if (result.conflict === "disclosure_pack_incomplete") {
+      throw new AppError({
+        code: "offering.finalization_disclosure_pack_incomplete",
+        title: "Offering cannot be finalized",
+        status: 409,
+        detail:
+          "This offering has no complete, current disclosure pack yet — publish one before publishing final terms.",
       });
     }
 

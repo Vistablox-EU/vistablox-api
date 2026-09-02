@@ -87,7 +87,7 @@ See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/B
 }
 ```
 
-Everything eligibility-relevant is re-verified atomically inside one transaction, under a row lock on the `offerings` row, mirroring `createReservation`'s own `AD-146` discipline rather than trusting an advisory read: `target_raise_eur` must still be fully funded (`AD-245` — no partial-funding path, so this is a hard `>=` gate, not the founder's discretion), the offering must still be `pre_offering`, and final terms must not already be published. A losing request gets `409 offering.finalization_target_not_reached`, `409 offering.finalization_not_available` (not open, or already published), or `404 offering.not_found` for an unknown `offering_id`.
+Everything eligibility-relevant is re-verified atomically inside one transaction, under a row lock on the `offerings` row, mirroring `createReservation`'s own `AD-146` discipline rather than trusting an advisory read: `target_raise_eur` must still be fully funded (`AD-245` — no partial-funding path, so this is a hard `>=` gate, not the founder's discretion), the offering must still be `pre_offering`, final terms must not already be published, and the offering's current disclosure pack must be complete (every one of the 11 mandatory document types, `isCompleteDisclosurePack` — see "Disclosure-pack authoring" below). That last check exists because `PAYMENT_FLOWS.md`'s Phase-1 Final Offering Settlement Flow step 4 bundles "publishes the locked final package" together with emitting `final_offering_published_at` — the reconfirmation window must never open against a pack no investor could actually act on. A losing request gets `409 offering.finalization_target_not_reached`, `409 offering.finalization_not_available` (not open, or already published), `409 offering.finalization_disclosure_pack_incomplete`, or `404 offering.not_found` for an unknown `offering_id`.
 
 For every reservation still `reservation_stage: "initiated"` on the offering, the same transaction locks the reservation row (`FOR UPDATE OF reservation`, alongside the offering lock) and either:
 
@@ -110,9 +110,17 @@ No position is created here. The transaction also sets `final_offering_published
 }
 ```
 
-Atomically, under a row lock on the reservation: ownership is checked (`account_id` must match the caller), the reservation must be `reservation_stage: "awaiting_reconfirmation"`, and the offering's `effective_rights_end_at` must not have passed yet. A nonexistent reservation and one owned by someone else both report the same `404 offering.reservation_not_found` — deliberately, so a reservation ID never leaks whether it exists to someone who doesn't own it. The wrong stage is `409 offering.reservation_not_awaiting_reconfirmation`; a closed window is `409 offering.reconfirmation_window_closed`. On success the reservation moves to `reservation_stage: "reconfirmed"` and an audit log entry records the disclosure-pack version current at that moment (`PAYMENT_FLOWS.md`: "Reconfirmation must reference a specific disclosure-pack version and that version must remain downloadable for audit purposes").
+Atomically, under a row lock on the reservation: ownership is checked (`account_id` must match the caller), the reservation must be `reservation_stage: "awaiting_reconfirmation"`, the offering's `effective_rights_end_at` must not have passed yet, and — `AD-037`: "An investor must not be able to reconfirm against an incomplete, draft, or superseded pack" — the offering's current disclosure pack must have every one of the 11 mandatory document types (`isCompleteDisclosurePack`, `domain/disclosure-pack.policy.ts`; an offering with no current pack at all fails this the same way, since an empty set is never complete). This check is largely defensive by the time reconfirmation runs: `publishFinalOfferingTerms` (stage 1) already requires a complete pack to open the window at all, so the only realistic way this fires here is a later republish (e.g. a materiality-triggered one) that lands incomplete after publish already succeeded. A nonexistent reservation and one owned by someone else both report the same `404 offering.reservation_not_found` — deliberately, so a reservation ID never leaks whether it exists to someone who doesn't own it. The wrong stage is `409 offering.reservation_not_awaiting_reconfirmation`; a closed window is `409 offering.reconfirmation_window_closed`; an incomplete pack is `409 offering.reconfirmation_disclosure_pack_incomplete`. On success the reservation moves to `reservation_stage: "reconfirmed"` and an audit log entry records the disclosure-pack version current at that moment (`PAYMENT_FLOWS.md`: "Reconfirmation must reference a specific disclosure-pack version and that version must remain downloadable for audit purposes").
 
 Reconfirming does **not** yet create a position — it only marks the reservation ready for the commit batch below. `PAYMENT_FLOWS.md`'s "Silence rule" is explicit that no action is the terminal outcome for a reservation that never reconfirms: "No reconfirmation by expiry means the reservation lapses rather than silently finalizing."
+
+### Reconfirmation-window reminders (scheduled batch, throughout the open window)
+
+`AD-214`: "The 168-Hour Reconfirmation Window Gets A Scheduled Reminder Job, Not Just The Single Notification At Window Open" — `PAYMENT_FLOWS.md`'s Withdrawal/Cancellation Window table names the same stakes-asymmetry `AD-213` already applied to KYC renewal reminders: "a lapsed reservation loses the investor's committed capital opportunity." The hourly `case_timers.offering_reconfirmation_reminders` job (`SendReconfirmationRemindersService`, `src/worker.ts`) emails every reservation still `reservation_stage: "awaiting_reconfirmation"` on an offering with published final terms, at a `platform.settings`-configurable cadence (`offering.reconfirmation_reminder_interval_hours`, seeded to `48`) — never once a reservation is `"reconfirmed"`, `"lapsed"`, or `"finalized"`.
+
+Unlike the KYC renewal reminder (`isRenewalReminderDue`, which counts back a fixed lead time from a single known due date), a reconfirmation reminder repeats indefinitely until the window closes, so there's no one calendar date to match against. `isReconfirmationReminderDue` (`domain/reconfirmation-reminder.policy.ts`) instead derives due-ness from time elapsed since the last reminder actually sent — or since `final_offering_published_at`, if none has been sent yet — compared against `effectiveRightsEndAt`. That makes it robust to a missed or delayed job tick: an overdue reminder stays due until it's actually sent, rather than being silently skipped once its one matching instant passes. "Last reminder actually sent" is derived from the `audit.audit_log` row each send writes (`offering.reconfirmation_reminder_sent`, `resourceType: "reservation"`) rather than a new column, the same general-purpose-event-history use of the audit log `AD-152`'s `trace_id` already establishes elsewhere. A reservation with no contact email on file is skipped without failing the run (matching every other reminder job's `contactEmail: null` handling) and is not counted as acted-on.
+
+The single notification `PAYMENT_FLOWS.md`'s Withdrawal/Cancellation Window table names separately — the window's `Start event` meaning "final terms are locked, the final package is visible in-app, **and investor notification is sent**," which `AD-214`'s own decision text frames as running "in addition to — not instead of" this repeating reminder job — is also now built, as its own AD-145 cross-domain handoff rather than a synchronous send inside the founder's `/finalize` request. Inside the same transaction that moves reservations to `awaiting_reconfirmation`, `publishFinalOfferingTerms` durably enqueues `case_timers.offering_reconfirmation_window_opened` (`enqueueTransactionalJob`, the same pattern `case_timers.pre_offering_open_handoff` already established for origination-to-offering) with the offering ID and the list of reservation IDs that just moved — never a synchronous email in the founder's own request, and never enqueued at all when nothing moved (an all-cancelled publish, though `target_not_reached` would already have blocked that case in practice). The consumer (`NotifyReconfirmationWindowOpenedService`) re-resolves each reservation's contact email and window end from the database rather than trusting the payload — the same "never trust a payload snapshot" discipline `OpenOfferingForApprovedCaseService` already applies — and is itself replay-safe: whether a notification was already sent is derived from the same `audit.audit_log` general-event-history pattern the reminder job uses (`offering.reconfirmation_window_opened_notification_sent`), so a pg-boss retry or duplicate delivery can never double-email an investor.
 
 ### 3. Window-close commit (scheduled batch, not a person)
 
@@ -125,4 +133,81 @@ A position's `unit_count` and `cost_basis_eur` are both set to the reservation's
 
 Only now does the transaction set `offerings.status = "final_offering"` — the one and only place in this codebase that ever does so.
 
-Out of scope for all three stages above, and not built: a material change resetting prior reconfirmations (its trigger — materiality classification itself — has no application code anywhere yet) and any per-jurisdiction override of the 168-hour platform default (no such table is documented). Locking reservation rows in each stage blocks a concurrent expiry sweep or a concurrent later stage from racing that same reservation, but not a concurrent onramp poll: `PollOnrampTransactionsService` inserts a new `money_events` row rather than updating the reservation row, so a row lock on `reservations` doesn't block it. A purchase that lands in `money_events` in the same instant as the publish stage reads that reservation as unfunded is the same category of residual, deliberately unresolved race already named above for the expiry sweep — narrow, rare given publishing is an infrequent, deliberate staff action, and not engineered around here for the same reason.
+Out of scope for all three stages above, and not built: any per-jurisdiction override of the 168-hour platform default (no such table is documented — see `AD-040`/`PAYMENT_FLOWS.md`'s "Effective Investor-Rights Window Override"). Locking reservation rows in each stage blocks a concurrent expiry sweep or a concurrent later stage from racing that same reservation, but not a concurrent onramp poll: `PollOnrampTransactionsService` inserts a new `money_events` row rather than updating the reservation row, so a row lock on `reservations` doesn't block it. A purchase that lands in `money_events` in the same instant as the publish stage reads that reservation as unfunded is the same category of residual, deliberately unresolved race already named above for the expiry sweep — narrow, rare given publishing is an infrequent, deliberate staff action, and not engineered around here for the same reason.
+
+## Materiality classification and the change-log
+
+`POST /internal/v1/offerings/:offering_id/materiality-records` is `AD-038`'s materiality classification — staff-gated exactly like `/finalize` (`admin_operations` role plus staff WebAuthn), since `ARCHITECTURE_DECISIONS.md`'s own AD-038 discussion confirms classification is "assessed by legal and offering ownership," performed as `admin_operations`, with no dedicated narrower role. Request body:
+
+```json
+{
+  "change_description": "Independent appraisal came in 7% below the disclosed valuation basis.",
+  "classification": "reviewed_material",
+  "threshold_type": "valuation"
+}
+```
+
+`classification` is one of `per_se_material`, `reviewed_material`, or `non_material` (`CORE_TABLES.md`'s exact `materiality_records.classification` values). `threshold_type` (`valuation | cashflow | gross_rent | closing_delay`, `PAYMENT_FLOWS.md`'s "Reviewed Material Changes With Default Thresholds" table) is rejected with `422` unless `classification` is `reviewed_material` — a per-se-material change is material by category (`PAYMENT_FLOWS.md`'s enumerated "Per Se Material Changes" list: issuer/obligor identity, legal instrument or ranking, fee/price/allocation mechanics, property or PIV identity, title/encumbrance/zoning/litigation/liquidity), not by crossing a threshold, and a non-material change has no threshold to record. This codebase does not attempt to infer which classification applies from structured inputs — that judgment call belongs to the classifying staff member, informed by `AD-038`'s materiality test (`(a)` would likely require a disclosure update, or `(b)` a reasonable retail investor could realistically decide differently) — the same way `founder_review_notes` records a founder's decision rather than computing one.
+
+What the endpoint does mechanically, atomically, under a row lock on the offering (`AD-146` discipline): a request is only accepted while the offering is between publish and commit (`final_offering_published_at` set, `status` still `pre_offering` — the same window `reconfirmReservation` itself operates in; `404 offering.not_found` for an unknown offering, `409 offering.materiality_classification_not_available` outside that window). It always inserts a `materiality_records` row and a generic audit-log entry (`offering.materiality_classified`), whatever the classification — `AD-038`: "must still be logged" applies even to `non_material` changes. `reset_triggered` is computed from `classification`, never accepted as a separate input: `per_se_material` and `reviewed_material` are always `true`, `non_material` is always `false` (`PAYMENT_FLOWS.md`'s Material-change rule: "Any material change resets the full 168-hour window and invalidates prior reconfirmations"; `AD-046`: reviewed-material thresholds are "escalation floors, not safe harbors," so a threshold-triggering change can never be waived down to non-material). When triggered, every reservation currently `reservation_stage: "reconfirmed"` on the offering moves back to `"awaiting_reconfirmation"` (clearing `reconfirmed_at`) — a reservation still only `"awaiting_reconfirmation"` has nothing to invalidate and is left untouched — and `platform_rights_end_at`/`effective_rights_end_at` are both recomputed as a **fresh** 168 hours from the classification instant, not merely extended from the old boundary. Reusing the same `effective_rights_end_at` field the window-close job reads means a reset landing after the window's old boundary but before that hourly job has actually run correctly reopens the window rather than racing a premature commit.
+
+Response (`201`):
+
+```json
+{
+  "data": {
+    "materiality_record_id": "materiality_...",
+    "offering_id": "offering_...",
+    "classification": "reviewed_material",
+    "threshold_type": "valuation",
+    "reset_triggered": true,
+    "classified_at": "2026-09-05T12:00:00.000Z",
+    "effective_rights_end_at": "2026-09-12T12:00:00.000Z",
+    "reservations_reset": 2
+  }
+}
+```
+
+Every created record also appears immediately in the investor-facing `change_log` (`GET /v1/offerings/:offering_id`'s response) — that read path already existed before this endpoint did, so no separate wiring was needed on the read side.
+
+**Known, deliberately unresolved gap:** `AD-038` also states a per-se-material change "always resets the disclosure pack." Disclosure-pack authoring is now built (see the next section) but this endpoint does not call it automatically — classifying a change as `per_se_material` resets the reconfirmation window but does not, by itself, publish a new disclosure pack. Republishing is a separate staff action (`POST /internal/v1/offerings/:offering_id/disclosure-packs`), left as a deliberate manual step rather than an automatic side effect, since the actual updated document content (what changed, and its `document_ref`) is not something a materiality classification's `change_description` free text can supply. `materiality_records` also has no column linking a record to the disclosure-pack version it prompted, for the same reason.
+
+## Disclosure-pack authoring
+
+`POST /internal/v1/offerings/:offering_id/disclosure-packs` publishes a new `disclosure_packs` version and immediately supersedes whatever was previously current (`is_current: false`, `superseded_at` set) — staff-gated identically to `/finalize` and `/materiality-records` (`admin_operations` role plus staff WebAuthn). Before this endpoint existed, nothing in this codebase could create a disclosure pack at all: `DisclosureDocumentStore` (the MinIO wrapper) only ever had a `.get()` method, `DisclosureDocumentRepository` only ever had a read path, and no origination-handoff or other flow ever wrote a `disclosure_packs` row — every disclosure pack in this codebase's tests was hand-seeded directly through Prisma, which is also, in effect, the only way one has ever existed in a real environment. That mattered beyond `AD-038`'s reset case: `hasDisclosurePack`/the `disclosure_pack_unavailable` blocker already gates *ordinary* reservation creation, well before an offering ever reaches publish or reconfirm.
+
+Request body:
+
+```json
+{
+  "documents": [
+    { "document_type": "ecsp_kiis", "document_ref": "documents/kiis-v2.pdf" },
+    { "document_type": "final_terms_sheet", "document_ref": "documents/terms-v2.pdf" }
+  ]
+}
+```
+
+`document_type` is a closed enum of the 11 document kinds `AD-037`/`VISTABLOX_BACKEND_DISCUSSION.md`'s "Mandatory Core Pack" table names (`ecsp_kiis`, `priips_kid`, `final_offer_summary`, `final_terms_sheet`, `issuer_offeror_structure_sheet`, `investor_rights_payout_waterfall_summary`, `risk_factors_summary`, `property_appraisal_summary`, `fees_costs_tax_liquidity_summary`, `withdrawal_cancellation_supplement_rights_notice`, `full_prospectus`) — rejected with `422` if duplicated within one request. `document_ref` is a trusted, already-uploaded storage reference (`z.string().trim().min(1).max(500)`), the exact same shape origination's own document intake already uses (`submitInitialCaseBodySchema`'s `document_type`/`document_ref` pair) — this codebase has no file-upload endpoint for any document kind, disclosure documents included, so getting the underlying file into MinIO is a process this API does not perform. `is_core_reading` is never client-supplied: it's computed server-side from `document_type` (`isCoreReadingDocumentType`, `domain/disclosure-pack.policy.ts`), true for every mandatory type except `full_prospectus` — CORE_TABLES.md's own comment on that column already frames this as deterministic ("false only for the full prospectus").
+
+This is deliberately **one reusable staff primitive**, not logic wired into any single flow. The documented model implies at least three distinct moments a new version gets published — an initial pre-offering pack (whatever `hasDisclosurePack` gates ordinary reservations on), the version-locked pack tied to `final_offering_published_at` (`AD-037`), and a republished pack after a materiality reset (`AD-038`, still a manual follow-up call — see the previous section) — but all three are the same mechanical action, so this endpoint doesn't hard-code which moment it's being called for. It only requires the offering still be `pre_offering` (`404 offering.not_found` for an unknown offering, `409 offering.disclosure_pack_not_available` otherwise — `AD-046` puts post-finalization content changes through a separate amendment/consent path this codebase does not build).
+
+Response (`201`):
+
+```json
+{
+  "data": {
+    "disclosure_pack_id": "pack_...",
+    "offering_id": "offering_...",
+    "version": 2,
+    "published_at": "2026-09-06T12:00:00.000Z",
+    "documents": [
+      { "document_id": "document_...", "document_type": "ecsp_kiis", "is_core_reading": true },
+      { "document_id": "document_...", "document_type": "final_terms_sheet", "is_core_reading": true }
+    ],
+    "is_complete": false,
+    "superseded_pack_id": "pack_..."
+  }
+}
+```
+
+`is_complete` reports whether every one of the 11 mandatory document types is present in *this* pack — informational only, not a hard gate on *this* endpoint itself. A pack published before final terms is legitimately allowed to be partial (`hasDisclosurePack` only ever required at least one document, never all eleven), so requiring full completeness on every publish would make the initial pre-offering moment unbuildable. `AD-037`'s "must be blocked if the pack is incomplete" is enforced downstream, in two places, both re-deriving completeness from the offering's current pack under their own row lock rather than trusting a stale `is_complete` value from whenever the pack was published: `publishFinalOfferingTerms` (stage 1 — see above), the primary gate, since it requires a complete pack before it will open the reconfirmation window at all; and `reconfirmReservation` (stage 2), defensively, for the narrower case of a pack that regresses to incomplete via a later republish after publish already succeeded.

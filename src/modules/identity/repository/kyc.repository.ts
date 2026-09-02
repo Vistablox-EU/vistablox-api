@@ -33,6 +33,19 @@ export interface KycRepository {
     diditReference: string,
   ): Promise<KycEligibilityRecord | null>;
   hasProcessedProviderEvent(eventKey: string): Promise<boolean>;
+  enqueueDiditWebhookProcessing(input: {
+    eventId: string;
+    webhookType: string;
+    applicationId: string;
+    environment: string;
+    sessionId: string;
+    sessionKind: string | null;
+    workflowId: string | null;
+    vendorData: string | null;
+    status: string;
+    createdAt: number;
+    traceId: string;
+  }): Promise<void>;
   reserveSessionStart(input: {
     accountId: string;
     sessionStartId: string;
@@ -114,4 +127,23 @@ export interface KycRepository {
     traceId: string;
     transitionedAt: Date;
   }): Promise<boolean>;
+  listStuckSessionCreationsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      sessionStartId: string;
+      updatedAt: Date;
+    }>
+  >;
+  listStuckOpenSessionsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      diditReference: string;
+      residenceCountryCode: string | null;
+      taxResidenceCountryCode: string | null;
+      everRequiredManualReview: boolean;
+      updatedAt: Date;
+    }>
+  >;
 }

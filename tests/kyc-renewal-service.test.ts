@@ -10,6 +10,7 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
     findByDiditReference: vi.fn(),
     findByProofOfAddressDiditReference: vi.fn(),
     hasProcessedProviderEvent: vi.fn(),
+    enqueueDiditWebhookProcessing: vi.fn(),
     reserveSessionStart: vi.fn(),
     completeSessionStart: vi.fn(),
     failSessionStart: vi.fn(),
@@ -22,6 +23,8 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
     getRenewalReminderLeadDays: vi.fn().mockResolvedValue(30),
     listEligibleAccountsForRenewalTimer: vi.fn().mockResolvedValue([]),
     transitionToRequiresRenewal: vi.fn().mockResolvedValue(true),
+    listStuckSessionCreationsForTimer: vi.fn().mockResolvedValue([]),
+    listStuckOpenSessionsForTimer: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -33,6 +36,8 @@ function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
     sendStaffInvitationEmail: vi.fn(),
     sendApplicantResponseReminderEmail: vi.fn(),
     sendKycRenewalReminderEmail: vi.fn().mockResolvedValue(undefined),
+    sendReconfirmationReminderEmail: vi.fn(),
+    sendReconfirmationWindowOpenedEmail: vi.fn(),
     ...overrides,
   };
 }

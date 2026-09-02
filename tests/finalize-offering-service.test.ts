@@ -143,4 +143,24 @@ describe("FinalizeOfferingService", () => {
       }),
     ).rejects.toMatchObject({ code: "offering.finalization_target_not_reached", status: 409 });
   });
+
+  it("reports a 409 when the current disclosure pack is incomplete", async () => {
+    const service = new FinalizeOfferingService(
+      repository({
+        publishFinalOfferingTerms: vi
+          .fn()
+          .mockResolvedValue({ published: null, conflict: "disclosure_pack_incomplete" }),
+      }),
+      () => now,
+    );
+
+    await expect(
+      service.execute({
+        accountId: "account_founder",
+        offeringId: "offering_01",
+        traceId: "req_01",
+        body: { founder_review_notes: "notes" },
+      }),
+    ).rejects.toMatchObject({ code: "offering.finalization_disclosure_pack_incomplete", status: 409 });
+  });
 });

@@ -53,7 +53,6 @@ import {
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
-const offeringRepository = new PrismaOfferingRepository(database);
 const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const jobQueue = new PgBoss(environment.DATABASE_URL);
 jobQueue.on("error", (error) => {
@@ -64,6 +63,14 @@ await jobQueue.start();
 // to run here even if the worker process hasn't started yet on a fresh
 // deploy — a send() would otherwise fail against a queue that doesn't exist.
 await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
+await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
+// Only when Didit is configured — same "all six configured together or
+// none" contract environment.ts's own refine enforces (see diditKyc
+// below), so this single check is equivalent to checking all six.
+if (environment.DIDIT_API_KEY !== undefined) {
+  await jobQueue.createQueue("provider_events.didit_webhook");
+}
+const offeringRepository = new PrismaOfferingRepository(database, jobQueue);
 const originationRepository = new PrismaOriginationRepository(database, jobQueue);
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
@@ -177,13 +184,11 @@ const diditKyc =
   environment.DIDIT_APPLICATION_ID !== undefined &&
   environment.DIDIT_ENVIRONMENT !== undefined
     ? {
-        repository: new PrismaKycRepository(database),
+        repository: new PrismaKycRepository(database, jobQueue),
         didit: diditClient,
         webhookVerifier: new DiditWebhookVerifier(environment.DIDIT_WEBHOOK_SECRET),
         workflowId: environment.DIDIT_WORKFLOW_ID,
         callbackUrl: environment.DIDIT_CALLBACK_URL,
-        applicationId: environment.DIDIT_APPLICATION_ID,
-        environment: environment.DIDIT_ENVIRONMENT,
         ...(environment.DIDIT_POA_WORKFLOW_ID === undefined
           ? {}
           : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),

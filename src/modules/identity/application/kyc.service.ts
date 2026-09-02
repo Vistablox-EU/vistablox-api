@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { z } from "zod";
+
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { DiditClient } from "./didit-client.js";
 import { evaluateDiditOutcome, type DiditStatus } from "../domain/kyc-policy.js";
@@ -84,6 +86,19 @@ export class StartKycSessionService {
       completedAt: this.clock(),
     });
     if (!completed) {
+      // A live Didit session already exists at this point (created above) —
+      // without this, the row is left at kyc_session_creating, a substatus
+      // canStartSession's retry allow-list excludes, permanently blocking
+      // the customer from ever retrying (there is no other recovery path
+      // today). Mirrors the createSession catch block above: attempt the
+      // same recovery regardless of why completeSessionStart's own guarded
+      // update matched no rows.
+      await this.repository.failSessionStart({
+        accountId: input.accountId,
+        sessionStartId,
+        traceId: input.traceId,
+        failedAt: this.clock(),
+      });
       throw new AppError({
         code: "identity.kyc_session_persistence_failed",
         title: "Identity verification session unavailable",
@@ -263,6 +278,59 @@ export class StartProofOfAddressSessionService {
   }
 }
 
+/**
+ * AD-062 / ASYNC_JOBS.md's Webhook Handling Rule: the Express handler's
+ * whole job is verify, durably receive, and acknowledge fast — it must not
+ * run heavy business orchestration inline. This is that fast path: it does
+ * no provider calls and no policy evaluation, only a durable enqueue
+ * (KycRepository.enqueueDiditWebhookProcessing) of the already
+ * signature-verified, schema-validated body. ProcessDiditWebhookService
+ * below — unchanged in its own logic — is now the worker-side consumer of
+ * the job this enqueues (provider_events.didit_webhook, src/worker.ts).
+ */
+export class ReceiveDiditWebhookService {
+  public constructor(private readonly repository: KycRepository) {}
+
+  public async execute(input: {
+    eventId: string;
+    webhookType: string;
+    applicationId: string;
+    environment: string;
+    sessionId: string;
+    sessionKind: string | null;
+    workflowId: string | null;
+    vendorData: string | null;
+    status: string;
+    createdAt: number;
+    traceId: string;
+  }): Promise<{ received: true }> {
+    await this.repository.enqueueDiditWebhookProcessing(input);
+    return { received: true };
+  }
+}
+
+// The job payload shape ReceiveDiditWebhookService enqueues
+// (provider_events.didit_webhook). Parsed defensively here since a pg-boss
+// payload is untyped JSON once round-tripped through Postgres — the same
+// pattern openOfferingForApprovedCaseJobSchema already uses. Field names
+// and shape deliberately match this service's own long-standing execute()
+// input exactly, so every existing direct-call test of this service (built
+// when it was still the synchronous webhook handler itself) keeps working
+// unchanged against the new job-payload entry point.
+export const processDiditWebhookJobSchema = z.object({
+  eventId: z.string(),
+  webhookType: z.string(),
+  applicationId: z.string(),
+  environment: z.string(),
+  sessionId: z.string(),
+  sessionKind: z.string().nullable(),
+  workflowId: z.string().nullable(),
+  vendorData: z.string().nullable(),
+  status: z.string(),
+  createdAt: z.number(),
+  traceId: z.string(),
+});
+
 export class ProcessDiditWebhookService {
   public constructor(
     private readonly repository: KycRepository,
@@ -277,19 +345,8 @@ export class ProcessDiditWebhookService {
       async () => {},
   ) {}
 
-  public async execute(input: {
-    eventId: string;
-    webhookType: string;
-    applicationId: string;
-    environment: string;
-    sessionId: string;
-    sessionKind: string | null;
-    workflowId: string | null;
-    vendorData: string | null;
-    status: string;
-    createdAt: number;
-    traceId: string;
-  }) {
+  public async execute(payload: unknown) {
+    const input = processDiditWebhookJobSchema.parse(payload);
     const eventKey = `didit:webhook:${input.eventId}`;
     if (await this.repository.hasProcessedProviderEvent(eventKey)) {
       return { received: true as const, duplicate: true as const };

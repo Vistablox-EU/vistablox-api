@@ -3,7 +3,7 @@ import { Router, type RequestHandler } from "express";
 import { AppError } from "../../../shared/errors/app-error.js";
 import {
   GetKycStatusService,
-  ProcessDiditWebhookService,
+  ReceiveDiditWebhookService,
   StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "../application/kyc.service.js";
@@ -68,7 +68,7 @@ export function createKycRouter(
 
 export function createDiditWebhookRouter(
   verifier: DiditWebhookVerifier,
-  processWebhook: ProcessDiditWebhookService,
+  receiveWebhook: ReceiveDiditWebhookService,
 ): Router {
   const router = Router();
   router.post("/", async (request, response) => {
@@ -78,7 +78,7 @@ export function createDiditWebhookRouter(
       timestamp: readHeader(request.headers["x-timestamp"]),
     });
     const body = diditWebhookBodySchema.parse(request.body);
-    const result = await processWebhook.execute({
+    const result = await receiveWebhook.execute({
       eventId: body.event_id,
       webhookType: body.webhook_type,
       applicationId: body.application_id,

@@ -94,4 +94,19 @@ describe("ReconfirmReservationService", () => {
       service.execute({ accountId: "account_investor", reservationId: "reservation_01", traceId: "req_01" }),
     ).rejects.toMatchObject({ code: "offering.reconfirmation_window_closed", status: 409 });
   });
+
+  it("409s when the current disclosure pack is incomplete", async () => {
+    const service = new ReconfirmReservationService(
+      repository({
+        reconfirmReservation: vi
+          .fn()
+          .mockResolvedValue({ reconfirmedAt: null, conflict: "disclosure_pack_incomplete" }),
+      }),
+      () => now,
+    );
+
+    await expect(
+      service.execute({ accountId: "account_investor", reservationId: "reservation_01", traceId: "req_01" }),
+    ).rejects.toMatchObject({ code: "offering.reconfirmation_disclosure_pack_incomplete", status: 409 });
+  });
 });

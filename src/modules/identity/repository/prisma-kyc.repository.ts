@@ -1,7 +1,9 @@
+import type { PgBoss } from "pg-boss";
 import { ulid } from "ulid";
 import { z } from "zod";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import { JOB_RETRY_OPTIONS } from "../../../shared/jobs/enqueue-job.js";
 import type {
   DiditStatus,
   KycEligibilityState,
@@ -20,7 +22,51 @@ import type {
 const renewalLeadDaysSettingSchema = z.object({ days: z.number().int().min(1).max(365) });
 
 export class PrismaKycRepository implements KycRepository {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly pgBoss: PgBoss,
+  ) {}
+
+  // AD-062 / ASYNC_JOBS.md's Webhook Handling Rule: "the endpoint verifies
+  // authenticity and schema... the downstream job is enqueued... the HTTP
+  // response returns quickly after durable receipt... workers own the
+  // actual business processing." No other write needs to happen atomically
+  // alongside this one (unlike enqueueTransactionalJob's callers elsewhere,
+  // which bind an enqueue to an existing state-change transaction), so this
+  // is a plain durable send rather than a transaction-bound one — pg-boss's
+  // own job row, holding the verified webhook body, *is* the durable
+  // receipt ASYNC_JOBS.md's diagram calls for.
+  public async enqueueDiditWebhookProcessing(input: {
+    eventId: string;
+    webhookType: string;
+    applicationId: string;
+    environment: string;
+    sessionId: string;
+    sessionKind: string | null;
+    workflowId: string | null;
+    vendorData: string | null;
+    status: string;
+    createdAt: number;
+    traceId: string;
+  }): Promise<void> {
+    await this.pgBoss.send(
+      "provider_events.didit_webhook",
+      {
+        eventId: input.eventId,
+        webhookType: input.webhookType,
+        applicationId: input.applicationId,
+        environment: input.environment,
+        sessionId: input.sessionId,
+        sessionKind: input.sessionKind,
+        workflowId: input.workflowId,
+        vendorData: input.vendorData,
+        status: input.status,
+        createdAt: input.createdAt,
+        traceId: input.traceId,
+      },
+      JOB_RETRY_OPTIONS,
+    );
+  }
 
   public async getRenewalReminderLeadDays(): Promise<number> {
     const setting = await this.database.platformSetting.findUnique({
@@ -635,6 +681,88 @@ export class PrismaKycRepository implements KycRepository {
       });
       return true;
     });
+  }
+
+  public async listStuckSessionCreationsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      sessionStartId: string;
+      updatedAt: Date;
+    }>
+  > {
+    const rows = await this.database.$queryRaw<
+      Array<{ account_id: string; kind: "baseline" | "proof_of_address"; session_start_id: string; updated_at: Date }>
+    >`
+      SELECT account_id, 'baseline' AS kind, session_start_id, updated_at
+      FROM identity.kyc_eligibility
+      WHERE operational_substatus = 'kyc_session_creating'
+      UNION ALL
+      SELECT account_id, 'proof_of_address' AS kind, proof_of_address_session_start_id, updated_at
+      FROM identity.kyc_eligibility
+      WHERE proof_of_address_status = 'creating'
+    `;
+    return rows.map((row) => ({
+      accountId: row.account_id,
+      kind: row.kind,
+      sessionStartId: row.session_start_id,
+      updatedAt: row.updated_at,
+    }));
+  }
+
+  public async listStuckOpenSessionsForTimer(): Promise<
+    Array<{
+      accountId: string;
+      kind: "baseline" | "proof_of_address";
+      diditReference: string;
+      residenceCountryCode: string | null;
+      taxResidenceCountryCode: string | null;
+      everRequiredManualReview: boolean;
+      updatedAt: Date;
+    }>
+  > {
+    const rows = await this.database.$queryRaw<
+      Array<{
+        account_id: string;
+        kind: "baseline" | "proof_of_address";
+        didit_reference: string;
+        residence_country_code: string | null;
+        tax_residence_country_code: string | null;
+        ever_required_manual_review: boolean;
+        updated_at: Date;
+      }>
+    >`
+      SELECT
+        account_id,
+        'baseline' AS kind,
+        didit_reference,
+        residence_country_code,
+        tax_residence_country_code,
+        ever_required_manual_review,
+        updated_at
+      FROM identity.kyc_eligibility
+      WHERE operational_substatus = 'kyc_session_open'
+      UNION ALL
+      SELECT
+        account_id,
+        'proof_of_address' AS kind,
+        proof_of_address_didit_reference,
+        residence_country_code,
+        NULL AS tax_residence_country_code,
+        ever_required_manual_review,
+        updated_at
+      FROM identity.kyc_eligibility
+      WHERE proof_of_address_status = 'in_progress'
+    `;
+    return rows.map((row) => ({
+      accountId: row.account_id,
+      kind: row.kind,
+      diditReference: row.didit_reference,
+      residenceCountryCode: row.residence_country_code,
+      taxResidenceCountryCode: row.tax_residence_country_code,
+      everRequiredManualReview: row.ever_required_manual_review,
+      updatedAt: row.updated_at,
+    }));
   }
 }
 

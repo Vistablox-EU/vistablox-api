@@ -5,6 +5,7 @@ import {
   GetKycAccountForOperationsService,
   GetKycStatusService,
   ProcessDiditWebhookService,
+  ReceiveDiditWebhookService,
   StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "../src/modules/identity/application/kyc.service.js";
@@ -38,6 +39,7 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
     }),
     findByProofOfAddressDiditReference: vi.fn().mockResolvedValue(null),
     hasProcessedProviderEvent: vi.fn().mockResolvedValue(false),
+    enqueueDiditWebhookProcessing: vi.fn().mockResolvedValue(undefined),
     reserveSessionStart: vi.fn().mockResolvedValue(true),
     completeSessionStart: vi.fn().mockResolvedValue(true),
     failSessionStart: vi.fn().mockResolvedValue(undefined),
@@ -50,6 +52,8 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
     getRenewalReminderLeadDays: vi.fn().mockResolvedValue(30),
     listEligibleAccountsForRenewalTimer: vi.fn().mockResolvedValue([]),
     transitionToRequiresRenewal: vi.fn().mockResolvedValue(false),
+    listStuckSessionCreationsForTimer: vi.fn().mockResolvedValue([]),
+    listStuckOpenSessionsForTimer: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -118,6 +122,42 @@ describe("KYC application services", () => {
       expect.objectContaining({ accountId, diditReference: sessionId }),
     );
     expect(invalidateDisplayProfile).toHaveBeenCalledWith(accountId);
+  });
+
+  it("fails the session start rather than leaving an orphaned session stuck unretryable, when persisting completion fails", async () => {
+    const storage = repository({ completeSessionStart: vi.fn().mockResolvedValue(false) });
+    const provider = didit();
+    const service = new StartKycSessionService(
+      storage,
+      provider,
+      { workflowId, callbackUrl: "https://app.vistablox.eu/kyc/complete" },
+      () => now,
+    );
+
+    await expect(
+      service.execute({
+        accountId,
+        traceId: "req_01",
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "HR",
+      }),
+    ).rejects.toMatchObject({ code: "identity.kyc_session_persistence_failed" });
+
+    expect(storage.failSessionStart).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId }),
+    );
+  });
+
+  it("durably enqueues webhook processing and acknowledges immediately, without touching the provider or applying policy", async () => {
+    const enqueueDiditWebhookProcessing = vi.fn().mockResolvedValue(undefined);
+    const storage = repository({ enqueueDiditWebhookProcessing });
+    const service = new ReceiveDiditWebhookService(storage);
+
+    const result = await service.execute(webhookInput());
+
+    expect(result).toEqual({ received: true });
+    expect(enqueueDiditWebhookProcessing).toHaveBeenCalledWith(webhookInput());
+    expect(storage.hasProcessedProviderEvent).not.toHaveBeenCalled();
   });
 
   it("fetches the authoritative decision and applies the local policy", async () => {

@@ -38,6 +38,7 @@ function fakeKycRepository(overrides: Partial<KycRepository> = {}): KycRepositor
     findByDiditReference: vi.fn().mockResolvedValue(null),
     findByProofOfAddressDiditReference: vi.fn().mockResolvedValue(null),
     hasProcessedProviderEvent: vi.fn().mockResolvedValue(false),
+    enqueueDiditWebhookProcessing: vi.fn().mockResolvedValue(undefined),
     reserveSessionStart: vi.fn().mockResolvedValue(true),
     completeSessionStart: vi.fn().mockResolvedValue(true),
     failSessionStart: vi.fn().mockResolvedValue(undefined),
@@ -50,6 +51,8 @@ function fakeKycRepository(overrides: Partial<KycRepository> = {}): KycRepositor
     getRenewalReminderLeadDays: vi.fn().mockResolvedValue(30),
     listEligibleAccountsForRenewalTimer: vi.fn().mockResolvedValue([]),
     transitionToRequiresRenewal: vi.fn().mockResolvedValue(false),
+    listStuckSessionCreationsForTimer: vi.fn().mockResolvedValue([]),
+    listStuckOpenSessionsForTimer: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
 }
@@ -150,8 +153,6 @@ function buildApp(options?: {
           webhookVerifier: new DiditWebhookVerifier("test-webhook-secret"),
           workflowId: "269214fe-77f7-4b1a-a028-b70e861d73c1",
           callbackUrl: "https://app.vistablox.eu/kyc/complete",
-          applicationId: "c5f501a8-0a32-42cd-ac24-13d0d0b15699",
-          environment: "sandbox",
         },
       },
     }),

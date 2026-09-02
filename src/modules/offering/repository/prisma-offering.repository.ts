@@ -1,5 +1,8 @@
+import type { PgBoss } from "pg-boss";
 import { ulid } from "ulid";
+import { z } from "zod";
 
+import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import { toCents } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import type {
@@ -34,6 +37,8 @@ import {
   costBasisToUnitCount,
   isReconfirmationWindowOpen,
 } from "../domain/finalization.policy.js";
+import { materialityResetTriggered } from "../domain/materiality.policy.js";
+import { isCompleteDisclosurePack, isCoreReadingDocumentType, type DisclosureDocumentType } from "../domain/disclosure-pack.policy.js";
 import type {
   CommitOfferingFinalizationInput,
   CommitOfferingFinalizationResult,
@@ -44,6 +49,24 @@ import type {
   ReconfirmReservationInput,
   ReconfirmReservationResult,
 } from "./finalize-offering.repository.js";
+import type { ClassifyMaterialityInput, ClassifyMaterialityResult, MaterialityRepository } from "./materiality.repository.js";
+import type {
+  DisclosurePackRepository,
+  PublishDisclosurePackInput,
+  PublishDisclosurePackResult,
+} from "./disclosure-pack.repository.js";
+import type {
+  ReconfirmationReminderRepository,
+  RecordReconfirmationReminderSentInput,
+  ReservationAwaitingReconfirmationReminder,
+} from "./reconfirmation-reminder.repository.js";
+import type {
+  ReconfirmationWindowOpenedNotificationRepository,
+  RecordReconfirmationWindowOpenedNotificationSentInput,
+  ReservationForReconfirmationWindowOpenedNotification,
+} from "./reconfirmation-window-opened-notification.repository.js";
+
+const reconfirmationReminderIntervalHoursSettingSchema = z.object({ hours: z.number().int().min(1).max(168) });
 
 export class PrismaOfferingRepository
   implements
@@ -51,9 +74,16 @@ export class PrismaOfferingRepository
     DisclosureDocumentRepository,
     OfferingOriginationHandoffRepository,
     FinalizeOfferingRepository,
+    MaterialityRepository,
+    DisclosurePackRepository,
+    ReconfirmationReminderRepository,
+    ReconfirmationWindowOpenedNotificationRepository,
     ReservationRepository
 {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly pgBoss: PgBoss,
+  ) {}
 
   public async openOfferingForApprovedCase(
     input: OpenOfferingForApprovedCaseInput,
@@ -638,6 +668,27 @@ export class PrismaOfferingRepository
         return { published: null, conflict: "target_not_reached" as const };
       }
 
+      // PAYMENT_FLOWS.md's Phase-1 Final Offering Settlement Flow, step 4:
+      // "VistaBlox publishes the locked final package, emits
+      // final_offering_published_at, and moves live reservations into
+      // reconfirmation_pending" — bundles publishing the disclosure package
+      // together with this step, not as a separately-timed staff action.
+      // Skipping this would open the reconfirmation window (and, per
+      // AD-214, start the clock toward the Silence rule) while no investor
+      // could actually reconfirm — reconfirmReservation already enforces
+      // the same completeness rule at reconfirmation time; this closes the
+      // gap where the window opens against a pack no one can act on yet.
+      const currentPack = await transaction.disclosurePack.findFirst({
+        where: { offeringId: input.offeringId, isCurrent: true, supersededAt: null },
+        select: { documents: { select: { documentType: true } } },
+      });
+      const currentDocumentTypes = (currentPack?.documents ?? []).map(
+        (document) => document.documentType as DisclosureDocumentType,
+      );
+      if (!isCompleteDisclosurePack(currentDocumentTypes)) {
+        return { published: null, conflict: "disclosure_pack_incomplete" as const };
+      }
+
       // Locked alongside the offering row so a concurrent expiry sweep
       // cannot flip one of these out from under this transaction; a
       // concurrent onramp-poll INSERT into money_events is a narrower,
@@ -665,6 +716,7 @@ export class PrismaOfferingRepository
 
       let reservationsAwaitingReconfirmation = 0;
       let reservationsCancelled = 0;
+      const reservationIdsAwaitingReconfirmation: string[] = [];
       for (const reservation of reservations) {
         const funded =
           reservation.latest_capital_state !== null &&
@@ -685,6 +737,7 @@ export class PrismaOfferingRepository
             },
           });
           reservationsAwaitingReconfirmation += 1;
+          reservationIdsAwaitingReconfirmation.push(reservation.reservation_id);
         } else {
           await transaction.reservation.update({
             where: { id: reservation.reservation_id },
@@ -732,6 +785,26 @@ export class PrismaOfferingRepository
         },
       });
 
+      // AD-214 / PAYMENT_FLOWS.md's Start-event meaning: "investor
+      // notification is sent" — durably handed off (AD-145) rather than
+      // sent synchronously here, the same cross-domain discipline
+      // case_timers.pre_offering_open_handoff already established. Never
+      // enqueued when nothing moved to awaiting_reconfirmation (an
+      // all-cancelled publish, though target_not_reached would already have
+      // blocked that in practice).
+      if (reservationIdsAwaitingReconfirmation.length > 0) {
+        await enqueueTransactionalJob(
+          this.pgBoss,
+          transaction,
+          "case_timers.offering_reconfirmation_window_opened",
+          {
+            offering_id: input.offeringId,
+            reservation_ids: reservationIdsAwaitingReconfirmation,
+          },
+          input.traceId,
+        );
+      }
+
       return {
         published: {
           offeringId: input.offeringId,
@@ -773,7 +846,7 @@ export class PrismaOfferingRepository
           effectiveRightsEndAt: true,
           disclosurePacks: {
             where: { isCurrent: true, supersededAt: null },
-            select: { version: true },
+            select: { version: true, documents: { select: { documentType: true } } },
             take: 1,
           },
         },
@@ -783,6 +856,18 @@ export class PrismaOfferingRepository
         !isReconfirmationWindowOpen({ effectiveRightsEndAt: offering.effectiveRightsEndAt, now: input.reconfirmedAt })
       ) {
         return { reconfirmedAt: null, conflict: "window_closed" as const };
+      }
+
+      // AD-037: "An investor must not be able to reconfirm against an
+      // incomplete, draft, or superseded pack." No current pack at all is
+      // the same failure as an incomplete one — isCompleteDisclosurePack([])
+      // is false — so a missing pack doesn't need its own branch here.
+      const currentPack = offering.disclosurePacks[0];
+      const currentDocumentTypes = (currentPack?.documents ?? []).map(
+        (document) => document.documentType as DisclosureDocumentType,
+      );
+      if (!isCompleteDisclosurePack(currentDocumentTypes)) {
+        return { reconfirmedAt: null, conflict: "disclosure_pack_incomplete" as const };
       }
 
       await transaction.reservation.update({
@@ -946,6 +1031,343 @@ export class PrismaOfferingRepository
         committed: { offeringId: input.offeringId, positionsCreated, reservationsLapsed },
         conflict: null,
       };
+    });
+  }
+
+  public async classifyMateriality(input: ClassifyMaterialityInput): Promise<ClassifyMaterialityResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<
+        Array<{
+          offering_id: string;
+          status: string;
+          final_offering_published_at: Date | null;
+          effective_rights_end_at: Date | null;
+        }>
+      >`
+        SELECT offering_id, status, final_offering_published_at, effective_rights_end_at
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined) {
+        return { classified: null, conflict: "offering_not_found" as const };
+      }
+      // "Post-publication change" only means something once publication has
+      // happened, and only up to the moment commitOfferingFinalization
+      // actually commits (AD-046 puts post-finalization worsening through a
+      // separate amendment/consent path this codebase does not build here).
+      if (offering.status !== "pre_offering" || offering.final_offering_published_at === null) {
+        return { classified: null, conflict: "no_active_reconfirmation_window" as const };
+      }
+
+      const resetTriggered = materialityResetTriggered(input.classification);
+      let effectiveRightsEndAt = offering.effective_rights_end_at;
+      let reservationsReset = 0;
+
+      if (resetTriggered) {
+        // Only already-reconfirmed reservations have anything to invalidate;
+        // ones still awaiting_reconfirmation are untouched by a reset — they
+        // simply reconfirm (or not) against the now-later window like normal.
+        const reconfirmed = await transaction.$queryRaw<Array<{ reservation_id: string }>>`
+          SELECT reservation.reservation_id
+          FROM offering.reservations AS reservation
+          WHERE reservation.offering_id = ${input.offeringId}
+            AND reservation.reservation_stage = 'reconfirmed'
+          FOR UPDATE OF reservation
+        `;
+        for (const reservation of reconfirmed) {
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "awaiting_reconfirmation", reconfirmedAt: null },
+          });
+        }
+        reservationsReset = reconfirmed.length;
+
+        // "Resets the full 168-hour window" (PAYMENT_FLOWS.md) — a fresh
+        // 168 hours from this reset, not merely extending the old boundary.
+        // Reusing this same field is also what correctly reopens a window
+        // that had already lapsed by clock time but whose reservations the
+        // hourly commit job hasn't processed yet.
+        effectiveRightsEndAt = computeEffectiveRightsEndAt(input.classifiedAt);
+        await transaction.offering.update({
+          where: { id: input.offeringId },
+          data: {
+            platformRightsEndAt: effectiveRightsEndAt,
+            effectiveRightsEndAt,
+          },
+        });
+      }
+
+      const materialityRecordId = `materiality_${ulid()}`;
+      await transaction.materialityRecord.create({
+        data: {
+          id: materialityRecordId,
+          offeringId: input.offeringId,
+          changeDescription: input.changeDescription,
+          classification: input.classification,
+          thresholdType: input.thresholdType,
+          resetTriggered,
+          classifiedByAccountId: input.accountId,
+          classifiedAt: input.classifiedAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.materiality_classified",
+          resourceType: "offering",
+          resourceId: input.offeringId,
+          changes: {
+            trace_id: input.traceId,
+            change_description: input.changeDescription,
+            classification: input.classification,
+            threshold_type: input.thresholdType,
+            reset_triggered: resetTriggered,
+            reservations_reset: reservationsReset,
+          },
+          createdAt: input.classifiedAt,
+        },
+      });
+
+      return {
+        classified: {
+          materialityRecordId,
+          offeringId: input.offeringId,
+          classification: input.classification,
+          thresholdType: input.thresholdType,
+          resetTriggered,
+          classifiedAt: input.classifiedAt,
+          effectiveRightsEndAt,
+          reservationsReset,
+        },
+        conflict: null,
+      };
+    });
+  }
+
+  public async publishDisclosurePack(input: PublishDisclosurePackInput): Promise<PublishDisclosurePackResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ offering_id: string; status: string }>>`
+        SELECT offering_id, status
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined) {
+        return { published: null, conflict: "offering_not_found" as const };
+      }
+      // Same window every other offering-lifecycle write in this module
+      // operates in — AD-046 puts post-finalization content changes through
+      // a separate amendment/consent path this codebase does not build.
+      if (offering.status !== "pre_offering") {
+        return { published: null, conflict: "not_open" as const };
+      }
+
+      const current = await transaction.disclosurePack.findFirst({
+        where: { offeringId: input.offeringId, isCurrent: true, supersededAt: null },
+        orderBy: [{ version: "desc" }],
+      });
+      if (current !== null) {
+        await transaction.disclosurePack.update({
+          where: { id: current.id },
+          data: { isCurrent: false, supersededAt: input.publishedAt },
+        });
+      }
+
+      const version = (current?.version ?? 0) + 1;
+      const disclosurePackId = `pack_${ulid()}`;
+      const created = await transaction.disclosurePack.create({
+        data: {
+          id: disclosurePackId,
+          offeringId: input.offeringId,
+          version,
+          publishedAt: input.publishedAt,
+          isCurrent: true,
+          documents: {
+            create: input.documents.map((document) => ({
+              id: `document_${ulid()}`,
+              documentType: document.documentType,
+              documentRef: document.documentRef,
+              isCoreReading: isCoreReadingDocumentType(document.documentType),
+            })),
+          },
+        },
+        include: { documents: true },
+      });
+
+      const documentTypes = input.documents.map((document) => document.documentType);
+      const isComplete = isCompleteDisclosurePack(documentTypes);
+
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.disclosure_pack_published",
+          resourceType: "offering",
+          resourceId: input.offeringId,
+          changes: {
+            trace_id: input.traceId,
+            disclosure_pack_id: disclosurePackId,
+            version,
+            document_types: documentTypes,
+            is_complete: isComplete,
+            superseded_pack_id: current?.id ?? null,
+          },
+          createdAt: input.publishedAt,
+        },
+      });
+
+      return {
+        published: {
+          disclosurePackId,
+          offeringId: input.offeringId,
+          version,
+          publishedAt: input.publishedAt,
+          documents: created.documents.map((document) => ({
+            documentId: document.id,
+            documentType: document.documentType as DisclosureDocumentType,
+            documentRef: document.documentRef,
+            isCoreReading: document.isCoreReading,
+          })),
+          isComplete,
+          supersededPackId: current?.id ?? null,
+        },
+        conflict: null,
+      };
+    });
+  }
+
+  public async getReconfirmationReminderIntervalHours(): Promise<number> {
+    const setting = await this.database.platformSetting.findUnique({
+      where: { key: "offering.reconfirmation_reminder_interval_hours" },
+      select: { value: true },
+    });
+    if (setting === null) {
+      throw new Error("Missing offering.reconfirmation_reminder_interval_hours setting");
+    }
+    return reconfirmationReminderIntervalHoursSettingSchema.parse(setting.value).hours;
+  }
+
+  public async listReservationsAwaitingReconfirmationForReminders(): Promise<
+    ReservationAwaitingReconfirmationReminder[]
+  > {
+    const rows = await this.database.$queryRaw<
+      Array<{
+        reservation_id: string;
+        account_id: string;
+        contact_email: string | null;
+        offering_id: string;
+        final_offering_published_at: Date;
+        effective_rights_end_at: Date;
+        last_reminder_sent_at: Date | null;
+      }>
+    >`
+      SELECT
+        reservation.reservation_id,
+        reservation.account_id,
+        account.protected_contact_email AS contact_email,
+        reservation.offering_id,
+        offering.final_offering_published_at,
+        offering.effective_rights_end_at,
+        latest_reminder.created_at AS last_reminder_sent_at
+      FROM offering.reservations AS reservation
+      JOIN offering.offerings AS offering ON offering.offering_id = reservation.offering_id
+      JOIN account.accounts AS account ON account.account_id = reservation.account_id
+      LEFT JOIN LATERAL (
+        SELECT audit_log.created_at
+        FROM audit.audit_log AS audit_log
+        WHERE audit_log.resource_type = 'reservation'
+          AND audit_log.resource_id = reservation.reservation_id
+          AND audit_log.action = 'offering.reconfirmation_reminder_sent'
+        ORDER BY audit_log.created_at DESC
+        LIMIT 1
+      ) AS latest_reminder ON TRUE
+      WHERE reservation.reservation_stage = 'awaiting_reconfirmation'
+        AND offering.final_offering_published_at IS NOT NULL
+        AND offering.effective_rights_end_at IS NOT NULL
+    `;
+    return rows.map((row) => ({
+      reservationId: row.reservation_id,
+      accountId: row.account_id,
+      contactEmail: row.contact_email,
+      offeringId: row.offering_id,
+      finalOfferingPublishedAt: row.final_offering_published_at,
+      effectiveRightsEndAt: row.effective_rights_end_at,
+      lastReminderSentAt: row.last_reminder_sent_at,
+    }));
+  }
+
+  public async recordReconfirmationReminderSent(input: RecordReconfirmationReminderSentInput): Promise<void> {
+    await this.database.auditLog.create({
+      data: {
+        id: `audit_${ulid()}`,
+        actorAccountId: null,
+        action: "offering.reconfirmation_reminder_sent",
+        resourceType: "reservation",
+        resourceId: input.reservationId,
+        changes: { trace_id: input.traceId },
+        createdAt: input.sentAt,
+      },
+    });
+  }
+
+  public async getReservationsForReconfirmationWindowOpenedNotification(
+    reservationIds: string[],
+  ): Promise<ReservationForReconfirmationWindowOpenedNotification[]> {
+    // Selects a raw timestamp and derives the boolean below in JS, rather
+    // than a SQL-computed boolean column — the same "was X already done"
+    // shape listReservationsAwaitingReconfirmationForReminders already
+    // proves out (last_reminder_sent_at), instead of an untested pattern.
+    const rows = await this.database.$queryRaw<
+      Array<{
+        reservation_id: string;
+        contact_email: string | null;
+        effective_rights_end_at: Date;
+        notification_sent_at: Date | null;
+      }>
+    >`
+      SELECT
+        reservation.reservation_id,
+        account.protected_contact_email AS contact_email,
+        offering.effective_rights_end_at,
+        already_sent.created_at AS notification_sent_at
+      FROM offering.reservations AS reservation
+      JOIN offering.offerings AS offering ON offering.offering_id = reservation.offering_id
+      JOIN account.accounts AS account ON account.account_id = reservation.account_id
+      LEFT JOIN LATERAL (
+        SELECT audit_log.created_at
+        FROM audit.audit_log AS audit_log
+        WHERE audit_log.resource_type = 'reservation'
+          AND audit_log.resource_id = reservation.reservation_id
+          AND audit_log.action = 'offering.reconfirmation_window_opened_notification_sent'
+        LIMIT 1
+      ) AS already_sent ON TRUE
+      WHERE reservation.reservation_id = ANY(${reservationIds})
+    `;
+    return rows.map((row) => ({
+      reservationId: row.reservation_id,
+      contactEmail: row.contact_email,
+      effectiveRightsEndAt: row.effective_rights_end_at,
+      notificationAlreadySent: row.notification_sent_at !== null,
+    }));
+  }
+
+  public async recordReconfirmationWindowOpenedNotificationSent(
+    input: RecordReconfirmationWindowOpenedNotificationSentInput,
+  ): Promise<void> {
+    await this.database.auditLog.create({
+      data: {
+        id: `audit_${ulid()}`,
+        actorAccountId: null,
+        action: "offering.reconfirmation_window_opened_notification_sent",
+        resourceType: "reservation",
+        resourceId: input.reservationId,
+        changes: { trace_id: input.traceId },
+        createdAt: input.sentAt,
+      },
     });
   }
 }

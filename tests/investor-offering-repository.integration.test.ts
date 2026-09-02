@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
 
+import { PgBoss } from "pg-boss";
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
+import { disclosureDocumentTypes } from "../src/modules/offering/domain/disclosure-pack.policy.js";
+import { NotifyReconfirmationWindowOpenedService } from "../src/modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -29,9 +33,17 @@ describe.skipIf(databaseUrl === undefined)(
     };
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string (unlike
+    // PrismaClient/pg.Pool above, which connect lazily), so it must not be
+    // constructed at describe-body scope: that body runs even when skipIf
+    // skips every test, and databaseUrl is undefined in that case.
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
 
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [
@@ -251,7 +263,7 @@ describe.skipIf(databaseUrl === undefined)(
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [
         betterAuthUserId,
       ]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("returns full disclosure, readiness inputs, and canonical raise progress", async () => {
@@ -353,7 +365,11 @@ describe.skipIf(databaseUrl === undefined)(
     const betterAuthUserId = `auth_reserve_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string, so it
+    // must not be constructed at describe-body scope (see the previous
+    // describe block's comment for why).
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
     const offeringIds: string[] = [];
     const pivIds: string[] = [];
     const caseIds: string[] = [];
@@ -408,6 +424,9 @@ describe.skipIf(databaseUrl === undefined)(
     }
 
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [betterAuthUserId, "Reservation Creation Investor", `reserve-${suffix}@example.test`, true, "customer"],
@@ -425,7 +444,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.property.deleteMany({ where: { id: { in: propertyIds } } });
       await database.account.deleteMany({ where: { id: accountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("creates a reservation, a matching money event, and an audit trail", async () => {
@@ -668,7 +687,11 @@ describe.skipIf(databaseUrl === undefined)(
     const unfundedAccountId = `account_finalize_unfunded_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string, so it
+    // must not be constructed at describe-body scope (see the first
+    // describe block's comment for why).
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
     const offeringIds: string[] = [];
     const pivIds: string[] = [];
     const caseIds: string[] = [];
@@ -720,7 +743,32 @@ describe.skipIf(databaseUrl === undefined)(
       return { offeringId, pivId };
     }
 
+    // reconfirmReservation requires a complete current pack (AD-037) —
+    // every mandatory document type, matching disclosureDocumentTypes.
+    async function publishCompleteDisclosurePack(offeringId: string, publishedAt: Date): Promise<void> {
+      const result = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: disclosureDocumentTypes.map((documentType) => ({
+          documentType,
+          documentRef: `documents/${documentType}.pdf`,
+        })),
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+      if (result.conflict !== null) {
+        throw new Error(`expected publishDisclosurePack to succeed, got conflict: ${result.conflict}`);
+      }
+    }
+
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
+      // publishFinalOfferingTerms enqueues the AD-214/AD-145 window-opened
+      // notification handoff inside its own transaction — the queue must
+      // already exist or that send() fails against a queue that doesn't.
+      await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)',
         [
@@ -756,6 +804,11 @@ describe.skipIf(databaseUrl === undefined)(
 
     afterAll(async () => {
       await database.positionLedger.deleteMany({ where: { pivId: { in: pivIds } } });
+      await database.materialityRecord.deleteMany({ where: { offeringId: { in: offeringIds } } });
+      await database.disclosureDocument.deleteMany({
+        where: { disclosurePack: { offeringId: { in: offeringIds } } },
+      });
+      await database.disclosurePack.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
       await database.auditLog.deleteMany({ where: { resourceId: { in: offeringIds }, resourceType: "offering" } });
       await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
@@ -768,7 +821,7 @@ describe.skipIf(databaseUrl === undefined)(
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [
         [`auth_${fundedAccountId}`, `auth_${unfundedAccountId}`],
       ]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("publishes final terms, moving the funded reservation to awaiting_reconfirmation and cancelling the unfunded one, without creating a position yet", async () => {
@@ -804,6 +857,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
       const result = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -843,6 +897,103 @@ describe.skipIf(databaseUrl === undefined)(
           where: { resourceId: offeringId, action: "offering.final_terms_published" },
         }),
       ).toBe(1);
+    });
+
+    it("durably enqueues the reconfirmation-window-opened notification job, and processing it is replay-safe", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_window_opened_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      const traceId = `trace_window_opened_${suffix}`;
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId,
+        publishedAt,
+      });
+
+      // AD-145: the handoff must be durably queued in the same transaction
+      // as the state change, not sent synchronously — assert the row exists
+      // in pgboss.job directly, the same technique
+      // origination-offering-handoff.integration.test.ts already uses for
+      // case_timers.pre_offering_open_handoff.
+      const enqueued = await authPool.query<{
+        name: string;
+        data: { offering_id: string; reservation_ids: string[]; trace_id: string };
+      }>("SELECT name, data FROM pgboss.job WHERE name = $1 AND data->>'offering_id' = $2", [
+        "case_timers.offering_reconfirmation_window_opened",
+        offeringId,
+      ]);
+      expect(enqueued.rows).toHaveLength(1);
+      expect(enqueued.rows[0]?.data).toEqual({
+        offering_id: offeringId,
+        reservation_ids: [reservationId],
+        trace_id: traceId,
+      });
+
+      // fundedAccountId's own fixture never sets protectedContactEmail, so
+      // whether the service actually emails depends on live DB state rather
+      // than something safe to hard-code here — read it back rather than
+      // assuming, the same approach the reconfirmation-reminder integration
+      // test above already takes for the same shared fixture account.
+      const account = await database.account.findUnique({ where: { id: fundedAccountId } });
+      const expectedActed = account?.protectedContactEmail == null ? 0 : 1;
+      const email: EmailSender = {
+        sendVerificationEmail: vi.fn(),
+        sendPasswordResetEmail: vi.fn(),
+        sendStaffInvitationEmail: vi.fn(),
+        sendApplicantResponseReminderEmail: vi.fn(),
+        sendKycRenewalReminderEmail: vi.fn(),
+        sendReconfirmationReminderEmail: vi.fn(),
+        sendReconfirmationWindowOpenedEmail: vi.fn().mockResolvedValue(undefined),
+      };
+      const notifyService = new NotifyReconfirmationWindowOpenedService(repository, email);
+
+      const summary = await notifyService.execute(enqueued.rows[0]?.data);
+      expect(summary).toEqual({ checked: 1, acted: expectedActed });
+      expect(
+        await database.auditLog.count({
+          where: {
+            resourceId: reservationId,
+            resourceType: "reservation",
+            action: "offering.reconfirmation_window_opened_notification_sent",
+          },
+        }),
+      ).toBe(expectedActed);
+
+      // Replaying the same job payload (as pg-boss would on a retry) must
+      // not double-email the investor or create a second audit row — the
+      // same replay-safety origination's own handoff test already checks.
+      const replayed = await notifyService.execute(enqueued.rows[0]?.data);
+      expect(replayed).toEqual({ checked: 1, acted: 0 });
+      expect(
+        await database.auditLog.count({
+          where: {
+            resourceId: reservationId,
+            resourceType: "reservation",
+            action: "offering.reconfirmation_window_opened_notification_sent",
+          },
+        }),
+      ).toBe(expectedActed);
     });
 
     it("reports offering_not_found for an unknown offering", async () => {
@@ -892,12 +1043,14 @@ describe.skipIf(databaseUrl === undefined)(
         amountEurc: null,
         recordedAt: new Date(),
       });
+      const alreadyPublishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, alreadyPublishedAt);
       const first = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
-        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+        publishedAt: alreadyPublishedAt,
       });
       expect(first.conflict).toBeNull();
 
@@ -966,12 +1119,14 @@ describe.skipIf(databaseUrl === undefined)(
         amountEurc: null,
         recordedAt: new Date(),
       });
+      const publishedAt01 = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt01);
       await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
-        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+        publishedAt: publishedAt01,
       });
 
       const reconfirmedAt = new Date("2026-09-03T12:00:00.000Z");
@@ -1083,12 +1238,14 @@ describe.skipIf(databaseUrl === undefined)(
         amountEurc: null,
         recordedAt: new Date(),
       });
+      const windowClosedPublishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, windowClosedPublishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
-        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+        publishedAt: windowClosedPublishedAt,
       });
 
       const result = await repository.reconfirmReservation({
@@ -1099,6 +1256,146 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       expect(result).toEqual({ reconfirmedAt: null, conflict: "window_closed" });
+    });
+
+    it("publishFinalOfferingTerms reports disclosure_pack_incomplete when no disclosure pack has been published yet", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_publish_pack_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+
+      const result = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "disclosure_pack_incomplete" });
+      const offering = await database.offering.findUnique({ where: { id: offeringId } });
+      expect(offering?.finalOfferingPublishedAt).toBeNull();
+      const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
+      expect(reservation).toMatchObject({ reservationStage: "initiated" });
+    });
+
+    it("publishFinalOfferingTerms reports disclosure_pack_incomplete when the current pack is missing a mandatory document type", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_publish_pack_02",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      // Every mandatory type except full_prospectus — deliberately incomplete.
+      const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
+      const publishedPack = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: partialTypes.map((documentType) => ({
+          documentType,
+          documentRef: `documents/${documentType}.pdf`,
+        })),
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+      expect(publishedPack.published?.isComplete).toBe(false);
+
+      const result = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "disclosure_pack_incomplete" });
+    });
+
+    it("reconfirmReservation reports disclosure_pack_incomplete when the current pack is republished incomplete after final terms were already published", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_reconfirm_pack_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+
+      // The only reachable way the current pack can be incomplete once
+      // publishFinalOfferingTerms itself already requires completeness: a
+      // later republish (e.g. materiality-triggered) that lands incomplete.
+      const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
+      const republishedPack = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: partialTypes.map((documentType) => ({
+          documentType,
+          documentRef: `documents/${documentType}-v2.pdf`,
+        })),
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-03T00:00:00.000Z"),
+      });
+      expect(republishedPack.published?.isComplete).toBe(false);
+
+      const result = await repository.reconfirmReservation({
+        reservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+
+      expect(result).toEqual({ reconfirmedAt: null, conflict: "disclosure_pack_incomplete" });
     });
 
     it("reports commitOfferingFinalization's offering_not_found for an unknown offering", async () => {
@@ -1165,6 +1462,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
       const published = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -1231,6 +1529,452 @@ describe.skipIf(databaseUrl === undefined)(
         await database.auditLog.count({ where: { resourceId: offeringId, action: "offering.finalized" } }),
       ).toBe(1);
     });
+
+    it("records a per_se_material classification, resets already-reconfirmed reservations, and restarts the full 168-hour window", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reconfirmedReservationId = `reservation_${randomUUID()}`;
+      const awaitingReservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId: reconfirmedReservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "700.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: reconfirmedReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_materiality_01",
+        capitalState: "eurc_reserved",
+        amountEur: "700.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      await repository.createReservation({
+        reservationId: awaitingReservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "300.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: awaitingReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_materiality_02",
+        capitalState: "eurc_reserved",
+        amountEur: "300.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+
+      const materialityPublishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, materialityPublishedAt);
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: materialityPublishedAt,
+      });
+      const reconfirmResult = await repository.reconfirmReservation({
+        reservationId: reconfirmedReservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+      expect(reconfirmResult.conflict).toBeNull();
+
+      const classifiedAt = new Date("2026-09-04T00:00:00.000Z");
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "Change of primary obligor.",
+        classification: "per_se_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt,
+      });
+
+      expect(result.conflict).toBeNull();
+      expect(result.classified).toMatchObject({
+        offeringId,
+        classification: "per_se_material",
+        thresholdType: null,
+        resetTriggered: true,
+        reservationsReset: 1,
+      });
+      // A fresh 168 hours from classifiedAt, not the original window extended.
+      expect(result.classified?.effectiveRightsEndAt).toEqual(new Date("2026-09-11T00:00:00.000Z"));
+
+      const reconfirmedReservation = await database.reservation.findUnique({
+        where: { id: reconfirmedReservationId },
+      });
+      expect(reconfirmedReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
+      expect(reconfirmedReservation?.reconfirmedAt).toBeNull();
+
+      // Never-reconfirmed reservation has nothing to invalidate — untouched.
+      const untouchedReservation = await database.reservation.findUnique({ where: { id: awaitingReservationId } });
+      expect(untouchedReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
+
+      const offering = await database.offering.findUnique({ where: { id: offeringId } });
+      expect(offering?.effectiveRightsEndAt).toEqual(new Date("2026-09-11T00:00:00.000Z"));
+      expect(offering?.platformRightsEndAt).toEqual(new Date("2026-09-11T00:00:00.000Z"));
+      expect(offering).toMatchObject({ status: "pre_offering" });
+
+      if (result.classified === null) throw new Error("expected a classified materiality record");
+      const record = await database.materialityRecord.findUnique({
+        where: { id: result.classified.materialityRecordId },
+      });
+      expect(record).toMatchObject({
+        offeringId,
+        changeDescription: "Change of primary obligor.",
+        classification: "per_se_material",
+        thresholdType: null,
+        resetTriggered: true,
+        classifiedByAccountId: "account_founder",
+      });
+
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: offeringId, action: "offering.materiality_classified" },
+        }),
+      ).toBe(1);
+    });
+
+    it("records a non_material classification without resetting anything", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_materiality_03",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+      await repository.reconfirmReservation({
+        reservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "Corrected a typo in the property summary.",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date("2026-09-04T00:00:00.000Z"),
+      });
+
+      expect(result.conflict).toBeNull();
+      expect(result.classified).toMatchObject({ resetTriggered: false, reservationsReset: 0 });
+      expect(result.classified?.effectiveRightsEndAt).toEqual(new Date("2026-09-09T12:00:00.000Z"));
+
+      const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
+      expect(reservation).toMatchObject({ reservationStage: "reconfirmed" });
+
+      const offering = await database.offering.findUnique({ where: { id: offeringId } });
+      expect(offering?.effectiveRightsEndAt).toEqual(new Date("2026-09-09T12:00:00.000Z"));
+    });
+
+    it("reports offering_not_found for an unknown offering", async () => {
+      const result = await repository.classifyMateriality({
+        offeringId: `offering_missing_${suffix}`,
+        accountId: "account_founder",
+        changeDescription: "notes",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date(),
+      });
+
+      expect(result).toEqual({ classified: null, conflict: "offering_not_found" });
+    });
+
+    it("reports no_active_reconfirmation_window before final terms are published", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "notes",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date(),
+      });
+
+      expect(result).toEqual({ classified: null, conflict: "no_active_reconfirmation_window" });
+    });
+
+    it("reports no_active_reconfirmation_window once the offering has already committed to final_offering", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00", status: "final_offering" });
+
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "notes",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date(),
+      });
+
+      expect(result).toEqual({ classified: null, conflict: "no_active_reconfirmation_window" });
+    });
+
+    it("publishes an initial disclosure pack as version 1, with no prior pack to supersede", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const publishedAt = new Date("2026-09-01T09:00:00.000Z");
+
+      const result = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [
+          { documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" },
+          { documentType: "final_terms_sheet", documentRef: "documents/terms-v1.pdf" },
+        ],
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+
+      expect(result.conflict).toBeNull();
+      expect(result.published).toMatchObject({
+        offeringId,
+        version: 1,
+        publishedAt,
+        isComplete: false,
+        supersededPackId: null,
+      });
+      expect(result.published?.documents).toHaveLength(2);
+      expect(result.published?.documents.find((d) => d.documentType === "ecsp_kiis")).toMatchObject({
+        documentRef: "documents/kiis-v1.pdf",
+        isCoreReading: true,
+      });
+
+      if (result.published === null) throw new Error("expected a published disclosure pack");
+      const pack = await database.disclosurePack.findUnique({ where: { id: result.published.disclosurePackId } });
+      expect(pack).toMatchObject({ offeringId, version: 1, isCurrent: true, supersededAt: null });
+
+      const documents = await database.disclosureDocument.findMany({
+        where: { disclosurePackId: result.published.disclosurePackId },
+      });
+      expect(documents).toHaveLength(2);
+
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: offeringId, action: "offering.disclosure_pack_published" },
+        }),
+      ).toBe(1);
+    });
+
+    it("supersedes the prior current pack and increments the version, reporting completeness once every mandatory document is present", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const first = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+      if (first.published === null) throw new Error("expected the first pack to publish");
+
+      const republishedAt = new Date("2026-09-02T12:00:00.000Z");
+      const second = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [
+          { documentType: "ecsp_kiis", documentRef: "documents/kiis-v2.pdf" },
+          { documentType: "priips_kid", documentRef: "documents/kid-v2.pdf" },
+          { documentType: "final_offer_summary", documentRef: "documents/offer-summary-v2.pdf" },
+          { documentType: "final_terms_sheet", documentRef: "documents/terms-v2.pdf" },
+          { documentType: "issuer_offeror_structure_sheet", documentRef: "documents/structure-v2.pdf" },
+          {
+            documentType: "investor_rights_payout_waterfall_summary",
+            documentRef: "documents/rights-v2.pdf",
+          },
+          { documentType: "risk_factors_summary", documentRef: "documents/risks-v2.pdf" },
+          { documentType: "property_appraisal_summary", documentRef: "documents/appraisal-v2.pdf" },
+          { documentType: "fees_costs_tax_liquidity_summary", documentRef: "documents/fees-v2.pdf" },
+          {
+            documentType: "withdrawal_cancellation_supplement_rights_notice",
+            documentRef: "documents/withdrawal-v2.pdf",
+          },
+          { documentType: "full_prospectus", documentRef: "documents/prospectus-v2.pdf" },
+        ],
+        traceId: `trace_${suffix}`,
+        publishedAt: republishedAt,
+      });
+
+      expect(second.conflict).toBeNull();
+      expect(second.published).toMatchObject({
+        offeringId,
+        version: 2,
+        publishedAt: republishedAt,
+        isComplete: true,
+        supersededPackId: first.published.disclosurePackId,
+      });
+      expect(second.published?.documents.find((d) => d.documentType === "full_prospectus")).toMatchObject({
+        isCoreReading: false,
+      });
+
+      const supersededPack = await database.disclosurePack.findUnique({
+        where: { id: first.published.disclosurePackId },
+      });
+      expect(supersededPack).toMatchObject({ isCurrent: false, supersededAt: republishedAt });
+
+      if (second.published === null) throw new Error("expected the second pack to publish");
+      const currentPack = await database.disclosurePack.findUnique({ where: { id: second.published.disclosurePackId } });
+      expect(currentPack).toMatchObject({ isCurrent: true, version: 2 });
+    });
+
+    it("reports offering_not_found for an unknown offering", async () => {
+      const result = await repository.publishDisclosurePack({
+        offeringId: `offering_missing_${suffix}`,
+        accountId: "account_founder",
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date(),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "offering_not_found" });
+    });
+
+    it("reports not_open once the offering has already committed to final_offering", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00", status: "final_offering" });
+
+      const result = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date(),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "not_open" });
+    });
+
+    it("reads a positive reconfirmation reminder interval from platform settings", async () => {
+      const hours = await repository.getReconfirmationReminderIntervalHours();
+      expect(Number.isInteger(hours)).toBe(true);
+      expect(hours).toBeGreaterThan(0);
+    });
+
+    it("lists a reservation awaiting reconfirmation for reminders, reflecting the most recently recorded reminder", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_reminder_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+
+      const account = await database.account.findUnique({ where: { id: fundedAccountId } });
+
+      const beforeAnyReminder = await repository.listReservationsAwaitingReconfirmationForReminders();
+      const candidate = beforeAnyReminder.find((r) => r.reservationId === reservationId);
+      expect(candidate).toMatchObject({
+        accountId: fundedAccountId,
+        contactEmail: account?.protectedContactEmail ?? null,
+        offeringId,
+        finalOfferingPublishedAt: publishedAt,
+        effectiveRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
+        lastReminderSentAt: null,
+      });
+
+      const firstReminderAt = new Date("2026-09-04T12:00:00.000Z");
+      await repository.recordReconfirmationReminderSent({
+        reservationId,
+        traceId: `trace_${suffix}`,
+        sentAt: firstReminderAt,
+      });
+      const afterFirstReminder = await repository.listReservationsAwaitingReconfirmationForReminders();
+      expect(
+        afterFirstReminder.find((r) => r.reservationId === reservationId),
+      ).toMatchObject({ lastReminderSentAt: firstReminderAt });
+
+      const secondReminderAt = new Date("2026-09-06T12:00:00.000Z");
+      await repository.recordReconfirmationReminderSent({
+        reservationId,
+        traceId: `trace_${suffix}`,
+        sentAt: secondReminderAt,
+      });
+      const afterSecondReminder = await repository.listReservationsAwaitingReconfirmationForReminders();
+      expect(
+        afterSecondReminder.find((r) => r.reservationId === reservationId),
+      ).toMatchObject({ lastReminderSentAt: secondReminderAt });
+
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: reservationId, action: "offering.reconfirmation_reminder_sent" },
+        }),
+      ).toBe(2);
+    });
+
+    it("excludes a reservation that is not awaiting reconfirmation", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+
+      const candidates = await repository.listReservationsAwaitingReconfirmationForReminders();
+      expect(candidates.find((r) => r.reservationId === reservationId)).toBeUndefined();
+    });
   },
 );
 
@@ -1244,11 +1988,18 @@ describe.skipIf(databaseUrl === undefined)(
     const caseId = `case_handoff_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
-    const repository = new PrismaOfferingRepository(database);
+    // PgBoss's constructor eagerly validates its connection string, so it
+    // must not be constructed at describe-body scope (see the first
+    // describe block's comment for why).
+    let boss: PgBoss;
+    let repository: PrismaOfferingRepository;
     let pivId = "";
     let offeringId = "";
 
     beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      repository = new PrismaOfferingRepository(database, boss);
+      await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [betterAuthUserId, "Handoff Repository Applicant", `handoff-repo-${suffix}@example.test`, true, "customer"],
@@ -1288,7 +2039,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.property.deleteMany({ where: { id: propertyId } });
       await database.account.deleteMany({ where: { id: accountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
-      await Promise.all([database.$disconnect(), authPool.end()]);
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
     it("opens a browsable pre-offering shell and is idempotent on replay", async () => {
