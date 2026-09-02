@@ -4,11 +4,13 @@ import type { FinalizeOfferingRepository } from "../repository/finalize-offering
 
 /**
  * AD-244/AD-245: the founder's "proceed" decision once ipo_value_eur is
- * fully collected — the only path in this codebase that creates
- * settlement.position_ledger rows. Everything eligibility-relevant is
- * re-checked atomically inside the repository call (AD-146 discipline), so
- * this service is orchestration only: map the repository's result to the
- * right HTTP outcome.
+ * fully collected. This only publishes the locked final terms and opens
+ * the mandatory 168-hour reconfirmation window (AD-214) — it does not
+ * create positions. Each investor must separately reconfirm
+ * (ReconfirmReservationService), and only once the window closes does the
+ * scheduled commit batch (CommitOfferingFinalizationService) actually
+ * create settlement.position_ledger rows. See
+ * docs/investor-offering.md#1-publishing-final-terms-founder-triggered.
  */
 export class FinalizeOfferingService {
   public constructor(
@@ -22,12 +24,12 @@ export class FinalizeOfferingService {
     traceId: string;
     body: FinalizeOfferingBody;
   }): Promise<FinalizeOfferingResponse> {
-    const result = await this.repository.finalizeOffering({
+    const result = await this.repository.publishFinalOfferingTerms({
       offeringId: input.offeringId,
       accountId: input.accountId,
       founderReviewNotes: input.body.founder_review_notes,
       traceId: input.traceId,
-      finalizedAt: this.clock(),
+      publishedAt: this.clock(),
     });
 
     if (result.conflict === "offering_not_found") {
@@ -38,12 +40,15 @@ export class FinalizeOfferingService {
         detail: "The requested offering does not exist.",
       });
     }
-    if (result.conflict === "not_open") {
+    if (result.conflict === "not_open" || result.conflict === "already_published") {
       throw new AppError({
         code: "offering.finalization_not_available",
         title: "Offering cannot be finalized",
         status: 409,
-        detail: "This offering is not currently open for finalization.",
+        detail:
+          result.conflict === "already_published"
+            ? "This offering's final terms have already been published."
+            : "This offering is not currently open for finalization.",
       });
     }
     if (result.conflict === "target_not_reached") {
@@ -55,23 +60,23 @@ export class FinalizeOfferingService {
       });
     }
 
-    const finalized = result.finalized;
-    if (finalized === null) {
+    const published = result.published;
+    if (published === null) {
       throw new AppError({
         code: "internal.unexpected",
         title: "Internal server error",
         status: 500,
-        detail: "Offering finalization returned neither a result nor a conflict.",
+        detail: "Publishing final offering terms returned neither a result nor a conflict.",
       });
     }
 
     return {
       data: {
-        offering_id: finalized.offeringId,
-        status: "final_offering",
-        final_offering_published_at: finalized.finalOfferingPublishedAt.toISOString(),
-        positions_created: finalized.positionsCreated,
-        reservations_cancelled: finalized.reservationsCancelled,
+        offering_id: published.offeringId,
+        final_offering_published_at: published.finalOfferingPublishedAt.toISOString(),
+        effective_rights_end_at: published.effectiveRightsEndAt.toISOString(),
+        reservations_awaiting_reconfirmation: published.reservationsAwaitingReconfirmation,
+        reservations_cancelled: published.reservationsCancelled,
       },
     };
   }

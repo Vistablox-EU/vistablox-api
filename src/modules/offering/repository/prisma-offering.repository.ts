@@ -28,11 +28,21 @@ import type {
   ReservationRepository,
 } from "./reservation.repository.js";
 import { FUNDED_CAPITAL_STATES } from "../domain/reservation-eligibility.policy.js";
-import { costBasisToUnitCount, isOfferingFinalizable } from "../domain/finalization.policy.js";
+import {
+  canPublishFinalOfferingTerms,
+  computeEffectiveRightsEndAt,
+  costBasisToUnitCount,
+  isReconfirmationWindowOpen,
+} from "../domain/finalization.policy.js";
 import type {
-  FinalizeOfferingInput,
+  CommitOfferingFinalizationInput,
+  CommitOfferingFinalizationResult,
   FinalizeOfferingRepository,
-  FinalizeOfferingResult,
+  OfferingPendingFinalizationCommit,
+  PublishFinalOfferingTermsInput,
+  PublishFinalOfferingTermsResult,
+  ReconfirmReservationInput,
+  ReconfirmReservationResult,
 } from "./finalize-offering.repository.js";
 
 export class PrismaOfferingRepository
@@ -573,22 +583,32 @@ export class PrismaOfferingRepository
     });
   }
 
-  public async finalizeOffering(input: FinalizeOfferingInput): Promise<FinalizeOfferingResult> {
+  public async publishFinalOfferingTerms(
+    input: PublishFinalOfferingTermsInput,
+  ): Promise<PublishFinalOfferingTermsResult> {
     return this.database.$transaction(async (transaction) => {
       const locked = await transaction.$queryRaw<
-        Array<{ offering_id: string; status: string; target_raise_eur: string }>
+        Array<{
+          offering_id: string;
+          status: string;
+          target_raise_eur: string;
+          final_offering_published_at: Date | null;
+        }>
       >`
-        SELECT offering_id, status, target_raise_eur::text
+        SELECT offering_id, status, target_raise_eur::text, final_offering_published_at
         FROM offering.offerings
         WHERE offering_id = ${input.offeringId}
         FOR UPDATE
       `;
       const offering = locked[0];
       if (offering === undefined) {
-        return { finalized: null, conflict: "offering_not_found" as const };
+        return { published: null, conflict: "offering_not_found" as const };
       }
       if (offering.status !== "pre_offering") {
-        return { finalized: null, conflict: "not_open" as const };
+        return { published: null, conflict: "not_open" as const };
+      }
+      if (offering.final_offering_published_at !== null) {
+        return { published: null, conflict: "already_published" as const };
       }
 
       const fundedRows = await transaction.$queryRaw<Array<{ funded_eur: string }>>`
@@ -607,8 +627,15 @@ export class PrismaOfferingRepository
         WHERE reservation.offering_id = ${input.offeringId}
       `;
       const fundedEur = fundedRows[0]?.funded_eur ?? "0";
-      if (!isOfferingFinalizable({ status: offering.status, targetRaiseEur: offering.target_raise_eur, fundedEur })) {
-        return { finalized: null, conflict: "target_not_reached" as const };
+      if (
+        !canPublishFinalOfferingTerms({
+          status: offering.status,
+          finalOfferingPublishedAt: offering.final_offering_published_at,
+          targetRaiseEur: offering.target_raise_eur,
+          fundedEur,
+        })
+      ) {
+        return { published: null, conflict: "target_not_reached" as const };
       }
 
       // Locked alongside the offering row so a concurrent expiry sweep
@@ -617,20 +644,12 @@ export class PrismaOfferingRepository
       // documented residual race (see docs/investor-offering.md) — an
       // append-only insert isn't blocked by a row lock on reservations.
       const reservations = await transaction.$queryRaw<
-        Array<{
-          reservation_id: string;
-          account_id: string;
-          amount_eur: string;
-          latest_capital_state: string | null;
-          wallet_address: string | null;
-        }>
+        Array<{ reservation_id: string; amount_eur: string; latest_capital_state: string | null }>
       >`
         SELECT
           reservation.reservation_id,
-          reservation.account_id,
           reservation.amount_eur::text,
-          latest_money.capital_state AS latest_capital_state,
-          wallet.wallet_address
+          latest_money.capital_state AS latest_capital_state
         FROM offering.reservations AS reservation
         LEFT JOIN LATERAL (
           SELECT money_event.capital_state
@@ -639,10 +658,220 @@ export class PrismaOfferingRepository
           ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
           LIMIT 1
         ) AS latest_money ON TRUE
+        WHERE reservation.offering_id = ${input.offeringId}
+          AND reservation.reservation_stage = 'initiated'
+        FOR UPDATE OF reservation
+      `;
+
+      let reservationsAwaitingReconfirmation = 0;
+      let reservationsCancelled = 0;
+      for (const reservation of reservations) {
+        const funded =
+          reservation.latest_capital_state !== null &&
+          (FUNDED_CAPITAL_STATES as readonly string[]).includes(reservation.latest_capital_state);
+        if (funded) {
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "awaiting_reconfirmation" },
+          });
+          await transaction.moneyEvent.create({
+            data: {
+              id: `money_event_${ulid()}`,
+              reservationId: reservation.reservation_id,
+              provider: "internal",
+              capitalState: "reconfirmation_pending",
+              amountEur: reservation.amount_eur,
+              recordedAt: input.publishedAt,
+            },
+          });
+          reservationsAwaitingReconfirmation += 1;
+        } else {
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "cancelled" },
+          });
+          reservationsCancelled += 1;
+        }
+      }
+
+      const platformRightsEndAt = computeEffectiveRightsEndAt(input.publishedAt);
+      // PAYMENT_FLOWS.md's "Effective Investor-Rights Window Override": no
+      // broader statutory/supplement-based rights table is documented
+      // anywhere to compute a real max() over, so this uses the 168-hour
+      // platform default directly (domain/finalization.policy.ts).
+      const effectiveRightsEndAt = platformRightsEndAt;
+
+      // offerings.status deliberately stays 'pre_offering' here — per
+      // CORE_TABLES.md it only becomes 'final_offering' once
+      // commitOfferingFinalization runs after the window closes.
+      await transaction.offering.update({
+        where: { id: input.offeringId },
+        data: {
+          finalOfferingPublishedAt: input.publishedAt,
+          platformRightsEndAt,
+          effectiveRightsEndAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.final_terms_published",
+          resourceType: "offering",
+          resourceId: input.offeringId,
+          changes: {
+            trace_id: input.traceId,
+            founder_review_notes: input.founderReviewNotes,
+            funded_eur: fundedEur,
+            target_raise_eur: offering.target_raise_eur,
+            effective_rights_end_at: effectiveRightsEndAt.toISOString(),
+            reservations_awaiting_reconfirmation: reservationsAwaitingReconfirmation,
+            reservations_cancelled: reservationsCancelled,
+          },
+          createdAt: input.publishedAt,
+        },
+      });
+
+      return {
+        published: {
+          offeringId: input.offeringId,
+          finalOfferingPublishedAt: input.publishedAt,
+          platformRightsEndAt,
+          effectiveRightsEndAt,
+          reservationsAwaitingReconfirmation,
+          reservationsCancelled,
+        },
+        conflict: null,
+      };
+    });
+  }
+
+  public async reconfirmReservation(input: ReconfirmReservationInput): Promise<ReconfirmReservationResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<
+        Array<{ reservation_id: string; account_id: string; offering_id: string; reservation_stage: string }>
+      >`
+        SELECT reservation_id, account_id, offering_id, reservation_stage
+        FROM offering.reservations
+        WHERE reservation_id = ${input.reservationId}
+        FOR UPDATE
+      `;
+      const reservation = locked[0];
+      // Not found and not-yours both report the same conflict, deliberately
+      // — a reservation ID belonging to someone else must not be
+      // distinguishable from one that doesn't exist.
+      if (reservation === undefined || reservation.account_id !== input.accountId) {
+        return { reconfirmedAt: null, conflict: "not_found" as const };
+      }
+      if (reservation.reservation_stage !== "awaiting_reconfirmation") {
+        return { reconfirmedAt: null, conflict: "not_awaiting_reconfirmation" as const };
+      }
+
+      const offering = await transaction.offering.findUniqueOrThrow({
+        where: { id: reservation.offering_id },
+        select: {
+          effectiveRightsEndAt: true,
+          disclosurePacks: {
+            where: { isCurrent: true, supersededAt: null },
+            select: { version: true },
+            take: 1,
+          },
+        },
+      });
+      if (
+        offering.effectiveRightsEndAt === null ||
+        !isReconfirmationWindowOpen({ effectiveRightsEndAt: offering.effectiveRightsEndAt, now: input.reconfirmedAt })
+      ) {
+        return { reconfirmedAt: null, conflict: "window_closed" as const };
+      }
+
+      await transaction.reservation.update({
+        where: { id: input.reservationId },
+        data: { reservationStage: "reconfirmed", reconfirmedAt: input.reconfirmedAt },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.reservation_reconfirmed",
+          resourceType: "reservation",
+          resourceId: input.reservationId,
+          changes: {
+            trace_id: input.traceId,
+            // PAYMENT_FLOWS.md: "Reconfirmation must reference a specific
+            // disclosure-pack version and that version must remain
+            // downloadable for audit purposes."
+            disclosure_pack_version: offering.disclosurePacks[0]?.version ?? null,
+          },
+          createdAt: input.reconfirmedAt,
+        },
+      });
+
+      return { reconfirmedAt: input.reconfirmedAt, conflict: null };
+    });
+  }
+
+  public async listOfferingsPendingFinalizationCommit(): Promise<OfferingPendingFinalizationCommit[]> {
+    const rows = await this.database.offering.findMany({
+      where: { status: "pre_offering", finalOfferingPublishedAt: { not: null } },
+      select: { id: true, effectiveRightsEndAt: true },
+    });
+    return rows
+      .filter((row) => row.effectiveRightsEndAt !== null)
+      .map((row) => ({ offeringId: row.id, effectiveRightsEndAt: row.effectiveRightsEndAt! }));
+  }
+
+  public async commitOfferingFinalization(
+    input: CommitOfferingFinalizationInput,
+  ): Promise<CommitOfferingFinalizationResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<
+        Array<{
+          offering_id: string;
+          status: string;
+          final_offering_published_at: Date | null;
+          effective_rights_end_at: Date | null;
+        }>
+      >`
+        SELECT offering_id, status, final_offering_published_at, effective_rights_end_at
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined) {
+        return { committed: null, conflict: "offering_not_found" as const };
+      }
+      if (offering.status !== "pre_offering" || offering.final_offering_published_at === null) {
+        return { committed: null, conflict: "not_publishable_state" as const };
+      }
+      if (
+        offering.effective_rights_end_at === null ||
+        isReconfirmationWindowOpen({ effectiveRightsEndAt: offering.effective_rights_end_at, now: input.finalizedAt })
+      ) {
+        return { committed: null, conflict: "window_still_open" as const };
+      }
+
+      const reservations = await transaction.$queryRaw<
+        Array<{
+          reservation_id: string;
+          account_id: string;
+          amount_eur: string;
+          reservation_stage: string;
+          wallet_address: string | null;
+        }>
+      >`
+        SELECT
+          reservation.reservation_id,
+          reservation.account_id,
+          reservation.amount_eur::text,
+          reservation.reservation_stage,
+          wallet.wallet_address
+        FROM offering.reservations AS reservation
         LEFT JOIN settlement.wallet_registrations AS wallet
           ON wallet.account_id = reservation.account_id
         WHERE reservation.offering_id = ${input.offeringId}
-          AND reservation.reservation_stage = 'initiated'
+          AND reservation.reservation_stage IN ('awaiting_reconfirmation', 'reconfirmed')
         FOR UPDATE OF reservation
       `;
 
@@ -652,12 +881,9 @@ export class PrismaOfferingRepository
       });
 
       let positionsCreated = 0;
-      let reservationsCancelled = 0;
+      let reservationsLapsed = 0;
       for (const reservation of reservations) {
-        const funded =
-          reservation.latest_capital_state !== null &&
-          (FUNDED_CAPITAL_STATES as readonly string[]).includes(reservation.latest_capital_state);
-        if (funded) {
+        if (reservation.reservation_stage === "reconfirmed") {
           await transaction.positionLedger.create({
             data: {
               id: `position_${ulid()}`,
@@ -673,46 +899,51 @@ export class PrismaOfferingRepository
             where: { id: reservation.reservation_id },
             data: { reservationStage: "finalized", reservationFinalizedAt: input.finalizedAt },
           });
+          await transaction.moneyEvent.create({
+            data: {
+              id: `money_event_${ulid()}`,
+              reservationId: reservation.reservation_id,
+              provider: "internal",
+              capitalState: "eurc_finalized",
+              amountEur: reservation.amount_eur,
+              recordedAt: input.finalizedAt,
+            },
+          });
           positionsCreated += 1;
         } else {
+          // 'awaiting_reconfirmation' that never reconfirmed. PAYMENT_FLOWS.md's
+          // Silence rule: "No reconfirmation by expiry means the reservation
+          // lapses rather than silently finalizing."
           await transaction.reservation.update({
             where: { id: reservation.reservation_id },
-            data: { reservationStage: "cancelled" },
+            data: { reservationStage: "lapsed" },
           });
-          reservationsCancelled += 1;
+          reservationsLapsed += 1;
         }
       }
 
       await transaction.offering.update({
         where: { id: input.offeringId },
-        data: { status: "final_offering", finalOfferingPublishedAt: input.finalizedAt },
+        data: { status: "final_offering" },
       });
       await transaction.auditLog.create({
         data: {
           id: `audit_${ulid()}`,
-          actorAccountId: input.accountId,
+          actorAccountId: null,
           action: "offering.finalized",
           resourceType: "offering",
           resourceId: input.offeringId,
           changes: {
             trace_id: input.traceId,
-            founder_review_notes: input.founderReviewNotes,
-            funded_eur: fundedEur,
-            target_raise_eur: offering.target_raise_eur,
             positions_created: positionsCreated,
-            reservations_cancelled: reservationsCancelled,
+            reservations_lapsed: reservationsLapsed,
           },
           createdAt: input.finalizedAt,
         },
       });
 
       return {
-        finalized: {
-          offeringId: input.offeringId,
-          finalOfferingPublishedAt: input.finalizedAt,
-          positionsCreated,
-          reservationsCancelled,
-        },
+        committed: { offeringId: input.offeringId, positionsCreated, reservationsLapsed },
         conflict: null,
       };
     });

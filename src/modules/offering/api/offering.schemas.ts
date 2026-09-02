@@ -143,6 +143,21 @@ export const createReservationResponseSchema = z.object({
 export type CreateReservationBody = z.infer<typeof createReservationBodySchema>;
 export type CreateReservationResponse = z.infer<typeof createReservationResponseSchema>;
 
+export const reservationParamsSchema = z.object({
+  offering_id: z.string().min(1),
+  reservation_id: z.string().min(1),
+});
+
+export const reconfirmReservationResponseSchema = z.object({
+  data: z.object({
+    reservation_id: z.string().min(1),
+    status: z.literal("reconfirmed"),
+    reconfirmed_at: z.iso.datetime(),
+  }),
+});
+
+export type ReconfirmReservationResponse = z.infer<typeof reconfirmReservationResponseSchema>;
+
 export type ListOfferingsQuery = z.infer<typeof listOfferingsQuerySchema>;
 export type ListOfferingsResponse = z.infer<typeof listOfferingsResponseSchema>;
 export type InvestorOfferingDetailResponse = z.infer<

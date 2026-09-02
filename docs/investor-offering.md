@@ -67,29 +67,62 @@ This is a one-time, per-environment gate, not a runtime check — no code here p
 
 See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/Backend/15-Decisions-and-Rationale/ARCHITECTURE_DECISIONS.md) for the full provider decision and its "Still Open" list, and `docs/coinbase-cdp-onramp.md` for the client's exact REST surface.
 
-## Offering finalization (founder-triggered)
+## Offering finalization is a three-stage flow, not one action
 
-`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed," the only path that ever creates a `settlement.position_ledger` row. Gated identically to origination's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
+`PAYMENT_FLOWS.md`'s "Phase-1 Final Offering Settlement Flow" and `AD-214`'s mandatory 168-hour reconfirmation window mean "finalizing" an offering is never a single atomic step: the founder's own decision only **publishes** locked final terms and opens a window; each investor must separately and explicitly **reconfirm** during that window; only once the window closes does a scheduled batch **commit** — and only reconfirmed reservations become positions. `offerings.status` stays `pre_offering` for the entire publish-and-reconfirm period; it becomes `final_offering` only at the very end, when the commit batch runs. The three stages below are documented in the order they occur.
+
+### 1. Publishing final terms (founder-triggered)
+
+`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to origination's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
 
 ```json
 {
   "data": {
     "offering_id": "offering_...",
-    "status": "final_offering",
     "final_offering_published_at": "2026-09-02T12:00:00.000Z",
-    "positions_created": 3,
+    "effective_rights_end_at": "2026-09-09T12:00:00.000Z",
+    "reservations_awaiting_reconfirmation": 3,
     "reservations_cancelled": 1
   }
 }
 ```
 
-Everything eligibility-relevant is re-verified atomically inside one transaction, under a row lock on the `offerings` row, mirroring `createReservation`'s own `AD-146` discipline rather than trusting an advisory read: `target_raise_eur` must still be fully funded (`AD-245` — no partial-funding path, so this is a hard `>=` gate, not the founder's discretion) and the offering must still be `pre_offering`. A losing request gets `409 offering.finalization_target_not_reached` or `409 offering.finalization_not_available`; an unknown `offering_id` is `404 offering.not_found`.
+Everything eligibility-relevant is re-verified atomically inside one transaction, under a row lock on the `offerings` row, mirroring `createReservation`'s own `AD-146` discipline rather than trusting an advisory read: `target_raise_eur` must still be fully funded (`AD-245` — no partial-funding path, so this is a hard `>=` gate, not the founder's discretion), the offering must still be `pre_offering`, and final terms must not already be published. A losing request gets `409 offering.finalization_target_not_reached`, `409 offering.finalization_not_available` (not open, or already published), or `404 offering.not_found` for an unknown `offering_id`.
 
 For every reservation still `reservation_stage: "initiated"` on the offering, the same transaction locks the reservation row (`FOR UPDATE OF reservation`, alongside the offering lock) and either:
 
-- **funded** (latest `capital_state` is `eurc_reserved`, `reconfirmation_pending`, or `eurc_finalized`) → creates one `position_ledger` row and moves the reservation to `reservation_stage: "finalized"`; or
-- **not funded** (reserved but never completed payment — possible even though the *offering's total* is fully funded, if some investors reserved but others' purchases covered the shortfall) → moves the reservation to `reservation_stage: "cancelled"` and creates no position.
+- **funded** (latest `capital_state` is `eurc_reserved`, `reconfirmation_pending`, or `eurc_finalized`) → moves the reservation to `reservation_stage: "awaiting_reconfirmation"` and records a `reconfirmation_pending` money event; or
+- **not funded** (reserved but never completed payment — possible even though the *offering's total* is fully funded, if some investors reserved but others' purchases covered the shortfall) → moves the reservation to `reservation_stage: "cancelled"`.
+
+No position is created here. The transaction also sets `final_offering_published_at`, `platform_rights_end_at`, and `effective_rights_end_at` on the offering (168 hours after publication — `computeEffectiveRightsEndAt`, `domain/finalization.policy.ts`; `PAYMENT_FLOWS.md`'s "Effective Investor-Rights Window Override" defines `effective_rights_end_at` as the max of every applicable investor-rights window, but no broader statutory/supplement-based rights table is documented anywhere yet to compute that max over, so this codebase uses the 168-hour platform default directly). `offerings.status` is deliberately left untouched — it stays `pre_offering`.
+
+### 2. Investor reconfirmation (investor-triggered, during the open window)
+
+`POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm` is each investor's own explicit action, customer-only (same auth as the rest of `offering.router.ts`). Response (`200`):
+
+```json
+{
+  "data": {
+    "reservation_id": "reservation_...",
+    "status": "reconfirmed",
+    "reconfirmed_at": "2026-09-03T12:00:00.000Z"
+  }
+}
+```
+
+Atomically, under a row lock on the reservation: ownership is checked (`account_id` must match the caller), the reservation must be `reservation_stage: "awaiting_reconfirmation"`, and the offering's `effective_rights_end_at` must not have passed yet. A nonexistent reservation and one owned by someone else both report the same `404 offering.reservation_not_found` — deliberately, so a reservation ID never leaks whether it exists to someone who doesn't own it. The wrong stage is `409 offering.reservation_not_awaiting_reconfirmation`; a closed window is `409 offering.reconfirmation_window_closed`. On success the reservation moves to `reservation_stage: "reconfirmed"` and an audit log entry records the disclosure-pack version current at that moment (`PAYMENT_FLOWS.md`: "Reconfirmation must reference a specific disclosure-pack version and that version must remain downloadable for audit purposes").
+
+Reconfirming does **not** yet create a position — it only marks the reservation ready for the commit batch below. `PAYMENT_FLOWS.md`'s "Silence rule" is explicit that no action is the terminal outcome for a reservation that never reconfirms: "No reconfirmation by expiry means the reservation lapses rather than silently finalizing."
+
+### 3. Window-close commit (scheduled batch, not a person)
+
+Once `effective_rights_end_at` passes, the hourly `case_timers.offering_reconfirmation_window_close` job (`CommitOfferingFinalizationService`, `src/worker.ts`) is the only remaining path to a `settlement.position_ledger` row. Hourly, not per-minute like the 15-minute reservation-expiry sweep: the window is 168 hours (`AD-214`), so per-minute precision buys nothing an investor would notice. For each `pre_offering` offering with published final terms, once its window has closed, a single transaction locks the offering row, re-verifies the window is actually closed (`409`-equivalent internal conflict `window_still_open` otherwise — the scheduled check and the transaction's own re-check can disagree only under a clock/timing race, and the row lock is what's authoritative), then locks every reservation still `awaiting_reconfirmation` or `reconfirmed` on that offering and either:
+
+- **reconfirmed** → creates one `position_ledger` row, moves the reservation to `reservation_stage: "finalized"`, and records an `eurc_finalized` money event; or
+- **awaiting_reconfirmation** (never reconfirmed) → moves the reservation to `reservation_stage: "lapsed"` — the same terminal stage the 15-minute unfunded-reservation sweep uses, reused rather than inventing a second "expired" stage for the same underlying idea (silence).
 
 A position's `unit_count` and `cost_basis_eur` are both set to the reservation's own committed `amount_eur` — a deliberate 1-unit-per-EUR convention (`costBasisToUnitCount`, `domain/finalization.policy.ts`), decided because no other pricing model is recorded anywhere in the architecture (`ARCHITECTURE_DECISIONS.md`/`CORE_TABLES.md` name total approved supply and a EUR-to-units conversion as an explicit, still-open gap under `AD-238`). This rule applies only to investor-subscribed positions from a real cash reservation; it says nothing about the original owner's retained position, which has no cash cost basis to convert and remains that same unresolved `AD-238` gap. `holder_wallet_address` is copied from the investor's `settlement.wallet_registrations` row as a convenience (`AD-241`'s own framing — "not a second source of truth"); `position_status` stays `pending_internal_settlement`, since nothing here touches the chain (`AD-234` keeps production blockchain settlement dormant) or attempts to mint or transfer a token (`AD-247`: only the PIV mints, using its own signers).
 
-Locking the reservation rows blocks a concurrent expiry sweep from lapsing one mid-finalization, but not a concurrent onramp poll: `PollOnrampTransactionsService` inserts a new `money_events` row rather than updating the reservation row, so a row lock on `reservations` doesn't block it. A purchase that lands in `money_events` in the same instant as finalization reads that reservation as unfunded is the same category of residual, deliberately unresolved race already named above for the expiry sweep — narrow, rare given finalization is an infrequent, deliberate staff action, and not engineered around here for the same reason.
+Only now does the transaction set `offerings.status = "final_offering"` — the one and only place in this codebase that ever does so.
+
+Out of scope for all three stages above, and not built: a material change resetting prior reconfirmations (its trigger — materiality classification itself — has no application code anywhere yet) and any per-jurisdiction override of the 168-hour platform default (no such table is documented). Locking reservation rows in each stage blocks a concurrent expiry sweep or a concurrent later stage from racing that same reservation, but not a concurrent onramp poll: `PollOnrampTransactionsService` inserts a new `money_events` row rather than updating the reservation row, so a row lock on `reservations` doesn't block it. A purchase that lands in `money_events` in the same instant as the publish stage reads that reservation as unfunded is the same category of residual, deliberately unresolved race already named above for the expiry sweep — narrow, rare given publishing is an infrequent, deliberate staff action, and not engineered around here for the same reason.

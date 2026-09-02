@@ -661,7 +661,7 @@ describe.skipIf(databaseUrl === undefined)(
 );
 
 describe.skipIf(databaseUrl === undefined)(
-  "offering finalization PostgreSQL integration (AD-244/AD-245)",
+  "offering finalization PostgreSQL integration (AD-244/AD-245/AD-214)",
   () => {
     const suffix = randomUUID();
     const fundedAccountId = `account_finalize_funded_${suffix}`;
@@ -771,7 +771,7 @@ describe.skipIf(databaseUrl === undefined)(
       await Promise.all([database.$disconnect(), authPool.end()]);
     });
 
-    it("creates a position only for the funded reservation, cancels the unfunded one, and publishes the offering", async () => {
+    it("publishes final terms, moving the funded reservation to awaiting_reconfirmation and cancelling the unfunded one, without creating a position yet", async () => {
       const { offeringId, pivId } = await createOffering({ targetRaiseEur: "1000.00" });
       const fundedReservationId = `reservation_${randomUUID()}`;
       const unfundedReservationId = `reservation_${randomUUID()}`;
@@ -803,74 +803,113 @@ describe.skipIf(databaseUrl === undefined)(
         createdAt: new Date(),
       });
 
-      const result = await repository.finalizeOffering({
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      const result = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "Target reached, proceeding to tokenization.",
         traceId: `trace_${suffix}`,
-        finalizedAt: new Date("2026-09-02T12:00:00.000Z"),
+        publishedAt,
       });
 
       expect(result).toEqual({
         conflict: null,
-        finalized: {
+        published: {
           offeringId,
-          finalOfferingPublishedAt: new Date("2026-09-02T12:00:00.000Z"),
-          positionsCreated: 1,
+          finalOfferingPublishedAt: publishedAt,
+          platformRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
+          effectiveRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
+          reservationsAwaitingReconfirmation: 1,
           reservationsCancelled: 1,
         },
       });
 
+      // offerings.status stays pre_offering through the whole reconfirmation
+      // window — it only becomes final_offering once commitOfferingFinalization
+      // runs (CORE_TABLES.md).
       const offering = await database.offering.findUnique({ where: { id: offeringId } });
-      expect(offering).toMatchObject({ status: "final_offering" });
-      expect(offering?.finalOfferingPublishedAt).toEqual(new Date("2026-09-02T12:00:00.000Z"));
+      expect(offering).toMatchObject({ status: "pre_offering" });
+      expect(offering?.finalOfferingPublishedAt).toEqual(publishedAt);
+      expect(offering?.effectiveRightsEndAt).toEqual(new Date("2026-09-09T12:00:00.000Z"));
 
       const fundedReservation = await database.reservation.findUnique({ where: { id: fundedReservationId } });
-      expect(fundedReservation).toMatchObject({ reservationStage: "finalized" });
+      expect(fundedReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
       const unfundedReservation = await database.reservation.findUnique({ where: { id: unfundedReservationId } });
       expect(unfundedReservation).toMatchObject({ reservationStage: "cancelled" });
 
-      const positions = await database.positionLedger.findMany({ where: { pivId } });
-      expect(positions).toHaveLength(1);
-      expect(positions[0]).toMatchObject({
-        reservationId: fundedReservationId,
-        accountId: fundedAccountId,
-        pivId,
-        positionStatus: "pending_internal_settlement",
-        holderWalletAddress: `0x${suffix.replaceAll("-", "")}f`,
-      });
-      expect(positions[0]?.unitCount.toFixed(6)).toBe("700.000000");
-      expect(positions[0]?.costBasisEur.toFixed(2)).toBe("700.00");
-
+      expect(await database.positionLedger.count({ where: { pivId } })).toBe(0);
       expect(
-        await database.auditLog.count({ where: { resourceId: offeringId, action: "offering.finalized" } }),
+        await database.auditLog.count({
+          where: { resourceId: offeringId, action: "offering.final_terms_published" },
+        }),
       ).toBe(1);
     });
 
     it("reports offering_not_found for an unknown offering", async () => {
-      const result = await repository.finalizeOffering({
+      const result = await repository.publishFinalOfferingTerms({
         offeringId: `offering_missing_${suffix}`,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
-        finalizedAt: new Date(),
+        publishedAt: new Date(),
       });
 
-      expect(result).toEqual({ finalized: null, conflict: "offering_not_found" });
+      expect(result).toEqual({ published: null, conflict: "offering_not_found" });
     });
 
     it("reports not_open for an offering that already left pre_offering", async () => {
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00", status: "final_offering" });
 
-      const result = await repository.finalizeOffering({
+      const result = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
-        finalizedAt: new Date(),
+        publishedAt: new Date(),
       });
 
-      expect(result).toEqual({ finalized: null, conflict: "not_open" });
+      expect(result).toEqual({ published: null, conflict: "not_open" });
+    });
+
+    it("reports already_published once final terms have already been published", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_already_published",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const first = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+      expect(first.conflict).toBeNull();
+
+      const second = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T13:00:00.000Z"),
+      });
+
+      expect(second).toEqual({ published: null, conflict: "already_published" });
     });
 
     it("reports target_not_reached when funded_eur falls short, however small the gap", async () => {
@@ -895,15 +934,302 @@ describe.skipIf(databaseUrl === undefined)(
         recordedAt: new Date(),
       });
 
-      const result = await repository.finalizeOffering({
+      const result = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
+        publishedAt: new Date(),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "target_not_reached" });
+    });
+
+    it("reconfirms a reservation that is awaiting reconfirmation", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_reconfirm_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      const reconfirmedAt = new Date("2026-09-03T12:00:00.000Z");
+      const result = await repository.reconfirmReservation({
+        reservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt,
+      });
+
+      expect(result).toEqual({ reconfirmedAt, conflict: null });
+      const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
+      expect(reservation).toMatchObject({ reservationStage: "reconfirmed" });
+      expect(reservation?.reconfirmedAt).toEqual(reconfirmedAt);
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: reservationId, action: "offering.reservation_reconfirmed" },
+        }),
+      ).toBe(1);
+    });
+
+    it("reports not_found for a nonexistent reservation or one owned by someone else", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_reconfirm_02",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      const wrongOwner = await repository.reconfirmReservation({
+        reservationId,
+        accountId: unfundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+      expect(wrongOwner).toEqual({ reconfirmedAt: null, conflict: "not_found" });
+
+      const missing = await repository.reconfirmReservation({
+        reservationId: `reservation_missing_${suffix}`,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+      expect(missing).toEqual({ reconfirmedAt: null, conflict: "not_found" });
+    });
+
+    it("reports not_awaiting_reconfirmation for a reservation that has not been published yet", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+
+      const result = await repository.reconfirmReservation({
+        reservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date(),
+      });
+
+      expect(result).toEqual({ reconfirmedAt: null, conflict: "not_awaiting_reconfirmation" });
+    });
+
+    it("reports window_closed once the reconfirmation window has passed", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_reconfirm_03",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      const result = await repository.reconfirmReservation({
+        reservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-09T12:00:00.001Z"),
+      });
+
+      expect(result).toEqual({ reconfirmedAt: null, conflict: "window_closed" });
+    });
+
+    it("reports commitOfferingFinalization's offering_not_found for an unknown offering", async () => {
+      const result = await repository.commitOfferingFinalization({
+        offeringId: `offering_missing_${suffix}`,
+        traceId: `trace_${suffix}`,
         finalizedAt: new Date(),
       });
 
-      expect(result).toEqual({ finalized: null, conflict: "target_not_reached" });
+      expect(result).toEqual({ committed: null, conflict: "offering_not_found" });
+    });
+
+    it("reports not_publishable_state before final terms have been published", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+
+      const result = await repository.commitOfferingFinalization({
+        offeringId,
+        traceId: `trace_${suffix}`,
+        finalizedAt: new Date(),
+      });
+
+      expect(result).toEqual({ committed: null, conflict: "not_publishable_state" });
+    });
+
+    it("commits only reconfirmed reservations into positions, lapses the rest, and publishes the offering once the window closes", async () => {
+      const { offeringId, pivId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reconfirmedReservationId = `reservation_${randomUUID()}`;
+      const lapsedReservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId: reconfirmedReservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "700.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: reconfirmedReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_commit_01",
+        capitalState: "eurc_reserved",
+        amountEur: "700.00",
+        amountEurc: "690.000000",
+        recordedAt: new Date(),
+      });
+      await repository.createReservation({
+        reservationId: lapsedReservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "300.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: lapsedReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_commit_02",
+        capitalState: "eurc_reserved",
+        amountEur: "300.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      const published = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+      expect(published.published?.reservationsAwaitingReconfirmation).toBe(2);
+
+      const reconfirmResult = await repository.reconfirmReservation({
+        reservationId: reconfirmedReservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+      expect(reconfirmResult.conflict).toBeNull();
+
+      // The window is 168 hours after publishedAt, i.e. 2026-09-09T12:00:00.000Z.
+      const pending = await repository.listOfferingsPendingFinalizationCommit();
+      expect(pending).toContainEqual({ offeringId, effectiveRightsEndAt: new Date("2026-09-09T12:00:00.000Z") });
+
+      const tooEarly = await repository.commitOfferingFinalization({
+        offeringId,
+        traceId: `trace_${suffix}`,
+        finalizedAt: new Date("2026-09-09T11:00:00.000Z"),
+      });
+      expect(tooEarly).toEqual({ committed: null, conflict: "window_still_open" });
+
+      const finalizedAt = new Date("2026-09-09T12:00:00.000Z");
+      const committed = await repository.commitOfferingFinalization({
+        offeringId,
+        traceId: `trace_${suffix}`,
+        finalizedAt,
+      });
+
+      expect(committed).toEqual({
+        conflict: null,
+        committed: { offeringId, positionsCreated: 1, reservationsLapsed: 1 },
+      });
+
+      const offering = await database.offering.findUnique({ where: { id: offeringId } });
+      expect(offering).toMatchObject({ status: "final_offering" });
+
+      const reconfirmedReservation = await database.reservation.findUnique({
+        where: { id: reconfirmedReservationId },
+      });
+      expect(reconfirmedReservation).toMatchObject({ reservationStage: "finalized" });
+      const lapsedReservation = await database.reservation.findUnique({ where: { id: lapsedReservationId } });
+      expect(lapsedReservation).toMatchObject({ reservationStage: "lapsed" });
+
+      const positions = await database.positionLedger.findMany({ where: { pivId } });
+      expect(positions).toHaveLength(1);
+      expect(positions[0]).toMatchObject({
+        reservationId: reconfirmedReservationId,
+        accountId: fundedAccountId,
+        pivId,
+        positionStatus: "pending_internal_settlement",
+        holderWalletAddress: `0x${suffix.replaceAll("-", "")}f`,
+      });
+      expect(positions[0]?.unitCount.toFixed(6)).toBe("700.000000");
+      expect(positions[0]?.costBasisEur.toFixed(2)).toBe("700.00");
+
+      expect(
+        await database.auditLog.count({ where: { resourceId: offeringId, action: "offering.finalized" } }),
+      ).toBe(1);
     });
   },
 );

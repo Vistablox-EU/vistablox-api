@@ -1,35 +1,90 @@
-export interface FinalizeOfferingInput {
+export interface PublishFinalOfferingTermsInput {
   offeringId: string;
   accountId: string;
   founderReviewNotes: string;
   traceId: string;
-  finalizedAt: Date;
+  publishedAt: Date;
 }
 
-export interface FinalizedOffering {
+export interface PublishedFinalOfferingTerms {
   offeringId: string;
   finalOfferingPublishedAt: Date;
-  positionsCreated: number;
+  platformRightsEndAt: Date;
+  effectiveRightsEndAt: Date;
+  reservationsAwaitingReconfirmation: number;
   reservationsCancelled: number;
 }
 
-export type FinalizeOfferingConflict = "offering_not_found" | "not_open" | "target_not_reached";
+export type PublishFinalOfferingTermsConflict = "offering_not_found" | "not_open" | "already_published" | "target_not_reached";
 
-export interface FinalizeOfferingResult {
-  finalized: FinalizedOffering | null;
-  conflict: FinalizeOfferingConflict | null;
+export interface PublishFinalOfferingTermsResult {
+  published: PublishedFinalOfferingTerms | null;
+  conflict: PublishFinalOfferingTermsConflict | null;
+}
+
+export interface ReconfirmReservationInput {
+  reservationId: string;
+  accountId: string;
+  traceId: string;
+  reconfirmedAt: Date;
+}
+
+export type ReconfirmReservationConflict = "not_found" | "not_awaiting_reconfirmation" | "window_closed";
+
+export interface ReconfirmReservationResult {
+  reconfirmedAt: Date | null;
+  conflict: ReconfirmReservationConflict | null;
+}
+
+export interface OfferingPendingFinalizationCommit {
+  offeringId: string;
+  effectiveRightsEndAt: Date;
+}
+
+export interface CommitOfferingFinalizationInput {
+  offeringId: string;
+  traceId: string;
+  finalizedAt: Date;
+}
+
+export interface CommittedOfferingFinalization {
+  offeringId: string;
+  positionsCreated: number;
+  reservationsLapsed: number;
+}
+
+export type CommitOfferingFinalizationConflict = "offering_not_found" | "not_publishable_state" | "window_still_open";
+
+export interface CommitOfferingFinalizationResult {
+  committed: CommittedOfferingFinalization | null;
+  conflict: CommitOfferingFinalizationConflict | null;
 }
 
 /**
- * AD-244/AD-245: the founder's one discretionary decision once an offering
- * reaches its target — proceed (this), extend the period, or close the
- * case. This is the only path that ever creates settlement.position_ledger
- * rows. Re-verifies funded_eur >= target_raise_eur under a row lock rather
+ * The three stages PAYMENT_FLOWS.md's "Phase-1 Final Offering Settlement
+ * Flow" and AD-214's 168-hour reconfirmation window actually require,
+ * corrected after this codebase initially collapsed them into one
+ * immediate action:
+ *
+ * 1. publishFinalOfferingTerms — the founder's AD-244/AD-245 "proceed"
+ *    decision. Locks final terms, opens the reconfirmation window, moves
+ *    funded reservations to 'awaiting_reconfirmation' (not directly to a
+ *    position). offerings.status stays 'pre_offering' throughout — per
+ *    CORE_TABLES.md it only becomes 'final_offering' once step 3 commits.
+ * 2. reconfirmReservation — each investor's own explicit action during the
+ *    open window (silence lapses the reservation rather than silently
+ *    finalizing it — PAYMENT_FLOWS.md's "Silence rule").
+ * 3. commitOfferingFinalization — the window-close batch (scheduled job,
+ *    not a person): only now does a settlement.position_ledger row get
+ *    created, only for reservations that were actually reconfirmed.
+ *
+ * Every step re-verifies its own preconditions under a row lock rather
  * than trusting an advisory read, the same AD-146 discipline
- * createReservation already applies to its own capacity check — a
- * concurrent sweep/expiry between the founder's read and this call must
- * not be able to finalize an offering that no longer qualifies.
+ * createReservation already applies to its capacity check.
  */
 export interface FinalizeOfferingRepository {
-  finalizeOffering(input: FinalizeOfferingInput): Promise<FinalizeOfferingResult>;
+  publishFinalOfferingTerms(input: PublishFinalOfferingTermsInput): Promise<PublishFinalOfferingTermsResult>;
+  reconfirmReservation(input: ReconfirmReservationInput): Promise<ReconfirmReservationResult>;
+  listOfferingsPendingFinalizationCommit(): Promise<OfferingPendingFinalizationCommit[]>;
+  commitOfferingFinalization(input: CommitOfferingFinalizationInput): Promise<CommitOfferingFinalizationResult>;
 }

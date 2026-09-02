@@ -6,6 +6,7 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import type { CreateReservationService } from "../application/create-reservation.service.js";
 import type { DownloadDisclosureDocumentService } from "../application/download-disclosure-document.service.js";
 import type { GetInvestorOfferingService } from "../application/get-investor-offering.service.js";
+import type { ReconfirmReservationService } from "../application/reconfirm-reservation.service.js";
 import { ListPublicOfferingsService } from "../application/list-public-offerings.service.js";
 import {
   createReservationBodySchema,
@@ -15,6 +16,8 @@ import {
   investorOfferingParamsSchema,
   listOfferingsQuerySchema,
   listOfferingsResponseSchema,
+  reconfirmReservationResponseSchema,
+  reservationParamsSchema,
 } from "./offering.schemas.js";
 
 export function createOfferingRouter(service: ListPublicOfferingsService): Router {
@@ -34,6 +37,7 @@ export function createInvestorOfferingRouter(
   service: GetInvestorOfferingService,
   downloadDocument?: DownloadDisclosureDocumentService,
   createReservation?: CreateReservationService,
+  reconfirmReservation?: ReconfirmReservationService,
 ): Router {
   const router = Router();
 
@@ -62,6 +66,24 @@ export function createInvestorOfferingRouter(
       response.setHeader("Cache-Control", "no-store");
       response.status(201).json(createReservationResponseSchema.parse(result));
     });
+  }
+
+  if (reconfirmReservation !== undefined) {
+    router.post(
+      "/:offering_id/reservations/:reservation_id/reconfirm",
+      requireAuthentication,
+      async (request, response) => {
+        const context = requireCustomerContext(response.locals.authContext);
+        const params = reservationParamsSchema.parse(request.params);
+        const result = await reconfirmReservation.execute({
+          accountId: context.accountId,
+          reservationId: params.reservation_id,
+          traceId: String(response.locals.traceId),
+        });
+        response.setHeader("Cache-Control", "no-store");
+        response.json(reconfirmReservationResponseSchema.parse(result));
+      },
+    );
   }
 
   if (downloadDocument !== undefined) {

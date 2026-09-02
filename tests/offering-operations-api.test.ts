@@ -38,15 +38,20 @@ function buildApp(options?: {
   const requireStaffWebAuthn: RequestHandler = (_request, _response, next) => next();
 
   const repository: FinalizeOfferingRepository = {
-    finalizeOffering: vi.fn().mockResolvedValue({
-      finalized: {
+    publishFinalOfferingTerms: vi.fn().mockResolvedValue({
+      published: {
         offeringId: "offering_01",
         finalOfferingPublishedAt: new Date("2026-09-02T12:00:00.000Z"),
-        positionsCreated: 3,
+        platformRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
+        effectiveRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
+        reservationsAwaitingReconfirmation: 3,
         reservationsCancelled: 1,
       },
       conflict: null,
     }),
+    reconfirmReservation: vi.fn(),
+    listOfferingsPendingFinalizationCommit: vi.fn().mockResolvedValue([]),
+    commitOfferingFinalization: vi.fn(),
     ...options?.repository,
   };
 
@@ -67,7 +72,7 @@ function buildApp(options?: {
 }
 
 describe("POST /internal/v1/offerings/:offering_id/finalize", () => {
-  it("finalizes an eligible offering", async () => {
+  it("publishes final terms for an eligible offering", async () => {
     const { app, repository } = buildApp();
 
     const response = await request(app)
@@ -78,13 +83,13 @@ describe("POST /internal/v1/offerings/:offering_id/finalize", () => {
     expect(response.body).toEqual({
       data: {
         offering_id: "offering_01",
-        status: "final_offering",
         final_offering_published_at: "2026-09-02T12:00:00.000Z",
-        positions_created: 3,
+        effective_rights_end_at: "2026-09-09T12:00:00.000Z",
+        reservations_awaiting_reconfirmation: 3,
         reservations_cancelled: 1,
       },
     });
-    expect(repository.finalizeOffering).toHaveBeenCalledWith(
+    expect(repository.publishFinalOfferingTerms).toHaveBeenCalledWith(
       expect.objectContaining({
         offeringId: "offering_01",
         accountId: "account_founder",
@@ -101,13 +106,13 @@ describe("POST /internal/v1/offerings/:offering_id/finalize", () => {
       .send({ founder_review_notes: "" });
 
     expect(response.status).toBe(422);
-    expect(repository.finalizeOffering).not.toHaveBeenCalled();
+    expect(repository.publishFinalOfferingTerms).not.toHaveBeenCalled();
   });
 
   it("reports the target-not-reached conflict as a 409", async () => {
     const { app } = buildApp({
       repository: {
-        finalizeOffering: vi.fn().mockResolvedValue({ finalized: null, conflict: "target_not_reached" }),
+        publishFinalOfferingTerms: vi.fn().mockResolvedValue({ published: null, conflict: "target_not_reached" }),
       },
     });
 
@@ -119,6 +124,21 @@ describe("POST /internal/v1/offerings/:offering_id/finalize", () => {
     expect(response.body.code).toBe("offering.finalization_target_not_reached");
   });
 
+  it("reports the already-published conflict as a 409", async () => {
+    const { app } = buildApp({
+      repository: {
+        publishFinalOfferingTerms: vi.fn().mockResolvedValue({ published: null, conflict: "already_published" }),
+      },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/finalize")
+      .send({ founder_review_notes: "Trying again." });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("offering.finalization_not_available");
+  });
+
   it("never reaches the service without the admin_operations role", async () => {
     const { app, repository } = buildApp({ denyAdminOperations: true });
 
@@ -127,6 +147,6 @@ describe("POST /internal/v1/offerings/:offering_id/finalize", () => {
       .send({ founder_review_notes: "notes" });
 
     expect(response.status).toBe(403);
-    expect(repository.finalizeOffering).not.toHaveBeenCalled();
+    expect(repository.publishFinalOfferingTerms).not.toHaveBeenCalled();
   });
 });

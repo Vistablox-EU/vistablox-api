@@ -67,6 +67,7 @@ export function computeReservationBlockers(input: {
   now: Date;
   fundingRailAvailable: boolean;
   offeringStatus: string;
+  finalTermsPublished: boolean;
   hasDisclosurePack: boolean;
   remainingCapacityEur: string;
   accountStatus: AccountReadinessStatus;
@@ -92,7 +93,14 @@ export function computeReservationBlockers(input: {
   if (!loginMethodsComplete) blockers.push("login_methods_incomplete");
   if (!input.walletProvisioned) blockers.push("payment_account_not_ready");
   if (!input.hasDisclosurePack) blockers.push("disclosure_pack_unavailable");
-  if (input.offeringStatus !== "pre_offering") blockers.push("offering_not_open");
+  // offerings.status stays 'pre_offering' through the entire reconfirmation
+  // window (CORE_TABLES.md: it only becomes 'final_offering' once the
+  // window closes and the finalization batch commits) — so closing new
+  // reservations off once final terms publish needs its own check, not
+  // just the status one.
+  if (input.offeringStatus !== "pre_offering" || input.finalTermsPublished) {
+    blockers.push("offering_not_open");
+  }
   if (input.remainingCapacityEur === "0.00") blockers.push("capacity_exhausted");
   if (!input.fundingRailAvailable) blockers.push("funding_rail_unavailable");
 

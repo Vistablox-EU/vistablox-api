@@ -7,9 +7,9 @@ export const finalizeOfferingBodySchema = z.object({
 export const finalizeOfferingResponseSchema = z.object({
   data: z.object({
     offering_id: z.string().min(1),
-    status: z.literal("final_offering"),
     final_offering_published_at: z.iso.datetime(),
-    positions_created: z.number().int().min(0),
+    effective_rights_end_at: z.iso.datetime(),
+    reservations_awaiting_reconfirmation: z.number().int().min(0),
     reservations_cancelled: z.number().int().min(0),
   }),
 });
