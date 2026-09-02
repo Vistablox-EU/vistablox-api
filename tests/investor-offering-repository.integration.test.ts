@@ -828,6 +828,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
       const result = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -916,12 +917,14 @@ describe.skipIf(databaseUrl === undefined)(
         amountEurc: null,
         recordedAt: new Date(),
       });
+      const alreadyPublishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, alreadyPublishedAt);
       const first = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
-        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+        publishedAt: alreadyPublishedAt,
       });
       expect(first.conflict).toBeNull();
 
@@ -991,6 +994,7 @@ describe.skipIf(databaseUrl === undefined)(
         recordedAt: new Date(),
       });
       const publishedAt01 = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt01);
       await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -998,7 +1002,6 @@ describe.skipIf(databaseUrl === undefined)(
         traceId: `trace_${suffix}`,
         publishedAt: publishedAt01,
       });
-      await publishCompleteDisclosurePack(offeringId, publishedAt01);
 
       const reconfirmedAt = new Date("2026-09-03T12:00:00.000Z");
       const result = await repository.reconfirmReservation({
@@ -1109,12 +1112,14 @@ describe.skipIf(databaseUrl === undefined)(
         amountEurc: null,
         recordedAt: new Date(),
       });
+      const windowClosedPublishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, windowClosedPublishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
-        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+        publishedAt: windowClosedPublishedAt,
       });
 
       const result = await repository.reconfirmReservation({
@@ -1127,7 +1132,90 @@ describe.skipIf(databaseUrl === undefined)(
       expect(result).toEqual({ reconfirmedAt: null, conflict: "window_closed" });
     });
 
-    it("reports disclosure_pack_incomplete when no disclosure pack has been published for the offering", async () => {
+    it("publishFinalOfferingTerms reports disclosure_pack_incomplete when no disclosure pack has been published yet", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_publish_pack_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+
+      const result = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "disclosure_pack_incomplete" });
+      const offering = await database.offering.findUnique({ where: { id: offeringId } });
+      expect(offering?.finalOfferingPublishedAt).toBeNull();
+      const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
+      expect(reservation).toMatchObject({ reservationStage: "initiated" });
+    });
+
+    it("publishFinalOfferingTerms reports disclosure_pack_incomplete when the current pack is missing a mandatory document type", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_publish_pack_02",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      // Every mandatory type except full_prospectus — deliberately incomplete.
+      const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
+      const publishedPack = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: "account_founder",
+        documents: partialTypes.map((documentType) => ({
+          documentType,
+          documentRef: `documents/${documentType}.pdf`,
+        })),
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+      expect(publishedPack.published?.isComplete).toBe(false);
+
+      const result = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      expect(result).toEqual({ published: null, conflict: "disclosure_pack_incomplete" });
+    });
+
+    it("reconfirmReservation reports disclosure_pack_incomplete when the current pack is republished incomplete after final terms were already published", async () => {
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
       const reservationId = `reservation_${randomUUID()}`;
       await repository.createReservation({
@@ -1148,48 +1236,8 @@ describe.skipIf(databaseUrl === undefined)(
         amountEurc: null,
         recordedAt: new Date(),
       });
-      await repository.publishFinalOfferingTerms({
-        offeringId,
-        accountId: "account_founder",
-        founderReviewNotes: "notes",
-        traceId: `trace_${suffix}`,
-        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
-      });
-
-      const result = await repository.reconfirmReservation({
-        reservationId,
-        accountId: fundedAccountId,
-        traceId: `trace_${suffix}`,
-        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
-      });
-
-      expect(result).toEqual({ reconfirmedAt: null, conflict: "disclosure_pack_incomplete" });
-      const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
-      expect(reservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
-    });
-
-    it("reports disclosure_pack_incomplete when the current pack is missing a mandatory document type", async () => {
-      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
-      const reservationId = `reservation_${randomUUID()}`;
-      await repository.createReservation({
-        reservationId,
-        offeringId,
-        accountId: fundedAccountId,
-        amountEur: "1000.00",
-        disclosurePackVersionAtReservation: null,
-        traceId: `trace_${suffix}`,
-        createdAt: new Date(),
-      });
-      await repository.recordMoneyEvent({
-        reservationId,
-        provider: "coinbase_cdp",
-        providerReference: "txn_reconfirm_pack_02",
-        capitalState: "eurc_reserved",
-        amountEur: "1000.00",
-        amountEurc: null,
-        recordedAt: new Date(),
-      });
       const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -1197,19 +1245,22 @@ describe.skipIf(databaseUrl === undefined)(
         traceId: `trace_${suffix}`,
         publishedAt,
       });
-      // Every mandatory type except full_prospectus — deliberately incomplete.
+
+      // The only reachable way the current pack can be incomplete once
+      // publishFinalOfferingTerms itself already requires completeness: a
+      // later republish (e.g. materiality-triggered) that lands incomplete.
       const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
-      const publishedPack = await repository.publishDisclosurePack({
+      const republishedPack = await repository.publishDisclosurePack({
         offeringId,
         accountId: "account_founder",
         documents: partialTypes.map((documentType) => ({
           documentType,
-          documentRef: `documents/${documentType}.pdf`,
+          documentRef: `documents/${documentType}-v2.pdf`,
         })),
         traceId: `trace_${suffix}`,
-        publishedAt,
+        publishedAt: new Date("2026-09-03T00:00:00.000Z"),
       });
-      expect(publishedPack.published?.isComplete).toBe(false);
+      expect(republishedPack.published?.isComplete).toBe(false);
 
       const result = await repository.reconfirmReservation({
         reservationId,
@@ -1285,6 +1336,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
       const published = await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -1293,7 +1345,6 @@ describe.skipIf(databaseUrl === undefined)(
         publishedAt,
       });
       expect(published.published?.reservationsAwaitingReconfirmation).toBe(2);
-      await publishCompleteDisclosurePack(offeringId, publishedAt);
 
       const reconfirmResult = await repository.reconfirmReservation({
         reservationId: reconfirmedReservationId,
@@ -1395,6 +1446,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       const materialityPublishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, materialityPublishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -1402,7 +1454,6 @@ describe.skipIf(databaseUrl === undefined)(
         traceId: `trace_${suffix}`,
         publishedAt: materialityPublishedAt,
       });
-      await publishCompleteDisclosurePack(offeringId, materialityPublishedAt);
       const reconfirmResult = await repository.reconfirmReservation({
         reservationId: reconfirmedReservationId,
         accountId: fundedAccountId,
@@ -1490,6 +1541,7 @@ describe.skipIf(databaseUrl === undefined)(
         recordedAt: new Date(),
       });
       const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
         accountId: "account_founder",
@@ -1497,7 +1549,6 @@ describe.skipIf(databaseUrl === undefined)(
         traceId: `trace_${suffix}`,
         publishedAt,
       });
-      await publishCompleteDisclosurePack(offeringId, publishedAt);
       await repository.reconfirmReservation({
         reservationId,
         accountId: fundedAccountId,

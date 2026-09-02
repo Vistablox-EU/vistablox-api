@@ -179,6 +179,23 @@ describe("POST /internal/v1/offerings/:offering_id/finalize", () => {
     expect(response.body.code).toBe("offering.finalization_not_available");
   });
 
+  it("reports the disclosure-pack-incomplete conflict as a 409", async () => {
+    const { app } = buildApp({
+      repository: {
+        publishFinalOfferingTerms: vi
+          .fn()
+          .mockResolvedValue({ published: null, conflict: "disclosure_pack_incomplete" }),
+      },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/finalize")
+      .send({ founder_review_notes: "Trying without a pack." });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("offering.finalization_disclosure_pack_incomplete");
+  });
+
   it("never reaches the service without the admin_operations role", async () => {
     const { app, repository } = buildApp({ denyAdminOperations: true });
 

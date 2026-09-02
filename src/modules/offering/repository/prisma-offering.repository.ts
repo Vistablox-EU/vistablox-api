@@ -648,6 +648,27 @@ export class PrismaOfferingRepository
         return { published: null, conflict: "target_not_reached" as const };
       }
 
+      // PAYMENT_FLOWS.md's Phase-1 Final Offering Settlement Flow, step 4:
+      // "VistaBlox publishes the locked final package, emits
+      // final_offering_published_at, and moves live reservations into
+      // reconfirmation_pending" — bundles publishing the disclosure package
+      // together with this step, not as a separately-timed staff action.
+      // Skipping this would open the reconfirmation window (and, per
+      // AD-214, start the clock toward the Silence rule) while no investor
+      // could actually reconfirm — reconfirmReservation already enforces
+      // the same completeness rule at reconfirmation time; this closes the
+      // gap where the window opens against a pack no one can act on yet.
+      const currentPack = await transaction.disclosurePack.findFirst({
+        where: { offeringId: input.offeringId, isCurrent: true, supersededAt: null },
+        select: { documents: { select: { documentType: true } } },
+      });
+      const currentDocumentTypes = (currentPack?.documents ?? []).map(
+        (document) => document.documentType as DisclosureDocumentType,
+      );
+      if (!isCompleteDisclosurePack(currentDocumentTypes)) {
+        return { published: null, conflict: "disclosure_pack_incomplete" as const };
+      }
+
       // Locked alongside the offering row so a concurrent expiry sweep
       // cannot flip one of these out from under this transaction; a
       // concurrent onramp-poll INSERT into money_events is a narrower,
