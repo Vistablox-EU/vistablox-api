@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { GetInvestorProfileService } from "../application/get-investor-profile.service.js";
+import type { RegisterWalletService } from "../application/register-wallet.service.js";
 import type {
   ListInvestorCurrentPositionsService,
   ListInvestorReservationsService,
@@ -11,6 +12,8 @@ import {
   investorCurrentPositionsResponseSchema,
   investorProfileResponseSchema,
   investorReservationHistoryResponseSchema,
+  registerWalletBodySchema,
+  registerWalletResponseSchema,
 } from "./investor-profile.schemas.js";
 
 export function createInvestorProfileRouter(
@@ -18,6 +21,7 @@ export function createInvestorProfileRouter(
   getProfile: GetInvestorProfileService,
   listReservations: ListInvestorReservationsService,
   listCurrentPositions: ListInvestorCurrentPositionsService,
+  registerWallet: RegisterWalletService,
 ): Router {
   const router = Router();
   router.get("/", requireAuthentication, async (_request, response) => {
@@ -25,6 +29,16 @@ export function createInvestorProfileRouter(
     const result = await getProfile.execute(context.accountId);
     response.setHeader("Cache-Control", "no-store");
     response.json(investorProfileResponseSchema.parse(result));
+  });
+  router.post("/wallet", requireAuthentication, async (request, response) => {
+    const context = requireCustomerContext(response.locals.authContext);
+    const body = registerWalletBodySchema.parse(request.body);
+    const result = await registerWallet.execute({
+      accountId: context.accountId,
+      walletAddress: body.wallet_address,
+    });
+    response.setHeader("Cache-Control", "no-store");
+    response.status(201).json(registerWalletResponseSchema.parse(result));
   });
   router.get("/reservations", requireAuthentication, async (request, response) => {
     const context = requireCustomerContext(response.locals.authContext);

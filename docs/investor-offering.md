@@ -20,21 +20,76 @@ Current-pack documents are accessible to any authenticated customer, matching `A
 
 The download response uses `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and `Cache-Control: private, no-store`. Object-store failures are mapped to provider-neutral `503` errors before streaming starts. See [`document-storage.md`](document-storage.md) for the runtime and deployment implementation.
 
-## Why reservation creation is closed
+## Reservation creation
 
-As checked on 2026-09-01, Stripe's current Onramp destination-network table does not list EURC as a supported destination asset. It also states that USDC on Base is not supported in the EU. That conflicts with the documented VistaBlox phase-1 requirement for an investor-initiated EUR-to-EURC purchase on Base. Stripe also labels the Onramp API as a public-preview product requiring access approval.
+`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
 
-Authoritative references:
+```json
+{
+  "data": {
+    "reservation_id": "reservation_...",
+    "offering_id": "offering_...",
+    "amount_eur": "1000.00",
+    "status": "initiated",
+    "expires_at": "2026-09-02T10:15:00.000Z",
+    "onramp": { "url": "https://pay.coinbase.com/buy/select-asset?...", "channel_id": "..." }
+  }
+}
+```
 
-- [Stripe Crypto Onramp supported networks and currencies](https://docs.stripe.com/crypto/onramp)
-- [Stripe embedded Onramp integration](https://docs.stripe.com/crypto/onramp/embedded?locale=en-GB)
-- [Stripe Onramp Sessions API](https://docs.stripe.com/api/crypto/onramp_sessions?lang=go)
+The reservation row and its first `money.money_events` row (`capital_state: "initiated"`) are written inside one transaction that also re-verifies, under a row lock on the `offerings` row, that the offering is still `pre_offering` and that the requested amount still fits the offering's remaining capacity (`AD-146`: the same check `GetInvestorOfferingService`'s `reservation.blockers` reports is advisory only — this is the atomic, authoritative one, sharing its rule set via `domain/reservation-eligibility.policy.ts` so the two can never disagree). A losing concurrent request gets `409 offering.reservation_not_available` (offering closed between read and write) or `422 offering.reservation_amount_exceeds_capacity` (amount no longer fits), never a silent oversell.
 
-The API therefore returns `funding_rail_unavailable` and does not create a reservation. It also returns `disclosure_pack_unavailable` when no non-empty current pack exists. Silently substituting USDC, another network, or another provider would alter the financial and legal architecture. Creating the reservation before the rail exists would consume hard offering capacity, while the current design has no expiry/release rule for an unfunded `initiated` or `eurc_purchase_pending` hold.
+After the reservation is durably created, the CDP onramp session token call happens synchronously in the request path, the same way `StartKycSessionService` calls Didit — not through a job (`AD-145` governs cross-domain *state transitions*, not a single external call whose whole purpose is "start now, hand the client a URL"). If that call fails, a `purchase_failed` money event is recorded and the error propagates; the reservation row is deliberately left in place rather than unwound, because the already-decided capacity policy (reserve immediately, auto-expire if unfunded) already covers this case identically to an investor who simply never completes the purchase.
 
-Before enabling reservation writes, the architecture needs both:
+## Unfunded reservation expiry
 
-1. a supported and approved funding rail whose asset/network combination matches the legally selected flow; and
-2. explicit timeout, retry, cancellation, and capacity-release rules for abandoned and failed purchases.
+A `case_timers.reservation_unfunded_expiry` job (`ExpireUnfundedReservationsService`, run every minute by the worker process — the other `case_timers`/`maintenance` jobs run hourly, but a 15-minute promise needs a tighter sweep) lists every `initiated` reservation and flips any older than 15 minutes to `lapsed`, exactly like `ExpireOverdueInformationRequestsService` already does for overdue information requests. There is no separate "release capacity" step: `reserved_capacity_eur` is computed by summing reservations excluding `cancelled`/`lapsed` at read/check time, so flipping the stage is the entire release. Each expiry is idempotent (a reservation no longer `initiated` by the time the job reaches it is a no-op, not an error) and writes an `offering.reservation_lapsed` audit log entry with `actor_account_id: null`, since nothing but the timer itself acts here.
 
-Once those decisions exist, the existing readiness projection can open without changing the response contract, and the reservation write can be added behind the shared idempotency middleware and an atomic capacity check.
+`reservation_stage` and `capital_state` are separate state machines (`AD-253`): a reservation whose latest `capital_state` already shows funded (`eurc_reserved`, `reconfirmation_pending`, or `eurc_finalized`) is never auto-expired just because `reservation_stage` is still `initiated` — that combination is normal, not a bug, since `reservation_stage` only moves forward at the later finalization step described below. `listInitiatedReservationsForTimers` reports each reservation's latest `capital_state` precisely so the sweep can apply this exclusion (`isReservationFunded`, `domain/reservation-eligibility.policy.ts`).
+
+## Advancing capital_state: the onramp transaction poll
+
+Coinbase's onramp/offramp API has no webhook (confirmed against CDP's own API reference, not assumed — see [`docs/coinbase-cdp-onramp.md`](coinbase-cdp-onramp.md)), so a `case_timers.reservation_onramp_poll` job (`PollOnrampTransactionsService`, also every minute) is the only way `capital_state` ever moves past `eurc_purchase_pending`. It lists reservations whose latest money event is `eurc_purchase_pending`, calls `GET /onramp/v1/buy/user/{partnerUserRef}/transactions` for each (`partnerUserRef` is the reservation ID, set at session-token creation), and records a new money event: `eurc_reserved` if any returned transaction succeeded, `purchase_failed` only once nothing is still `created`/`in_progress` and at least one failed, or no change at all while everything is still in flight or nothing has started yet. This job is only registered when Coinbase credentials are configured — the one worker job so far whose sole dependency is genuinely optional, unlike the always-on `case_timers`/`maintenance` jobs.
+
+An investor whose purchase succeeds after their reservation has already lapsed (the poll hasn't yet caught up when the 15-minute sweep runs) is a real, unresolved race this pass does not reconcile — deciding what happens to that late `EURC` is a policy question in the same territory as `AD-251`'s no-refund stance, not an implementation detail to invent here.
+
+## The funding rail still stays closed by default
+
+Both `GetInvestorOfferingService` and `CreateReservationService` take a `fundingRailAvailable` flag, computed once in `server.ts` as `RESERVATION_FUNDING_RAIL_ENABLED && <a configured Coinbase client>` and passed to both, so the read side and the write side can never disagree about whether reservations are open. `RESERVATION_FUNDING_RAIL_ENABLED` defaults to `false`; setting it without also configuring `COINBASE_CDP_*`/`COINBASE_ONRAMP_REDIRECT_URL` has no effect, and vice versa — either alone leaves `POST .../reservations` returning `409 funding_rail_unavailable`, deliberately, rather than a confusing half-enabled state.
+
+This codebase cannot verify Coinbase's live EUR/Base support on its own — that is exactly the category of assumption that broke the prior Stripe-based design (see the historical evidence preserved in [`STRIPE_INTEGRATION.md`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/Backend/04-Payments-Financial/STRIPE_INTEGRATION.md)). Before setting `RESERVATION_FUNDING_RAIL_ENABLED=true` in any environment, a human with real Coinbase CDP credentials should confirm, against the live API (not documentation):
+
+1. `GET /onramp/v1/buy/options?country=<the investor's country>` lists `EUR` among `payment_currencies` and lists a `EURC`-on-`Base` combination among `purchase_currencies`/`networks`;
+2. a real `POST /onramp/v1/token` + hosted-purchase-page round trip actually completes for a small test amount, end to end, on the configured `COINBASE_ONRAMP_BLOCKCHAIN`; and
+3. the configured `COINBASE_CDP_API_KEY_ID`/`COINBASE_CDP_API_KEY_SECRET` are the intended environment's own credentials (sandbox for anything but production), since nothing in this codebase enforces that separation.
+
+This is a one-time, per-environment gate, not a runtime check — no code here polls Coinbase's own capability endpoint before serving a reservation request, since that would add latency and a new failure mode to every request for a fact that changes rarely, if ever, once confirmed.
+
+See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/Backend/15-Decisions-and-Rationale/ARCHITECTURE_DECISIONS.md) for the full provider decision and its "Still Open" list, and `docs/coinbase-cdp-onramp.md` for the client's exact REST surface.
+
+## Offering finalization (founder-triggered)
+
+`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed," the only path that ever creates a `settlement.position_ledger` row. Gated identically to origination's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
+
+```json
+{
+  "data": {
+    "offering_id": "offering_...",
+    "status": "final_offering",
+    "final_offering_published_at": "2026-09-02T12:00:00.000Z",
+    "positions_created": 3,
+    "reservations_cancelled": 1
+  }
+}
+```
+
+Everything eligibility-relevant is re-verified atomically inside one transaction, under a row lock on the `offerings` row, mirroring `createReservation`'s own `AD-146` discipline rather than trusting an advisory read: `target_raise_eur` must still be fully funded (`AD-245` — no partial-funding path, so this is a hard `>=` gate, not the founder's discretion) and the offering must still be `pre_offering`. A losing request gets `409 offering.finalization_target_not_reached` or `409 offering.finalization_not_available`; an unknown `offering_id` is `404 offering.not_found`.
+
+For every reservation still `reservation_stage: "initiated"` on the offering, the same transaction locks the reservation row (`FOR UPDATE OF reservation`, alongside the offering lock) and either:
+
+- **funded** (latest `capital_state` is `eurc_reserved`, `reconfirmation_pending`, or `eurc_finalized`) → creates one `position_ledger` row and moves the reservation to `reservation_stage: "finalized"`; or
+- **not funded** (reserved but never completed payment — possible even though the *offering's total* is fully funded, if some investors reserved but others' purchases covered the shortfall) → moves the reservation to `reservation_stage: "cancelled"` and creates no position.
+
+A position's `unit_count` and `cost_basis_eur` are both set to the reservation's own committed `amount_eur` — a deliberate 1-unit-per-EUR convention (`costBasisToUnitCount`, `domain/finalization.policy.ts`), decided because no other pricing model is recorded anywhere in the architecture (`ARCHITECTURE_DECISIONS.md`/`CORE_TABLES.md` name total approved supply and a EUR-to-units conversion as an explicit, still-open gap under `AD-238`). This rule applies only to investor-subscribed positions from a real cash reservation; it says nothing about the original owner's retained position, which has no cash cost basis to convert and remains that same unresolved `AD-238` gap. `holder_wallet_address` is copied from the investor's `settlement.wallet_registrations` row as a convenience (`AD-241`'s own framing — "not a second source of truth"); `position_status` stays `pending_internal_settlement`, since nothing here touches the chain (`AD-234` keeps production blockchain settlement dormant) or attempts to mint or transfer a token (`AD-247`: only the PIV mints, using its own signers).
+
+Locking the reservation rows blocks a concurrent expiry sweep from lapsing one mid-finalization, but not a concurrent onramp poll: `PollOnrampTransactionsService` inserts a new `money_events` row rather than updating the reservation row, so a row lock on `reservations` doesn't block it. A purchase that lands in `money_events` in the same instant as finalization reads that reservation as unfunded is the same category of residual, deliberately unresolved race already named above for the expiry sweep — narrow, rare given finalization is an infrequent, deliberate staff action, and not engineered around here for the same reason.

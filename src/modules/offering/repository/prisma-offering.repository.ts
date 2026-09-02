@@ -1,5 +1,6 @@
 import { ulid } from "ulid";
 
+import { toCents } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import type {
   InvestorOfferingDetailRecord,
@@ -17,9 +18,30 @@ import type {
   OpenedOffering,
   OpenOfferingForApprovedCaseInput,
 } from "./offering-origination-handoff.repository.js";
+import type {
+  AdvanceReservationCapitalStateInput,
+  CreateReservationInput,
+  CreateReservationResult,
+  ExpireReservationInput,
+  InitiatedReservationForTimer,
+  PendingPurchaseReservationForTimer,
+  ReservationRepository,
+} from "./reservation.repository.js";
+import { FUNDED_CAPITAL_STATES } from "../domain/reservation-eligibility.policy.js";
+import { costBasisToUnitCount, isOfferingFinalizable } from "../domain/finalization.policy.js";
+import type {
+  FinalizeOfferingInput,
+  FinalizeOfferingRepository,
+  FinalizeOfferingResult,
+} from "./finalize-offering.repository.js";
 
 export class PrismaOfferingRepository
-  implements OfferingRepository, DisclosureDocumentRepository, OfferingOriginationHandoffRepository
+  implements
+    OfferingRepository,
+    DisclosureDocumentRepository,
+    OfferingOriginationHandoffRepository,
+    FinalizeOfferingRepository,
+    ReservationRepository
 {
   public constructor(private readonly database: DatabaseClient) {}
 
@@ -213,7 +235,7 @@ export class PrismaOfferingRepository
             select: { eligibilityState: true, renewalDueAt: true },
           },
           walletRegistration: {
-            select: { registeredAt: true },
+            select: { walletAddress: true, registeredAt: true },
           },
         },
       }),
@@ -308,6 +330,7 @@ export class PrismaOfferingRepository
         kycEligibilityState: account.kycEligibility?.eligibilityState ?? null,
         kycRenewalDueAt: account.kycEligibility?.renewalDueAt ?? null,
         walletProvisioned: account.walletRegistration !== null,
+        walletAddress: account.walletRegistration?.walletAddress ?? null,
         payoutWalletRegistered:
           account.walletRegistration !== null &&
           account.walletRegistration.registeredAt !== null,
@@ -360,6 +383,339 @@ export class PrismaOfferingRepository
           documentType: row.document_type,
           disclosurePackVersion: row.disclosure_pack_version,
         };
+  }
+
+  public async createReservation(input: CreateReservationInput): Promise<CreateReservationResult> {
+    return this.database.$transaction(async (transaction) => {
+      // AD-146: lock the offering row so concurrent reservation attempts
+      // against the same offering serialize, matching the FOR UPDATE
+      // pattern PrismaOriginationRepository.submitInitialCase already uses.
+      const locked = await transaction.$queryRaw<
+        Array<{ offering_id: string; status: string; target_raise_eur: string }>
+      >`
+        SELECT offering_id, status, target_raise_eur::text
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined || offering.status !== "pre_offering") {
+        return { reservation: null, conflict: "offering_not_open" as const };
+      }
+
+      const reservedRows = await transaction.$queryRaw<Array<{ reserved_capacity_eur: string }>>`
+        SELECT COALESCE(
+          SUM(amount_eur) FILTER (WHERE reservation_stage NOT IN ('cancelled', 'lapsed')),
+          0
+        )::text AS reserved_capacity_eur
+        FROM offering.reservations
+        WHERE offering_id = ${input.offeringId}
+      `;
+      const reservedCapacityEur = reservedRows[0]?.reserved_capacity_eur ?? "0";
+      const remainingCents = toCents(offering.target_raise_eur) - toCents(reservedCapacityEur);
+      if (toCents(input.amountEur) > (remainingCents > 0n ? remainingCents : 0n)) {
+        return { reservation: null, conflict: "capacity_exceeded" as const };
+      }
+
+      await transaction.reservation.create({
+        data: {
+          id: input.reservationId,
+          offeringId: input.offeringId,
+          accountId: input.accountId,
+          amountEur: input.amountEur,
+          reservationStage: "initiated",
+          disclosurePackVersionAtReservation: input.disclosurePackVersionAtReservation,
+          createdAt: input.createdAt,
+        },
+      });
+      await transaction.moneyEvent.create({
+        data: {
+          id: `money_event_${ulid()}`,
+          reservationId: input.reservationId,
+          provider: "coinbase_cdp",
+          capitalState: "initiated",
+          amountEur: input.amountEur,
+          recordedAt: input.createdAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.reservation_created",
+          resourceType: "reservation",
+          resourceId: input.reservationId,
+          changes: {
+            trace_id: input.traceId,
+            offering_id: input.offeringId,
+            amount_eur: input.amountEur,
+          },
+          createdAt: input.createdAt,
+        },
+      });
+
+      return {
+        reservation: { reservationId: input.reservationId, createdAt: input.createdAt },
+        conflict: null,
+      };
+    });
+  }
+
+  public async recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<void> {
+    await this.database.moneyEvent.create({
+      data: {
+        id: `money_event_${ulid()}`,
+        reservationId: input.reservationId,
+        provider: input.provider,
+        providerReference: input.providerReference,
+        capitalState: input.capitalState,
+        amountEur: input.amountEur,
+        amountEurc: input.amountEurc,
+        recordedAt: input.recordedAt,
+      },
+    });
+  }
+
+  public async listInitiatedReservationsForTimers(): Promise<InitiatedReservationForTimer[]> {
+    const rows = await this.database.$queryRaw<
+      Array<{
+        reservation_id: string;
+        offering_id: string;
+        account_id: string;
+        created_at: Date;
+        latest_capital_state: string | null;
+      }>
+    >`
+      SELECT
+        reservation.reservation_id,
+        reservation.offering_id,
+        reservation.account_id,
+        reservation.created_at,
+        latest_money.capital_state AS latest_capital_state
+      FROM offering.reservations AS reservation
+      LEFT JOIN LATERAL (
+        SELECT money_event.capital_state
+        FROM money.money_events AS money_event
+        WHERE money_event.reservation_id = reservation.reservation_id
+        ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+        LIMIT 1
+      ) AS latest_money ON TRUE
+      WHERE reservation.reservation_stage = 'initiated'
+    `;
+    return rows.map((row) => ({
+      reservationId: row.reservation_id,
+      offeringId: row.offering_id,
+      accountId: row.account_id,
+      createdAt: row.created_at,
+      latestCapitalState: row.latest_capital_state,
+    }));
+  }
+
+  public async listPendingPurchaseReservationsForTimers(): Promise<PendingPurchaseReservationForTimer[]> {
+    const rows = await this.database.$queryRaw<
+      Array<{ reservation_id: string; account_id: string; amount_eur: string }>
+    >`
+      SELECT reservation.reservation_id, reservation.account_id, reservation.amount_eur::text
+      FROM offering.reservations AS reservation
+      JOIN LATERAL (
+        SELECT money_event.capital_state
+        FROM money.money_events AS money_event
+        WHERE money_event.reservation_id = reservation.reservation_id
+        ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+        LIMIT 1
+      ) AS latest_money ON TRUE
+      WHERE reservation.reservation_stage = 'initiated'
+        AND latest_money.capital_state = 'eurc_purchase_pending'
+    `;
+    return rows.map((row) => ({
+      reservationId: row.reservation_id,
+      accountId: row.account_id,
+      amountEur: row.amount_eur,
+    }));
+  }
+
+  public async expireReservation(input: ExpireReservationInput): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ reservation_id: string }>>`
+        SELECT reservation_id
+        FROM offering.reservations
+        WHERE reservation_id = ${input.reservationId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return false;
+
+      const current = await transaction.reservation.findUniqueOrThrow({
+        where: { id: input.reservationId },
+        select: { reservationStage: true },
+      });
+      if (current.reservationStage !== "initiated") return false;
+
+      await transaction.reservation.update({
+        where: { id: input.reservationId },
+        data: { reservationStage: "lapsed" },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: null,
+          action: "offering.reservation_lapsed",
+          resourceType: "reservation",
+          resourceId: input.reservationId,
+          changes: {
+            trace_id: input.traceId,
+            previous_stage: "initiated",
+            new_stage: "lapsed",
+          },
+          createdAt: input.expiredAt,
+        },
+      });
+      return true;
+    });
+  }
+
+  public async finalizeOffering(input: FinalizeOfferingInput): Promise<FinalizeOfferingResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<
+        Array<{ offering_id: string; status: string; target_raise_eur: string }>
+      >`
+        SELECT offering_id, status, target_raise_eur::text
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined) {
+        return { finalized: null, conflict: "offering_not_found" as const };
+      }
+      if (offering.status !== "pre_offering") {
+        return { finalized: null, conflict: "not_open" as const };
+      }
+
+      const fundedRows = await transaction.$queryRaw<Array<{ funded_eur: string }>>`
+        SELECT COALESCE(
+          SUM(latest_money.amount_eur) FILTER (WHERE latest_money.capital_state = ANY(${[...FUNDED_CAPITAL_STATES]})),
+          0
+        )::text AS funded_eur
+        FROM offering.reservations AS reservation
+        LEFT JOIN LATERAL (
+          SELECT money_event.capital_state, money_event.amount_eur
+          FROM money.money_events AS money_event
+          WHERE money_event.reservation_id = reservation.reservation_id
+          ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+          LIMIT 1
+        ) AS latest_money ON TRUE
+        WHERE reservation.offering_id = ${input.offeringId}
+      `;
+      const fundedEur = fundedRows[0]?.funded_eur ?? "0";
+      if (!isOfferingFinalizable({ status: offering.status, targetRaiseEur: offering.target_raise_eur, fundedEur })) {
+        return { finalized: null, conflict: "target_not_reached" as const };
+      }
+
+      // Locked alongside the offering row so a concurrent expiry sweep
+      // cannot flip one of these out from under this transaction; a
+      // concurrent onramp-poll INSERT into money_events is a narrower,
+      // documented residual race (see docs/investor-offering.md) — an
+      // append-only insert isn't blocked by a row lock on reservations.
+      const reservations = await transaction.$queryRaw<
+        Array<{
+          reservation_id: string;
+          account_id: string;
+          amount_eur: string;
+          latest_capital_state: string | null;
+          wallet_address: string | null;
+        }>
+      >`
+        SELECT
+          reservation.reservation_id,
+          reservation.account_id,
+          reservation.amount_eur::text,
+          latest_money.capital_state AS latest_capital_state,
+          wallet.wallet_address
+        FROM offering.reservations AS reservation
+        LEFT JOIN LATERAL (
+          SELECT money_event.capital_state
+          FROM money.money_events AS money_event
+          WHERE money_event.reservation_id = reservation.reservation_id
+          ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+          LIMIT 1
+        ) AS latest_money ON TRUE
+        LEFT JOIN settlement.wallet_registrations AS wallet
+          ON wallet.account_id = reservation.account_id
+        WHERE reservation.offering_id = ${input.offeringId}
+          AND reservation.reservation_stage = 'initiated'
+        FOR UPDATE OF reservation
+      `;
+
+      const piv = await transaction.offering.findUniqueOrThrow({
+        where: { id: input.offeringId },
+        select: { pivId: true },
+      });
+
+      let positionsCreated = 0;
+      let reservationsCancelled = 0;
+      for (const reservation of reservations) {
+        const funded =
+          reservation.latest_capital_state !== null &&
+          (FUNDED_CAPITAL_STATES as readonly string[]).includes(reservation.latest_capital_state);
+        if (funded) {
+          await transaction.positionLedger.create({
+            data: {
+              id: `position_${ulid()}`,
+              reservationId: reservation.reservation_id,
+              pivId: piv.pivId,
+              accountId: reservation.account_id,
+              unitCount: costBasisToUnitCount(reservation.amount_eur),
+              costBasisEur: reservation.amount_eur,
+              holderWalletAddress: reservation.wallet_address,
+            },
+          });
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "finalized", reservationFinalizedAt: input.finalizedAt },
+          });
+          positionsCreated += 1;
+        } else {
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "cancelled" },
+          });
+          reservationsCancelled += 1;
+        }
+      }
+
+      await transaction.offering.update({
+        where: { id: input.offeringId },
+        data: { status: "final_offering", finalOfferingPublishedAt: input.finalizedAt },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.finalized",
+          resourceType: "offering",
+          resourceId: input.offeringId,
+          changes: {
+            trace_id: input.traceId,
+            founder_review_notes: input.founderReviewNotes,
+            funded_eur: fundedEur,
+            target_raise_eur: offering.target_raise_eur,
+            positions_created: positionsCreated,
+            reservations_cancelled: reservationsCancelled,
+          },
+          createdAt: input.finalizedAt,
+        },
+      });
+
+      return {
+        finalized: {
+          offeringId: input.offeringId,
+          finalOfferingPublishedAt: input.finalizedAt,
+          positionsCreated,
+          reservationsCancelled,
+        },
+        conflict: null,
+      };
+    });
   }
 }
 

@@ -77,6 +77,7 @@ export interface InvestorOfferingDetailRecord {
     kycEligibilityState: string | null;
     kycRenewalDueAt: Date | null;
     walletProvisioned: boolean;
+    walletAddress: string | null;
     payoutWalletRegistered: boolean;
   };
 }

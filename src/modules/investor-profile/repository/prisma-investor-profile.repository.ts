@@ -1,13 +1,79 @@
+import { ulid } from "ulid";
+
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
-import type {
-  InvestorPositionRecord,
-  InvestorProfileRecord,
-  InvestorProfileRepository,
-  InvestorReservationRecord,
+import {
+  WalletAddressConflictError,
+  type InvestorPositionRecord,
+  type InvestorProfileRecord,
+  type InvestorProfileRepository,
+  type InvestorReservationRecord,
+  type RegisteredWallet,
 } from "./investor-profile.repository.js";
 
 export class PrismaInvestorProfileRepository implements InvestorProfileRepository {
   public constructor(private readonly database: DatabaseClient) {}
+
+  public async registerWallet(input: {
+    accountId: string;
+    walletAddress: string;
+    registrationCommitment: string;
+    requestedAt: Date;
+  }): Promise<RegisteredWallet> {
+    return this.database.$transaction(async (transaction) => {
+      const existingForAccount = await transaction.walletRegistration.findUnique({
+        where: { accountId: input.accountId },
+        select: {
+          walletAddress: true,
+          registrationCommitment: true,
+          requestedAt: true,
+          registeredAt: true,
+        },
+      });
+      if (existingForAccount !== null) {
+        if (existingForAccount.walletAddress !== input.walletAddress) {
+          throw new WalletAddressConflictError("address_mismatch");
+        }
+        // Idempotent replay of the same request: return the existing
+        // registration rather than creating a second one.
+        return existingForAccount;
+      }
+
+      const claimedByOther = await transaction.walletRegistration.findUnique({
+        where: { walletAddress: input.walletAddress },
+        select: { accountId: true },
+      });
+      if (claimedByOther !== null) {
+        throw new WalletAddressConflictError("address_claimed");
+      }
+
+      const created = await transaction.walletRegistration.create({
+        data: {
+          accountId: input.accountId,
+          walletAddress: input.walletAddress,
+          registrationCommitment: input.registrationCommitment,
+          requestedAt: input.requestedAt,
+        },
+        select: {
+          walletAddress: true,
+          registrationCommitment: true,
+          requestedAt: true,
+          registeredAt: true,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "settlement.wallet_registration_requested",
+          resourceType: "account",
+          resourceId: input.accountId,
+          changes: { wallet_address: input.walletAddress },
+          createdAt: input.requestedAt,
+        },
+      });
+      return created;
+    });
+  }
 
   public async get(accountId: string): Promise<InvestorProfileRecord | null> {
     const account = await this.database.account.findUnique({

@@ -35,6 +35,7 @@ import { createOidcProvider } from "./modules/auth/infrastructure/oidc-provider.
 import { OidcBearerSessionResolver } from "./modules/auth/infrastructure/oidc-bearer-session.resolver.js";
 import { CompositeSessionResolver } from "./modules/auth/application/composite-session.resolver.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
@@ -202,6 +203,27 @@ const diditKyc =
             }),
       }
     : undefined;
+const onrampRedirectUrl = environment.COINBASE_ONRAMP_REDIRECT_URL;
+const coinbaseCdpClient =
+  environment.COINBASE_CDP_API_KEY_ID === undefined ||
+  environment.COINBASE_CDP_API_KEY_SECRET === undefined ||
+  environment.COINBASE_ONRAMP_REDIRECT_URL === undefined
+    ? undefined
+    : new HttpCoinbaseCdpClient({
+        baseUrl: environment.COINBASE_CDP_API_BASE_URL,
+        payHostedUrl: environment.COINBASE_CDP_PAY_HOSTED_URL,
+        apiKeyId: environment.COINBASE_CDP_API_KEY_ID,
+        apiKeySecret: environment.COINBASE_CDP_API_KEY_SECRET,
+        timeoutMs: 8_000,
+      });
+// Necessary but not sufficient on its own: RESERVATION_FUNDING_RAIL_ENABLED
+// is the human "I've verified this live" switch, but it can never actually
+// open the rail without a configured Coinbase client to serve it — an
+// operator who sets one without the other should not get a confusing
+// half-enabled state (readiness reporting available with no route to act on
+// it, or vice versa).
+const reservationFundingRailEnabled =
+  environment.RESERVATION_FUNDING_RAIL_ENABLED && coinbaseCdpClient !== undefined;
 const betterAuthSessionResolver = new BetterAuthSessionResolver(auth);
 const oidcProvider = createOidcProvider({
   baseUrl: environment.BETTER_AUTH_URL,
@@ -249,10 +271,12 @@ const app = createApp({
   logger,
   authHandler: toNodeHandler(auth),
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
+  reservationFundingRailEnabled,
   protectedApi: {
     accounts: accountRepository,
     sessions,
     originationRepository,
+    offeringOperations: { repository: offeringRepository },
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({
       rpName: environment.WEBAUTHN_RP_NAME,
@@ -267,6 +291,17 @@ const app = createApp({
       repository: offeringRepository,
       store: disclosureDocumentStore,
     },
+    ...(coinbaseCdpClient === undefined || onrampRedirectUrl === undefined
+      ? {}
+      : {
+          reservations: {
+            repository: offeringRepository,
+            coinbase: coinbaseCdpClient,
+            blockchain: environment.COINBASE_ONRAMP_BLOCKCHAIN,
+            buildRedirectUrl: (reservationId: string) =>
+              `${onrampRedirectUrl}?reservation_id=${encodeURIComponent(reservationId)}`,
+          },
+        }),
     totp: {
       repository: new PrismaTotpRepository(database),
       provider: new OtplibTotpProvider(),

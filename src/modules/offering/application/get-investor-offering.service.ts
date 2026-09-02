@@ -1,5 +1,12 @@
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { InvestorOfferingDetailResponse } from "../api/offering.schemas.js";
+import { subtractCurrencyFloorZero } from "../domain/currency.js";
+import {
+  computeReservationBlockers,
+  isInvestmentEligible,
+  isKycCurrent,
+  isLoginMethodsComplete,
+} from "../domain/reservation-eligibility.policy.js";
 import type { OfferingRepository } from "../repository/offering.repository.js";
 
 export class GetInvestorOfferingService {
@@ -24,48 +31,37 @@ export class GetInvestorOfferingService {
     }
 
     const now = this.clock();
-    const loginMethods = new Set(record.accountReadiness.loginMethods);
-    const kycCurrent =
-      record.accountReadiness.kycEligibilityState === "eligible" &&
-      record.accountReadiness.kycRenewalDueAt !== null &&
-      record.accountReadiness.kycRenewalDueAt > now;
-    const loginMethodsComplete =
-      loginMethods.has("google") && loginMethods.has("email_password");
-    const investmentEligible =
-      record.accountReadiness.status === "active" &&
-      kycCurrent &&
-      loginMethodsComplete;
+    const kycCurrent = isKycCurrent({
+      kycEligibilityState: record.accountReadiness.kycEligibilityState,
+      kycRenewalDueAt: record.accountReadiness.kycRenewalDueAt,
+      now,
+    });
+    const loginMethodsComplete = isLoginMethodsComplete(record.accountReadiness.loginMethods);
+    const investmentEligible = isInvestmentEligible({
+      accountStatus: record.accountReadiness.status,
+      kycCurrent,
+      loginMethodsComplete,
+    });
     const remainingCapacityEur = subtractCurrencyFloorZero(
       record.targetRaiseEur,
       record.reservedCapacityEur,
     );
-    const blockers: InvestorOfferingDetailResponse["data"]["reservation"]["blockers"] = [];
-
-    if (record.accountReadiness.status !== "active") blockers.push("account_restricted");
-    if (record.accountReadiness.kycEligibilityState !== "eligible") {
-      blockers.push("kyc_not_eligible");
-    } else if (!kycCurrent) {
-      blockers.push("kyc_renewal_due");
-    }
-    if (!loginMethodsComplete) blockers.push("login_methods_incomplete");
-    if (!record.accountReadiness.walletProvisioned) {
-      blockers.push("payment_account_not_ready");
-    }
-    if (
-      record.currentDisclosurePack === null ||
-      record.currentDisclosurePack.documents.length === 0
-    ) {
-      blockers.push("disclosure_pack_unavailable");
-    }
-    if (record.status !== "pre_offering") blockers.push("offering_not_open");
-    if (remainingCapacityEur === "0.00") blockers.push("capacity_exhausted");
-
-    if (!this.fundingRailAvailable) {
-      // The selected phase-1 EUR -> EURC rail is not currently implementable as
-      // documented. Keep this provider-neutral capability closed until a supported
-      // rail is selected; never create an unfunded capacity hold here.
-      blockers.push("funding_rail_unavailable");
-    }
+    // Kept closed (never true) until a go-live step deliberately wires this
+    // to a verified Coinbase CDP readiness check (AD-255) — never create an
+    // unfunded capacity hold here.
+    const blockers = computeReservationBlockers({
+      now,
+      fundingRailAvailable: this.fundingRailAvailable,
+      offeringStatus: record.status,
+      hasDisclosurePack:
+        record.currentDisclosurePack !== null && record.currentDisclosurePack.documents.length > 0,
+      remainingCapacityEur,
+      accountStatus: record.accountReadiness.status,
+      kycEligibilityState: record.accountReadiness.kycEligibilityState,
+      kycRenewalDueAt: record.accountReadiness.kycRenewalDueAt,
+      loginMethods: record.accountReadiness.loginMethods,
+      walletProvisioned: record.accountReadiness.walletProvisioned,
+    });
 
     return {
       data: {
@@ -135,15 +131,4 @@ export class GetInvestorOfferingService {
       },
     };
   }
-}
-
-function subtractCurrencyFloorZero(minuend: string, subtrahend: string): string {
-  const remaining = toCents(minuend) - toCents(subtrahend);
-  const cents = remaining > 0n ? remaining : 0n;
-  return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
-}
-
-function toCents(value: string): bigint {
-  const [euros, fraction = "00"] = value.split(".");
-  return BigInt(euros!) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
 }

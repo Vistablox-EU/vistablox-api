@@ -26,8 +26,27 @@ export interface InvestorProfileRecord {
   } | null;
 }
 
+export interface RegisteredWallet {
+  walletAddress: string;
+  registrationCommitment: string;
+  requestedAt: Date;
+  registeredAt: Date | null;
+}
+
+export class WalletAddressConflictError extends Error {
+  public constructor(public readonly reason: "address_mismatch" | "address_claimed") {
+    super(`Wallet address conflict: ${reason}`);
+  }
+}
+
 export interface InvestorProfileRepository {
   get(accountId: string): Promise<InvestorProfileRecord | null>;
+  registerWallet(input: {
+    accountId: string;
+    walletAddress: string;
+    registrationCommitment: string;
+    requestedAt: Date;
+  }): Promise<RegisteredWallet>;
   listReservations(input: {
     accountId: string;
     limit: number;

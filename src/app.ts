@@ -62,10 +62,16 @@ import {
   createInvestorOfferingRouter,
   createOfferingRouter,
 } from "./modules/offering/api/offering.router.js";
+import { createOfferingOperationsRouter } from "./modules/offering/api/offering-operations.router.js";
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
+import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
+import { FinalizeOfferingService } from "./modules/offering/application/finalize-offering.service.js";
+import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
 import type { DisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
+import type { ReservationRepository } from "./modules/offering/repository/reservation.repository.js";
+import type { FinalizeOfferingRepository } from "./modules/offering/repository/finalize-offering.repository.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
 import type { OfferingRepository } from "./modules/offering/repository/offering.repository.js";
 import { createOriginationRouter } from "./modules/origination/api/origination.router.js";
@@ -111,6 +117,7 @@ import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/did
 import type { KycRepository } from "./modules/identity/repository/kyc.repository.js";
 import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
 import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
+import { RegisterWalletService } from "./modules/investor-profile/application/register-wallet.service.js";
 import {
   ListInvestorCurrentPositionsService,
   ListInvestorReservationsService,
@@ -133,6 +140,8 @@ export interface AppDependencies {
   logger: Logger;
   authHandler?: RequestHandler;
   rateLimitStore?: RateLimitStore;
+  /** Never true unless a human has done the live Coinbase EUR/Base verification AD-255 leaves open — see docs/investor-offering.md. Defaults false. */
+  reservationFundingRailEnabled?: boolean;
   protectedApi?: {
     accounts: AccountRepository;
     sessions: SessionResolver;
@@ -157,6 +166,15 @@ export interface AppDependencies {
     disclosureDocuments?: {
       repository: DisclosureDocumentRepository;
       store: DisclosureDocumentStore;
+    };
+    reservations?: {
+      repository: ReservationRepository;
+      coinbase: CoinbaseCdpClient;
+      blockchain: string;
+      buildRedirectUrl: (reservationId: string) => string;
+    };
+    offeringOperations?: {
+      repository: FinalizeOfferingRepository;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -257,15 +275,42 @@ export function createApp(dependencies: AppDependencies): Express {
       "/v1/offerings",
       createInvestorOfferingRouter(
         requireAuthentication,
-        new GetInvestorOfferingService(dependencies.offeringRepository),
+        new GetInvestorOfferingService(
+          dependencies.offeringRepository,
+          undefined,
+          dependencies.reservationFundingRailEnabled ?? false,
+        ),
         dependencies.protectedApi.disclosureDocuments === undefined
           ? undefined
           : new DownloadDisclosureDocumentService(
               dependencies.protectedApi.disclosureDocuments.repository,
               dependencies.protectedApi.disclosureDocuments.store,
             ),
+        dependencies.protectedApi.reservations === undefined
+          ? undefined
+          : new CreateReservationService(
+              dependencies.offeringRepository,
+              dependencies.protectedApi.reservations.repository,
+              dependencies.protectedApi.reservations.coinbase,
+              {
+                blockchain: dependencies.protectedApi.reservations.blockchain,
+                buildRedirectUrl: dependencies.protectedApi.reservations.buildRedirectUrl,
+                fundingRailAvailable: dependencies.reservationFundingRailEnabled ?? false,
+              },
+            ),
       ),
     );
+    if (dependencies.protectedApi.offeringOperations !== undefined) {
+      app.use(
+        "/internal/v1/offerings",
+        createOfferingOperationsRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new FinalizeOfferingService(dependencies.protectedApi.offeringOperations.repository),
+        ),
+      );
+    }
     if (dependencies.protectedApi.investorProfile !== undefined) {
       const investorProfile = dependencies.protectedApi.investorProfile;
       app.use(
@@ -278,6 +323,7 @@ export function createApp(dependencies: AppDependencies): Express {
           ),
           new ListInvestorReservationsService(investorProfile.repository),
           new ListInvestorCurrentPositionsService(investorProfile.repository),
+          new RegisterWalletService(investorProfile.repository),
         ),
       );
     }

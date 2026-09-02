@@ -50,6 +50,7 @@ describe("investor profile service", () => {
   it("assembles durable account data with the protected display profile", async () => {
     const repository: InvestorProfileRepository = {
       get: vi.fn().mockResolvedValue(profileRecord()),
+      registerWallet: vi.fn(),
       listReservations: vi.fn().mockResolvedValue([]),
       listCurrentPositions: vi.fn().mockResolvedValue([]),
     };
@@ -119,6 +120,7 @@ describe("investor profile service", () => {
   it("returns a stable not-found error when the account disappeared", async () => {
     const repository: InvestorProfileRepository = {
       get: vi.fn().mockResolvedValue(null),
+      registerWallet: vi.fn(),
       listReservations: vi.fn().mockResolvedValue([]),
       listCurrentPositions: vi.fn().mockResolvedValue([]),
     };

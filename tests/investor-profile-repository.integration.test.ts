@@ -241,7 +241,9 @@ describe.skipIf(databaseUrl === undefined)("investor profile PostgreSQL integrat
     await database.piv.deleteMany({ where: { id: pivId } });
     await database.originationCase.deleteMany({ where: { id: caseId } });
     await database.property.deleteMany({ where: { id: propertyId } });
-    await database.walletRegistration.deleteMany({ where: { accountId } });
+    await database.walletRegistration.deleteMany({
+      where: { accountId: { in: [accountId, otherAccountId] } },
+    });
     await database.kycEligibility.deleteMany({ where: { accountId } });
     await database.loginMethod.deleteMany({ where: { accountId } });
     await database.account.deleteMany({
@@ -336,5 +338,82 @@ describe.skipIf(databaseUrl === undefined)("investor profile PostgreSQL integrat
     expect(pendingPage.map((row) => row.positionStatus)).toEqual([
       "pending_internal_settlement",
     ]);
+  });
+
+  it("registers a wallet, replays idempotently, and rejects address conflicts", async () => {
+    const address = `0xnew${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0");
+
+    const created = await repository.registerWallet({
+      accountId: otherAccountId,
+      walletAddress: address,
+      registrationCommitment: `commitment_new_${suffix}`,
+      requestedAt: new Date("2026-09-02T11:00:00.000Z"),
+    });
+    expect(created).toMatchObject({
+      walletAddress: address,
+      registrationCommitment: `commitment_new_${suffix}`,
+      registeredAt: null,
+    });
+
+    const replayed = await repository.registerWallet({
+      accountId: otherAccountId,
+      walletAddress: address,
+      registrationCommitment: `commitment_replayed_${suffix}`,
+      requestedAt: new Date("2026-09-02T11:05:00.000Z"),
+    });
+    expect(replayed).toEqual(created);
+
+    await expect(
+      repository.registerWallet({
+        accountId: otherAccountId,
+        walletAddress: `0xdifferent${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0"),
+        registrationCommitment: `commitment_mismatch_${suffix}`,
+        requestedAt: new Date("2026-09-02T11:10:00.000Z"),
+      }),
+    ).rejects.toMatchObject({ reason: "address_mismatch" });
+
+    expect(
+      await database.auditLog.count({
+        where: {
+          resourceId: otherAccountId,
+          action: "settlement.wallet_registration_requested",
+        },
+      }),
+    ).toBe(1);
+  });
+
+  it("rejects registering an address already claimed by a different account", async () => {
+    const thirdAccountId = `acct_third_${suffix}`;
+    const thirdBetterAuthUserId = `auth_third_${suffix}`;
+    const claimedAddress = `0xclaim${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0");
+    await authPool.query(
+      'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
+      [thirdBetterAuthUserId, "Third Investor", `profile-third-${suffix}@example.test`, true, "customer"],
+    );
+    await database.account.create({
+      data: { id: thirdAccountId, betterAuthUserId: thirdBetterAuthUserId },
+    });
+
+    await database.walletRegistration.create({
+      data: {
+        accountId: thirdAccountId,
+        walletAddress: claimedAddress,
+        registrationCommitment: `commitment_claim_owner_${suffix}`,
+        requestedAt: new Date("2026-09-02T11:20:00.000Z"),
+      },
+    });
+
+    await expect(
+      repository.registerWallet({
+        accountId: otherAccountId,
+        walletAddress: claimedAddress,
+        registrationCommitment: `commitment_claim_attempt_${suffix}`,
+        requestedAt: new Date("2026-09-02T11:25:00.000Z"),
+      }),
+    ).rejects.toMatchObject({ reason: "address_claimed" });
+
+    await database.walletRegistration.deleteMany({ where: { accountId: thirdAccountId } });
+    await database.account.deleteMany({ where: { id: thirdAccountId } });
+    await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [thirdBetterAuthUserId]);
   });
 });

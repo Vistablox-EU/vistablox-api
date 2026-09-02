@@ -120,6 +120,29 @@ export const investorOfferingDetailResponseSchema = z.object({
   }),
 });
 
+export const createReservationBodySchema = z.object({
+  amount_eur: currency.refine((value) => Number(value) > 0, {
+    message: "amount_eur must be greater than zero",
+  }),
+});
+
+export const createReservationResponseSchema = z.object({
+  data: z.object({
+    reservation_id: z.string().min(1),
+    offering_id: z.string().min(1),
+    amount_eur: currency,
+    status: z.literal("initiated"),
+    expires_at: z.iso.datetime(),
+    onramp: z.object({
+      url: z.url(),
+      channel_id: z.string().min(1),
+    }),
+  }),
+});
+
+export type CreateReservationBody = z.infer<typeof createReservationBodySchema>;
+export type CreateReservationResponse = z.infer<typeof createReservationResponseSchema>;
+
 export type ListOfferingsQuery = z.infer<typeof listOfferingsQuerySchema>;
 export type ListOfferingsResponse = z.infer<typeof listOfferingsResponseSchema>;
 export type InvestorOfferingDetailResponse = z.infer<

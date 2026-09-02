@@ -68,6 +68,23 @@ export const investorProfileResponseSchema = z.object({
   }),
 });
 
+export const registerWalletBodySchema = z.object({
+  wallet_address: z
+    .string()
+    .trim()
+    .regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 20-byte, 0x-prefixed hex address"),
+});
+
+export const registerWalletResponseSchema = z.object({
+  data: z.object({
+    wallet_address: z.string().min(1),
+    registration_commitment: z.string().min(1),
+    status: z.enum(["pending", "registered"]),
+    requested_at: dateTime,
+    registered_at: dateTime.nullable(),
+  }),
+});
+
 export const investorActivityQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   after: z.string().min(1).optional(),
