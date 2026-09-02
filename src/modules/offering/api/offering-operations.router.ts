@@ -1,15 +1,22 @@
 import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
+import type { ClassifyMaterialityService } from "../application/classify-materiality.service.js";
 import type { FinalizeOfferingService } from "../application/finalize-offering.service.js";
 import { investorOfferingParamsSchema } from "./offering.schemas.js";
-import { finalizeOfferingBodySchema, finalizeOfferingResponseSchema } from "./offering-operations.schemas.js";
+import {
+  classifyMaterialityBodySchema,
+  classifyMaterialityResponseSchema,
+  finalizeOfferingBodySchema,
+  finalizeOfferingResponseSchema,
+} from "./offering-operations.schemas.js";
 
 export function createOfferingOperationsRouter(
   requireAuthentication: RequestHandler,
   requireAdminOperations: RequestHandler,
   requireStaffWebAuthn: RequestHandler,
   finalizeOffering: FinalizeOfferingService,
+  classifyMateriality: ClassifyMaterialityService,
 ): Router {
   const router = Router();
   const staffOnly = [requireAuthentication, requireAdminOperations, requireStaffWebAuthn];
@@ -25,6 +32,19 @@ export function createOfferingOperationsRouter(
       body,
     });
     response.json(finalizeOfferingResponseSchema.parse(result));
+  });
+
+  router.post("/:offering_id/materiality-records", ...staffOnly, async (request, response) => {
+    const authContext = requireAuthContext(response.locals.authContext);
+    const params = investorOfferingParamsSchema.parse(request.params);
+    const body = classifyMaterialityBodySchema.parse(request.body);
+    const result = await classifyMateriality.execute({
+      accountId: authContext.accountId,
+      offeringId: params.offering_id,
+      traceId: String(response.locals.traceId),
+      body,
+    });
+    response.status(201).json(classifyMaterialityResponseSchema.parse(result));
   });
 
   return router;

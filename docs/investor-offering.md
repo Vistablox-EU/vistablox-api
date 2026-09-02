@@ -125,4 +125,41 @@ A position's `unit_count` and `cost_basis_eur` are both set to the reservation's
 
 Only now does the transaction set `offerings.status = "final_offering"` — the one and only place in this codebase that ever does so.
 
-Out of scope for all three stages above, and not built: a material change resetting prior reconfirmations (its trigger — materiality classification itself — has no application code anywhere yet) and any per-jurisdiction override of the 168-hour platform default (no such table is documented). Locking reservation rows in each stage blocks a concurrent expiry sweep or a concurrent later stage from racing that same reservation, but not a concurrent onramp poll: `PollOnrampTransactionsService` inserts a new `money_events` row rather than updating the reservation row, so a row lock on `reservations` doesn't block it. A purchase that lands in `money_events` in the same instant as the publish stage reads that reservation as unfunded is the same category of residual, deliberately unresolved race already named above for the expiry sweep — narrow, rare given publishing is an infrequent, deliberate staff action, and not engineered around here for the same reason.
+Out of scope for all three stages above, and not built: any per-jurisdiction override of the 168-hour platform default (no such table is documented — see `AD-040`/`PAYMENT_FLOWS.md`'s "Effective Investor-Rights Window Override"). Locking reservation rows in each stage blocks a concurrent expiry sweep or a concurrent later stage from racing that same reservation, but not a concurrent onramp poll: `PollOnrampTransactionsService` inserts a new `money_events` row rather than updating the reservation row, so a row lock on `reservations` doesn't block it. A purchase that lands in `money_events` in the same instant as the publish stage reads that reservation as unfunded is the same category of residual, deliberately unresolved race already named above for the expiry sweep — narrow, rare given publishing is an infrequent, deliberate staff action, and not engineered around here for the same reason.
+
+## Materiality classification and the change-log
+
+`POST /internal/v1/offerings/:offering_id/materiality-records` is `AD-038`'s materiality classification — staff-gated exactly like `/finalize` (`admin_operations` role plus staff WebAuthn), since `ARCHITECTURE_DECISIONS.md`'s own AD-038 discussion confirms classification is "assessed by legal and offering ownership," performed as `admin_operations`, with no dedicated narrower role. Request body:
+
+```json
+{
+  "change_description": "Independent appraisal came in 7% below the disclosed valuation basis.",
+  "classification": "reviewed_material",
+  "threshold_type": "valuation"
+}
+```
+
+`classification` is one of `per_se_material`, `reviewed_material`, or `non_material` (`CORE_TABLES.md`'s exact `materiality_records.classification` values). `threshold_type` (`valuation | cashflow | gross_rent | closing_delay`, `PAYMENT_FLOWS.md`'s "Reviewed Material Changes With Default Thresholds" table) is rejected with `422` unless `classification` is `reviewed_material` — a per-se-material change is material by category (`PAYMENT_FLOWS.md`'s enumerated "Per Se Material Changes" list: issuer/obligor identity, legal instrument or ranking, fee/price/allocation mechanics, property or PIV identity, title/encumbrance/zoning/litigation/liquidity), not by crossing a threshold, and a non-material change has no threshold to record. This codebase does not attempt to infer which classification applies from structured inputs — that judgment call belongs to the classifying staff member, informed by `AD-038`'s materiality test (`(a)` would likely require a disclosure update, or `(b)` a reasonable retail investor could realistically decide differently) — the same way `founder_review_notes` records a founder's decision rather than computing one.
+
+What the endpoint does mechanically, atomically, under a row lock on the offering (`AD-146` discipline): a request is only accepted while the offering is between publish and commit (`final_offering_published_at` set, `status` still `pre_offering` — the same window `reconfirmReservation` itself operates in; `404 offering.not_found` for an unknown offering, `409 offering.materiality_classification_not_available` outside that window). It always inserts a `materiality_records` row and a generic audit-log entry (`offering.materiality_classified`), whatever the classification — `AD-038`: "must still be logged" applies even to `non_material` changes. `reset_triggered` is computed from `classification`, never accepted as a separate input: `per_se_material` and `reviewed_material` are always `true`, `non_material` is always `false` (`PAYMENT_FLOWS.md`'s Material-change rule: "Any material change resets the full 168-hour window and invalidates prior reconfirmations"; `AD-046`: reviewed-material thresholds are "escalation floors, not safe harbors," so a threshold-triggering change can never be waived down to non-material). When triggered, every reservation currently `reservation_stage: "reconfirmed"` on the offering moves back to `"awaiting_reconfirmation"` (clearing `reconfirmed_at`) — a reservation still only `"awaiting_reconfirmation"` has nothing to invalidate and is left untouched — and `platform_rights_end_at`/`effective_rights_end_at` are both recomputed as a **fresh** 168 hours from the classification instant, not merely extended from the old boundary. Reusing the same `effective_rights_end_at` field the window-close job reads means a reset landing after the window's old boundary but before that hourly job has actually run correctly reopens the window rather than racing a premature commit.
+
+Response (`201`):
+
+```json
+{
+  "data": {
+    "materiality_record_id": "materiality_...",
+    "offering_id": "offering_...",
+    "classification": "reviewed_material",
+    "threshold_type": "valuation",
+    "reset_triggered": true,
+    "classified_at": "2026-09-05T12:00:00.000Z",
+    "effective_rights_end_at": "2026-09-12T12:00:00.000Z",
+    "reservations_reset": 2
+  }
+}
+```
+
+Every created record also appears immediately in the investor-facing `change_log` (`GET /v1/offerings/:offering_id`'s response) — that read path already existed before this endpoint did, so no separate wiring was needed on the read side.
+
+**Known, deliberately unresolved gap:** `AD-038` also states a per-se-material change "always resets the disclosure pack." No application code anywhere in this codebase creates or republishes a `disclosure_packs` row — the `disclosure_packs`/`disclosure_documents` tables have version/`is_current`/`superseded_at` columns, but only read paths exist (`GetInvestorOfferingService`, `DownloadDisclosureDocumentService`). Disclosure-pack authoring (staff uploading new documents, versioning, superseding the prior pack) is a separate, materially larger, still-unbuilt prerequisite feature — this endpoint records the classification and applies the reconfirmation-window consequence, but does not and cannot also publish a new disclosure pack as a side effect. `materiality_records` also has no column linking a record to the disclosure-pack version it prompted, for the same reason.

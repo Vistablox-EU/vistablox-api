@@ -34,6 +34,7 @@ import {
   costBasisToUnitCount,
   isReconfirmationWindowOpen,
 } from "../domain/finalization.policy.js";
+import { materialityResetTriggered } from "../domain/materiality.policy.js";
 import type {
   CommitOfferingFinalizationInput,
   CommitOfferingFinalizationResult,
@@ -44,6 +45,7 @@ import type {
   ReconfirmReservationInput,
   ReconfirmReservationResult,
 } from "./finalize-offering.repository.js";
+import type { ClassifyMaterialityInput, ClassifyMaterialityResult, MaterialityRepository } from "./materiality.repository.js";
 
 export class PrismaOfferingRepository
   implements
@@ -51,6 +53,7 @@ export class PrismaOfferingRepository
     DisclosureDocumentRepository,
     OfferingOriginationHandoffRepository,
     FinalizeOfferingRepository,
+    MaterialityRepository,
     ReservationRepository
 {
   public constructor(private readonly database: DatabaseClient) {}
@@ -944,6 +947,119 @@ export class PrismaOfferingRepository
 
       return {
         committed: { offeringId: input.offeringId, positionsCreated, reservationsLapsed },
+        conflict: null,
+      };
+    });
+  }
+
+  public async classifyMateriality(input: ClassifyMaterialityInput): Promise<ClassifyMaterialityResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<
+        Array<{
+          offering_id: string;
+          status: string;
+          final_offering_published_at: Date | null;
+          effective_rights_end_at: Date | null;
+        }>
+      >`
+        SELECT offering_id, status, final_offering_published_at, effective_rights_end_at
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined) {
+        return { classified: null, conflict: "offering_not_found" as const };
+      }
+      // "Post-publication change" only means something once publication has
+      // happened, and only up to the moment commitOfferingFinalization
+      // actually commits (AD-046 puts post-finalization worsening through a
+      // separate amendment/consent path this codebase does not build here).
+      if (offering.status !== "pre_offering" || offering.final_offering_published_at === null) {
+        return { classified: null, conflict: "no_active_reconfirmation_window" as const };
+      }
+
+      const resetTriggered = materialityResetTriggered(input.classification);
+      let effectiveRightsEndAt = offering.effective_rights_end_at;
+      let reservationsReset = 0;
+
+      if (resetTriggered) {
+        // Only already-reconfirmed reservations have anything to invalidate;
+        // ones still awaiting_reconfirmation are untouched by a reset — they
+        // simply reconfirm (or not) against the now-later window like normal.
+        const reconfirmed = await transaction.$queryRaw<Array<{ reservation_id: string }>>`
+          SELECT reservation.reservation_id
+          FROM offering.reservations AS reservation
+          WHERE reservation.offering_id = ${input.offeringId}
+            AND reservation.reservation_stage = 'reconfirmed'
+          FOR UPDATE OF reservation
+        `;
+        for (const reservation of reconfirmed) {
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "awaiting_reconfirmation", reconfirmedAt: null },
+          });
+        }
+        reservationsReset = reconfirmed.length;
+
+        // "Resets the full 168-hour window" (PAYMENT_FLOWS.md) — a fresh
+        // 168 hours from this reset, not merely extending the old boundary.
+        // Reusing this same field is also what correctly reopens a window
+        // that had already lapsed by clock time but whose reservations the
+        // hourly commit job hasn't processed yet.
+        effectiveRightsEndAt = computeEffectiveRightsEndAt(input.classifiedAt);
+        await transaction.offering.update({
+          where: { id: input.offeringId },
+          data: {
+            platformRightsEndAt: effectiveRightsEndAt,
+            effectiveRightsEndAt,
+          },
+        });
+      }
+
+      const materialityRecordId = `materiality_${ulid()}`;
+      await transaction.materialityRecord.create({
+        data: {
+          id: materialityRecordId,
+          offeringId: input.offeringId,
+          changeDescription: input.changeDescription,
+          classification: input.classification,
+          thresholdType: input.thresholdType,
+          resetTriggered,
+          classifiedByAccountId: input.accountId,
+          classifiedAt: input.classifiedAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.materiality_classified",
+          resourceType: "offering",
+          resourceId: input.offeringId,
+          changes: {
+            trace_id: input.traceId,
+            change_description: input.changeDescription,
+            classification: input.classification,
+            threshold_type: input.thresholdType,
+            reset_triggered: resetTriggered,
+            reservations_reset: reservationsReset,
+          },
+          createdAt: input.classifiedAt,
+        },
+      });
+
+      return {
+        classified: {
+          materialityRecordId,
+          offeringId: input.offeringId,
+          classification: input.classification,
+          thresholdType: input.thresholdType,
+          resetTriggered,
+          classifiedAt: input.classifiedAt,
+          effectiveRightsEndAt,
+          reservationsReset,
+        },
         conflict: null,
       };
     });

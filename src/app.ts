@@ -66,6 +66,7 @@ import { createOfferingOperationsRouter } from "./modules/offering/api/offering-
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
 import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
+import { ClassifyMaterialityService } from "./modules/offering/application/classify-materiality.service.js";
 import { FinalizeOfferingService } from "./modules/offering/application/finalize-offering.service.js";
 import { ReconfirmReservationService } from "./modules/offering/application/reconfirm-reservation.service.js";
 import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
@@ -73,6 +74,7 @@ import type { DisclosureDocumentStore } from "./modules/offering/application/dis
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
 import type { ReservationRepository } from "./modules/offering/repository/reservation.repository.js";
 import type { FinalizeOfferingRepository } from "./modules/offering/repository/finalize-offering.repository.js";
+import type { MaterialityRepository } from "./modules/offering/repository/materiality.repository.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
 import type { OfferingRepository } from "./modules/offering/repository/offering.repository.js";
 import { createOriginationRouter } from "./modules/origination/api/origination.router.js";
@@ -175,7 +177,7 @@ export interface AppDependencies {
       buildRedirectUrl: (reservationId: string) => string;
     };
     offeringOperations?: {
-      repository: FinalizeOfferingRepository;
+      repository: FinalizeOfferingRepository & MaterialityRepository;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -312,6 +314,7 @@ export function createApp(dependencies: AppDependencies): Express {
           requireAdminOperations,
           requireStaffWebAuthn,
           new FinalizeOfferingService(dependencies.protectedApi.offeringOperations.repository),
+          new ClassifyMaterialityService(dependencies.protectedApi.offeringOperations.repository),
         ),
       );
     }

@@ -756,6 +756,7 @@ describe.skipIf(databaseUrl === undefined)(
 
     afterAll(async () => {
       await database.positionLedger.deleteMany({ where: { pivId: { in: pivIds } } });
+      await database.materialityRecord.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
       await database.auditLog.deleteMany({ where: { resourceId: { in: offeringIds }, resourceType: "offering" } });
       await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
@@ -1230,6 +1231,222 @@ describe.skipIf(databaseUrl === undefined)(
       expect(
         await database.auditLog.count({ where: { resourceId: offeringId, action: "offering.finalized" } }),
       ).toBe(1);
+    });
+
+    it("records a per_se_material classification, resets already-reconfirmed reservations, and restarts the full 168-hour window", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reconfirmedReservationId = `reservation_${randomUUID()}`;
+      const awaitingReservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId: reconfirmedReservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "700.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: reconfirmedReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_materiality_01",
+        capitalState: "eurc_reserved",
+        amountEur: "700.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      await repository.createReservation({
+        reservationId: awaitingReservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "300.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: awaitingReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_materiality_02",
+        capitalState: "eurc_reserved",
+        amountEur: "300.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+      const reconfirmResult = await repository.reconfirmReservation({
+        reservationId: reconfirmedReservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+      expect(reconfirmResult.conflict).toBeNull();
+
+      const classifiedAt = new Date("2026-09-04T00:00:00.000Z");
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "Change of primary obligor.",
+        classification: "per_se_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt,
+      });
+
+      expect(result.conflict).toBeNull();
+      expect(result.classified).toMatchObject({
+        offeringId,
+        classification: "per_se_material",
+        thresholdType: null,
+        resetTriggered: true,
+        reservationsReset: 1,
+      });
+      // A fresh 168 hours from classifiedAt, not the original window extended.
+      expect(result.classified?.effectiveRightsEndAt).toEqual(new Date("2026-09-11T00:00:00.000Z"));
+
+      const reconfirmedReservation = await database.reservation.findUnique({
+        where: { id: reconfirmedReservationId },
+      });
+      expect(reconfirmedReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
+      expect(reconfirmedReservation?.reconfirmedAt).toBeNull();
+
+      // Never-reconfirmed reservation has nothing to invalidate — untouched.
+      const untouchedReservation = await database.reservation.findUnique({ where: { id: awaitingReservationId } });
+      expect(untouchedReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
+
+      const offering = await database.offering.findUnique({ where: { id: offeringId } });
+      expect(offering?.effectiveRightsEndAt).toEqual(new Date("2026-09-11T00:00:00.000Z"));
+      expect(offering?.platformRightsEndAt).toEqual(new Date("2026-09-11T00:00:00.000Z"));
+      expect(offering).toMatchObject({ status: "pre_offering" });
+
+      if (result.classified === null) throw new Error("expected a classified materiality record");
+      const record = await database.materialityRecord.findUnique({
+        where: { id: result.classified.materialityRecordId },
+      });
+      expect(record).toMatchObject({
+        offeringId,
+        changeDescription: "Change of primary obligor.",
+        classification: "per_se_material",
+        thresholdType: null,
+        resetTriggered: true,
+        classifiedByAccountId: "account_founder",
+      });
+
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: offeringId, action: "offering.materiality_classified" },
+        }),
+      ).toBe(1);
+    });
+
+    it("records a non_material classification without resetting anything", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_materiality_03",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+      await repository.reconfirmReservation({
+        reservationId,
+        accountId: fundedAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "Corrected a typo in the property summary.",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date("2026-09-04T00:00:00.000Z"),
+      });
+
+      expect(result.conflict).toBeNull();
+      expect(result.classified).toMatchObject({ resetTriggered: false, reservationsReset: 0 });
+      expect(result.classified?.effectiveRightsEndAt).toEqual(new Date("2026-09-09T12:00:00.000Z"));
+
+      const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
+      expect(reservation).toMatchObject({ reservationStage: "reconfirmed" });
+
+      const offering = await database.offering.findUnique({ where: { id: offeringId } });
+      expect(offering?.effectiveRightsEndAt).toEqual(new Date("2026-09-09T12:00:00.000Z"));
+    });
+
+    it("reports offering_not_found for an unknown offering", async () => {
+      const result = await repository.classifyMateriality({
+        offeringId: `offering_missing_${suffix}`,
+        accountId: "account_founder",
+        changeDescription: "notes",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date(),
+      });
+
+      expect(result).toEqual({ classified: null, conflict: "offering_not_found" });
+    });
+
+    it("reports no_active_reconfirmation_window before final terms are published", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "notes",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date(),
+      });
+
+      expect(result).toEqual({ classified: null, conflict: "no_active_reconfirmation_window" });
+    });
+
+    it("reports no_active_reconfirmation_window once the offering has already committed to final_offering", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00", status: "final_offering" });
+
+      const result = await repository.classifyMateriality({
+        offeringId,
+        accountId: "account_founder",
+        changeDescription: "notes",
+        classification: "non_material",
+        thresholdType: null,
+        traceId: `trace_${suffix}`,
+        classifiedAt: new Date(),
+      });
+
+      expect(result).toEqual({ classified: null, conflict: "no_active_reconfirmation_window" });
     });
   },
 );
