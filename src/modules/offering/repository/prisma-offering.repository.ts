@@ -1,4 +1,5 @@
 import { ulid } from "ulid";
+import { z } from "zod";
 
 import { toCents } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
@@ -52,6 +53,13 @@ import type {
   PublishDisclosurePackInput,
   PublishDisclosurePackResult,
 } from "./disclosure-pack.repository.js";
+import type {
+  ReconfirmationReminderRepository,
+  RecordReconfirmationReminderSentInput,
+  ReservationAwaitingReconfirmationReminder,
+} from "./reconfirmation-reminder.repository.js";
+
+const reconfirmationReminderIntervalHoursSettingSchema = z.object({ hours: z.number().int().min(1).max(168) });
 
 export class PrismaOfferingRepository
   implements
@@ -61,6 +69,7 @@ export class PrismaOfferingRepository
     FinalizeOfferingRepository,
     MaterialityRepository,
     DisclosurePackRepository,
+    ReconfirmationReminderRepository,
     ReservationRepository
 {
   public constructor(private readonly database: DatabaseClient) {}
@@ -1195,6 +1204,80 @@ export class PrismaOfferingRepository
         },
         conflict: null,
       };
+    });
+  }
+
+  public async getReconfirmationReminderIntervalHours(): Promise<number> {
+    const setting = await this.database.platformSetting.findUnique({
+      where: { key: "offering.reconfirmation_reminder_interval_hours" },
+      select: { value: true },
+    });
+    if (setting === null) {
+      throw new Error("Missing offering.reconfirmation_reminder_interval_hours setting");
+    }
+    return reconfirmationReminderIntervalHoursSettingSchema.parse(setting.value).hours;
+  }
+
+  public async listReservationsAwaitingReconfirmationForReminders(): Promise<
+    ReservationAwaitingReconfirmationReminder[]
+  > {
+    const rows = await this.database.$queryRaw<
+      Array<{
+        reservation_id: string;
+        account_id: string;
+        contact_email: string | null;
+        offering_id: string;
+        final_offering_published_at: Date;
+        effective_rights_end_at: Date;
+        last_reminder_sent_at: Date | null;
+      }>
+    >`
+      SELECT
+        reservation.reservation_id,
+        reservation.account_id,
+        account.protected_contact_email AS contact_email,
+        reservation.offering_id,
+        offering.final_offering_published_at,
+        offering.effective_rights_end_at,
+        latest_reminder.created_at AS last_reminder_sent_at
+      FROM offering.reservations AS reservation
+      JOIN offering.offerings AS offering ON offering.offering_id = reservation.offering_id
+      JOIN account.accounts AS account ON account.account_id = reservation.account_id
+      LEFT JOIN LATERAL (
+        SELECT audit_log.created_at
+        FROM audit.audit_log AS audit_log
+        WHERE audit_log.resource_type = 'reservation'
+          AND audit_log.resource_id = reservation.reservation_id
+          AND audit_log.action = 'offering.reconfirmation_reminder_sent'
+        ORDER BY audit_log.created_at DESC
+        LIMIT 1
+      ) AS latest_reminder ON TRUE
+      WHERE reservation.reservation_stage = 'awaiting_reconfirmation'
+        AND offering.final_offering_published_at IS NOT NULL
+        AND offering.effective_rights_end_at IS NOT NULL
+    `;
+    return rows.map((row) => ({
+      reservationId: row.reservation_id,
+      accountId: row.account_id,
+      contactEmail: row.contact_email,
+      offeringId: row.offering_id,
+      finalOfferingPublishedAt: row.final_offering_published_at,
+      effectiveRightsEndAt: row.effective_rights_end_at,
+      lastReminderSentAt: row.last_reminder_sent_at,
+    }));
+  }
+
+  public async recordReconfirmationReminderSent(input: RecordReconfirmationReminderSentInput): Promise<void> {
+    await this.database.auditLog.create({
+      data: {
+        id: `audit_${ulid()}`,
+        actorAccountId: null,
+        action: "offering.reconfirmation_reminder_sent",
+        resourceType: "reservation",
+        resourceId: input.reservationId,
+        changes: { trace_id: input.traceId },
+        createdAt: input.sentAt,
+      },
     });
   }
 }

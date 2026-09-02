@@ -1753,6 +1753,102 @@ describe.skipIf(databaseUrl === undefined)(
 
       expect(result).toEqual({ published: null, conflict: "not_open" });
     });
+
+    it("reads a positive reconfirmation reminder interval from platform settings", async () => {
+      const hours = await repository.getReconfirmationReminderIntervalHours();
+      expect(Number.isInteger(hours)).toBe(true);
+      expect(hours).toBeGreaterThan(0);
+    });
+
+    it("lists a reservation awaiting reconfirmation for reminders, reflecting the most recently recorded reminder", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_reminder_01",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: "account_founder",
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+
+      const account = await database.account.findUnique({ where: { id: fundedAccountId } });
+
+      const beforeAnyReminder = await repository.listReservationsAwaitingReconfirmationForReminders();
+      const candidate = beforeAnyReminder.find((r) => r.reservationId === reservationId);
+      expect(candidate).toMatchObject({
+        accountId: fundedAccountId,
+        contactEmail: account?.protectedContactEmail ?? null,
+        offeringId,
+        finalOfferingPublishedAt: publishedAt,
+        effectiveRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
+        lastReminderSentAt: null,
+      });
+
+      const firstReminderAt = new Date("2026-09-04T12:00:00.000Z");
+      await repository.recordReconfirmationReminderSent({
+        reservationId,
+        traceId: `trace_${suffix}`,
+        sentAt: firstReminderAt,
+      });
+      const afterFirstReminder = await repository.listReservationsAwaitingReconfirmationForReminders();
+      expect(
+        afterFirstReminder.find((r) => r.reservationId === reservationId),
+      ).toMatchObject({ lastReminderSentAt: firstReminderAt });
+
+      const secondReminderAt = new Date("2026-09-06T12:00:00.000Z");
+      await repository.recordReconfirmationReminderSent({
+        reservationId,
+        traceId: `trace_${suffix}`,
+        sentAt: secondReminderAt,
+      });
+      const afterSecondReminder = await repository.listReservationsAwaitingReconfirmationForReminders();
+      expect(
+        afterSecondReminder.find((r) => r.reservationId === reservationId),
+      ).toMatchObject({ lastReminderSentAt: secondReminderAt });
+
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: reservationId, action: "offering.reconfirmation_reminder_sent" },
+        }),
+      ).toBe(2);
+    });
+
+    it("excludes a reservation that is not awaiting reconfirmation", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+
+      const candidates = await repository.listReservationsAwaitingReconfirmationForReminders();
+      expect(candidates.find((r) => r.reservationId === reservationId)).toBeUndefined();
+    });
   },
 );
 

@@ -33,6 +33,7 @@ function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
     sendStaffInvitationEmail: vi.fn(),
     sendApplicantResponseReminderEmail: vi.fn(),
     sendKycRenewalReminderEmail: vi.fn().mockResolvedValue(undefined),
+    sendReconfirmationReminderEmail: vi.fn(),
     ...overrides,
   };
 }

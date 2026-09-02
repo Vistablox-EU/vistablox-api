@@ -21,6 +21,7 @@ import { OpenOfferingForApprovedCaseService } from "./modules/offering/applicati
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
+import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
@@ -57,6 +58,7 @@ const runOidcCleanup = new RunOidcCleanupService(new PostgresOidcCleanupReposito
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
+const sendReconfirmationReminders = new SendReconfirmationRemindersService(offeringRepository, emailSender);
 const coinbaseCdpClient =
   environment.COINBASE_CDP_API_KEY_ID === undefined || environment.COINBASE_CDP_API_KEY_SECRET === undefined
     ? undefined
@@ -95,6 +97,7 @@ await boss.createQueue("case_timers.response_window_expiry");
 await boss.createQueue("case_timers.pre_offering_open_handoff");
 await boss.createQueue("case_timers.reservation_unfunded_expiry");
 await boss.createQueue("case_timers.offering_reconfirmation_window_close");
+await boss.createQueue("case_timers.offering_reconfirmation_reminders");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.oidc_cleanup");
 // Only registered when Coinbase CDP credentials are configured — unlike
@@ -137,6 +140,14 @@ await boss.schedule("case_timers.offering_reconfirmation_window_close", "0 * * *
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
+// Also hourly — isReconfirmationReminderDue derives due-ness from time
+// elapsed since the last reminder actually sent, not a calendar-day match,
+// so it stays correct regardless of this schedule's exact cadence; hourly
+// just keeps it consistent with this worker's other longer-horizon timers.
+await boss.schedule("case_timers.offering_reconfirmation_reminders", "0 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
 if (pollOnrampTransactions !== undefined) {
   await boss.schedule("case_timers.reservation_onramp_poll", "* * * * *", null, {
     tz: "UTC",
@@ -166,6 +177,11 @@ await boss.work("case_timers.reservation_unfunded_expiry", async () => {
 await boss.work("case_timers.offering_reconfirmation_window_close", async () => {
   await runJob("case_timers.offering_reconfirmation_window_close", (traceId) =>
     commitOfferingFinalization.execute(traceId),
+  );
+});
+await boss.work("case_timers.offering_reconfirmation_reminders", async () => {
+  await runJob("case_timers.offering_reconfirmation_reminders", (traceId) =>
+    sendReconfirmationReminders.execute(traceId),
   );
 });
 if (pollOnrampTransactions !== undefined) {
