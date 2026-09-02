@@ -36,6 +36,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - privacy-minimized KYC persistence that excludes provider payloads, document data, biometrics, and addresses
 - WebAuthn-protected operations decision display at `GET /internal/v1/kyc-accounts/:account_id`: the same `admin_operations` + staff-WebAuthn gate as founder origination review, reading the same already-persisted, already privacy-minimized eligibility record — never the raw Didit artifacts, which were never persisted in the first place. Surfaces the operational detail the customer's own `GET /v1/kyc` intentionally omits (`operational_substatus`, the Didit provider reference, declared residence/tax-residence countries, `ever_required_manual_review`) so a reviewer can actually see why an account is stuck in `pending_manual_review` or similar and why its renewal clock is set the way it is, closing the first of `docs/didit-kyc.md`'s follow-on-work gaps; a missing record reports `404` rather than a misleading default, since an arbitrary staff-supplied `account_id` might just be a typo
 - authenticated investor profile aggregate at `GET /v1/investor-profile`
+- wallet registration at `POST /v1/investor-profile/wallet` (`AD-241`'s DB-recording half: KYC-eligible, idempotent by account, rejects an address change or an address already claimed elsewhere as a `409`) — closes the gap where the profile's own `payment_account_ready`/`wallet` readiness fields could never become true because nothing ever wrote a `settlement.wallet_registrations` row. Deliberately does not prepare on-chain registration-transaction calldata or observe its confirmation (`registered_at` stays `null`): `AD-234` keeps production blockchain settlement dormant pending a written-counsel memo, and reservation creation's own readiness check only needs the row to exist, not on-chain confirmation. See [`docs/investor-profile.md`](docs/investor-profile.md)
 - cursor-paginated investor reservation history and current portfolio subresources
 - Redis/Valkey-backed, 24-hour protected cache for Didit-verified display names
 - KYC/proof-of-address-gated owner intake at `POST /v1/origination-cases`
@@ -151,6 +152,7 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `GET` | `/v1/investor-profile` | Read the authenticated customer's cross-domain investor profile aggregate |
 | `GET` | `/v1/investor-profile/reservations?limit=20&after=...` | Read account-scoped reservation history with the latest capital state |
 | `GET` | `/v1/investor-profile/positions?limit=20&after=...` | Read active and internally-settling portfolio positions |
+| `POST` | `/v1/investor-profile/wallet` | Register a customer wallet address (KYC-eligible, idempotent by account); requires authentication |
 | `POST` | `/v1/auth/totp/enroll` | Enroll (or re-enroll) a customer TOTP factor; returns the `otpauth://` URI, secret, and one-time backup codes |
 | `POST` | `/v1/auth/totp/verify` | Verify a customer TOTP code or one-time backup code |
 | `GET` | `/v1/auth/sessions` | List the authenticated customer's own web sessions and native OIDC grants as one list |

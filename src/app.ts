@@ -111,6 +111,7 @@ import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/did
 import type { KycRepository } from "./modules/identity/repository/kyc.repository.js";
 import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
 import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
+import { RegisterWalletService } from "./modules/investor-profile/application/register-wallet.service.js";
 import {
   ListInvestorCurrentPositionsService,
   ListInvestorReservationsService,
@@ -278,6 +279,7 @@ export function createApp(dependencies: AppDependencies): Express {
           ),
           new ListInvestorReservationsService(investorProfile.repository),
           new ListInvestorCurrentPositionsService(investorProfile.repository),
+          new RegisterWalletService(investorProfile.repository),
         ),
       );
     }

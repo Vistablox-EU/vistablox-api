@@ -17,6 +17,7 @@ function repository(
 ): InvestorProfileRepository {
   return {
     get: vi.fn().mockResolvedValue(null),
+    registerWallet: vi.fn(),
     listReservations: vi.fn().mockResolvedValue([]),
     listCurrentPositions: vi.fn().mockResolvedValue([]),
     ...overrides,
