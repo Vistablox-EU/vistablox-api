@@ -12,7 +12,6 @@ import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
-import { PrismaIdempotencyStore } from "./infrastructure/idempotency/prisma-idempotency-store.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
@@ -315,11 +314,6 @@ const app = createApp({
               `${onrampRedirectUrl}?reservation_id=${encodeURIComponent(reservationId)}`,
           },
         }),
-    disclosurePublication: {
-      repository: offeringRepository,
-      store: disclosureDocumentStore,
-      idempotencyStore: new PrismaIdempotencyStore(database),
-    },
     totp: {
       repository: new PrismaTotpRepository(database),
       provider: new OtplibTotpProvider(),
