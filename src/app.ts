@@ -67,6 +67,7 @@ import { GetInvestorOfferingService } from "./modules/offering/application/get-i
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
 import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
 import { FinalizeOfferingService } from "./modules/offering/application/finalize-offering.service.js";
+import { ReconfirmReservationService } from "./modules/offering/application/reconfirm-reservation.service.js";
 import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
 import type { DisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
@@ -298,6 +299,9 @@ export function createApp(dependencies: AppDependencies): Express {
                 fundingRailAvailable: dependencies.reservationFundingRailEnabled ?? false,
               },
             ),
+        dependencies.protectedApi.offeringOperations === undefined
+          ? undefined
+          : new ReconfirmReservationService(dependencies.protectedApi.offeringOperations.repository),
       ),
     );
     if (dependencies.protectedApi.offeringOperations !== undefined) {

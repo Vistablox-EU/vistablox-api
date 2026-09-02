@@ -6,6 +6,8 @@ import { createInvestorOfferingRouter } from "../src/modules/offering/api/offeri
 import type { CoinbaseCdpClient } from "../src/modules/offering/application/coinbase-cdp-client.js";
 import { CreateReservationService } from "../src/modules/offering/application/create-reservation.service.js";
 import { GetInvestorOfferingService } from "../src/modules/offering/application/get-investor-offering.service.js";
+import { ReconfirmReservationService } from "../src/modules/offering/application/reconfirm-reservation.service.js";
+import type { FinalizeOfferingRepository } from "../src/modules/offering/repository/finalize-offering.repository.js";
 import type { InvestorOfferingDetailRecord, OfferingRepository } from "../src/modules/offering/repository/offering.repository.js";
 import type { CreateReservationResult, ReservationRepository } from "../src/modules/offering/repository/reservation.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
@@ -283,5 +285,130 @@ describe("POST /v1/offerings/:offering_id/reservations", () => {
 
     expect(response.status).toBe(404);
     expect(response.body.code).toBe("offering.not_found");
+  });
+});
+
+function buildReconfirmApp(options?: {
+  repository?: Partial<FinalizeOfferingRepository>;
+  population?: "customer" | "staff_partner";
+}) {
+  const offerings: OfferingRepository = {
+    listPublic: vi.fn().mockResolvedValue([]),
+    getInvestorDetail: vi.fn().mockResolvedValue(reservationEligibleDetail),
+  };
+  const finalization: FinalizeOfferingRepository = {
+    publishFinalOfferingTerms: vi.fn(),
+    reconfirmReservation: vi.fn().mockResolvedValue({
+      reconfirmedAt: new Date("2026-09-05T12:00:00.000Z"),
+      conflict: null,
+    }),
+    listOfferingsPendingFinalizationCommit: vi.fn().mockResolvedValue([]),
+    commitOfferingFinalization: vi.fn(),
+    ...options?.repository,
+  };
+
+  const app = express();
+  const authenticated: RequestHandler = (_request, response, next) => {
+    response.locals.authContext = {
+      accountId: "account_01",
+      providerSessionId: "session_01",
+      population: options?.population ?? "customer",
+    };
+    next();
+  };
+  app.use(requestContext);
+  app.use(express.json());
+  app.use(
+    "/v1/offerings",
+    createInvestorOfferingRouter(
+      authenticated,
+      new GetInvestorOfferingService(offerings),
+      undefined,
+      undefined,
+      new ReconfirmReservationService(finalization, () => new Date("2026-09-05T12:00:00.000Z")),
+    ),
+  );
+  app.use(errorHandler);
+  return { app, finalization };
+}
+
+describe("POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm", () => {
+  it("reconfirms a reservation and returns the outcome", async () => {
+    const { app, finalization } = buildReconfirmApp();
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_01/reconfirm",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body).toEqual({
+      data: {
+        reservation_id: "reservation_01",
+        status: "reconfirmed",
+        reconfirmed_at: "2026-09-05T12:00:00.000Z",
+      },
+    });
+    expect(finalization.reconfirmReservation).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationId: "reservation_01", accountId: "account_01" }),
+    );
+  });
+
+  it("404s when the reservation does not exist or is not owned by the caller", async () => {
+    const { app } = buildReconfirmApp({
+      repository: {
+        reconfirmReservation: vi.fn().mockResolvedValue({ reconfirmedAt: null, conflict: "not_found" }),
+      },
+    });
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_missing/reconfirm",
+    );
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe("offering.reservation_not_found");
+  });
+
+  it("409s when the reservation is not awaiting reconfirmation", async () => {
+    const { app } = buildReconfirmApp({
+      repository: {
+        reconfirmReservation: vi
+          .fn()
+          .mockResolvedValue({ reconfirmedAt: null, conflict: "not_awaiting_reconfirmation" }),
+      },
+    });
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_01/reconfirm",
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("offering.reservation_not_awaiting_reconfirmation");
+  });
+
+  it("409s once the reconfirmation window has closed", async () => {
+    const { app } = buildReconfirmApp({
+      repository: {
+        reconfirmReservation: vi.fn().mockResolvedValue({ reconfirmedAt: null, conflict: "window_closed" }),
+      },
+    });
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_01/reconfirm",
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("offering.reconfirmation_window_closed");
+  });
+
+  it("does not expose the reconfirm action to staff identities", async () => {
+    const { app, finalization } = buildReconfirmApp({ population: "staff_partner" });
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_01/reconfirm",
+    );
+
+    expect(response.status).toBe(403);
+    expect(finalization.reconfirmReservation).not.toHaveBeenCalled();
   });
 });
