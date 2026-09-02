@@ -13,6 +13,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - authenticated full offering detail at `GET /v1/offerings/:offering_id`, including the current disclosure pack, material-change log, raise progress, and account-specific investment readiness
 - authenticated disclosure downloads streamed through the API from private MinIO storage; object references and presigned storage URLs are never exposed
 - self-hosted Better Auth core for email/password and optional Google login
+- Better Auth's Expo plugin, trusting the native app's custom URI scheme (and, outside production, the Expo dev client's `exp://` scheme) so `vistablox-mobile` calls `/api/auth/*` directly for registration and sign-in — no browser or webview involved
 - verified-email delivery through provider-neutral SMTP
 - SMTP password-reset delivery with post-reset session revocation
 - HIBP k-anonymity breached-password screening on password creation and changes

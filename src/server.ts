@@ -134,12 +134,19 @@ const emailSender = new SmtpEmailSender({
   password: environment.SMTP_PASSWORD,
   from: environment.SMTP_FROM,
 });
+// The Expo dev client always connects through the `exp://` scheme rather than
+// the app's own custom scheme (already covered by AUTH_TRUSTED_ORIGINS), so
+// these wildcards are only needed — and only safe — outside production.
+const trustedOrigins =
+  environment.NODE_ENV === "production"
+    ? environment.AUTH_TRUSTED_ORIGINS
+    : [...environment.AUTH_TRUSTED_ORIGINS, "exp://", "exp://**", "exp://192.168.*.*:*/**"];
 const auth = createBetterAuth({
   database: authDatabase,
   baseURL: environment.BETTER_AUTH_URL,
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
-  trustedOrigins: environment.AUTH_TRUSTED_ORIGINS,
+  trustedOrigins,
   ...(environment.GOOGLE_CLIENT_ID === undefined ||
   environment.GOOGLE_CLIENT_SECRET === undefined
     ? {}
@@ -164,7 +171,7 @@ const staffProvisioningAuth = createBetterAuth({
   baseURL: environment.BETTER_AUTH_URL,
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
-  trustedOrigins: environment.AUTH_TRUSTED_ORIGINS,
+  trustedOrigins,
   allowPopulationInput: true,
   disableAutoSignIn: true,
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
