@@ -276,6 +276,7 @@ const app = createApp({
     accounts: accountRepository,
     sessions,
     originationRepository,
+    offeringOperations: { repository: offeringRepository },
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({
       rpName: environment.WEBAUTHN_RP_NAME,

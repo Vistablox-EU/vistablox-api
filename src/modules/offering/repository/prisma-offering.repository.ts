@@ -27,12 +27,20 @@ import type {
   PendingPurchaseReservationForTimer,
   ReservationRepository,
 } from "./reservation.repository.js";
+import { FUNDED_CAPITAL_STATES } from "../domain/reservation-eligibility.policy.js";
+import { costBasisToUnitCount, isOfferingFinalizable } from "../domain/finalization.policy.js";
+import type {
+  FinalizeOfferingInput,
+  FinalizeOfferingRepository,
+  FinalizeOfferingResult,
+} from "./finalize-offering.repository.js";
 
 export class PrismaOfferingRepository
   implements
     OfferingRepository,
     DisclosureDocumentRepository,
     OfferingOriginationHandoffRepository,
+    FinalizeOfferingRepository,
     ReservationRepository
 {
   public constructor(private readonly database: DatabaseClient) {}
@@ -562,6 +570,151 @@ export class PrismaOfferingRepository
         },
       });
       return true;
+    });
+  }
+
+  public async finalizeOffering(input: FinalizeOfferingInput): Promise<FinalizeOfferingResult> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<
+        Array<{ offering_id: string; status: string; target_raise_eur: string }>
+      >`
+        SELECT offering_id, status, target_raise_eur::text
+        FROM offering.offerings
+        WHERE offering_id = ${input.offeringId}
+        FOR UPDATE
+      `;
+      const offering = locked[0];
+      if (offering === undefined) {
+        return { finalized: null, conflict: "offering_not_found" as const };
+      }
+      if (offering.status !== "pre_offering") {
+        return { finalized: null, conflict: "not_open" as const };
+      }
+
+      const fundedRows = await transaction.$queryRaw<Array<{ funded_eur: string }>>`
+        SELECT COALESCE(
+          SUM(latest_money.amount_eur) FILTER (WHERE latest_money.capital_state = ANY(${[...FUNDED_CAPITAL_STATES]})),
+          0
+        )::text AS funded_eur
+        FROM offering.reservations AS reservation
+        LEFT JOIN LATERAL (
+          SELECT money_event.capital_state, money_event.amount_eur
+          FROM money.money_events AS money_event
+          WHERE money_event.reservation_id = reservation.reservation_id
+          ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+          LIMIT 1
+        ) AS latest_money ON TRUE
+        WHERE reservation.offering_id = ${input.offeringId}
+      `;
+      const fundedEur = fundedRows[0]?.funded_eur ?? "0";
+      if (!isOfferingFinalizable({ status: offering.status, targetRaiseEur: offering.target_raise_eur, fundedEur })) {
+        return { finalized: null, conflict: "target_not_reached" as const };
+      }
+
+      // Locked alongside the offering row so a concurrent expiry sweep
+      // cannot flip one of these out from under this transaction; a
+      // concurrent onramp-poll INSERT into money_events is a narrower,
+      // documented residual race (see docs/investor-offering.md) — an
+      // append-only insert isn't blocked by a row lock on reservations.
+      const reservations = await transaction.$queryRaw<
+        Array<{
+          reservation_id: string;
+          account_id: string;
+          amount_eur: string;
+          latest_capital_state: string | null;
+          wallet_address: string | null;
+        }>
+      >`
+        SELECT
+          reservation.reservation_id,
+          reservation.account_id,
+          reservation.amount_eur::text,
+          latest_money.capital_state AS latest_capital_state,
+          wallet.wallet_address
+        FROM offering.reservations AS reservation
+        LEFT JOIN LATERAL (
+          SELECT money_event.capital_state
+          FROM money.money_events AS money_event
+          WHERE money_event.reservation_id = reservation.reservation_id
+          ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+          LIMIT 1
+        ) AS latest_money ON TRUE
+        LEFT JOIN settlement.wallet_registrations AS wallet
+          ON wallet.account_id = reservation.account_id
+        WHERE reservation.offering_id = ${input.offeringId}
+          AND reservation.reservation_stage = 'initiated'
+        FOR UPDATE OF reservation
+      `;
+
+      const piv = await transaction.offering.findUniqueOrThrow({
+        where: { id: input.offeringId },
+        select: { pivId: true },
+      });
+
+      let positionsCreated = 0;
+      let reservationsCancelled = 0;
+      for (const reservation of reservations) {
+        const funded =
+          reservation.latest_capital_state !== null &&
+          (FUNDED_CAPITAL_STATES as readonly string[]).includes(reservation.latest_capital_state);
+        if (funded) {
+          await transaction.positionLedger.create({
+            data: {
+              id: `position_${ulid()}`,
+              reservationId: reservation.reservation_id,
+              pivId: piv.pivId,
+              accountId: reservation.account_id,
+              unitCount: costBasisToUnitCount(reservation.amount_eur),
+              costBasisEur: reservation.amount_eur,
+              holderWalletAddress: reservation.wallet_address,
+            },
+          });
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "finalized", reservationFinalizedAt: input.finalizedAt },
+          });
+          positionsCreated += 1;
+        } else {
+          await transaction.reservation.update({
+            where: { id: reservation.reservation_id },
+            data: { reservationStage: "cancelled" },
+          });
+          reservationsCancelled += 1;
+        }
+      }
+
+      await transaction.offering.update({
+        where: { id: input.offeringId },
+        data: { status: "final_offering", finalOfferingPublishedAt: input.finalizedAt },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "offering.finalized",
+          resourceType: "offering",
+          resourceId: input.offeringId,
+          changes: {
+            trace_id: input.traceId,
+            founder_review_notes: input.founderReviewNotes,
+            funded_eur: fundedEur,
+            target_raise_eur: offering.target_raise_eur,
+            positions_created: positionsCreated,
+            reservations_cancelled: reservationsCancelled,
+          },
+          createdAt: input.finalizedAt,
+        },
+      });
+
+      return {
+        finalized: {
+          offeringId: input.offeringId,
+          finalOfferingPublishedAt: input.finalizedAt,
+          positionsCreated,
+          reservationsCancelled,
+        },
+        conflict: null,
+      };
     });
   }
 }

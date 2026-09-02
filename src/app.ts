@@ -62,13 +62,16 @@ import {
   createInvestorOfferingRouter,
   createOfferingRouter,
 } from "./modules/offering/api/offering.router.js";
+import { createOfferingOperationsRouter } from "./modules/offering/api/offering-operations.router.js";
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
 import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
+import { FinalizeOfferingService } from "./modules/offering/application/finalize-offering.service.js";
 import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
 import type { DisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
 import type { ReservationRepository } from "./modules/offering/repository/reservation.repository.js";
+import type { FinalizeOfferingRepository } from "./modules/offering/repository/finalize-offering.repository.js";
 import { ListPublicOfferingsService } from "./modules/offering/application/list-public-offerings.service.js";
 import type { OfferingRepository } from "./modules/offering/repository/offering.repository.js";
 import { createOriginationRouter } from "./modules/origination/api/origination.router.js";
@@ -169,6 +172,9 @@ export interface AppDependencies {
       coinbase: CoinbaseCdpClient;
       blockchain: string;
       buildRedirectUrl: (reservationId: string) => string;
+    };
+    offeringOperations?: {
+      repository: FinalizeOfferingRepository;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -294,6 +300,17 @@ export function createApp(dependencies: AppDependencies): Express {
             ),
       ),
     );
+    if (dependencies.protectedApi.offeringOperations !== undefined) {
+      app.use(
+        "/internal/v1/offerings",
+        createOfferingOperationsRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new FinalizeOfferingService(dependencies.protectedApi.offeringOperations.repository),
+        ),
+      );
+    }
     if (dependencies.protectedApi.investorProfile !== undefined) {
       const investorProfile = dependencies.protectedApi.investorProfile;
       app.use(
