@@ -88,9 +88,10 @@ Customer full-lockout account recovery (`ACCOUNT_RECOVERY_POLICY.md`) is now bui
 
 ## Local setup
 
-Requirements: Node.js 22+, npm, and PostgreSQL 16+ (or a Neon development branch).
+Requirements: Node.js 22+, npm, and PostgreSQL 18 (local development and testing both use a local instance — `AD-256` — rather than the project's Neon database, which is production-only).
 
 ```bash
+createdb -U prisma vistablox   # or point DATABASE_URL/DIRECT_DATABASE_URL at your own local instance
 cp .env.example .env
 npm install
 npm run db:generate
@@ -98,7 +99,7 @@ npm run db:migrate:dev
 npm run dev
 ```
 
-`DATABASE_URL` is the pooled runtime connection. `DIRECT_DATABASE_URL` must be the non-pooled connection used by Prisma migrations.
+`DATABASE_URL` is the runtime connection; `DIRECT_DATABASE_URL` is the connection Prisma migrations use. Locally these are the same local instance (`.env.example`'s defaults already point at one, matching `prisma.config.ts`'s own local-dev fallback role); in production they instead point at Neon's pooled and direct connections respectively (`DEPLOYMENT_TOPOLOGY.md`).
 
 Didit baseline KYC remains disabled unless the required `DIDIT_*` values in `.env.example` are configured together. `DIDIT_POA_WORKFLOW_ID` independently enables the owner-only hosted address workflow. `PROFILE_CACHE_URL` enables the short-lived Didit-verified display-name cache; the profile route remains available and omits names when the cache is absent or unavailable. The provider webhook destination is `/webhooks/didit`; the callback URL is the frontend destination Didit uses after either hosted verification flow. See [`docs/didit-kyc.md`](docs/didit-kyc.md) and [`docs/investor-profile.md`](docs/investor-profile.md) for the reviewed workflows and data boundaries.
 
@@ -132,6 +133,25 @@ The API is then at `http://localhost:3000`. `migrate` is a one-shot service that
 Compose overrides `DATABASE_URL`, `PROFILE_CACHE_URL`, `RATE_LIMIT_CACHE_URL`, `BETTER_AUTH_URL`, and the `SMTP_*` values to point at the container network (`postgres`, `cache`, `mailpit`) regardless of what `.env` has for them; everything else — `BETTER_AUTH_SECRET`, `OIDC_JWKS`, `OIDC_NATIVE_REDIRECT_URIS`, and the optional `GOOGLE_*`/`DIDIT_*` toggles — comes from `.env` via `env_file`.
 
 This has been validated end to end in a real Docker daemon: a clean build of all four targets, `prisma migrate deploy` applying the repository's entire migration history (all 15 migrations, from the initial schema through `oidc_provider_store`) against a fresh Postgres container, and the running `api`/`worker` containers passing their healthchecks and serving real requests (including the OIDC discovery document) against the containerized Postgres/Redis. One real finding from that run, now fixed: Postgres 18's official image expects its volume mounted at `/var/lib/postgresql`, not `/var/lib/postgresql/data` (`docker-compose.yml` already reflects this); pg-boss v12 requires a queue to exist (`createQueue`, idempotent) before it can be scheduled or worked, which `worker.ts` now does on every start.
+
+## Testing
+
+```bash
+npm test               # unit tests always run; integration tests skip themselves without TEST_DATABASE_URL
+npm run test:watch     # same, in watch mode
+```
+
+`npm test` (`vitest run`) is safe to run with nothing else set up: unit tests always execute, and every `tests/*.integration.test.ts` file individually skips itself (`describe.skipIf(process.env.TEST_DATABASE_URL === undefined)`) rather than failing when that variable is absent — there's no separate command for "just the unit tests."
+
+To also exercise the integration suite, point `TEST_DATABASE_URL` at a local PostgreSQL 18 database — a separate one from `DATABASE_URL`, since these tests create and delete real rows and shouldn't touch whatever you're looking at interactively in the dev database:
+
+```bash
+createdb -U prisma vistablox_test
+DIRECT_DATABASE_URL=postgresql://prisma:prisma@localhost:5432/vistablox_test npm run db:migrate:deploy
+TEST_DATABASE_URL=postgresql://prisma:prisma@localhost:5432/vistablox_test npm test
+```
+
+This mirrors `.env.example`'s local-dev defaults; `docker compose up -d postgres` (this repo's own `postgres:18-alpine` service) works the same way using that service's `vistablox`/`vistablox` credentials instead. Local PostgreSQL 18 for both development and testing — rather than the design docs' earlier disposable-Neon-branch plan for integration tests, which turned out to never have actually been built — is `AD-256`; `vistablox-design-docs`' `INTEGRATION_TESTS.md` has the full pattern reference. Each integration test file owns its own fixture setup and cleanup directly; there's no separate seed script and no separate Vitest config. `npm run check` (below) runs the same way regardless of whether `TEST_DATABASE_URL` is set.
 
 ## Commands
 
