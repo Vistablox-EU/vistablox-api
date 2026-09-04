@@ -88,7 +88,7 @@ Customer full-lockout account recovery (`ACCOUNT_RECOVERY_POLICY.md`) is now bui
 
 ## Local setup
 
-Requirements: Node.js 22+, npm, and PostgreSQL 18 (local development and testing both use a local instance — `AD-256` — rather than the project's Neon database, which is production-only).
+Requirements: Node.js 22+, npm, and PostgreSQL 18 (local development and testing both use a local instance — `AD-257` — rather than the project's Neon database, which is production-only).
 
 ```bash
 createdb -U prisma vistablox   # or point DATABASE_URL/DIRECT_DATABASE_URL at your own local instance
@@ -151,7 +151,7 @@ DIRECT_DATABASE_URL=postgresql://prisma:prisma@localhost:5432/vistablox_test npm
 TEST_DATABASE_URL=postgresql://prisma:prisma@localhost:5432/vistablox_test npm test
 ```
 
-This mirrors `.env.example`'s local-dev defaults; `docker compose up -d postgres` (this repo's own `postgres:18-alpine` service) works the same way using that service's `vistablox`/`vistablox` credentials instead. Local PostgreSQL 18 for both development and testing — rather than the design docs' earlier disposable-Neon-branch plan for integration tests, which turned out to never have actually been built — is `AD-256`; `vistablox-design-docs`' `INTEGRATION_TESTS.md` has the full pattern reference. Each integration test file owns its own fixture setup and cleanup directly; there's no separate seed script and no separate Vitest config. `npm run check` (below) runs the same way regardless of whether `TEST_DATABASE_URL` is set.
+This mirrors `.env.example`'s local-dev defaults; `docker compose up -d postgres` (this repo's own `postgres:18-alpine` service) works the same way using that service's `vistablox`/`vistablox` credentials instead. Local PostgreSQL 18 for both development and testing — rather than the design docs' earlier disposable-Neon-branch plan for integration tests, which turned out to never have actually been built — is `AD-257`; `vistablox-design-docs`' `INTEGRATION_TESTS.md` has the full pattern reference. Each integration test file owns its own fixture setup and cleanup directly; there's no separate seed script and no separate Vitest config. `npm run check` (below) runs the same way regardless of whether `TEST_DATABASE_URL` is set.
 
 ## Commands
 
