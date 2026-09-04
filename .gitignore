@@ -6,3 +6,6 @@ dist/
 coverage/
 src/generated/prisma/
 *.log
+contracts/artifacts/
+contracts/cache/
+contracts/types/

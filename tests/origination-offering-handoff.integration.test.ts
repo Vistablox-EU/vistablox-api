@@ -40,6 +40,7 @@ describe.skipIf(databaseUrl === undefined)(
       openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
       await boss.start();
       await boss.createQueue("case_timers.pre_offering_open_handoff");
+      await boss.createQueue("settlement.open_ipo_escrow_campaign");
 
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
@@ -95,11 +96,19 @@ describe.skipIf(databaseUrl === undefined)(
         await database.offering.deleteMany({ where: { pivId } });
         await database.piv.deleteMany({ where: { id: pivId } });
       }
-      await database.submissionRevision.deleteMany({ where: { caseId } });
-      await database.originationCase.deleteMany({ where: { id: caseId } });
-      await database.property.deleteMany({ where: { id: propertyId } });
-      await database.account.deleteMany({ where: { id: accountId } });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
+      // submission_revisions is append-only by design (AD-186's
+      // "submission_revisions_append_only" trigger rejects every UPDATE and
+      // DELETE unconditionally) -- and that isn't just local to that table:
+      // submission_revisions.case_id -> origination_cases and
+      // submission_revisions.submitted_by_account_id -> account.accounts are
+      // both ON DELETE RESTRICT, and origination_cases.property_id ->
+      // properties is RESTRICT too. So once beforeAll creates a revision,
+      // the case, the property, and the submitting account all become
+      // permanently undeletable as a direct, correct consequence of the
+      // audit trail's own design -- not something to work around. This test
+      // relies on its account/case/property/revision IDs already being
+      // uniquely suffixed per run, so leaving them in place is safe: nothing
+      // here can ever collide with a later run.
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 

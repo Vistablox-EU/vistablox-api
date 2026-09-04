@@ -121,6 +121,41 @@ const environmentSchema = z
       .enum(["true", "false"])
       .default("false")
       .transform((value) => value === "true"),
+    // Dormant by default, matching AD-234's pattern for the settlement layer
+    // itself: built and testable, but not wired to run automatically until
+    // deliberately turned on. Built ahead of AD-232/AD-206's named trigger
+    // (a real property nearing finalization) at the founder's direction.
+    OPERATING_DISTRIBUTION_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    // Optional on-chain settlement integration (AD-163/AD-256): mint/burn on
+    // the shared VistaBloxProperty contract and open/finalize IPO escrow
+    // campaigns on VistaBloxIpoEscrow. Same "all together or none" shape as
+    // the Coinbase CDP / Didit integrations above -- there is no deployed
+    // contract address for any environment yet, so this simply doesn't run
+    // until every value below is configured together.
+    CHAIN_NETWORK: z.preprocess(
+      emptyStringToUndefined,
+      z.enum(["base", "base-sepolia"]).optional(),
+    ),
+    CHAIN_RPC_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
+    CHAIN_OPERATOR_PRIVATE_KEY: z.preprocess(
+      emptyStringToUndefined,
+      z
+        .string()
+        .regex(/^0x[0-9a-fA-F]{64}$/, "CHAIN_OPERATOR_PRIVATE_KEY must be a 0x-prefixed 32-byte hex key")
+        .optional(),
+    ),
+    VISTABLOX_PROPERTY_CONTRACT_ADDRESS: optionalEthAddress(),
+    VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS: optionalEthAddress(),
+    EURC_TOKEN_ADDRESS: optionalEthAddress(),
+    // A placeholder, single platform-wide destination for successful IPO
+    // escrow sweeps until real per-PIV governed multisigs exist (a separate,
+    // not-yet-designed piece of work) -- VistaBloxIpoEscrow.updateTreasury
+    // exists specifically so this can be corrected per campaign once a real
+    // multisig is provisioned, without redeploying anything.
+    PIV_TREASURY_ADDRESS: optionalEthAddress(),
     OIDC_JWKS: z
       .string()
       .min(1)
@@ -235,6 +270,27 @@ const environmentSchema = z
       message: "All Coinbase CDP onramp settings must be configured together",
       path: ["COINBASE_CDP_API_KEY_ID"],
     },
+  )
+  .refine(
+    (environment) => {
+      const values = [
+        environment.CHAIN_NETWORK,
+        environment.CHAIN_RPC_URL,
+        environment.CHAIN_OPERATOR_PRIVATE_KEY,
+        environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS,
+        environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS,
+        environment.EURC_TOKEN_ADDRESS,
+        environment.PIV_TREASURY_ADDRESS,
+      ];
+      return (
+        values.every((value) => value === undefined) ||
+        values.every((value) => value !== undefined)
+      );
+    },
+    {
+      message: "All on-chain settlement settings must be configured together",
+      path: ["CHAIN_NETWORK"],
+    },
   );
 
 export type Environment = z.infer<typeof environmentSchema>;
@@ -253,4 +309,14 @@ function optionalNonEmptyString() {
 
 function optionalUuid() {
   return z.preprocess(emptyStringToUndefined, z.string().uuid().optional());
+}
+
+function optionalEthAddress() {
+  return z.preprocess(
+    emptyStringToUndefined,
+    z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{40}$/, "must be a 0x-prefixed 20-byte address")
+      .optional(),
+  );
 }

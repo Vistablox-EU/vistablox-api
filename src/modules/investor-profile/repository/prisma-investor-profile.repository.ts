@@ -29,21 +29,29 @@ export class PrismaInvestorProfileRepository implements InvestorProfileRepositor
           registeredAt: true,
         },
       });
-      if (existingForAccount !== null) {
-        if (existingForAccount.walletAddress !== input.walletAddress) {
-          throw new WalletAddressConflictError("address_mismatch");
-        }
+      if (existingForAccount !== null && existingForAccount.walletAddress === input.walletAddress) {
         // Idempotent replay of the same request: return the existing
         // registration rather than creating a second one.
         return existingForAccount;
       }
 
+      // Checked before the account's own existing-registration state: if
+      // this exact address already belongs to a *different* account, that's
+      // the more specific conflict, regardless of whether the requesting
+      // account also happens to already have a different address of its
+      // own. Checking address_mismatch first would misreport a genuine
+      // address-uniqueness violation as "you're trying to change your own
+      // address" whenever both conditions happen to be true at once.
       const claimedByOther = await transaction.walletRegistration.findUnique({
         where: { walletAddress: input.walletAddress },
         select: { accountId: true },
       });
-      if (claimedByOther !== null) {
+      if (claimedByOther !== null && claimedByOther.accountId !== input.accountId) {
         throw new WalletAddressConflictError("address_claimed");
+      }
+
+      if (existingForAccount !== null) {
+        throw new WalletAddressConflictError("address_mismatch");
       }
 
       const created = await transaction.walletRegistration.create({
@@ -267,7 +275,7 @@ export class PrismaInvestorProfileRepository implements InvestorProfileRepositor
     return rows.map((row) => ({
       positionId: row.id,
       reservationId: row.reservationId,
-      offeringId: row.reservation.offeringId,
+      offeringId: row.reservation?.offeringId ?? null,
       pivId: row.pivId,
       unitCount: row.unitCount.toFixed(6),
       costBasisEur: row.costBasisEur.toFixed(2),

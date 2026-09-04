@@ -5,7 +5,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["account", "identity", "origination", "offering", "money", "settlement", "audit", "platform"]
+  schemas  = ["account", "identity", "origination", "offering", "money", "settlement", "audit", "platform", "rental"]
 }
 
 model Account {
@@ -24,6 +24,8 @@ model Account {
   acceptedStaffInvitation StaffInvitation?  @relation("StaffInvitationAcceptance")
   loginMethods            LoginMethod[]
   sessions                Session[]
+  rentCollectionsRecorded RentCollection[]
+  operatingDistributionsApproved OperatingDistribution[]
   mfaTotpFactor           MfaTotpFactor?
   mfaBackupCodes          MfaBackupCode[]
   recoveryCases           AccountRecoveryCase[] @relation("RecoverySubject")
@@ -619,6 +621,8 @@ model Piv {
   corridorClearance     CorridorClearance? @relation(fields: [corridorClearanceId], references: [id])
   offerings             Offering[]
   positions             PositionLedger[]
+  rentCollections       RentCollection[]
+  operatingDistributions OperatingDistribution[]
 
   @@index([corridorClearanceId], map: "idx_pivs_corridor_clearance")
   @@index([caseId], map: "idx_pivs_case")
@@ -788,7 +792,12 @@ model WalletRegistration {
 
 model PositionLedger {
   id                         String    @id @map("position_id")
-  reservationId              String    @map("reservation_id")
+  // Nullable: a position originated directly from an AD-256 IPO escrow
+  // contribution has no Reservation at all -- that model belongs to the
+  // separate Stripe/reconfirmation purchase flow (AD-146/AD-214), which an
+  // on-chain escrow contribution bypasses entirely. Still required (and
+  // still the norm) for every position that *did* originate that way.
+  reservationId              String?   @map("reservation_id")
   pivId                      String    @map("piv_id")
   accountId                  String    @map("account_id")
   unitCount                  Decimal   @map("unit_count") @db.Decimal(20, 6)
@@ -799,10 +808,11 @@ model PositionLedger {
   redeemedAt                 DateTime? @map("redeemed_at") @db.Timestamptz(6)
   redemptionProceedsEur      Decimal?  @map("redemption_proceeds_eur") @db.Decimal(15, 2)
 
-  reservation               Reservation @relation(fields: [reservationId], references: [id])
+  reservation               Reservation? @relation(fields: [reservationId], references: [id])
   piv                       Piv @relation(fields: [pivId], references: [id])
   account                   Account @relation(fields: [accountId], references: [id])
   chainEvents               ChainSettlementEvent[]
+  operatingDistributionEntries OperatingDistributionEntry[]
 
   @@index([reservationId], map: "idx_position_ledger_reservation")
   @@index([pivId], map: "idx_position_ledger_piv")
@@ -825,6 +835,84 @@ model ChainSettlementEvent {
   @@index([positionId], map: "idx_chain_events_position")
   @@index([tokenContractAddress, tokenId], map: "idx_chain_events_contract_token")
   @@map("chain_settlement_events")
+  @@schema("settlement")
+}
+
+// Minimal slice of AD-232's Rental domain boundary -- just enough to feed
+// operating distributions below, not the full tenancy/lease/maintenance
+// system AD-232 scoped but deliberately left unbuilt.
+model RentCollection {
+  id                     String    @id @map("rent_collection_id")
+  pivId                  String    @map("piv_id")
+  periodStart            DateTime  @map("period_start") @db.Date
+  periodEnd              DateTime  @map("period_end") @db.Date
+  grossRentCollectedEur  Decimal   @map("gross_rent_collected_eur") @db.Decimal(15, 2)
+  recordedBy             String    @map("recorded_by")
+  recordedAt             DateTime  @default(now()) @map("recorded_at") @db.Timestamptz(6)
+  notes                  String?
+
+  piv                    Piv       @relation(fields: [pivId], references: [id])
+  recordedByAccount      Account   @relation(fields: [recordedBy], references: [id])
+  distribution           OperatingDistribution?
+
+  @@unique([pivId, periodStart, periodEnd], map: "uq_rent_collections_piv_period")
+  @@index([pivId], map: "idx_rent_collections_piv")
+  @@map("rent_collections")
+  @@schema("rental")
+}
+
+// Dormant by default -- gated behind OPERATING_DISTRIBUTION_ENABLED (see
+// worker.ts), same pattern AD-234 already uses for the settlement layer
+// itself. Nothing here pays out on its own; `approvedAt`/`approvedBy` is a
+// real governance checkpoint before any entry moves to `paying`.
+model OperatingDistribution {
+  id                          String    @id @map("operating_distribution_id")
+  pivId                       String    @map("piv_id")
+  rentCollectionId            String    @unique @map("rent_collection_id")
+  periodStart                 DateTime  @map("period_start") @db.Date
+  periodEnd                   DateTime  @map("period_end") @db.Date
+  recordDate                  DateTime  @map("record_date") @db.Date
+  grossRentEur                Decimal   @map("gross_rent_eur") @db.Decimal(15, 2)
+  managementFeeEur            Decimal   @default(0) @map("management_fee_eur") @db.Decimal(15, 2)
+  otherExpensesEur            Decimal   @default(0) @map("other_expenses_eur") @db.Decimal(15, 2)
+  reserveHoldbackEur          Decimal   @default(0) @map("reserve_holdback_eur") @db.Decimal(15, 2)
+  distributableNetEur         Decimal   @map("distributable_net_eur") @db.Decimal(15, 2)
+  totalUnitsAtRecordDate      Decimal   @map("total_units_at_record_date") @db.Decimal(20, 6)
+  amountPerUnitEur            Decimal   @map("amount_per_unit_eur") @db.Decimal(15, 6)
+  status                      String    @default("calculated") @map("status")
+  calculatedAt                DateTime  @default(now()) @map("calculated_at") @db.Timestamptz(6)
+  approvedAt                  DateTime? @map("approved_at") @db.Timestamptz(6)
+  approvedBy                  String?   @map("approved_by")
+  completedAt                 DateTime? @map("completed_at") @db.Timestamptz(6)
+
+  piv                         Piv       @relation(fields: [pivId], references: [id])
+  rentCollection               RentCollection @relation(fields: [rentCollectionId], references: [id])
+  approvedByAccount           Account?  @relation(fields: [approvedBy], references: [id])
+  entries                     OperatingDistributionEntry[]
+
+  @@unique([pivId, periodStart, periodEnd], map: "uq_operating_distributions_piv_period")
+  @@index([pivId], map: "idx_operating_distributions_piv")
+  @@map("operating_distributions")
+  @@schema("settlement")
+}
+
+model OperatingDistributionEntry {
+  id                          String    @id @map("operating_distribution_entry_id")
+  operatingDistributionId     String    @map("operating_distribution_id")
+  positionId                  String    @map("position_id")
+  unitCountAtRecordDate        Decimal   @map("unit_count_at_record_date") @db.Decimal(20, 6)
+  amountEurc                   Decimal   @map("amount_eurc") @db.Decimal(15, 6)
+  destinationWalletAddress     String    @map("destination_wallet_address")
+  chainTxHash                  String?   @map("chain_tx_hash")
+  paidAt                       DateTime? @map("paid_at") @db.Timestamptz(6)
+
+  operatingDistribution        OperatingDistribution @relation(fields: [operatingDistributionId], references: [id])
+  position                     PositionLedger        @relation(fields: [positionId], references: [id])
+
+  @@unique([operatingDistributionId, positionId], map: "uq_distribution_entries_dist_position")
+  @@index([operatingDistributionId], map: "idx_distribution_entries_distribution")
+  @@index([positionId], map: "idx_distribution_entries_position")
+  @@map("operating_distribution_entries")
   @@schema("settlement")
 }
 
