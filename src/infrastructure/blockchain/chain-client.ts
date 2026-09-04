@@ -1,9 +1,11 @@
-import { createPublicClient, createWalletClient, http, getContract, type Address, type Hex } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
+import { createPublicClient, createWalletClient, http, getContract, type Address, type Hex, type Transport } from "viem";
+import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
 
 import vistaBloxPropertyAbi from "./abis/VistaBloxProperty.abi.json" with { type: "json" };
 import vistaBloxIpoEscrowAbi from "./abis/VistaBloxIpoEscrow.abi.json" with { type: "json" };
+
+type OperatorChain = typeof base | typeof baseSepolia;
 
 export interface ChainSettlementConfig {
   network: "base" | "base-sepolia";
@@ -28,8 +30,10 @@ export interface ChainSettlementConfig {
 export class ChainClients {
   public readonly config: ChainSettlementConfig;
 
-  public readonly publicClient;
-  public readonly walletClient;
+  public readonly publicClient: ReturnType<typeof createPublicClient<Transport, OperatorChain>>;
+  public readonly walletClient: ReturnType<
+    typeof createWalletClient<Transport, OperatorChain, PrivateKeyAccount>
+  >;
 
   public constructor(config: ChainSettlementConfig) {
     this.config = config;
