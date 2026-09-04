@@ -20,7 +20,10 @@
     "db:generate": "prisma generate",
     "db:validate": "prisma validate",
     "db:migrate:dev": "prisma migrate dev",
-    "db:migrate:deploy": "prisma migrate deploy"
+    "db:migrate:deploy": "prisma migrate deploy",
+    "contracts:compile": "npm --prefix contracts run compile",
+    "contracts:test": "npm --prefix contracts test",
+    "contracts:export-abi": "node scripts/export-contract-abis.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "3.1123.0",
@@ -42,6 +45,7 @@
     "pino-http": "11.0.0",
     "redis": "^6.2.1",
     "ulid": "3.0.2",
+    "viem": "^2.56.3",
     "zod": "4.5.4"
   },
   "devDependencies": {

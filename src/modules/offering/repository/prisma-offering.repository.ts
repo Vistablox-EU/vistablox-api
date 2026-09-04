@@ -3,7 +3,7 @@ import { ulid } from "ulid";
 import { z } from "zod";
 
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
-import { toCents } from "../domain/currency.js";
+import { toCents, toEurcMicros } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import type {
   InvestorOfferingDetailRecord,
@@ -110,8 +110,33 @@ export class PrismaOfferingRepository
         return { pivId: existingPiv.id, offeringId: offering.id };
       }
 
+      const originationCase = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: { ipoEndAt: true },
+      });
+      if (originationCase.ipoEndAt === null) {
+        throw new Error(
+          `Origination case ${input.caseId} has no ipo_end_at set; cannot open an IPO escrow campaign without a deadline.`,
+        );
+      }
+
+      // AD-256's escrow needs a concrete token_id to open a campaign against
+      // before any minting can happen -- earlier than AD-163's original
+      // "once minted" framing for pivs.token_id, so it's assigned here
+      // instead, at Piv creation, via the dedicated sequence
+      // (20260904090000_add_piv_token_id_sequence).
+      const tokenIdRows = await transaction.$queryRaw<{ next_token_id: bigint | string }[]>`
+        SELECT nextval('origination.piv_token_id_seq') AS next_token_id
+      `;
+      const tokenId = BigInt(tokenIdRows[0]!.next_token_id);
+
       const piv = await transaction.piv.create({
-        data: { id: `piv_${ulid()}`, propertyId: input.propertyId, caseId: input.caseId },
+        data: {
+          id: `piv_${ulid()}`,
+          propertyId: input.propertyId,
+          caseId: input.caseId,
+          tokenId: tokenId.toString(),
+        },
         select: { id: true },
       });
       const offering = await transaction.offering.create({
@@ -135,10 +160,32 @@ export class PrismaOfferingRepository
             case_id: input.caseId,
             piv_id: piv.id,
             target_raise_eur: input.ipoValueEur,
+            token_id: tokenId.toString(),
           },
           createdAt: input.openedAt,
         },
       });
+
+      // AD-256: durably hand off, in this same transaction, to the job that
+      // opens this Piv's IPO escrow campaign on-chain -- the same
+      // enqueue-in-transaction pattern AD-145 already uses one step earlier
+      // (origination approval -> this method). Only reached on first
+      // creation of a Piv: the existingPiv branch above (a replay of this
+      // job) must not re-open an already-open campaign, which the escrow
+      // contract itself would reject anyway (CampaignAlreadyOpened).
+      await enqueueTransactionalJob(
+        this.pgBoss,
+        transaction,
+        "settlement.open_ipo_escrow_campaign",
+        {
+          piv_id: piv.id,
+          token_id: tokenId.toString(),
+          target_amount_eurc: toEurcMicros(input.ipoValueEur).toString(),
+          deadline_unix: Math.floor(originationCase.ipoEndAt.getTime() / 1_000),
+        },
+        input.traceId,
+      );
+
       return { pivId: piv.id, offeringId: offering.id };
     });
   }
@@ -746,6 +793,14 @@ export class PrismaOfferingRepository
           reservationsAwaitingReconfirmation += 1;
           reservationIdsAwaitingReconfirmation.push(reservation.reservation_id);
         } else {
+          // Structurally unreachable under the current rules, not dead code
+          // to delete: canPublishFinalOfferingTerms (AD-245, no partial
+          // funding) only lets execution reach this point once fundedEur has
+          // reached the full target, and createReservation caps total
+          // reserved capacity at that same target -- so by the time this
+          // gate passes, every reserved euro must already be funded, leaving
+          // nothing here to cancel. Kept for correctness of the loop (and in
+          // case AD-245 is ever revisited) rather than special-cased away.
           await transaction.reservation.update({
             where: { id: reservation.reservation_id },
             data: { reservationStage: "cancelled" },

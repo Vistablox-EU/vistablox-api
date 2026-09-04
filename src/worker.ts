@@ -33,6 +33,13 @@ import { SendReconfirmationRemindersService } from "./modules/offering/applicati
 import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
+import { CalculateOperatingDistributionService } from "./modules/rental/application/calculate-operating-distribution.service.js";
+import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
+import { PrismaOperatingDistributionRepository } from "./modules/rental/repository/prisma-operating-distribution.repository.js";
+import { OpenIpoEscrowCampaignService } from "./modules/settlement/application/open-ipo-escrow-campaign.service.js";
+import { FinalizeIpoEscrowCampaignsService } from "./modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
+import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
+import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 
@@ -166,6 +173,45 @@ const pollOnrampTransactions =
     ? undefined
     : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient);
 
+const operatingDistributionRepository = new PrismaOperatingDistributionRepository(database);
+const calculateOperatingDistribution = new CalculateOperatingDistributionService(
+  operatingDistributionRepository,
+);
+// Dormant unless OPERATING_DISTRIBUTION_ENABLED (AD-234's pattern) -- built
+// ahead of AD-232/AD-206's named trigger at the founder's direction.
+const runOperatingDistributionSweep = environment.OPERATING_DISTRIBUTION_ENABLED
+  ? new RunOperatingDistributionSweepService(operatingDistributionRepository, calculateOperatingDistribution)
+  : undefined;
+
+// Optional on-chain settlement integration (AD-163/AD-256), same
+// all-configured-together-or-none gate environment.ts's own refine already
+// enforces -- mirrors coinbaseCdpClient's construction just above.
+const chainClients =
+  environment.CHAIN_NETWORK === undefined ||
+  environment.CHAIN_RPC_URL === undefined ||
+  environment.CHAIN_OPERATOR_PRIVATE_KEY === undefined ||
+  environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS === undefined ||
+  environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS === undefined ||
+  environment.EURC_TOKEN_ADDRESS === undefined ||
+  environment.PIV_TREASURY_ADDRESS === undefined
+    ? undefined
+    : createChainClients({
+        network: environment.CHAIN_NETWORK,
+        rpcUrl: environment.CHAIN_RPC_URL,
+        operatorPrivateKey: environment.CHAIN_OPERATOR_PRIVATE_KEY as `0x${string}`,
+        propertyContractAddress: environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS as `0x${string}`,
+        ipoEscrowContractAddress: environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS as `0x${string}`,
+        eurcTokenAddress: environment.EURC_TOKEN_ADDRESS as `0x${string}`,
+        pivTreasuryAddress: environment.PIV_TREASURY_ADDRESS as `0x${string}`,
+      });
+const openIpoEscrowCampaign =
+  chainClients === undefined ? undefined : new OpenIpoEscrowCampaignService(chainClients);
+const settlementRepository = chainClients === undefined ? undefined : new PrismaSettlementRepository(database);
+const finalizeIpoEscrowCampaigns =
+  chainClients === undefined || settlementRepository === undefined
+    ? undefined
+    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients);
+
 const RETRY_OPTIONS = JOB_RETRY_OPTIONS;
 
 async function runJob(name: string, run: (traceId: string) => Promise<JobRunSummary>): Promise<void> {
@@ -208,6 +254,15 @@ if (processDiditWebhook !== undefined) {
 }
 if (reconcileStuckOpenSessions !== undefined) {
   await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
+}
+if (runOperatingDistributionSweep !== undefined) {
+  await boss.createQueue("rental.operating_distribution_sweep");
+}
+if (openIpoEscrowCampaign !== undefined) {
+  await boss.createQueue("settlement.open_ipo_escrow_campaign");
+}
+if (finalizeIpoEscrowCampaigns !== undefined) {
+  await boss.createQueue("settlement.finalize_ipo_escrow_campaigns");
 }
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
@@ -271,6 +326,26 @@ if (pollOnrampTransactions !== undefined) {
     ...RETRY_OPTIONS,
   });
 }
+if (finalizeIpoEscrowCampaigns !== undefined) {
+  // Hourly, like this worker's other longer-horizon timers: an IPO window
+  // runs on the order of days to weeks (AD-244), so per-minute precision
+  // buys nothing an investor would notice, same reasoning as
+  // case_timers.offering_reconfirmation_window_close above.
+  await boss.schedule("settlement.finalize_ipo_escrow_campaigns", "0 * * * *", null, {
+    tz: "UTC",
+    ...RETRY_OPTIONS,
+  });
+}
+if (runOperatingDistributionSweep !== undefined) {
+  // Monthly, 1st at 06:00 UTC — matches this worker's other daily/monthly
+  // timers' plain top-of-period convention (case_timers.applicant_reminders
+  // is "0 8 * * *"); nothing here is latency-sensitive enough to need
+  // off-the-hour jitter the way a public-facing API endpoint would.
+  await boss.schedule("rental.operating_distribution_sweep", "0 6 1 * *", null, {
+    tz: "UTC",
+    ...RETRY_OPTIONS,
+  });
+}
 
 await boss.work("case_timers.applicant_reminders", async () => {
   await runJob("case_timers.applicant_reminders", () => sendApplicantReminders.execute());
@@ -318,6 +393,32 @@ if (pollOnrampTransactions !== undefined) {
     await runJob("case_timers.reservation_onramp_poll", () => pollOnrampTransactions.execute());
   });
 }
+if (runOperatingDistributionSweep !== undefined) {
+  await boss.work("rental.operating_distribution_sweep", async () => {
+    await runJob("rental.operating_distribution_sweep", () => runOperatingDistributionSweep.execute());
+  });
+}
+if (finalizeIpoEscrowCampaigns !== undefined) {
+  // Not routed through runJob: its richer, multi-counter summary (finalized
+  // / successful / failed / positions minted / per-campaign errors) is more
+  // useful here than JobRunSummary's generic checked/acted pair would be.
+  await boss.work("settlement.finalize_ipo_escrow_campaigns", async () => {
+    const traceId = `req_${ulid()}`;
+    try {
+      const summary = await finalizeIpoEscrowCampaigns.execute();
+      logger.info(
+        { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
+        "case timer job completed",
+      );
+    } catch (error) {
+      logger.error(
+        { err: error, trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns" },
+        "case timer job failed",
+      );
+      throw error;
+    }
+  });
+}
 
 // AD-152: this job's trace_id is the originating approval request's own,
 // carried forward by the enqueue path — never a freshly minted one, unlike
@@ -343,6 +444,34 @@ await boss.work("case_timers.pre_offering_open_handoff", async (jobs) => {
     }
   }
 });
+
+// AD-152: this job's trace_id is the originating founder-approval request's
+// own, carried forward from PrismaOfferingRepository.openOfferingForApprovedCase's
+// enqueue (AD-256) -- the same pattern case_timers.pre_offering_open_handoff
+// above already uses.
+if (openIpoEscrowCampaign !== undefined) {
+  await boss.work("settlement.open_ipo_escrow_campaign", async (jobs) => {
+    for (const job of jobs) {
+      const traceId =
+        typeof job.data === "object" && job.data !== null && "trace_id" in job.data
+          ? String((job.data as { trace_id: unknown }).trace_id)
+          : "unknown";
+      try {
+        const result = await openIpoEscrowCampaign.execute(job.data);
+        logger.info(
+          { trace_id: traceId, job: "settlement.open_ipo_escrow_campaign", ...result },
+          "case timer job completed",
+        );
+      } catch (error) {
+        logger.error(
+          { err: error, trace_id: traceId, job: "settlement.open_ipo_escrow_campaign" },
+          "case timer job failed",
+        );
+        throw error;
+      }
+    }
+  });
+}
 
 // AD-152: this job's trace_id is the originating publishFinalOfferingTerms
 // request's own, carried forward by the enqueue path — the same pattern

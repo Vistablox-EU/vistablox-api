@@ -64,11 +64,22 @@ describe.skipIf(databaseUrl === undefined)("OIDC grant + cleanup PostgreSQL inte
       clientId: "vistablox-native",
     });
 
-    const listed = await grants.listForAccount(accountId);
+    try {
+      const listed = await grants.listForAccount(accountId);
 
-    expect(listed.map((grant) => grant.grantId)).toEqual([ownGrantId]);
-    expect(await grants.isOwnedByAccount(accountId, ownGrantId)).toBe(true);
-    expect(await grants.isOwnedByAccount(accountId, otherGrantId)).toBe(false);
+      expect(listed.map((grant) => grant.grantId)).toEqual([ownGrantId]);
+      expect(await grants.isOwnedByAccount(accountId, ownGrantId)).toBe(true);
+      expect(await grants.isOwnedByAccount(accountId, otherGrantId)).toBe(false);
+    } finally {
+      // Unlike the revoke tests below, this test never calls revoke()
+      // itself, so nothing removes these rows as a side effect -- without
+      // this, ownGrantId leaks into the revokeAllForAccount test later in
+      // this same describe block (they share one account for the whole
+      // file), which would then correctly, but unexpectedly, revoke it too.
+      await authPool.query('DELETE FROM "oidc_model_instances" WHERE "id" = ANY($1)', [
+        [ownGrantId, otherGrantId],
+      ]);
+    }
   });
 
   it("revoke deletes the grant row and every token row sharing its grant id", async () => {
