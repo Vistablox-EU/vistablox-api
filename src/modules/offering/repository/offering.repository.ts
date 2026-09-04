@@ -79,6 +79,8 @@ export interface InvestorOfferingDetailRecord {
     walletProvisioned: boolean;
     walletAddress: string | null;
     payoutWalletRegistered: boolean;
+    /** Still-active post-recovery restriction (ACCOUNT_RECOVERY_POLICY.md), if any — null once it has lapsed. */
+    recoveryCooldownEndsAt: Date | null;
   };
 }
 

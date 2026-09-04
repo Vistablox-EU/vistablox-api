@@ -8,6 +8,7 @@ export const reservationBlockers = [
   "offering_not_open",
   "capacity_exhausted",
   "funding_rail_unavailable",
+  "recovery_cooldown_active",
 ] as const;
 
 export type ReservationBlocker = (typeof reservationBlockers)[number];
@@ -75,6 +76,8 @@ export function computeReservationBlockers(input: {
   kycRenewalDueAt: Date | null;
   loginMethods: ReadonlyArray<"google" | "email_password">;
   walletProvisioned: boolean;
+  /** ACCOUNT_RECOVERY_POLICY.md's 72-hour post-recovery restriction — still active when this is set and in the future. */
+  recoveryCooldownEndsAt: Date | null;
 }): ReservationBlocker[] {
   const kycCurrent = isKycCurrent({
     kycEligibilityState: input.kycEligibilityState,
@@ -103,6 +106,9 @@ export function computeReservationBlockers(input: {
   }
   if (input.remainingCapacityEur === "0.00") blockers.push("capacity_exhausted");
   if (!input.fundingRailAvailable) blockers.push("funding_rail_unavailable");
+  if (input.recoveryCooldownEndsAt !== null && input.recoveryCooldownEndsAt > input.now) {
+    blockers.push("recovery_cooldown_active");
+  }
 
   return blockers;
 }

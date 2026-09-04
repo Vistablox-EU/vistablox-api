@@ -324,6 +324,12 @@ export class PrismaOfferingRepository
           walletRegistration: {
             select: { walletAddress: true, registeredAt: true },
           },
+          recoveryCases: {
+            where: { cooldownEndsAt: { not: null } },
+            orderBy: { cooldownEndsAt: "desc" },
+            take: 1,
+            select: { cooldownEndsAt: true },
+          },
         },
       }),
       this.database.$queryRaw<
@@ -421,6 +427,7 @@ export class PrismaOfferingRepository
         payoutWalletRegistered:
           account.walletRegistration !== null &&
           account.walletRegistration.registeredAt !== null,
+        recoveryCooldownEndsAt: account.recoveryCases[0]?.cooldownEndsAt ?? null,
       },
     };
   }

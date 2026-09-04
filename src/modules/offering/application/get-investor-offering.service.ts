@@ -62,6 +62,7 @@ export class GetInvestorOfferingService {
       kycRenewalDueAt: record.accountReadiness.kycRenewalDueAt,
       loginMethods: record.accountReadiness.loginMethods,
       walletProvisioned: record.accountReadiness.walletProvisioned,
+      recoveryCooldownEndsAt: record.accountReadiness.recoveryCooldownEndsAt,
     });
 
     return {

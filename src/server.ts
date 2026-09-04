@@ -25,6 +25,8 @@ import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/prisma-
 import { PrismaStaffInvitationRepository } from "./modules/auth/repository/prisma-staff-invitation.repository.js";
 import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit-sink.js";
 import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
+import { BetterAuthCustomerAccountAdministrator } from "./modules/auth/infrastructure/better-auth-customer-account-administrator.js";
+import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
 import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
 import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
 import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
@@ -215,6 +217,22 @@ const diditKyc =
             }),
       }
     : undefined;
+// Reuses the same baseline Didit workflow as ordinary KYC (AD-062's didit-kyc.md
+// follow-on work): a fresh recovery verification only needs to re-prove a live
+// human with a valid ID, not a separate provider configuration.
+const accountRecovery =
+  diditKyc === undefined
+    ? undefined
+    : {
+        repository: new PrismaAccountRecoveryRepository(database),
+        administrator: new BetterAuthCustomerAccountAdministrator(auth),
+        didit: diditKyc.didit,
+        workflowId: diditKyc.workflowId,
+        callbackUrl: diditKyc.callbackUrl,
+        recoveryRedirectUrl:
+          environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "https://app.vistablox.eu/reset-password",
+        emailSender,
+      };
 const onrampRedirectUrl = environment.COINBASE_ONRAMP_REDIRECT_URL;
 const coinbaseCdpClient =
   environment.COINBASE_CDP_API_KEY_ID === undefined ||
@@ -337,6 +355,7 @@ const app = createApp({
         environment.STAFF_RECOVERY_REDIRECT_URL ??
         new URL("/staff/reset-password", authBaseUrl).toString(),
     },
+    ...(accountRecovery === undefined ? {} : { accountRecovery }),
     staffInvitations: {
       repository: staffInvitationRepository,
       identities: new BetterAuthStaffIdentityProvider(staffProvisioningAuth),

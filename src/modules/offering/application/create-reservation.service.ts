@@ -21,6 +21,7 @@ const blockerMessages: Record<ReservationBlocker, string> = {
   offering_not_open: "This offering is not currently open for reservations.",
   capacity_exhausted: "This offering has no remaining capacity.",
   funding_rail_unavailable: "Reservation funding is not currently available.",
+  recovery_cooldown_active: "This account is in a post-recovery restriction window.",
 };
 
 /**
@@ -96,6 +97,7 @@ export class CreateReservationService {
       kycRenewalDueAt: detail.accountReadiness.kycRenewalDueAt,
       loginMethods: detail.accountReadiness.loginMethods,
       walletProvisioned: detail.accountReadiness.walletProvisioned,
+      recoveryCooldownEndsAt: detail.accountReadiness.recoveryCooldownEndsAt,
     });
     if (blockers.length > 0) throw reservationNotAvailableError(blockers);
 

@@ -6,7 +6,7 @@ export interface DiditClient {
     accountId: string;
     callbackUrl: string;
     sessionStartId: string;
-    purpose: "baseline_kyc" | "owner_proof_of_address";
+    purpose: "baseline_kyc" | "owner_proof_of_address" | "account_recovery";
     language?: string;
   }): Promise<{
     sessionId: string;

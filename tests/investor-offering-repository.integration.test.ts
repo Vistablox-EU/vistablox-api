@@ -1017,6 +1017,10 @@ describe.skipIf(databaseUrl === undefined)(
         sendKycRenewalReminderEmail: vi.fn(),
         sendReconfirmationReminderEmail: vi.fn(),
         sendReconfirmationWindowOpenedEmail: vi.fn().mockResolvedValue(undefined),
+        sendAccountRecoveryCaseOpenedEmail: vi.fn().mockResolvedValue(undefined),
+        sendAccountRecoveryApprovedEmail: vi.fn().mockResolvedValue(undefined),
+        sendAccountRecoveryRejectedEmail: vi.fn().mockResolvedValue(undefined),
+        sendAccountRecoveryCompletedEmail: vi.fn().mockResolvedValue(undefined),
       };
       const notifyService = new NotifyReconfirmationWindowOpenedService(repository, email);
 

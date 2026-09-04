@@ -61,6 +61,7 @@ function detail(
       walletProvisioned: true,
       walletAddress: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
       payoutWalletRegistered: true,
+      recoveryCooldownEndsAt: null,
     },
     ...overrides,
   };
@@ -136,6 +137,7 @@ describe("authenticated investor offering detail", () => {
         walletProvisioned: false,
         walletAddress: null,
         payoutWalletRegistered: false,
+        recoveryCooldownEndsAt: null,
       },
     });
     const service = new GetInvestorOfferingService(repository(record), () => currentTime);

@@ -38,6 +38,10 @@ function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
     sendKycRenewalReminderEmail: vi.fn().mockResolvedValue(undefined),
     sendReconfirmationReminderEmail: vi.fn(),
     sendReconfirmationWindowOpenedEmail: vi.fn(),
+    sendAccountRecoveryCaseOpenedEmail: vi.fn(),
+    sendAccountRecoveryApprovedEmail: vi.fn(),
+    sendAccountRecoveryRejectedEmail: vi.fn(),
+    sendAccountRecoveryCompletedEmail: vi.fn(),
     ...overrides,
   };
 }

@@ -52,6 +52,7 @@ const repository: OfferingRepository = {
       kycRenewalDueAt: null,
       walletProvisioned: false,
       payoutWalletRegistered: false,
+      recoveryCooldownEndsAt: null,
     },
   }),
 };
@@ -167,6 +168,7 @@ const reservationEligibleDetail: InvestorOfferingDetailRecord = {
     walletProvisioned: true,
     walletAddress: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
     payoutWalletRegistered: false,
+    recoveryCooldownEndsAt: null,
   },
 };
 
