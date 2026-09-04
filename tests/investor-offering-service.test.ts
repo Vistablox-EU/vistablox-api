@@ -116,6 +116,12 @@ describe("authenticated investor offering detail", () => {
     expect(JSON.stringify(result)).not.toContain(
       "documents/offering_01/kiis-v2.pdf",
     );
+    // The repository layer's accountReadiness.walletAddress carries the raw
+    // address for internal consumers like create-reservation.service.ts
+    // (which needs it for Coinbase CDP onramp); this service layer is what
+    // must not forward it into an API-facing response -- readiness only
+    // ever exposes the walletProvisioned/payoutWalletRegistered booleans.
+    expect(JSON.stringify(result)).not.toContain(detail().accountReadiness.walletAddress);
   });
 
   it("reports every account and offering blocker without hiding disclosure access", async () => {

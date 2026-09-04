@@ -18,6 +18,7 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
   const rosterEmail = `staff-roster-${suffix}@example.test`;
   const rosterPassword = `A uniquely generated VistaBlox roster password ${suffix}`;
   const rosterAccountId = `acct_roster_${suffix}`;
+  const legalPracticeId = `practice_${suffix}`;
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
   const resetUrls: string[] = [];
@@ -80,6 +81,9 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
       },
     });
     rosterBetterAuthUserId = rosterSignedUp.user.id;
+    await database.legalPractice.create({
+      data: { id: legalPracticeId, name: "Roster Test Legal Practice", countryCode: "NL" },
+    });
     await database.account.create({
       data: {
         id: rosterAccountId,
@@ -116,6 +120,10 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
         rosterBetterAuthUserId,
       ]);
     }
+    // After staffRoleAssignment rows are gone (both branches above), so
+    // legal_practices' FK from staff_role_assignments.legal_practice_id no
+    // longer references this row.
+    await database.legalPractice.deleteMany({ where: { id: legalPracticeId } });
     await Promise.all([database.$disconnect(), authPool.end()]);
   });
 
@@ -240,7 +248,7 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
     const granted = await repository.grantRole({
       accountId: rosterAccountId,
       role: "legal_partner",
-      legalPracticeId: `practice_${suffix}`,
+      legalPracticeId,
       appraisalFirmId: null,
       actorAccountId: rosterAccountId,
       traceId: `trace_grant_${suffix}`,
@@ -248,7 +256,7 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
     });
     expect(granted).toMatchObject({
       role: "legal_partner",
-      legalPracticeId: `practice_${suffix}`,
+      legalPracticeId,
       appraisalFirmId: null,
       revokedAt: null,
     });

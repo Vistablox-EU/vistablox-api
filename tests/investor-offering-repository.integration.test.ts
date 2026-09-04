@@ -311,7 +311,12 @@ describe.skipIf(databaseUrl === undefined)(
           payoutWalletRegistered: true,
         },
       });
-      expect(JSON.stringify(result)).not.toContain("walletAddress");
+      // Not asserting walletAddress absence here: this repository method is
+      // an internal/domain layer serving multiple consumers, including
+      // create-reservation.service.ts, which needs the actual address for
+      // Coinbase CDP onramp. Privacy-scrubbing for API responses is
+      // GetInvestorOfferingService's job (asserted in
+      // investor-offering-service.test.ts), one layer up from here.
       expect(JSON.stringify(result)).not.toContain("providerReference");
     });
 
@@ -619,6 +624,14 @@ describe.skipIf(databaseUrl === undefined)(
       const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
       const fundedId = `reservation_${randomUUID()}`;
       const pendingId = `reservation_${randomUUID()}`;
+      // createReservation itself records an implicit "initiated" money
+      // event at recordedAt: createdAt (see recordMoneyEvent's own
+      // reasoning below) -- every later event here must be relative to,
+      // and after, that same reference point, not a hardcoded past
+      // timestamp: listInitiatedReservationsForTimers picks the row with
+      // the latest recorded_at, and a fixed past date silently stops being
+      // "latest" the moment real time catches up to and passes it.
+      const now = Date.now();
       await repository.createReservation({
         reservationId: fundedId,
         offeringId,
@@ -626,7 +639,7 @@ describe.skipIf(databaseUrl === undefined)(
         amountEur: "200.00",
         disclosurePackVersionAtReservation: null,
         traceId: `trace_${suffix}`,
-        createdAt: new Date(),
+        createdAt: new Date(now),
       });
       await repository.createReservation({
         reservationId: pendingId,
@@ -635,7 +648,7 @@ describe.skipIf(databaseUrl === undefined)(
         amountEur: "300.00",
         disclosurePackVersionAtReservation: null,
         traceId: `trace_${suffix}`,
-        createdAt: new Date(),
+        createdAt: new Date(now),
       });
       await repository.recordMoneyEvent({
         reservationId: fundedId,
@@ -644,7 +657,7 @@ describe.skipIf(databaseUrl === undefined)(
         capitalState: "eurc_purchase_pending",
         amountEur: "200.00",
         amountEurc: null,
-        recordedAt: new Date("2026-09-02T09:00:00.000Z"),
+        recordedAt: new Date(now + 60_000),
       });
       await repository.recordMoneyEvent({
         reservationId: fundedId,
@@ -653,7 +666,7 @@ describe.skipIf(databaseUrl === undefined)(
         capitalState: "eurc_reserved",
         amountEur: "200.00",
         amountEurc: "190.000000",
-        recordedAt: new Date("2026-09-02T09:05:00.000Z"),
+        recordedAt: new Date(now + 300_000),
       });
       await repository.recordMoneyEvent({
         reservationId: pendingId,
@@ -662,7 +675,7 @@ describe.skipIf(databaseUrl === undefined)(
         capitalState: "eurc_purchase_pending",
         amountEur: "300.00",
         amountEurc: null,
-        recordedAt: new Date("2026-09-02T09:00:00.000Z"),
+        recordedAt: new Date(now + 60_000),
       });
 
       const forTimers = await repository.listInitiatedReservationsForTimers();
@@ -685,6 +698,7 @@ describe.skipIf(databaseUrl === undefined)(
     const suffix = randomUUID();
     const fundedAccountId = `account_finalize_funded_${suffix}`;
     const unfundedAccountId = `account_finalize_unfunded_${suffix}`;
+    const founderAccountId = `account_finalize_founder_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
     // PgBoss's constructor eagerly validates its connection string, so it
@@ -748,7 +762,7 @@ describe.skipIf(databaseUrl === undefined)(
     async function publishCompleteDisclosurePack(offeringId: string, publishedAt: Date): Promise<void> {
       const result = await repository.publishDisclosurePack({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: disclosureDocumentTypes.map((documentType) => ({
           documentType,
           documentRef: `documents/${documentType}.pdf`,
@@ -770,7 +784,7 @@ describe.skipIf(databaseUrl === undefined)(
       // already exist or that send() fails against a queue that doesn't.
       await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
       await authPool.query(
-        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10)',
+        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10), ($11, $12, $13, $14, $15)',
         [
           `auth_${fundedAccountId}`,
           "Funded Investor",
@@ -782,6 +796,11 @@ describe.skipIf(databaseUrl === undefined)(
           `finalize-unfunded-${suffix}@example.test`,
           true,
           "customer",
+          `auth_${founderAccountId}`,
+          "Finalize Test Founder",
+          `finalize-founder-${suffix}@example.test`,
+          true,
+          "staff_partner",
         ],
       );
       await database.account.create({
@@ -800,6 +819,15 @@ describe.skipIf(databaseUrl === undefined)(
       await database.account.create({
         data: { id: unfundedAccountId, betterAuthUserId: `auth_${unfundedAccountId}` },
       });
+      // publishDisclosurePack/classifyMateriality/reconfirmReservation etc.
+      // all record an audit log actor for whichever account performs them —
+      // every call site in this describe block passes this founder account,
+      // which (unlike everywhere else in this file) was never actually
+      // created, so every one of those calls failed on
+      // audit_log_actor_account_id_fkey.
+      await database.account.create({
+        data: { id: founderAccountId, betterAuthUserId: `auth_${founderAccountId}` },
+      });
     });
 
     afterAll(async () => {
@@ -811,25 +839,40 @@ describe.skipIf(databaseUrl === undefined)(
       await database.disclosurePack.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
       await database.auditLog.deleteMany({ where: { resourceId: { in: offeringIds }, resourceType: "offering" } });
+      // Separate from the resourceId-scoped delete above: this FK is on
+      // actorAccountId, and the founder account acted on plenty of audit
+      // log rows whose resourceType/resourceId isn't "offering" (disclosure
+      // packs, materiality records, reconfirmations).
+      await database.auditLog.deleteMany({ where: { actorAccountId: founderAccountId } });
       await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
       await database.piv.deleteMany({ where: { id: { in: pivIds } } });
       await database.originationCase.deleteMany({ where: { id: { in: caseIds } } });
       await database.property.deleteMany({ where: { id: { in: propertyIds } } });
       await database.walletRegistration.deleteMany({ where: { accountId: fundedAccountId } });
-      await database.account.deleteMany({ where: { id: { in: [fundedAccountId, unfundedAccountId] } } });
+      await database.account.deleteMany({
+        where: { id: { in: [fundedAccountId, unfundedAccountId, founderAccountId] } },
+      });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [
-        [`auth_${fundedAccountId}`, `auth_${unfundedAccountId}`],
+        [`auth_${fundedAccountId}`, `auth_${unfundedAccountId}`, `auth_${founderAccountId}`],
       ]);
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
-    it("publishes final terms, moving the funded reservation to awaiting_reconfirmation and cancelling the unfunded one, without creating a position yet", async () => {
+    it("publishes final terms once every reservation together reaches target, moving each to awaiting_reconfirmation without creating a position yet", async () => {
+      // AD-245 (no partial-funding path) means canPublishFinalOfferingTerms
+      // requires *funded* alone to reach the full target -- and createReservation
+      // caps total reserved capacity at that same target. Those two rules
+      // together mean a successful publish can never have a leftover unfunded
+      // reservation to cancel: reserved <= target and funded <= reserved, so
+      // funded == target forces reserved == target too, leaving no room for
+      // anything unfunded. This scenario reflects that: every reservation that
+      // makes up the target must itself be funded for publish to succeed at all.
       const { offeringId, pivId } = await createOffering({ targetRaiseEur: "1000.00" });
-      const fundedReservationId = `reservation_${randomUUID()}`;
-      const unfundedReservationId = `reservation_${randomUUID()}`;
+      const firstReservationId = `reservation_${randomUUID()}`;
+      const secondReservationId = `reservation_${randomUUID()}`;
       await repository.createReservation({
-        reservationId: fundedReservationId,
+        reservationId: firstReservationId,
         offeringId,
         accountId: fundedAccountId,
         amountEur: "700.00",
@@ -838,7 +881,7 @@ describe.skipIf(databaseUrl === undefined)(
         createdAt: new Date(),
       });
       await repository.recordMoneyEvent({
-        reservationId: fundedReservationId,
+        reservationId: firstReservationId,
         provider: "coinbase_cdp",
         providerReference: "txn_01",
         capitalState: "eurc_reserved",
@@ -847,7 +890,7 @@ describe.skipIf(databaseUrl === undefined)(
         recordedAt: new Date(),
       });
       await repository.createReservation({
-        reservationId: unfundedReservationId,
+        reservationId: secondReservationId,
         offeringId,
         accountId: unfundedAccountId,
         amountEur: "300.00",
@@ -855,12 +898,21 @@ describe.skipIf(databaseUrl === undefined)(
         traceId: `trace_${suffix}`,
         createdAt: new Date(),
       });
+      await repository.recordMoneyEvent({
+        reservationId: secondReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_02",
+        capitalState: "eurc_reserved",
+        amountEur: "300.00",
+        amountEurc: "295.000000",
+        recordedAt: new Date(),
+      });
 
       const publishedAt = new Date("2026-09-02T12:00:00.000Z");
       await publishCompleteDisclosurePack(offeringId, publishedAt);
       const result = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "Target reached, proceeding to tokenization.",
         traceId: `trace_${suffix}`,
         publishedAt,
@@ -873,8 +925,8 @@ describe.skipIf(databaseUrl === undefined)(
           finalOfferingPublishedAt: publishedAt,
           platformRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
           effectiveRightsEndAt: new Date("2026-09-09T12:00:00.000Z"),
-          reservationsAwaitingReconfirmation: 1,
-          reservationsCancelled: 1,
+          reservationsAwaitingReconfirmation: 2,
+          reservationsCancelled: 0,
         },
       });
 
@@ -886,10 +938,10 @@ describe.skipIf(databaseUrl === undefined)(
       expect(offering?.finalOfferingPublishedAt).toEqual(publishedAt);
       expect(offering?.effectiveRightsEndAt).toEqual(new Date("2026-09-09T12:00:00.000Z"));
 
-      const fundedReservation = await database.reservation.findUnique({ where: { id: fundedReservationId } });
-      expect(fundedReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
-      const unfundedReservation = await database.reservation.findUnique({ where: { id: unfundedReservationId } });
-      expect(unfundedReservation).toMatchObject({ reservationStage: "cancelled" });
+      const firstReservation = await database.reservation.findUnique({ where: { id: firstReservationId } });
+      expect(firstReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
+      const secondReservation = await database.reservation.findUnique({ where: { id: secondReservationId } });
+      expect(secondReservation).toMatchObject({ reservationStage: "awaiting_reconfirmation" });
 
       expect(await database.positionLedger.count({ where: { pivId } })).toBe(0);
       expect(
@@ -925,7 +977,7 @@ describe.skipIf(databaseUrl === undefined)(
       const traceId = `trace_window_opened_${suffix}`;
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId,
         publishedAt,
@@ -999,7 +1051,7 @@ describe.skipIf(databaseUrl === undefined)(
     it("reports offering_not_found for an unknown offering", async () => {
       const result = await repository.publishFinalOfferingTerms({
         offeringId: `offering_missing_${suffix}`,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: new Date(),
@@ -1013,7 +1065,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: new Date(),
@@ -1047,7 +1099,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, alreadyPublishedAt);
       const first = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: alreadyPublishedAt,
@@ -1056,7 +1108,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const second = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: new Date("2026-09-02T13:00:00.000Z"),
@@ -1089,7 +1141,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: new Date(),
@@ -1123,7 +1175,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, publishedAt01);
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: publishedAt01,
@@ -1171,7 +1223,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: new Date("2026-09-02T12:00:00.000Z"),
@@ -1242,7 +1294,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, windowClosedPublishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: windowClosedPublishedAt,
@@ -1282,7 +1334,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: new Date("2026-09-02T12:00:00.000Z"),
@@ -1320,7 +1372,7 @@ describe.skipIf(databaseUrl === undefined)(
       const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
       const publishedPack = await repository.publishDisclosurePack({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: partialTypes.map((documentType) => ({
           documentType,
           documentRef: `documents/${documentType}.pdf`,
@@ -1332,7 +1384,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: new Date("2026-09-02T12:00:00.000Z"),
@@ -1366,7 +1418,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, publishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt,
@@ -1378,7 +1430,7 @@ describe.skipIf(databaseUrl === undefined)(
       const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
       const republishedPack = await repository.publishDisclosurePack({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: partialTypes.map((documentType) => ({
           documentType,
           documentRef: `documents/${documentType}-v2.pdf`,
@@ -1465,7 +1517,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, publishedAt);
       const published = await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt,
@@ -1575,7 +1627,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, materialityPublishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt: materialityPublishedAt,
@@ -1591,7 +1643,7 @@ describe.skipIf(databaseUrl === undefined)(
       const classifiedAt = new Date("2026-09-04T00:00:00.000Z");
       const result = await repository.classifyMateriality({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         changeDescription: "Change of primary obligor.",
         classification: "per_se_material",
         thresholdType: null,
@@ -1635,7 +1687,7 @@ describe.skipIf(databaseUrl === undefined)(
         classification: "per_se_material",
         thresholdType: null,
         resetTriggered: true,
-        classifiedByAccountId: "account_founder",
+        classifiedByAccountId: founderAccountId,
       });
 
       expect(
@@ -1670,7 +1722,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, publishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt,
@@ -1684,7 +1736,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.classifyMateriality({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         changeDescription: "Corrected a typo in the property summary.",
         classification: "non_material",
         thresholdType: null,
@@ -1706,7 +1758,7 @@ describe.skipIf(databaseUrl === undefined)(
     it("reports offering_not_found for an unknown offering", async () => {
       const result = await repository.classifyMateriality({
         offeringId: `offering_missing_${suffix}`,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         changeDescription: "notes",
         classification: "non_material",
         thresholdType: null,
@@ -1722,7 +1774,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.classifyMateriality({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         changeDescription: "notes",
         classification: "non_material",
         thresholdType: null,
@@ -1738,7 +1790,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.classifyMateriality({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         changeDescription: "notes",
         classification: "non_material",
         thresholdType: null,
@@ -1755,7 +1807,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.publishDisclosurePack({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: [
           { documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" },
           { documentType: "final_terms_sheet", documentRef: "documents/terms-v1.pdf" },
@@ -1798,7 +1850,7 @@ describe.skipIf(databaseUrl === undefined)(
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
       const first = await repository.publishDisclosurePack({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
         traceId: `trace_${suffix}`,
         publishedAt: new Date("2026-09-01T09:00:00.000Z"),
@@ -1808,7 +1860,7 @@ describe.skipIf(databaseUrl === undefined)(
       const republishedAt = new Date("2026-09-02T12:00:00.000Z");
       const second = await repository.publishDisclosurePack({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: [
           { documentType: "ecsp_kiis", documentRef: "documents/kiis-v2.pdf" },
           { documentType: "priips_kid", documentRef: "documents/kid-v2.pdf" },
@@ -1857,7 +1909,7 @@ describe.skipIf(databaseUrl === undefined)(
     it("reports offering_not_found for an unknown offering", async () => {
       const result = await repository.publishDisclosurePack({
         offeringId: `offering_missing_${suffix}`,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
         traceId: `trace_${suffix}`,
         publishedAt: new Date(),
@@ -1871,7 +1923,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       const result = await repository.publishDisclosurePack({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-v1.pdf" }],
         traceId: `trace_${suffix}`,
         publishedAt: new Date(),
@@ -1911,7 +1963,7 @@ describe.skipIf(databaseUrl === undefined)(
       await publishCompleteDisclosurePack(offeringId, publishedAt);
       await repository.publishFinalOfferingTerms({
         offeringId,
-        accountId: "account_founder",
+        accountId: founderAccountId,
         founderReviewNotes: "notes",
         traceId: `trace_${suffix}`,
         publishedAt,
@@ -2000,6 +2052,7 @@ describe.skipIf(databaseUrl === undefined)(
       boss = new PgBoss(databaseUrl ?? "");
       repository = new PrismaOfferingRepository(database, boss);
       await boss.start();
+      await boss.createQueue("settlement.open_ipo_escrow_campaign");
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [betterAuthUserId, "Handoff Repository Applicant", `handoff-repo-${suffix}@example.test`, true, "customer"],
@@ -2023,6 +2076,13 @@ describe.skipIf(databaseUrl === undefined)(
           legalExecutionEventRefs: [],
           legalDocumentRefs: [],
           appraisalDocumentRefs: [],
+          // A real case only reaches pre_offering_open via
+          // recordFounderDecision's approve path, which always sets this
+          // alongside the stage transition -- set directly here since this
+          // fixture skips straight to that stage rather than going through
+          // the full approval flow. openOfferingForApprovedCase (AD-256)
+          // requires it to open the case's IPO escrow campaign.
+          ipoEndAt: new Date("2026-10-01T19:00:00.000Z"),
         },
       });
     });

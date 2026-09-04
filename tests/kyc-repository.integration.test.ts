@@ -35,6 +35,7 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
     boss = new PgBoss(databaseUrl ?? "");
     repository = new PrismaKycRepository(database, boss);
     await boss.start();
+    await boss.createQueue("provider_events.didit_webhook");
     await authPool.query(
       'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
       [betterAuthUserId, "KYC Test User", `kyc-${suffix}@example.test`, true, "customer"],
@@ -318,6 +319,7 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
       const creatingWhileOpen = await repository.listStuckSessionCreationsForTimer();
       expect(creatingWhileOpen.find((row) => row.accountId === stuckAccountId)).toBeUndefined();
     } finally {
+      await database.kycEligibilityHistory.deleteMany({ where: { accountId: stuckAccountId } });
       await database.kycEligibility.deleteMany({ where: { accountId: stuckAccountId } });
       await database.account.deleteMany({ where: { id: stuckAccountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [stuckBetterAuthUserId]);
