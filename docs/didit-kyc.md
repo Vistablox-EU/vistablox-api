@@ -12,6 +12,17 @@ This slice implements the baseline B2C workflow described in the backend design 
 
 Owner proof of address uses the same authenticated webhook-then-fetch pattern but a separate Didit Address Verification workflow. `POST /v1/kyc/proof-of-address/sessions` is available only when baseline KYC is eligible and no current address evidence already exists. The document is captured and retained by Didit, not uploaded through VistaBlox.
 
+## Resuming an in-progress session
+
+`POST /v1/kyc/sessions` correctly rejects a second concurrent session with `409 identity.kyc_session_unavailable` while one is already open (`canStartSession`'s allow-list excludes `kyc_session_open`/`kyc_pending`/`kyc_resubmission_pending`), but a client that hit the 409 still needs a way back into the session it already started. `GET /v1/kyc` answers that with an `active_session` field (`GetKycStatusService.resolveActiveSession`): `verification_session_id`, `verification_url`, and `expires_at`, or `null` when there's nothing to resume.
+
+That URL is never the one persisted at creation time -- it can't be, since the Data boundary below excludes session tokens from storage, and the hosted verification link is exactly that: a bearer credential into the customer's in-flight document/biometric flow. Instead, whenever the account's `operational_substatus` indicates a session is genuinely still open, `resolveActiveSession` re-fetches it live from Didit's own decision endpoint (`GET /v3/session/{id}/decision/`, the same one the webhook and reconciliation paths already call) and hands back whatever `session_url` Didit reports right now, discarding it once the response is sent. Two consequences fall out of that:
+
+- **No added cost for the common case.** The vast majority of `GET /v1/kyc` calls are for accounts with no open session (never started, or already at a terminal outcome), so the local `operational_substatus` check alone skips the Didit call entirely for those.
+- **Self-correcting, never stale.** If Didit's own status has already moved past "still open" by the time this is read (approved/declined/expired/abandoned, most often because its webhook for that transition hasn't arrived yet), `active_session` reports `null` rather than a dead link -- `eligibility_state` itself catches up separately and asynchronously, through the existing webhook/reconciliation path this section already describes; this lookup is purely read-only and never writes anything back.
+
+A Didit outage while resolving this degrades to `active_session: null` rather than failing the whole status request -- `eligibility_state` and everything else in the response still come from the local record either way.
+
 ## Stuck-session reconciliation
 
 A session start can get permanently wedged with no self-service recovery path, since `canStartSession`/`canStartProofOfAddress` (`prisma-kyc.repository.ts`) both exclude `kyc_session_creating`/`kyc_session_open` (and the proof-of-address equivalents) from their retry allow-list. Two hourly `maintenance` jobs close this:

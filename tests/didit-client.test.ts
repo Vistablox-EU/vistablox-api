@@ -108,6 +108,8 @@ describe("Didit HTTP client", () => {
       workflowId,
       vendorData: "acct_01",
       status: "Approved",
+      verificationUrl: null,
+      expiresAt: null,
       idVerifications: [
         { status: "Approved", dateOfBirth: "1990-04-15", warnings: [] },
       ],
@@ -131,6 +133,44 @@ describe("Didit HTTP client", () => {
     expect(JSON.stringify(result)).not.toContain("SECRET");
     expect(JSON.stringify(result)).not.toContain("raw_images");
     expect(JSON.stringify(result)).not.toContain("Private address");
+  });
+
+  it("carries the resume URL and expiry alongside a decision", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({
+        session_id: sessionId,
+        status: "In Progress",
+        session_url: `https://verify.didit.me/session/${sessionId}`,
+        expires_at: "2026-09-01T13:00:00.000Z",
+      }),
+    );
+    const result = await new HttpDiditClient({
+      baseUrl: "https://verification.didit.me",
+      apiKey: "secret-api-key",
+      fetch,
+    }).getDecision(sessionId);
+
+    expect(result.verificationUrl).toBe(`https://verify.didit.me/session/${sessionId}`);
+    expect(result.expiresAt).toEqual(new Date("2026-09-01T13:00:00.000Z"));
+  });
+
+  it("falls back to no expiry rather than failing when expires_at is unparseable", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({
+        session_id: sessionId,
+        status: "In Progress",
+        session_url: `https://verify.didit.me/session/${sessionId}`,
+        expires_at: "not-a-date",
+      }),
+    );
+    const result = await new HttpDiditClient({
+      baseUrl: "https://verification.didit.me",
+      apiKey: "secret-api-key",
+      fetch,
+    }).getDecision(sessionId);
+
+    expect(result.verificationUrl).toBe(`https://verify.didit.me/session/${sessionId}`);
+    expect(result.expiresAt).toBeNull();
   });
 
   it("returns a safe provider error without response content", async () => {

@@ -75,6 +75,12 @@ export interface DiditDecisionSummary {
   workflowId: string | null;
   vendorData: string | null;
   status: DiditStatus | null;
+  // Optional (not part of every call site's fixture data) rather than
+  // required: only GetKycStatusService's resume-support path reads these,
+  // and Didit's decision endpoint returns them alongside the feature
+  // arrays every other caller already relies on.
+  verificationUrl?: string | null;
+  expiresAt?: Date | null;
   idVerifications: DiditIdentitySummary[];
   livenessChecks: DiditFeatureSummary[];
   faceMatches: DiditFeatureSummary[];

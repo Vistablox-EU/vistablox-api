@@ -48,6 +48,13 @@ const decisionResponseSchema = z
     workflow_id: z.string().nullable().optional(),
     vendor_data: z.string().nullable().optional(),
     status: z.string(),
+    // Deliberately permissive (not .url()/.iso.datetime()): these two are
+    // only a resume-support nicety (see GetKycStatusService), so an
+    // unexpected shape here should fall back to null in the mapper below,
+    // never fail the whole decision fetch that every other caller
+    // (webhook processing, stuck-session reconciliation) depends on.
+    session_url: z.string().nullish(),
+    expires_at: z.union([z.string(), z.number()]).nullish(),
     id_verifications: z.array(identitySchema).nullish(),
     liveness_checks: z.array(featureSchema).nullish(),
     face_matches: z.array(featureSchema).nullish(),
@@ -114,6 +121,8 @@ export class HttpDiditClient implements DiditClient {
       workflowId: parsed.data.workflow_id ?? null,
       vendorData: parsed.data.vendor_data ?? null,
       status: normalizeDiditStatus(parsed.data.status),
+      verificationUrl: parsed.data.session_url ?? null,
+      expiresAt: parseProviderDate(parsed.data.expires_at),
       idVerifications: (parsed.data.id_verifications ?? []).map((feature) => ({
         status: feature.status,
         dateOfBirth: feature.date_of_birth ?? null,
@@ -182,6 +191,17 @@ function normalizeDiditStatus(value: string): DiditStatus | null {
     AWAITING_USER: "Awaiting User",
   };
   return uppercase[value] ?? null;
+}
+
+// Didit's docs say expires_at is ISO 8601 on this endpoint, matching every
+// other timestamp field here, but the webhook body elsewhere in this
+// integration uses unix seconds (kyc.service.ts's `createdAt * 1_000`) --
+// tolerating both, and falling back to null on anything else, means a
+// format surprise degrades the resume-URL nicety instead of throwing.
+function parseProviderDate(value: string | number | null | undefined): Date | null {
+  if (value === null || value === undefined) return null;
+  const date = typeof value === "number" ? new Date(value * 1_000) : new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
 }
 
 function toFeature(feature: z.infer<typeof featureSchema>) {

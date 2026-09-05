@@ -71,6 +71,15 @@ export const startProofOfAddressSessionResponseSchema = z.object({
   }),
 });
 
+// Only ever populated from a freshly re-fetched Didit decision, never a
+// persisted column (docs/didit-kyc.md's data boundary excludes session
+// tokens from storage) -- see GetKycStatusService.resolveActiveSession.
+const activeSessionSchema = z.object({
+  verification_session_id: z.string().uuid(),
+  verification_url: z.url(),
+  expires_at: z.iso.datetime().nullable(),
+});
+
 export const kycStatusResponseSchema = z.object({
   data: z.object({
     eligibility_state: eligibilityStateSchema,
@@ -78,6 +87,7 @@ export const kycStatusResponseSchema = z.object({
     proof_of_address_current_until: z.iso.datetime().nullable(),
     last_verified_at: z.iso.datetime().nullable(),
     renewal_due_at: z.iso.datetime().nullable(),
+    active_session: activeSessionSchema.nullable(),
   }),
 });
 

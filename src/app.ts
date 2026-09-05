@@ -409,7 +409,7 @@ export function createApp(dependencies: AppDependencies): Express {
         "/v1/kyc",
         createKycRouter(
           requireAuthentication,
-          new GetKycStatusService(kyc.repository),
+          new GetKycStatusService(kyc.repository, kyc.didit),
           new StartKycSessionService(kyc.repository, kyc.didit, {
             workflowId: kyc.workflowId,
             callbackUrl: kyc.callbackUrl,
