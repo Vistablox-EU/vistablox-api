@@ -55,6 +55,13 @@ const environmentSchema = z
     SMTP_USER: z.string().min(1),
     SMTP_PASSWORD: z.string().min(1),
     SMTP_FROM: z.string().min(1),
+    // Must stay "true" in production. Setting it "false" skips sending the
+    // verification email entirely and lets new accounts sign in unverified --
+    // for local/dev testing only, when SMTP isn't configured or reachable.
+    EMAIL_VERIFICATION_ENABLED: z
+      .enum(["true", "false"])
+      .default("true")
+      .transform((value) => value === "true"),
     PROFILE_CACHE_URL: z.preprocess(
       emptyStringToUndefined,
       z

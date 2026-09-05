@@ -158,7 +158,9 @@ const auth = createBetterAuth({
       }),
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
-  sendVerificationEmail: (email) => emailSender.sendVerificationEmail(email),
+  ...(environment.EMAIL_VERIFICATION_ENABLED
+    ? { sendVerificationEmail: (email) => emailSender.sendVerificationEmail(email) }
+    : {}),
   sendPasswordResetEmail: (email) => emailSender.sendPasswordResetEmail(email),
   authAuditSink,
   sessionMirror: new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET),
