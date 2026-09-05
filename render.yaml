@@ -89,6 +89,14 @@ services:
         sync: false
       - key: MINIO_DOCUMENT_BUCKET
         sync: false
+      # All-together-or-none, enforced by environment.ts's own refine: leave
+      # every DIDIT_* value below blank in the dashboard to run without
+      # individual KYC. That is a valid, tested configuration, not a
+      # misconfiguration -- but it means GET/POST /v1/kyc (and the other KYC
+      # routes app.ts mounts alongside them) are never registered, so they
+      # 404 as "No route exists" rather than responding as a disabled
+      # feature. Provision real Didit sandbox/production credentials here to
+      # turn that into a working integration instead.
       - key: DIDIT_API_KEY
         sync: false
       - key: DIDIT_WORKFLOW_ID
