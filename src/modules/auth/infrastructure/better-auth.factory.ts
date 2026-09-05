@@ -148,6 +148,13 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     databaseHooks: {
       user: {
         create: {
+          // Same condition as requireEmailVerification above: when
+          // verification is off, new accounts are created already verified
+          // instead of landing in a false-but-unenforced state that would
+          // re-lock them out the moment verification gets turned back on.
+          ...(options.sendVerificationEmail === undefined
+            ? { before: async () => ({ data: { emailVerified: true } }) }
+            : {}),
           after: async (user) => {
             await options.onUserCreated?.(toAuthUserSnapshot(user));
           },
