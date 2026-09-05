@@ -191,8 +191,16 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       cookiePrefix: "vb",
       useSecureCookies: options.secureCookies,
       cookies: {
+        // No custom `name` here: the client only recognizes and reacts to
+        // cookies whose wire name contains "session_token" (its
+        // hasBetterAuthCookies/hasSessionCookieChanged checks are
+        // string-based, not aware of cookiePrefix's semantics). Overriding
+        // the name to something like "vb_session" silently breaks that
+        // detection -- the cookie gets set but the client never notices,
+        // so sign-in "succeeds" yet the app never leaves the login screen.
+        // cookiePrefix above already gives it the "vb." prefix; that's the
+        // customization this needs.
         session_token: {
-          name: options.secureCookies ? "__Host-vb_session" : "vb_session",
           attributes: {
             httpOnly: true,
             secure: options.secureCookies,
