@@ -116,7 +116,11 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       encryptOAuthTokens: true,
       accountLinking: {
         enabled: true,
-        trustedProviders: [],
+        // Google verifies email ownership, and password sign-in no longer
+        // exists in the mobile client (removed in the OAuth+passkey
+        // rewrite) -- without this, every pre-existing password-only
+        // account has no self-service path back in.
+        trustedProviders: ["google"],
         allowDifferentEmails: false,
       },
     },
