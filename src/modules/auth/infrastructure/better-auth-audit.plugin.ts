@@ -5,6 +5,7 @@ import { createAuthMiddleware, isAPIError } from "better-auth/api";
 
 import type { AuthAuditEvent, AuthAuditSink } from "../application/auth-audit-sink.js";
 import type { SessionMirror } from "../application/session-mirror.js";
+import type { LoginMethodType } from "../../account/repository/account.repository.js";
 
 export interface BetterAuthAuditPluginOptions {
   sink: AuthAuditSink;
@@ -16,6 +17,11 @@ export interface BetterAuthAuditPluginOptions {
   sessionMirror?: SessionMirror;
   sessionIdleMinutes?: number;
   sessionAbsoluteHours?: number;
+  onLoginMethodUsed?: (input: {
+    betterAuthUserId: string;
+    methodType: LoginMethodType;
+    occurredAt: Date;
+  }) => Promise<void>;
 }
 
 interface AuditContext {
@@ -106,7 +112,8 @@ export function createBetterAuthAuditPlugin(
               create: {
                 after: async (session, context) => {
                   const traceId = readTraceId(context);
-                  const method = resolveLoginMethod(context);
+                  const method = resolveLoginMethod(context, session);
+                  const linkedMethod = resolveLinkedMethod(context);
                   await record({
                     eventKey: `better_auth:session_created:${session.id}`,
                     action: "authentication.session_created",
@@ -122,9 +129,25 @@ export function createBetterAuthAuditPlugin(
                     occurredAt: session.createdAt,
                   });
                   if (isLoginPath(context?.path)) {
+                    if (linkedMethod !== null && isSupportedLoginMethod(linkedMethod)) {
+                      try {
+                        await options.onLoginMethodUsed?.({
+                          betterAuthUserId: session.userId,
+                          methodType: linkedMethod,
+                          occurredAt: session.createdAt,
+                        });
+                      } catch (error) {
+                        options.onError?.(error);
+                      }
+                    }
+                    const oauthPending = isOAuthCallbackPath(context?.path);
                     await record({
-                      eventKey: `better_auth:login_succeeded:${session.id}`,
-                      action: "authentication.login_succeeded",
+                      eventKey: oauthPending
+                        ? `better_auth:oauth_verified:${session.id}`
+                        : `better_auth:login_succeeded:${session.id}`,
+                      action: oauthPending
+                        ? "authentication.oauth_verified"
+                        : "authentication.login_succeeded",
                       betterAuthUserId: session.userId,
                       attributeToSubject: true,
                       resourceType: "account",
@@ -155,46 +178,6 @@ export function createBetterAuthAuditPlugin(
                       reason: sessionRevocationReason(context?.path),
                     },
                     occurredAt: clock(),
-                  });
-                },
-              },
-            },
-            account: {
-              create: {
-                after: async (account, context) => {
-                  if (context?.path !== "/set-password" || account.providerId !== "credential") {
-                    return;
-                  }
-                  const traceId = readTraceId(context);
-                  const eventId = readEventId(context);
-                  await record({
-                    eventKey: `better_auth:password_set:${account.id}:${eventId ?? account.createdAt.toISOString()}`,
-                    action: "authentication.password_set",
-                    betterAuthUserId: account.userId,
-                    attributeToSubject: true,
-                    resourceType: "account",
-                    resourceId: account.userId,
-                    changes: { trace_id: traceId },
-                    occurredAt: account.createdAt,
-                  });
-                },
-              },
-              update: {
-                after: async (account, context) => {
-                  const action = passwordAction(context?.path);
-                  if (action === null || account.providerId !== "credential") return;
-                  const traceId = readTraceId(context);
-                  const eventId = readEventId(context);
-                  const updatedAt = readDate(account.updatedAt) ?? clock();
-                  await record({
-                    eventKey: `better_auth:${action}:${account.id}:${eventId ?? updatedAt.toISOString()}`,
-                    action: `authentication.${action}`,
-                    betterAuthUserId: account.userId,
-                    attributeToSubject: true,
-                    resourceType: "account",
-                    resourceId: account.userId,
-                    changes: { trace_id: traceId },
-                    occurredAt: updatedAt,
                   });
                 },
               },
@@ -265,15 +248,27 @@ async function resolveFailedIdentity(
 
 function isLoginPath(path: string | undefined): boolean {
   return (
-    path === "/sign-in/email" ||
+    path === "/passkey/verify-authentication" ||
+    path === "/passkey/verify-registration" ||
     path === "/sign-in/social" ||
     path?.startsWith("/callback/") === true
   );
 }
 
-function resolveLoginMethod(context: AuditContext | null): string | null {
+function isOAuthCallbackPath(path: string | undefined): boolean {
+  return path?.startsWith("/callback/") === true;
+}
+
+function resolveLoginMethod(
+  context: AuditContext | null,
+  session?: Record<string, unknown>,
+): string | null {
   const path = context?.path;
-  if (path === "/sign-in/email" || path === "/sign-up/email") return "email_password";
+  if (path === "/passkey/verify-authentication" || path === "/passkey/verify-registration") {
+    return session?.authenticationLevel === "staff_passkey"
+      ? "staff_passkey"
+      : "oauth_passkey";
+  }
   if (path === "/sign-in/social") return readBodyString(context?.body, "provider");
   if (path?.startsWith("/callback/") === true) {
     return readObjectString(context?.params, "id") ?? path.slice("/callback/".length);
@@ -281,13 +276,16 @@ function resolveLoginMethod(context: AuditContext | null): string | null {
   return null;
 }
 
-function passwordAction(
-  path: string | undefined,
-): "password_changed" | "password_reset" | "password_set" | null {
-  if (path === "/change-password") return "password_changed";
-  if (path === "/reset-password") return "password_reset";
-  if (path === "/set-password") return "password_set";
-  return null;
+function resolveLinkedMethod(context: AuditContext | null): string | null {
+  const path = context?.path;
+  if (path === "/passkey/verify-authentication" || path === "/passkey/verify-registration") {
+    return "passkey";
+  }
+  return resolveLoginMethod(context);
+}
+
+function isSupportedLoginMethod(value: string): value is LoginMethodType {
+  return value === "passkey" || value === "google" || value === "apple";
 }
 
 function sessionRevocationReason(path: string | undefined): string {
@@ -295,8 +293,6 @@ function sessionRevocationReason(path: string | undefined): string {
   if (path === "/revoke-session") return "self_revoke_one";
   if (path === "/revoke-sessions") return "self_revoke_all";
   if (path === "/revoke-other-sessions") return "self_revoke_others";
-  if (path === "/reset-password") return "password_reset";
-  if (path === "/change-password") return "password_change";
   if (path === "/get-session") return "expired";
   return "internal";
 }
@@ -322,11 +318,4 @@ function readObjectString(input: unknown, key: string): string | null {
 function readErrorCode(error: unknown): string | null {
   if (typeof error !== "object" || error === null || !("body" in error)) return null;
   return readObjectString((error as { body: unknown }).body, "code");
-}
-
-function readDate(input: unknown): Date | null {
-  if (input instanceof Date && !Number.isNaN(input.getTime())) return input;
-  if (typeof input !== "string") return null;
-  const parsed = new Date(input);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
 }

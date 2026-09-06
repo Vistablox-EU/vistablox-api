@@ -33,6 +33,19 @@ export class PrismaStaffWebAuthnRepository implements StaffWebAuthnRepository {
     accountId: string,
     providerSessionId: string,
   ): Promise<boolean> {
+    const passkeySession = await this.database.session.findFirst({
+      where: {
+        accountId,
+        betterAuthSessionId: providerSessionId,
+        status: "active",
+        authMethodAtLogin: "passkey",
+      },
+      select: { id: true },
+    });
+    if (passkeySession !== null) return true;
+
+    // Transitional support for sessions that completed the former separate
+    // WebAuthn ceremony before the unified passkey login was deployed.
     const proof = await this.database.staffSessionMfa.findFirst({
       where: { accountId, providerSessionId },
       select: { providerSessionId: true },

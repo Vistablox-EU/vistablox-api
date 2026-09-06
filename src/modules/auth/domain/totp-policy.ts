@@ -21,7 +21,7 @@ function generateBackupCode(): string {
 }
 
 // AD-177: backup codes are hashed and marked consumed-on-use, mirroring
-// password-storage discipline. HMAC (not a per-code salt) is deliberate: it
+// one-way secret-storage discipline. HMAC (not a per-code salt) is deliberate: it
 // keeps lookup a single indexed equality query instead of scanning every
 // unconsumed code with a slow per-row comparison.
 export function hashBackupCode(code: string, hashKey: string): string {

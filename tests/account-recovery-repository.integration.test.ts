@@ -50,7 +50,7 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
         accountId,
         channel: "web",
         betterAuthUserId,
-        authMethodAtLogin: "email_password",
+        authMethodAtLogin: "oauth_passkey",
         idleExpiresAt: new Date("2026-09-02T13:00:00.000Z"),
         absoluteExpiresAt: new Date("2026-09-02T20:00:00.000Z"),
       },
@@ -62,6 +62,7 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
       where: { resourceType: "account_recovery_case", resourceId: { contains: suffix } },
     });
     await database.accountRecoveryCase.deleteMany({ where: { accountId } });
+    await database.accountRecoveryCode.deleteMany({ where: { accountId } });
     await database.session.deleteMany({ where: { accountId } });
     await database.staffRoleAssignment.deleteMany({ where: { accountId: staffAccountId } });
     await database.account.deleteMany({
@@ -85,13 +86,16 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
   it("surfaces the last login as a corroboration fact", async () => {
     const facts = await repository.getCorroborationFacts(accountId);
 
-    expect(facts.lastLogin).toMatchObject({ authMethod: "email_password" });
+    expect(facts.lastLogin).toMatchObject({ authMethod: "oauth_passkey" });
     expect(facts.lastDeposit).toBeNull();
     expect(facts.lastReservation).toBeNull();
   });
 
   it("drives a case through the full lifecycle: open, Didit session, dual review, and completion", async () => {
     const openedAt = new Date("2026-09-02T12:00:00.000Z");
+    await database.accountRecoveryCode.create({
+      data: { accountId, codeHash: "old-code-hash", createdAt: openedAt },
+    });
     const opened = await repository.openCase({
       accountId,
       actorAccountId: staffAccountId,
@@ -99,6 +103,11 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
       openedAt,
     });
     expect(opened.status).toBe("open");
+
+    const invalidatedCode = await database.accountRecoveryCode.findUniqueOrThrow({
+      where: { accountId },
+    });
+    expect(invalidatedCode.consumedAt?.toISOString()).toBe(openedAt.toISOString());
 
     const restrictedAccount = await database.account.findUniqueOrThrow({ where: { id: accountId } });
     expect(restrictedAccount.status).toBe("recovery_review");

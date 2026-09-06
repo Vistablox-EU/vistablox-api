@@ -55,7 +55,7 @@ function detail(
     fundedEur: "100000.00",
     accountReadiness: {
       status: "active",
-      loginMethods: ["google", "email_password"],
+      loginMethods: ["passkey", "google"],
       kycEligibilityState: "eligible",
       kycRenewalDueAt: new Date("2027-01-01T12:00:00.000Z"),
       walletProvisioned: true,
@@ -131,7 +131,7 @@ describe("authenticated investor offering detail", () => {
       reservedCapacityEur: "510000.00",
       accountReadiness: {
         status: "recovery_review",
-        loginMethods: ["email_password"],
+        loginMethods: ["apple"],
         kycEligibilityState: "eligible",
         kycRenewalDueAt: currentTime,
         walletProvisioned: false,

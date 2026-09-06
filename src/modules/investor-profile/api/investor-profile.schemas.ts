@@ -18,7 +18,7 @@ export const investorProfileResponseSchema = z.object({
       .nullable(),
     login_methods: z.array(
       z.object({
-        method_type: z.enum(["google", "email_password"]),
+        method_type: z.enum(["passkey", "google", "apple"]),
         linked_at: dateTime,
       }),
     ),

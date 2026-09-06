@@ -91,6 +91,21 @@ export class PrismaTotpRepository implements TotpRepository {
     });
   }
 
+  public async recordSessionFreshAuth(input: {
+    accountId: string;
+    providerSessionId: string;
+    verifiedAt: Date;
+  }): Promise<void> {
+    await this.database.session.updateMany({
+      where: {
+        accountId: input.accountId,
+        betterAuthSessionId: input.providerSessionId,
+        status: "active",
+      },
+      data: { lastFreshAuthAt: input.verifiedAt },
+    });
+  }
+
   public async countUnconsumedBackupCodes(accountId: string): Promise<number> {
     return this.database.mfaBackupCode.count({
       where: { accountId, consumedAt: null },

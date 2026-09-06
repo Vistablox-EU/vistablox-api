@@ -51,8 +51,7 @@ function repository(overrides: Partial<OriginationRepository> = {}): Origination
 
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
-    sendVerificationEmail: vi.fn(),
-    sendPasswordResetEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
     sendStaffInvitationEmail: vi.fn(),
     sendApplicantResponseReminderEmail: vi.fn().mockResolvedValue(undefined),
     sendKycRenewalReminderEmail: vi.fn(),

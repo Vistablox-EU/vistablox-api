@@ -154,7 +154,7 @@ function buildApp(options?: {
         staffAccountLifecycle: {
           repository,
           administrator: fakeAdministrator(),
-          recoveryRedirectUrl: "https://app.example.test/staff/reset-password",
+          recoveryRedirectUrl: "https://app.example.test/staff/recover-account",
         },
       },
     }),

@@ -13,6 +13,8 @@ import type { DatabaseProbe } from "./infrastructure/database/database-probe.js"
 import type { EmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import type { AccountRepository } from "./modules/account/repository/account.repository.js";
 import { createRequireAuthentication } from "./modules/auth/api/require-authentication.js";
+import { rejectDisabledAuthRoutes } from "./modules/auth/api/reject-disabled-auth.js";
+import { createRequireFreshAuthentication } from "./modules/auth/api/require-fresh-authentication.js";
 import {
   createRequireAdminOperations,
   createRequireStaffIdentity,
@@ -40,6 +42,7 @@ import {
 import type { StaffAccountAdministrator } from "./modules/auth/application/staff-account-administrator.js";
 import type { StaffAccountLifecycleRepository } from "./modules/auth/repository/staff-account-lifecycle.repository.js";
 import { createAccountRecoveryRouter } from "./modules/auth/api/account-recovery.router.js";
+import { createAccountRecoveryCodeRouter } from "./modules/auth/api/account-recovery-code.router.js";
 import {
   CompleteAccountRecoveryService,
   CreateRecoveryDiditSessionService,
@@ -48,7 +51,12 @@ import {
   OpenAccountRecoveryCaseService,
   RecordPrimaryRecoveryReviewService,
 } from "./modules/auth/application/account-recovery.service.js";
+import {
+  RedeemAccountRecoveryCodeService,
+  RotateAccountRecoveryCodeService,
+} from "./modules/auth/application/account-recovery-code.service.js";
 import type { CustomerAccountAdministrator } from "./modules/auth/application/customer-account-administrator.js";
+import type { AccountRecoveryCodeRepository } from "./modules/auth/repository/account-recovery-code.repository.js";
 import type { AccountRecoveryRepository } from "./modules/auth/repository/account-recovery.repository.js";
 import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.service.js";
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
@@ -156,12 +164,19 @@ export interface AppDependencies {
   offeringRepository: OfferingRepository;
   logger: Logger;
   authHandler?: RequestHandler;
+  passkeyAssociations?: {
+    appleTeamId?: string;
+    appleBundleId: string;
+    androidPackageName: string;
+    androidCertificateFingerprints?: string[];
+  };
   rateLimitStore?: RateLimitStore;
   /** Never true unless a human has done the live Coinbase EUR/Base verification AD-255 leaves open — see docs/investor-offering.md. Defaults false. */
   reservationFundingRailEnabled?: boolean;
   protectedApi?: {
     accounts: AccountRepository;
     sessions: SessionResolver;
+    oauthBootstrapSessions?: SessionResolver;
     originationRepository: OriginationRepository;
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
@@ -208,8 +223,13 @@ export interface AppDependencies {
       // actions — unlike the customer-facing reminder jobs in worker.ts, a staff
       // reviewer is directly waiting on the result here. Every call site wraps
       // this in try/catch as best-effort; only the administrator's own
-      // password-reset email (better-auth's own send path) is a hard failure.
+      // passkey recovery email delivery is a hard failure.
       emailSender: EmailSender;
+    };
+    accountRecoveryCodes?: {
+      repository: AccountRecoveryCodeRepository;
+      administrator: CustomerAccountAdministrator;
+      hashKey: string;
     };
     staffInvitations?: {
       repository: StaffInvitationRepository;
@@ -266,9 +286,41 @@ export function createApp(dependencies: AppDependencies): Express {
     next();
   });
   app.use(helmet());
+  if (dependencies.passkeyAssociations?.appleTeamId !== undefined) {
+    app.get("/.well-known/apple-app-site-association", (_request, response) => {
+      response.setHeader("Cache-Control", "public, max-age=3600");
+      response.json({
+        webcredentials: {
+          apps: [
+            `${dependencies.passkeyAssociations?.appleTeamId}.${dependencies.passkeyAssociations?.appleBundleId}`,
+          ],
+        },
+      });
+    });
+  }
+  if (dependencies.passkeyAssociations?.androidCertificateFingerprints !== undefined) {
+    app.get("/.well-known/assetlinks.json", (_request, response) => {
+      response.setHeader("Cache-Control", "public, max-age=3600");
+      response.json([
+        {
+          relation: [
+            "delegate_permission/common.handle_all_urls",
+            "delegate_permission/common.get_login_creds",
+          ],
+          target: {
+            namespace: "android_app",
+            package_name: dependencies.passkeyAssociations?.androidPackageName,
+            sha256_cert_fingerprints:
+              dependencies.passkeyAssociations?.androidCertificateFingerprints,
+          },
+        },
+      ]);
+    });
+  }
   if (dependencies.authHandler !== undefined) {
     app.all(
       "/api/auth/*splat",
+      rejectDisabledAuthRoutes,
       ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
       dependencies.authHandler,
     );
@@ -284,6 +336,11 @@ export function createApp(dependencies: AppDependencies): Express {
   if (dependencies.protectedApi !== undefined) {
     const requireAuthentication = createRequireAuthentication(
       dependencies.protectedApi.sessions,
+      dependencies.protectedApi.accounts,
+      baselineRateLimiter,
+    );
+    const requireOAuthBootstrapAuthentication = createRequireAuthentication(
+      dependencies.protectedApi.oauthBootstrapSessions ?? dependencies.protectedApi.sessions,
       dependencies.protectedApi.accounts,
       baselineRateLimiter,
     );
@@ -331,6 +388,11 @@ export function createApp(dependencies: AppDependencies): Express {
         dependencies.protectedApi.offeringOperations === undefined
           ? undefined
           : new ReconfirmReservationService(dependencies.protectedApi.offeringOperations.repository),
+        dependencies.protectedApi.customerSessions === undefined
+          ? undefined
+          : createRequireFreshAuthentication(
+              dependencies.protectedApi.customerSessions.repository,
+            ),
       ),
     );
     if (dependencies.protectedApi.offeringOperations !== undefined) {
@@ -371,11 +433,37 @@ export function createApp(dependencies: AppDependencies): Express {
           requireAuthentication,
           new EnrollTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
           new VerifyTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
+          dependencies.protectedApi.customerSessions === undefined
+            ? undefined
+            : createRequireFreshAuthentication(
+                dependencies.protectedApi.customerSessions.repository,
+              ),
         ),
       );
     }
     if (dependencies.protectedApi.customerSessions !== undefined) {
       const customerSessions = dependencies.protectedApi.customerSessions;
+      if (dependencies.protectedApi.accountRecoveryCodes !== undefined) {
+        const recoveryCodes = dependencies.protectedApi.accountRecoveryCodes;
+        app.use(
+          "/v1/auth/recovery-code",
+          ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
+          createAccountRecoveryCodeRouter(
+            requireAuthentication,
+            requireOAuthBootstrapAuthentication,
+            createRequireFreshAuthentication(customerSessions.repository),
+            new RotateAccountRecoveryCodeService(
+              recoveryCodes.repository,
+              recoveryCodes.hashKey,
+            ),
+            new RedeemAccountRecoveryCodeService(
+              recoveryCodes.repository,
+              recoveryCodes.administrator,
+              recoveryCodes.hashKey,
+            ),
+          ),
+        );
+      }
       app.use(
         "/v1/auth/sessions",
         createCustomerSessionRouter(
@@ -409,7 +497,7 @@ export function createApp(dependencies: AppDependencies): Express {
         "/v1/kyc",
         createKycRouter(
           requireAuthentication,
-          new GetKycStatusService(kyc.repository),
+          new GetKycStatusService(kyc.repository, kyc.didit),
           new StartKycSessionService(kyc.repository, kyc.didit, {
             workflowId: kyc.workflowId,
             callbackUrl: kyc.callbackUrl,

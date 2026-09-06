@@ -55,7 +55,7 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
     fundedEur: "100000.00",
     accountReadiness: {
       status: "active",
-      loginMethods: ["google", "email_password"],
+      loginMethods: ["passkey", "google"],
       kycEligibilityState: "eligible",
       kycRenewalDueAt: new Date("2027-01-01T12:00:00.000Z"),
       walletProvisioned: true,
@@ -175,7 +175,7 @@ describe("CreateReservationService", () => {
     const record = detail({
       accountReadiness: {
         status: "active",
-        loginMethods: ["email_password"],
+        loginMethods: ["apple"],
         kycEligibilityState: "expired",
         kycRenewalDueAt: now,
         walletProvisioned: false,

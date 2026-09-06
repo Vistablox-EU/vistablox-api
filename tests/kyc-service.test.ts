@@ -249,10 +249,174 @@ describe("KYC application services", () => {
     });
 
     expect(
-      await new GetKycStatusService(storage, () => now).execute(accountId),
+      await new GetKycStatusService(storage, didit(), () => now).execute(accountId),
     ).toMatchObject({
       data: { eligibility_state: "eligible", proof_of_address_status: "expired" },
     });
+  });
+
+  it("reports no active session for an account that never started KYC", async () => {
+    const storage = repository();
+    const provider = didit();
+
+    const result = await new GetKycStatusService(storage, provider, () => now).execute(
+      accountId,
+    );
+
+    expect(provider.getDecision).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ data: { active_session: null } });
+  });
+
+  it("reports no active session once KYC has already reached a terminal outcome", async () => {
+    const storage = repository({
+      getForAccount: vi.fn().mockResolvedValue({
+        accountId,
+        diditReference: sessionId,
+        eligibilityState: "eligible",
+        operationalSubstatus: "kyc_verified",
+        proofOfAddressDiditReference: null,
+        proofOfAddressProviderStatus: null,
+        proofOfAddressProviderUpdatedAt: null,
+        proofOfAddressStatus: "not_started",
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "HR",
+        proofOfAddressCurrentUntil: null,
+        lastVerifiedAt: now,
+        renewalDueAt: new Date("2028-09-01T12:00:00.000Z"),
+      }),
+    });
+    const provider = didit();
+
+    const result = await new GetKycStatusService(storage, provider, () => now).execute(
+      accountId,
+    );
+
+    expect(provider.getDecision).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ data: { active_session: null } });
+  });
+
+  it("exposes a freshly fetched resume URL for an account with a session still open", async () => {
+    const storage = repository({
+      getForAccount: vi.fn().mockResolvedValue({
+        accountId,
+        diditReference: sessionId,
+        eligibilityState: "not_started",
+        operationalSubstatus: "kyc_session_open",
+        proofOfAddressDiditReference: null,
+        proofOfAddressProviderStatus: null,
+        proofOfAddressProviderUpdatedAt: null,
+        proofOfAddressStatus: "not_started",
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "HR",
+        proofOfAddressCurrentUntil: null,
+        lastVerifiedAt: null,
+        renewalDueAt: null,
+      }),
+    });
+    const provider = didit({
+      getDecision: vi.fn().mockResolvedValue({
+        sessionId,
+        sessionKind: "user",
+        workflowId,
+        vendorData: accountId,
+        status: "In Progress",
+        verificationUrl: `https://verify.didit.me/session/${sessionId}`,
+        expiresAt: new Date("2026-09-01T13:00:00.000Z"),
+        idVerifications: [],
+        livenessChecks: [],
+        faceMatches: [],
+        amlScreenings: [],
+        proofOfAddressVerifications: [],
+        verifiedDisplayProfile: null,
+      }),
+    });
+
+    const result = await new GetKycStatusService(storage, provider, () => now).execute(
+      accountId,
+    );
+
+    expect(provider.getDecision).toHaveBeenCalledWith(sessionId);
+    expect(result).toMatchObject({
+      data: {
+        active_session: {
+          verification_session_id: sessionId,
+          verification_url: `https://verify.didit.me/session/${sessionId}`,
+          expires_at: "2026-09-01T13:00:00.000Z",
+        },
+      },
+    });
+  });
+
+  it("omits the active session when Didit reports the session already reached a terminal status", async () => {
+    const storage = repository({
+      getForAccount: vi.fn().mockResolvedValue({
+        accountId,
+        diditReference: sessionId,
+        eligibilityState: "not_started",
+        operationalSubstatus: "kyc_session_open",
+        proofOfAddressDiditReference: null,
+        proofOfAddressProviderStatus: null,
+        proofOfAddressProviderUpdatedAt: null,
+        proofOfAddressStatus: "not_started",
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "HR",
+        proofOfAddressCurrentUntil: null,
+        lastVerifiedAt: null,
+        renewalDueAt: null,
+      }),
+    });
+    const provider = didit({
+      getDecision: vi.fn().mockResolvedValue({
+        sessionId,
+        sessionKind: "user",
+        workflowId,
+        vendorData: accountId,
+        status: "Abandoned",
+        verificationUrl: `https://verify.didit.me/session/${sessionId}`,
+        expiresAt: null,
+        idVerifications: [],
+        livenessChecks: [],
+        faceMatches: [],
+        amlScreenings: [],
+        proofOfAddressVerifications: [],
+        verifiedDisplayProfile: null,
+      }),
+    });
+
+    const result = await new GetKycStatusService(storage, provider, () => now).execute(
+      accountId,
+    );
+
+    expect(result).toMatchObject({ data: { active_session: null } });
+  });
+
+  it("degrades to no active session, rather than failing, when Didit is unreachable", async () => {
+    const storage = repository({
+      getForAccount: vi.fn().mockResolvedValue({
+        accountId,
+        diditReference: sessionId,
+        eligibilityState: "not_started",
+        operationalSubstatus: "kyc_pending",
+        proofOfAddressDiditReference: null,
+        proofOfAddressProviderStatus: null,
+        proofOfAddressProviderUpdatedAt: null,
+        proofOfAddressStatus: "not_started",
+        residenceCountryCode: "DE",
+        taxResidenceCountryCode: "HR",
+        proofOfAddressCurrentUntil: null,
+        lastVerifiedAt: null,
+        renewalDueAt: null,
+      }),
+    });
+    const provider = didit({
+      getDecision: vi.fn().mockRejectedValue(new Error("Didit request failed with HTTP 503")),
+    });
+
+    const result = await new GetKycStatusService(storage, provider, () => now).execute(
+      accountId,
+    );
+
+    expect(result).toMatchObject({ data: { active_session: null } });
   });
 
   it("returns the full operational record to an authorized reviewer, including fields the customer view omits", async () => {

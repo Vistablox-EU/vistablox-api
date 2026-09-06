@@ -51,7 +51,7 @@ describe("staff account lifecycle services", () => {
     const service = new RecoverStaffAccountService(
       repository,
       administrator,
-      "https://app.example.test/staff/reset-password",
+      "https://app.example.test/staff/recover-account",
       () => now,
     );
 
@@ -77,7 +77,7 @@ describe("staff account lifecycle services", () => {
     });
     expect(administrator.sendRecoveryEmail).toHaveBeenCalledWith({
       betterAuthUserId: "auth_staff",
-      redirectTo: "https://app.example.test/staff/reset-password",
+      redirectTo: "https://app.example.test/staff/recover-account",
       traceId: "trace_recovery",
     });
     expect(vi.mocked(administrator.prepareRecovery).mock.invocationCallOrder[0]).toBeLessThan(
@@ -96,7 +96,7 @@ describe("staff account lifecycle services", () => {
     const service = new RecoverStaffAccountService(
       repository,
       administrator,
-      "https://app.example.test/staff/reset-password",
+      "https://app.example.test/staff/recover-account",
       () => now,
     );
 
@@ -127,7 +127,7 @@ describe("staff account lifecycle services", () => {
     const service = new RecoverStaffAccountService(
       repository,
       administrator,
-      "https://app.example.test/staff/reset-password",
+      "https://app.example.test/staff/recover-account",
     );
 
     await expect(
@@ -179,7 +179,7 @@ describe("staff account lifecycle services", () => {
     const recovery = new RecoverStaffAccountService(
       repository,
       administrator,
-      "https://app.example.test/staff/reset-password",
+      "https://app.example.test/staff/recover-account",
     );
     const offboarding = new OffboardStaffAccountService(repository, administrator);
     const action = {

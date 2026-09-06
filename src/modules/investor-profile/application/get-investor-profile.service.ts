@@ -39,8 +39,8 @@ export class GetInvestorProfileService {
       profile.kyc?.eligibilityState === "eligible" &&
       profile.kyc.renewalDueAt !== null &&
       profile.kyc.renewalDueAt > now &&
-      linkedMethods.has("google") &&
-      linkedMethods.has("email_password");
+      linkedMethods.has("passkey") &&
+      (linkedMethods.has("google") || linkedMethods.has("apple"));
     return {
       data: {
         account_id: profile.accountId,

@@ -15,7 +15,7 @@ const blockerMessages: Record<ReservationBlocker, string> = {
   account_restricted: "The account is not active.",
   kyc_not_eligible: "Identity verification is not currently eligible.",
   kyc_renewal_due: "Identity verification has expired and needs renewal.",
-  login_methods_incomplete: "Both Google and email/password recovery must be linked.",
+  login_methods_incomplete: "Complete Google or Apple sign-in and add a passkey before investing.",
   payment_account_not_ready: "No wallet is registered for this account.",
   disclosure_pack_unavailable: "No current disclosure pack is available for this offering.",
   offering_not_open: "This offering is not currently open for reservations.",

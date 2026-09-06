@@ -48,10 +48,6 @@ export interface VerifyTotpResult {
   method: "totp" | "backup_code" | null;
 }
 
-// The fresh-auth challenge itself (AD-109) — deciding which product actions
-// require this and enforcing it — has no current caller: no customer-facing
-// action exists yet that the design docs mark as sensitive enough to gate.
-// This service is the reusable verification primitive that gate will call.
 export class VerifyTotpService {
   public constructor(
     private readonly repository: TotpRepository,
@@ -60,7 +56,11 @@ export class VerifyTotpService {
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
-  public async execute(accountId: string, code: string): Promise<VerifyTotpResult> {
+  public async execute(
+    accountId: string,
+    code: string,
+    providerSessionId?: string,
+  ): Promise<VerifyTotpResult> {
     const factor = await this.repository.getFactor(accountId);
     if (factor === null) {
       throw new AppError({
@@ -74,6 +74,9 @@ export class VerifyTotpService {
     const now = this.clock();
     if (await this.provider.verify(factor.secret, code)) {
       await this.repository.recordTotpUse(accountId, now);
+      if (providerSessionId !== undefined) {
+        await this.repository.recordSessionFreshAuth?.({ accountId, providerSessionId, verifiedAt: now });
+      }
       return { verified: true, method: "totp" };
     }
 
@@ -82,6 +85,9 @@ export class VerifyTotpService {
       codeHash: hashBackupCode(normalizeBackupCode(code), this.backupCodeHashKey),
       consumedAt: now,
     });
+    if (consumed && providerSessionId !== undefined) {
+      await this.repository.recordSessionFreshAuth?.({ accountId, providerSessionId, verifiedAt: now });
+    }
     return { verified: consumed, method: consumed ? "backup_code" : null };
   }
 }

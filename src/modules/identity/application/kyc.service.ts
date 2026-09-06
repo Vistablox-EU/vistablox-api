@@ -120,6 +120,7 @@ export class StartKycSessionService {
 export class GetKycStatusService {
   public constructor(
     private readonly repository: KycRepository,
+    private readonly didit: DiditClient,
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
@@ -133,9 +134,48 @@ export class GetKycStatusService {
           record?.proofOfAddressCurrentUntil?.toISOString() ?? null,
         last_verified_at: record?.lastVerifiedAt?.toISOString() ?? null,
         renewal_due_at: record?.renewalDueAt?.toISOString() ?? null,
+        active_session: await this.resolveActiveSession(record),
       },
     };
   }
+
+  // Never persisted (docs/didit-kyc.md's data boundary explicitly excludes
+  // session tokens), so a mobile client that needs to resume an in-progress
+  // verification is handed a freshly re-fetched one instead: cheap for the
+  // common case (most accounts aren't mid-session, so hasOpenSession skips
+  // the Didit call entirely), and self-correcting if Didit's own status has
+  // already moved past "still open" by the time this is read (no active
+  // session is reported rather than a stale/dead link) -- eligibility_state
+  // catches up separately, through the existing webhook/reconciliation
+  // path, unaffected by this read-only lookup.
+  private async resolveActiveSession(record: KycEligibilityRecord | null) {
+    if (record === null || record.diditReference === null) return null;
+    if (!hasOpenSession(record.operationalSubstatus)) return null;
+
+    const decision = await this.didit.getDecision(record.diditReference).catch(() => null);
+    if (decision === null || decision.verificationUrl == null) return null;
+    if (decision.status === null || !RESUMABLE_DIDIT_STATUSES.has(decision.status)) return null;
+
+    return {
+      verification_session_id: record.diditReference,
+      verification_url: decision.verificationUrl,
+      expires_at: decision.expiresAt?.toISOString() ?? null,
+    };
+  }
+}
+
+const RESUMABLE_DIDIT_STATUSES: ReadonlySet<DiditStatus> = new Set([
+  "Not Started",
+  "In Progress",
+  "Resubmitted",
+]);
+
+function hasOpenSession(substatus: KycEligibilityRecord["operationalSubstatus"]): boolean {
+  return (
+    substatus === "kyc_session_open" ||
+    substatus === "kyc_pending" ||
+    substatus === "kyc_resubmission_pending"
+  );
 }
 
 // Operations-only lookup for authorized reviewers (admin_operations +

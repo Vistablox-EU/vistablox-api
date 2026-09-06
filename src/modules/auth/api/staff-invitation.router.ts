@@ -20,7 +20,6 @@ export function createPublicStaffInvitationRouter(
     const body = acceptStaffInvitationBodySchema.parse(request.body);
     const result = await acceptInvitation.execute({
       token: body.token,
-      password: body.password,
       traceId: String(response.locals.traceId),
     });
     response.json(acceptStaffInvitationResponseSchema.parse(result));

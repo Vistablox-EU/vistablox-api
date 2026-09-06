@@ -1459,7 +1459,7 @@ function asAccountStatus(
 function asLoginMethod(
   value: string,
 ): InvestorOfferingDetailRecord["accountReadiness"]["loginMethods"][number] {
-  if (value === "google" || value === "email_password") return value;
+  if (value === "google" || value === "apple" || value === "passkey") return value;
   throw new Error(`Unknown login method: ${value}`);
 }
 

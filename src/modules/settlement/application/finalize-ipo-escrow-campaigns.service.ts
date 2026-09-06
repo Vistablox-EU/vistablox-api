@@ -1,6 +1,6 @@
-import { costBasisToUnitCount } from "../../offering/domain/finalization.policy.js";
-import { fromEurcMicros } from "../../offering/domain/currency.js";
 import type { ChainClients } from "../../../infrastructure/blockchain/chain-client.js";
+import { fromEurcMicros } from "../../../shared/domain/currency.js";
+import { costBasisToUnitCount } from "../../../shared/domain/position.js";
 import type { SettlementRepository } from "../repository/settlement.repository.js";
 
 // Mirrors VistaBloxIpoEscrow.sol's CampaignState enum ordering exactly.
@@ -154,8 +154,8 @@ export class FinalizeIpoEscrowCampaignsService {
       throw new Error(`mint transaction reverted for ${walletAddress} (tx=${mintHash})`);
     }
 
-    // AD-247's 1-unit-per-EUR convention (finalization.policy.ts), reused
-    // as-is rather than re-derived: unit_count == cost_basis_eur.
+    // AD-247's shared 1-unit-per-EUR convention:
+    // unit_count == cost_basis_eur.
     const costBasisEur = fromEurcMicros(amount);
     await this.repository.recordEscrowMintedPosition({
       pivId,

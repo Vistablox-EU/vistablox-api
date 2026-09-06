@@ -1,6 +1,7 @@
 import { createHash, generateKeyPairSync, randomBytes, randomUUID } from "node:crypto";
 
 import express from "express";
+import { makeSignature } from "better-auth/crypto";
 import { toNodeHandler } from "better-auth/node";
 import type { JWK } from "oidc-provider";
 import { Pool } from "pg";
@@ -42,7 +43,7 @@ function toPath(location: string): string {
  * simulated native client (real PKCE math, no fakes) against the real
  * Express app, the real oidc-provider library, the real Postgres-backed
  * adapter, and a real Better Auth session, exercising the entire chain a
- * physical device would: sign in, authorize, complete both interaction
+ * physical device would after OAuth and passkey verification: authorize, complete both interaction
  * prompts, exchange the code, call a protected resource with the bearer
  * token, rotate the refresh token, and confirm reuse-detection revokes the
  * whole grant. What it still cannot cover — an actual mobile/desktop app
@@ -53,12 +54,12 @@ function toPath(location: string): string {
 describe.skipIf(databaseUrl === undefined)("native-client OIDC PKCE end-to-end integration", () => {
   const suffix = randomUUID();
   const email = `native-login-${suffix}@example.test`;
-  const password = `A uniquely generated VistaBlox test password ${suffix}`;
   const accountId = `acct_${suffix}`;
   const nativeRedirectUri = "vistablox://oauth-callback";
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
   let betterAuthUserId = "";
+  let authCookie = "";
   let app: express.Express;
 
   beforeAll(async () => {
@@ -75,10 +76,29 @@ describe.skipIf(databaseUrl === undefined)("native-client OIDC PKCE end-to-end i
       secureCookies: false,
       trustedOrigins: ["http://localhost:3000"],
     });
-    const signedUp = await auth.api.signUpEmail({
-      body: { name: "Native Login Test Investor", email, password },
-    });
-    betterAuthUserId = signedUp.user.id;
+    const authContext = await auth.$context;
+    const created = await authContext.internalAdapter.createUser({
+      name: "Native Login Test Investor",
+      email,
+      emailVerified: true,
+      population: "customer",
+    }, { method: "internal" });
+    betterAuthUserId = created.id;
+    const session = await authContext.internalAdapter.createSession(
+      created.id,
+      false,
+      { authenticationLevel: "oauth_passkey" },
+      true,
+    );
+    await authPool.query(
+      'UPDATE "auth_session" SET "authenticationLevel" = $1 WHERE "id" = $2',
+      ["oauth_passkey", session.id],
+    );
+    const signedToken = `${session.token}.${await makeSignature(
+      session.token,
+      "integration-test-secret-that-is-at-least-32-characters",
+    )}`;
+    authCookie = `${authContext.authCookies.sessionToken.name}=${signedToken}`;
     await database.account.create({ data: { id: accountId, betterAuthUserId } });
 
     const provider = createOidcProvider({
@@ -120,20 +140,12 @@ describe.skipIf(databaseUrl === undefined)("native-client OIDC PKCE end-to-end i
     await Promise.all([database.$disconnect(), authPool.end()]);
   });
 
-  it("drives a real native client through sign-in, PKCE authorization, token exchange, resource access, and refresh rotation with reuse detection", async () => {
-    const agent = request.agent(app);
-
-    // A native app opens this in a system browser / auth session already
-    // signed in to Better Auth — simulated here as a prior sign-in on the
-    // same cookie jar the OIDC dance below reuses.
-    const signIn = await agent.post("/api/auth/sign-in/email").send({ email, password });
-    expect(signIn.status).toBe(200);
-
+  it("drives an OAuth-plus-passkey session through PKCE authorization, token exchange, resource access, and refresh rotation with reuse detection", async () => {
     const codeVerifier = randomBytes(32).toString("base64url");
     const codeChallenge = createHash("sha256").update(codeVerifier).digest("base64url");
     const state = randomUUID();
 
-    const authorize = await agent.get("/oidc/auth").query({
+    const authorize = await request(app).get("/oidc/auth").set("Cookie", authCookie).query({
       client_id: "vistablox-native",
       response_type: "code",
       redirect_uri: nativeRedirectUri,
@@ -154,12 +166,12 @@ describe.skipIf(databaseUrl === undefined)("native-client OIDC PKCE end-to-end i
 
     // The login interaction: already authenticated via the cookie above, so
     // this resolves immediately without a second credential prompt.
-    const loginInteraction = await agent.get(loginInteractionPath);
+    const loginInteraction = await request(app).get(loginInteractionPath).set("Cookie", authCookie);
     expect(loginInteraction.status).toBeGreaterThanOrEqual(300);
     expect(loginInteraction.status).toBeLessThan(400);
     const afterLoginPath = toPath(loginInteraction.headers.location as string);
 
-    const afterLogin = await agent.get(afterLoginPath);
+    const afterLogin = await request(app).get(afterLoginPath).set("Cookie", authCookie);
     expect(afterLogin.status).toBeGreaterThanOrEqual(300);
     expect(afterLogin.status).toBeLessThan(400);
     const nextLocation = afterLogin.headers.location as string;
@@ -170,12 +182,12 @@ describe.skipIf(databaseUrl === undefined)("native-client OIDC PKCE end-to-end i
     // client redirect and this second round-trip is skipped.
     let finalRedirectLocation: string;
     if (nextLocation.includes("/oidc/interaction/")) {
-      const consentInteraction = await agent.get(toPath(nextLocation));
+      const consentInteraction = await request(app).get(toPath(nextLocation)).set("Cookie", authCookie);
       expect(consentInteraction.status).toBeGreaterThanOrEqual(300);
       expect(consentInteraction.status).toBeLessThan(400);
       const afterConsentPath = toPath(consentInteraction.headers.location as string);
 
-      const afterConsent = await agent.get(afterConsentPath);
+      const afterConsent = await request(app).get(afterConsentPath).set("Cookie", authCookie);
       expect(afterConsent.status).toBeGreaterThanOrEqual(300);
       expect(afterConsent.status).toBeLessThan(400);
       finalRedirectLocation = afterConsent.headers.location as string;

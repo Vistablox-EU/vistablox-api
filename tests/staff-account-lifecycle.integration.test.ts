@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import { BetterAuthStaffAccountAdministrator } from "../src/modules/auth/infrastructure/better-auth-staff-account-administrator.js";
 import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
 import { PrismaStaffAccountLifecycleRepository } from "../src/modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
@@ -12,16 +13,14 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL integration", () => {
   const suffix = randomUUID();
   const email = `staff-lifecycle-${suffix}@example.test`;
-  const password = `A uniquely generated VistaBlox test password ${suffix}`;
   const accountId = `acct_${suffix}`;
   const credentialId = `credential_${suffix}`;
   const rosterEmail = `staff-roster-${suffix}@example.test`;
-  const rosterPassword = `A uniquely generated VistaBlox roster password ${suffix}`;
   const rosterAccountId = `acct_roster_${suffix}`;
   const legalPracticeId = `practice_${suffix}`;
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
-  const resetUrls: string[] = [];
+  const recoveryUrls: string[] = [];
   const auth = createBetterAuth({
     database: authPool,
     baseURL: "http://localhost:3000",
@@ -29,25 +28,26 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
     secureCookies: false,
     trustedOrigins: ["http://localhost:3000"],
     allowPopulationInput: true,
-    sendPasswordResetEmail: async ({ resetUrl }) => {
-      resetUrls.push(resetUrl);
-    },
   });
-  const administrator = new BetterAuthStaffAccountAdministrator(auth);
+  const recoveryEmailSender = {
+    sendPasskeyRecoveryEmail: async ({ recoveryUrl }: { recoveryUrl: string }) => {
+      recoveryUrls.push(recoveryUrl);
+    },
+  } as unknown as EmailSender;
+  const administrator = new BetterAuthStaffAccountAdministrator(auth, recoveryEmailSender);
   const repository = new PrismaStaffAccountLifecycleRepository(database);
   let betterAuthUserId = "";
   let rosterBetterAuthUserId = "";
 
   beforeAll(async () => {
-    const signedUp = await auth.api.signUpEmail({
-      body: {
-        name: "Lifecycle Test Staff",
-        email,
-        password,
-        population: "staff_partner",
-      },
-    });
-    betterAuthUserId = signedUp.user.id;
+    const authContext = await auth.$context;
+    const created = await authContext.internalAdapter.createUser({
+      name: "Lifecycle Test Staff",
+      email,
+      emailVerified: true,
+      population: "staff_partner",
+    }, { method: "internal" });
+    betterAuthUserId = created.id;
     await database.account.create({
       data: {
         id: accountId,
@@ -72,15 +72,13 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
       },
     });
 
-    const rosterSignedUp = await auth.api.signUpEmail({
-      body: {
-        name: "Roster Test Staff",
-        email: rosterEmail,
-        password: rosterPassword,
-        population: "staff_partner",
-      },
-    });
-    rosterBetterAuthUserId = rosterSignedUp.user.id;
+    const rosterCreated = await authContext.internalAdapter.createUser({
+      name: "Roster Test Staff",
+      email: rosterEmail,
+      emailVerified: true,
+      population: "staff_partner",
+    }, { method: "internal" });
+    rosterBetterAuthUserId = rosterCreated.id;
     await database.legalPractice.create({
       data: { id: legalPracticeId, name: "Roster Test Legal Practice", countryCode: "NL" },
     });
@@ -127,7 +125,7 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
     await Promise.all([database.$disconnect(), authPool.end()]);
   });
 
-  it("revokes recovery access, delivers reset, and blocks login after offboarding", async () => {
+  it("revokes recovery access, delivers passkey enrollment, and offboards", async () => {
     await administrator.prepareRecovery({
       betterAuthUserId,
       recoveryRequiredAt: new Date(),
@@ -140,39 +138,26 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
     });
     await administrator.sendRecoveryEmail({
       betterAuthUserId,
-      redirectTo: "http://localhost:3000/staff/reset-password",
+      redirectTo: "http://localhost:3000/staff/recover-account",
       traceId: `trace_${suffix}`,
     });
 
     expect(prepared).toBe(true);
     expect(await database.staffWebAuthnCredential.count({ where: { accountId } })).toBe(0);
-    expect(resetUrls).toHaveLength(1);
-    expect(resetUrls[0]).toContain("/api/auth/reset-password/");
-    expect(resetUrls[0]).not.toContain(email);
+    expect(recoveryUrls).toHaveLength(1);
+    expect(recoveryUrls[0]).toContain("/staff/recover-account?context=");
+    expect(recoveryUrls[0]).not.toContain(email);
     expect(
       await authPool.query('SELECT 1 FROM "auth_session" WHERE "userId" = $1', [
         betterAuthUserId,
       ]),
     ).toMatchObject({ rowCount: 0 });
 
-    await expect(
-      auth.api.signInEmail({ body: { email, password } }),
-    ).rejects.toMatchObject({
-      statusCode: 403,
-      body: { code: "STAFF_ACCOUNT_RECOVERY_REQUIRED" },
-    });
-    const resetToken = new URL(resetUrls[0] ?? "").pathname.split("/").at(-1);
-    expect(resetToken).toBeTruthy();
-    const newPassword = `${password} reset`;
-    await auth.api.resetPassword({
-      body: { newPassword, token: resetToken },
-    });
-    const recovered = await authPool.query<{ recoveryRequiredAt: Date | null }>(
+    const recovering = await authPool.query<{ recoveryRequiredAt: Date | null }>(
       'SELECT "recoveryRequiredAt" FROM "auth_user" WHERE "id" = $1',
       [betterAuthUserId],
     );
-    expect(recovered.rows[0]).toMatchObject({ recoveryRequiredAt: null });
-    await auth.api.signInEmail({ body: { email, password: newPassword } });
+    expect(recovering.rows[0]).toMatchObject({ recoveryRequiredAt: expect.any(Date) });
     await administrator.disableAndRevoke({
       betterAuthUserId,
       reason: "partner_firm_notice",
@@ -202,12 +187,6 @@ describe.skipIf(databaseUrl === undefined)("staff account lifecycle PostgreSQL i
         betterAuthUserId,
       ]),
     ).toMatchObject({ rowCount: 0 });
-    await expect(
-      auth.api.signInEmail({ body: { email, password: newPassword } }),
-    ).rejects.toMatchObject({
-      statusCode: 403,
-      body: { code: "STAFF_ACCOUNT_DISABLED" },
-    });
     expect(await database.account.findUnique({ where: { id: accountId } })).toMatchObject({
       status: "suspended_restricted",
     });

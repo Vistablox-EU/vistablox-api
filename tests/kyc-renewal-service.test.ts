@@ -31,8 +31,7 @@ function repository(overrides: Partial<KycRepository> = {}): KycRepository {
 
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
-    sendVerificationEmail: vi.fn(),
-    sendPasswordResetEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
     sendStaffInvitationEmail: vi.fn(),
     sendApplicantResponseReminderEmail: vi.fn(),
     sendKycRenewalReminderEmail: vi.fn().mockResolvedValue(undefined),

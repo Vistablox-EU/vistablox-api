@@ -86,7 +86,7 @@ export class AcceptStaffInvitationService {
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
-  public async execute(input: { token: string; password: string; traceId: string }) {
+  public async execute(input: { token: string; traceId: string }) {
     const claimedAt = this.clock();
     const claimId = randomUUID();
     const invitation = await this.repository.claimInvitation({
@@ -101,7 +101,6 @@ export class AcceptStaffInvitationService {
       const identity = await this.identities.createOrResolveInvitedStaff({
         email: invitation.email,
         displayName: invitation.displayName,
-        password: input.password,
       });
       const accepted = await this.repository.completeAcceptance({
         invitationId: invitation.invitationId,
@@ -116,6 +115,7 @@ export class AcceptStaffInvitationService {
           accepted: true as const,
           account_id: accepted.accountId,
           webauthn_enrollment_required: true as const,
+          passkey_registration_context: identity.passkeyRegistrationContext,
         },
       };
     } catch (error) {

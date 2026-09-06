@@ -50,7 +50,7 @@ describe.skipIf(databaseUrl === undefined)("investor profile PostgreSQL integrat
         loginMethods: {
           create: {
             id: `login_${suffix}`,
-            methodType: "email_password",
+            methodType: "apple",
             providerSubject: betterAuthUserId,
             linkedAt,
           },
@@ -261,7 +261,7 @@ describe.skipIf(databaseUrl === undefined)("investor profile PostgreSQL integrat
       accountId,
       accountStatus: "active",
       protectedContactEmail: `profile-${suffix}@example.test`,
-      loginMethods: [{ methodType: "email_password", linkedAt }],
+      loginMethods: [{ methodType: "apple", linkedAt }],
       kyc: {
         diditReference,
         providerStatus: "Approved",

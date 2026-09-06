@@ -32,4 +32,21 @@ export class PrismaCustomerSessionRepository implements CustomerSessionRepositor
     });
     return row?.betterAuthSessionToken ?? null;
   }
+
+  public async hasFreshAuthentication(input: {
+    accountId: string;
+    providerSessionId: string;
+    freshAfter: Date;
+  }): Promise<boolean> {
+    const session = await this.database.session.findFirst({
+      where: {
+        accountId: input.accountId,
+        betterAuthSessionId: input.providerSessionId,
+        status: "active",
+        lastFreshAuthAt: { gte: input.freshAfter },
+      },
+      select: { id: true },
+    });
+    return session !== null;
+  }
 }

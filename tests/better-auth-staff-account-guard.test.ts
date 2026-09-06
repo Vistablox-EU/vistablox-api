@@ -73,4 +73,49 @@ describe("Better Auth staff account guard", () => {
 
     await expect(resolver.resolve({ cookie: "vb_session=opaque" })).resolves.toBeNull();
   });
+
+  it("keeps an OAuth-only session out of protected APIs until passkey confirmation", async () => {
+    const getSession = vi.fn().mockResolvedValue({
+      user: {
+        id: "auth_customer",
+        population: "customer",
+        disabledAt: null,
+        recoveryRequiredAt: null,
+      },
+      session: { id: "session_pending", authenticationLevel: "oauth_pending" },
+    });
+
+    const protectedResolver = new BetterAuthSessionResolver({ api: { getSession } } as never);
+    const recoveryResolver = new BetterAuthSessionResolver(
+      { api: { getSession } } as never,
+      { allowPendingOAuth: true },
+    );
+
+    await expect(protectedResolver.resolve({ cookie: "vb.session_token=opaque" }))
+      .resolves.toBeNull();
+    await expect(recoveryResolver.resolve({ cookie: "vb.session_token=opaque" }))
+      .resolves.toMatchObject({
+        betterAuthUserId: "auth_customer",
+        providerSessionId: "session_pending",
+      });
+  });
+
+  it("accepts a customer session only after OAuth and passkey are complete", async () => {
+    const getSession = vi.fn().mockResolvedValue({
+      user: {
+        id: "auth_customer",
+        population: "customer",
+        disabledAt: null,
+        recoveryRequiredAt: null,
+      },
+      session: { id: "session_full", authenticationLevel: "oauth_passkey" },
+    });
+    const resolver = new BetterAuthSessionResolver({ api: { getSession } } as never);
+
+    await expect(resolver.resolve({ cookie: "vb.session_token=opaque" }))
+      .resolves.toMatchObject({
+        betterAuthUserId: "auth_customer",
+        providerSessionId: "session_full",
+      });
+  });
 });

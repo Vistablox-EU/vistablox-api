@@ -14,4 +14,9 @@ export interface CustomerSessionRepository {
   listForAccount(accountId: string): Promise<CustomerSessionSummary[]>;
   /** Returns the session's Better Auth token, scoped to the caller's own account. */
   findOwnedSessionToken(accountId: string, sessionId: string): Promise<string | null>;
+  hasFreshAuthentication?(input: {
+    accountId: string;
+    providerSessionId: string;
+    freshAfter: Date;
+  }): Promise<boolean>;
 }

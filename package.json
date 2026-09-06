@@ -28,6 +28,7 @@
   "dependencies": {
     "@aws-sdk/client-s3": "3.1123.0",
     "@better-auth/expo": "^1.7.2",
+    "@better-auth/passkey": "^1.7.2",
     "@prisma/adapter-pg": "7.10.0",
     "@prisma/client": "7.10.0",
     "@simplewebauthn/server": "13.3.3",

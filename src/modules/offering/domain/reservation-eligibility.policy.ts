@@ -42,10 +42,10 @@ export function isKycCurrent(input: {
 }
 
 export function isLoginMethodsComplete(
-  loginMethods: ReadonlyArray<"google" | "email_password">,
+  loginMethods: ReadonlyArray<"passkey" | "google" | "apple">,
 ): boolean {
   const methods = new Set(loginMethods);
-  return methods.has("google") && methods.has("email_password");
+  return methods.has("passkey") && (methods.has("google") || methods.has("apple"));
 }
 
 export function isInvestmentEligible(input: {
@@ -74,7 +74,7 @@ export function computeReservationBlockers(input: {
   accountStatus: AccountReadinessStatus;
   kycEligibilityState: string | null;
   kycRenewalDueAt: Date | null;
-  loginMethods: ReadonlyArray<"google" | "email_password">;
+  loginMethods: ReadonlyArray<"passkey" | "google" | "apple">;
   walletProvisioned: boolean;
   /** ACCOUNT_RECOVERY_POLICY.md's 72-hour post-recovery restriction — still active when this is set and in the future. */
   recoveryCooldownEndsAt: Date | null;

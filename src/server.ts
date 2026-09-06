@@ -17,6 +17,7 @@ import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
 import { PrismaAccountRepository } from "./modules/account/repository/prisma-account.repository.js";
 import { createBetterAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
+import { createAppleClientSecret } from "./modules/auth/infrastructure/apple-client-secret.js";
 import { BetterAuthStaffIdentityProvider } from "./modules/auth/infrastructure/better-auth-staff-identity.provider.js";
 import { BetterAuthStaffAccountAdministrator } from "./modules/auth/infrastructure/better-auth-staff-account-administrator.js";
 import { BetterAuthSessionResolver } from "./modules/auth/infrastructure/better-auth-session.resolver.js";
@@ -27,6 +28,7 @@ import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit
 import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
 import { BetterAuthCustomerAccountAdministrator } from "./modules/auth/infrastructure/better-auth-customer-account-administrator.js";
 import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
+import { PrismaAccountRecoveryCodeRepository } from "./modules/auth/repository/prisma-account-recovery-code.repository.js";
 import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
 import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
 import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
@@ -137,17 +139,25 @@ const emailSender = new SmtpEmailSender({
 // The Expo dev client always connects through the `exp://` scheme rather than
 // the app's own custom scheme (already covered by AUTH_TRUSTED_ORIGINS), so
 // these wildcards are only needed — and only safe — outside production.
-const trustedOrigins =
+const appTrustedOrigins =
   environment.NODE_ENV === "production"
     ? environment.AUTH_TRUSTED_ORIGINS
     : [...environment.AUTH_TRUSTED_ORIGINS, "exp://", "exp://**", "exp://192.168.*.*:*/**"];
+const trustedOrigins = environment.APPLE_OAUTH_ENABLED
+  ? [...new Set([...appTrustedOrigins, "https://appleid.apple.com"])]
+  : appTrustedOrigins;
 const auth = createBetterAuth({
   database: authDatabase,
   baseURL: environment.BETTER_AUTH_URL,
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
   trustedOrigins,
-  ...(environment.GOOGLE_CLIENT_ID === undefined ||
+  webauthn: {
+    rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
+    origins: [environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin],
+  },
+  ...(!environment.GOOGLE_OAUTH_ENABLED ||
+  environment.GOOGLE_CLIENT_ID === undefined ||
   environment.GOOGLE_CLIENT_SECRET === undefined
     ? {}
     : {
@@ -156,12 +166,27 @@ const auth = createBetterAuth({
           clientSecret: environment.GOOGLE_CLIENT_SECRET,
         },
       }),
+  ...(!environment.APPLE_OAUTH_ENABLED ||
+  environment.APPLE_CLIENT_ID === undefined ||
+  environment.APPLE_TEAM_ID === undefined ||
+  environment.APPLE_KEY_ID === undefined ||
+  environment.APPLE_PRIVATE_KEY === undefined
+    ? {}
+    : {
+        apple: {
+          clientId: environment.APPLE_CLIENT_ID,
+          createClientSecret: () =>
+            createAppleClientSecret({
+              clientId: environment.APPLE_CLIENT_ID as string,
+              teamId: environment.APPLE_TEAM_ID as string,
+              keyId: environment.APPLE_KEY_ID as string,
+              privateKey: environment.APPLE_PRIVATE_KEY as string,
+            }),
+        },
+      }),
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
-  ...(environment.EMAIL_VERIFICATION_ENABLED
-    ? { sendVerificationEmail: (email) => emailSender.sendVerificationEmail(email) }
-    : {}),
-  sendPasswordResetEmail: (email) => emailSender.sendPasswordResetEmail(email),
+  onLoginMethodUsed: (method) => accountProvisioner.onLoginMethodUsed(method),
   authAuditSink,
   sessionMirror: new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET),
   onBackgroundError: (error) => {
@@ -174,8 +199,11 @@ const staffProvisioningAuth = createBetterAuth({
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
   trustedOrigins,
+  webauthn: {
+    rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
+    origins: [environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin],
+  },
   allowPopulationInput: true,
-  disableAutoSignIn: true,
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
 });
@@ -222,17 +250,21 @@ const diditKyc =
 // Reuses the same baseline Didit workflow as ordinary KYC (AD-062's didit-kyc.md
 // follow-on work): a fresh recovery verification only needs to re-prove a live
 // human with a valid ID, not a separate provider configuration.
+const customerAccountAdministrator = new BetterAuthCustomerAccountAdministrator(
+  auth,
+  emailSender,
+);
 const accountRecovery =
   diditKyc === undefined
     ? undefined
     : {
         repository: new PrismaAccountRecoveryRepository(database),
-        administrator: new BetterAuthCustomerAccountAdministrator(auth),
+        administrator: customerAccountAdministrator,
         didit: diditKyc.didit,
         workflowId: diditKyc.workflowId,
         callbackUrl: diditKyc.callbackUrl,
         recoveryRedirectUrl:
-          environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "https://app.vistablox.eu/reset-password",
+          environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "com.vistablox.app://recover-account",
         emailSender,
       };
 const onrampRedirectUrl = environment.COINBASE_ONRAMP_REDIRECT_URL;
@@ -302,11 +334,27 @@ const app = createApp({
   offeringRepository,
   logger,
   authHandler: toNodeHandler(auth),
+  passkeyAssociations: {
+    ...(environment.PASSKEY_APPLE_TEAM_ID === undefined
+      ? {}
+      : { appleTeamId: environment.PASSKEY_APPLE_TEAM_ID }),
+    appleBundleId: "com.vistablox.app",
+    androidPackageName: "com.vistablox.app",
+    ...(environment.PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS === undefined
+      ? {}
+      : {
+          androidCertificateFingerprints:
+            environment.PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS,
+        }),
+  },
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
   reservationFundingRailEnabled,
   protectedApi: {
     accounts: accountRepository,
     sessions,
+    oauthBootstrapSessions: new BetterAuthSessionResolver(auth, {
+      allowPendingOAuth: true,
+    }),
     originationRepository,
     offeringOperations: { repository: offeringRepository },
     staffWebAuthnRepository,
@@ -345,6 +393,11 @@ const app = createApp({
       oidcGrants: new PostgresOidcGrantRepository(authDatabase),
       auditSink: authAuditSink,
     },
+    accountRecoveryCodes: {
+      repository: new PrismaAccountRecoveryCodeRepository(database),
+      administrator: customerAccountAdministrator,
+      hashKey: environment.BETTER_AUTH_SECRET,
+    },
     oidc: {
       provider: oidcProvider,
       betterAuthSessions: betterAuthSessionResolver,
@@ -352,10 +405,10 @@ const app = createApp({
     ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
     staffAccountLifecycle: {
       repository: staffAccountLifecycleRepository,
-      administrator: new BetterAuthStaffAccountAdministrator(auth),
+      administrator: new BetterAuthStaffAccountAdministrator(auth, emailSender),
       recoveryRedirectUrl:
         environment.STAFF_RECOVERY_REDIRECT_URL ??
-        new URL("/staff/reset-password", authBaseUrl).toString(),
+        new URL("/staff/recover-account", authBaseUrl).toString(),
     },
     ...(accountRecovery === undefined ? {} : { accountRecovery }),
     staffInvitations: {

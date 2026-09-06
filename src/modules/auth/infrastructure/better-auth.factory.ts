@@ -1,11 +1,12 @@
 import { betterAuth } from "better-auth";
-import { haveIBeenPwned } from "better-auth/plugins";
 import { expo } from "@better-auth/expo";
-import { randomUUID } from "node:crypto";
+import { passkey } from "@better-auth/passkey";
+import { APIError, getSessionFromCtx } from "better-auth/api";
 import type { Pool } from "pg";
 
 import type { AuthAuditSink } from "../application/auth-audit-sink.js";
 import type { SessionMirror } from "../application/session-mirror.js";
+import type { LoginMethodType } from "../../account/repository/account.repository.js";
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 import { createBetterAuthStaffAccountGuardPlugin } from "./better-auth-staff-account-guard.plugin.js";
 
@@ -26,19 +27,43 @@ export interface BetterAuthFactoryOptions {
     clientId: string;
     clientSecret: string;
   };
+  apple?: {
+    clientId: string;
+    createClientSecret: () => Promise<string>;
+  };
+  webauthn?: {
+    rpId: string;
+    origins: string[];
+  };
   onUserCreated?: (user: AuthUserSnapshot) => Promise<void>;
   onUserUpdated?: (user: AuthUserSnapshot) => Promise<void>;
-  sendVerificationEmail?: (input: { to: string; verificationUrl: string }) => Promise<void>;
-  sendPasswordResetEmail?: (input: { to: string; resetUrl: string }) => Promise<void>;
+  onLoginMethodUsed?: (input: {
+    betterAuthUserId: string;
+    methodType: LoginMethodType;
+    occurredAt: Date;
+  }) => Promise<void>;
   onBackgroundError?: (error: unknown) => void;
   allowPopulationInput?: boolean;
-  disableAutoSignIn?: boolean;
   authAuditSink?: AuthAuditSink;
   sessionMirror?: SessionMirror;
 }
 
 export function createBetterAuth(options: BetterAuthFactoryOptions) {
-  let clearStaffRecoveryRequirement = async (_betterAuthUserId: string): Promise<void> => {};
+  const defaultOrigin = new URL(options.baseURL).origin;
+  const rpId = options.webauthn?.rpId ?? new URL(defaultOrigin).hostname;
+  const origins = options.webauthn?.origins ?? [defaultOrigin];
+  const apple = options.apple;
+  const socialProviders = {
+    ...(options.google === undefined ? {} : { google: options.google }),
+    ...(apple === undefined
+      ? {}
+      : {
+          apple: async () => ({
+            clientId: apple.clientId,
+            clientSecret: await apple.createClientSecret(),
+          }),
+        }),
+  };
   const auth = betterAuth({
     appName: "VistaBlox",
     baseURL: options.baseURL,
@@ -76,6 +101,14 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       modelName: "auth_session",
       expiresIn: 30 * 60,
       updateAge: 5 * 60,
+      additionalFields: {
+        authenticationLevel: {
+          type: ["unassured", "oauth_pending", "oauth_passkey", "staff_passkey"],
+          required: true,
+          defaultValue: "unassured",
+          input: false,
+        },
+      },
     },
     account: {
       modelName: "auth_account",
@@ -83,7 +116,11 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       encryptOAuthTokens: true,
       accountLinking: {
         enabled: true,
-        trustedProviders: [],
+        // Google verifies email ownership, and password sign-in no longer
+        // exists in the mobile client (removed in the OAuth+passkey
+        // rewrite) -- without this, every pre-existing password-only
+        // account has no self-service path back in.
+        trustedProviders: ["google"],
         allowDifferentEmails: false,
       },
     },
@@ -91,70 +128,22 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       modelName: "auth_verification",
       storeIdentifier: "hashed",
     },
-    emailAndPassword: {
-      enabled: true,
-      minPasswordLength: 12,
-      maxPasswordLength: 128,
-      requireEmailVerification: options.sendVerificationEmail !== undefined,
-      autoSignIn: options.disableAutoSignIn !== true,
-      revokeSessionsOnPasswordReset: true,
-      onPasswordReset: async ({ user }, request) => {
-        await clearStaffRecoveryRequirement(user.id);
-        if (options.authAuditSink === undefined) return;
-        try {
-          const eventId =
-            request?.headers.get("x-vistablox-auth-event-id")?.trim() || randomUUID();
-          const traceId = request?.headers.get("x-trace-id")?.trim() || null;
-          await options.authAuditSink.record({
-            eventKey: `better_auth:password_reset:${user.id}:${eventId}`,
-            action: "authentication.password_reset",
-            betterAuthUserId: user.id,
-            attributeToSubject: true,
-            resourceType: "account",
-            resourceId: user.id,
-            changes: { trace_id: traceId },
-            occurredAt: new Date(),
-          });
-        } catch (error) {
-          options.onBackgroundError?.(error);
-        }
-      },
-      ...(options.sendPasswordResetEmail === undefined
-        ? {}
-        : {
-            sendResetPassword: async ({ user, url }) => {
-              await options.sendPasswordResetEmail?.({ to: user.email, resetUrl: url });
-            },
-          }),
-    },
-    ...(options.sendVerificationEmail === undefined
-      ? {}
-      : {
-          emailVerification: {
-            sendVerificationEmail: async ({ user, url }) => {
-              void options
-                .sendVerificationEmail?.({ to: user.email, verificationUrl: url })
-                .catch((error: unknown) => options.onBackgroundError?.(error));
-            },
-          },
-        }),
-    ...(options.google === undefined
-      ? {}
-      : {
-          socialProviders: {
-            google: options.google,
-          },
-        }),
+    emailAndPassword: { enabled: false },
+    socialProviders,
     databaseHooks: {
       user: {
         create: {
-          // Same condition as requireEmailVerification above: when
-          // verification is off, new accounts are created already verified
-          // instead of landing in a false-but-unenforced state that would
-          // re-lock them out the moment verification gets turned back on.
-          ...(options.sendVerificationEmail === undefined
-            ? { before: async () => ({ data: { emailVerified: true } }) }
-            : {}),
+          before: async (user, context) => {
+            if (
+              isOAuthCallbackPath(context?.path) &&
+              user.emailVerified !== true
+            ) {
+              throw APIError.from("FORBIDDEN", {
+                code: "OAUTH_EMAIL_NOT_VERIFIED",
+                message: "The identity provider did not verify this email address.",
+              });
+            }
+          },
           after: async (user) => {
             await options.onUserCreated?.(toAuthUserSnapshot(user));
           },
@@ -165,10 +154,111 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           },
         },
       },
+      session: {
+        create: {
+          before: async (session, context) => ({
+            data: {
+              ...session,
+              authenticationLevel: await resolveAuthenticationLevel(
+                session.userId,
+                context,
+              ),
+            },
+          }),
+        },
+      },
     },
     plugins: [
       expo(),
-      haveIBeenPwned(),
+      passkey({
+        rpID: rpId,
+        rpName: "VistaBlox",
+        origin: origins,
+        authenticatorSelection: {
+          residentKey: "required",
+          userVerification: "required",
+        },
+        registration: {
+          requireSession: false,
+          resolveUser: async ({ ctx, context }) => {
+            const bootstrap = await readPasskeyBootstrap(ctx, context);
+            return {
+              id: bootstrap.userId,
+              name: bootstrap.email,
+              displayName: bootstrap.displayName,
+            };
+          },
+          afterVerification: async ({ ctx, user, context }) => {
+            const pendingBootstrap = context == null
+              ? null
+              : await readPasskeyBootstrap(ctx, context);
+            const priorSessionToken = await assertPasskeyCeremonyAuthorized(
+              ctx,
+              user.id,
+              pendingBootstrap?.customerIdentityVerified === true,
+            );
+            if (context === null || context === undefined) {
+              const existing = await ctx.context.adapter.findMany({
+                model: "passkey",
+                where: [{ field: "userId", value: user.id }],
+                limit: 1,
+              });
+              if (existing.length !== 0) {
+                throw APIError.from("FORBIDDEN", {
+                  code: "PASSKEY_ALREADY_ENROLLED",
+                  message:
+                    "A passkey is already enrolled. Use account recovery to replace it.",
+                });
+              }
+            } else {
+              const bootstrap = await consumePasskeyBootstrap(ctx, context);
+              if (bootstrap.userId !== user.id) throw invalidPasskeyBootstrap();
+              if (bootstrap.replaceCredentials) {
+                await ctx.context.adapter.deleteMany({
+                  model: "passkey",
+                  where: [{ field: "userId", value: user.id }],
+                });
+              }
+              const storedUser = await ctx.context.internalAdapter.findUserById(user.id);
+              if (
+                storedUser !== null &&
+                (storedUser as Record<string, unknown>).recoveryRequiredAt != null
+              ) {
+                await ctx.context.internalAdapter.updateUser(user.id, {
+                  recoveryRequiredAt: null,
+                });
+              }
+            }
+            if (priorSessionToken !== null) {
+              await ctx.context.internalAdapter.deleteSession(priorSessionToken);
+            }
+          },
+        },
+        authentication: {
+          afterVerification: async ({ ctx, clientData }) => {
+            const credential = await ctx.context.adapter.findOne({
+              model: "passkey",
+              where: [{ field: "credentialID", value: clientData.id }],
+            });
+            if (
+              typeof credential !== "object" ||
+              credential === null ||
+              !("userId" in credential) ||
+              typeof credential.userId !== "string"
+            ) {
+              throw oauthPasskeyRequired();
+            }
+            const priorSessionToken = await assertPasskeyCeremonyAuthorized(
+              ctx,
+              credential.userId,
+              false,
+            );
+            if (priorSessionToken !== null) {
+              await ctx.context.internalAdapter.deleteSession(priorSessionToken);
+            }
+          },
+        },
+      }),
       createBetterAuthStaffAccountGuardPlugin(),
       ...(options.authAuditSink === undefined
         ? []
@@ -182,6 +272,9 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               ...(options.sessionMirror === undefined
                 ? {}
                 : { sessionMirror: options.sessionMirror }),
+              ...(options.onLoginMethodUsed === undefined
+                ? {}
+                : { onLoginMethodUsed: options.onLoginMethodUsed }),
             }),
           ]),
     ],
@@ -211,21 +304,25 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       },
     },
   });
-  clearStaffRecoveryRequirement = async (betterAuthUserId: string) => {
-    const context = await auth.$context;
-    const user = await context.internalAdapter.findUserById(betterAuthUserId);
-    const fields = user as (typeof user & Record<string, unknown>);
-    if (
-      user !== null &&
-      fields.population === "staff_partner" &&
-      fields.recoveryRequiredAt != null
-    ) {
-      await context.internalAdapter.updateUser(betterAuthUserId, {
-        recoveryRequiredAt: null,
-      });
-    }
-  };
   return auth;
+
+  async function resolveAuthenticationLevel(
+    userId: string,
+    context: {
+      path?: string;
+      context: {
+        internalAdapter: { findUserById: (id: string) => Promise<unknown> };
+      };
+    } | null,
+  ): Promise<"unassured" | "oauth_pending" | "oauth_passkey" | "staff_passkey"> {
+    const user = await authContextUser(userId, context);
+    if (isStaffAuthUser(user) && isPasskeyVerificationPath(context?.path)) {
+      return "staff_passkey";
+    }
+    if (isPasskeyVerificationPath(context?.path)) return "oauth_passkey";
+    if (isOAuthCallbackPath(context?.path)) return "oauth_pending";
+    return "unassured";
+  }
 }
 
 function toAuthUserSnapshot(user: {
@@ -243,3 +340,116 @@ function toAuthUserSnapshot(user: {
 }
 
 export type VistaBloxAuth = ReturnType<typeof createBetterAuth>;
+
+interface PasskeyBootstrapValue {
+  userId: string;
+  email: string;
+  displayName: string;
+  replaceCredentials: boolean;
+  customerIdentityVerified: boolean;
+}
+
+async function readPasskeyBootstrap(
+  ctx: { context: { internalAdapter: { findVerificationValue(identifier: string): Promise<unknown> } } },
+  rawContext: string | null | undefined,
+): Promise<PasskeyBootstrapValue> {
+  if (!rawContext) throw invalidPasskeyBootstrap();
+  const stored = await ctx.context.internalAdapter.findVerificationValue(
+    `passkey-bootstrap:${rawContext}`,
+  );
+  return parsePasskeyBootstrap(stored);
+}
+
+async function consumePasskeyBootstrap(
+  ctx: { context: { internalAdapter: { consumeVerificationValue(identifier: string): Promise<unknown> } } },
+  rawContext: string,
+): Promise<PasskeyBootstrapValue> {
+  const stored = await ctx.context.internalAdapter.consumeVerificationValue(
+    `passkey-bootstrap:${rawContext}`,
+  );
+  return parsePasskeyBootstrap(stored);
+}
+
+function parsePasskeyBootstrap(input: unknown): PasskeyBootstrapValue {
+  if (typeof input !== "object" || input === null || !("value" in input)) {
+    throw invalidPasskeyBootstrap();
+  }
+  try {
+    const parsed = JSON.parse(String((input as { value: unknown }).value)) as Record<string, unknown>;
+    if (
+      typeof parsed.userId !== "string" ||
+      typeof parsed.email !== "string" ||
+      typeof parsed.displayName !== "string" ||
+      typeof parsed.replaceCredentials !== "boolean" ||
+      typeof parsed.customerIdentityVerified !== "boolean"
+    ) {
+      throw invalidPasskeyBootstrap();
+    }
+    return {
+      userId: parsed.userId,
+      email: parsed.email,
+      displayName: parsed.displayName,
+      replaceCredentials: parsed.replaceCredentials,
+      customerIdentityVerified: parsed.customerIdentityVerified,
+    };
+  } catch (error) {
+    if (error instanceof APIError) throw error;
+    throw invalidPasskeyBootstrap();
+  }
+}
+
+function invalidPasskeyBootstrap(): APIError {
+  return APIError.from("UNAUTHORIZED", {
+    code: "PASSKEY_BOOTSTRAP_INVALID",
+    message: "This passkey enrollment link is invalid or expired.",
+  });
+}
+
+async function assertPasskeyCeremonyAuthorized(
+  ctx: Parameters<typeof getSessionFromCtx>[0],
+  passkeyUserId: string,
+  customerIdentityVerifiedByBootstrap: boolean,
+): Promise<string | null> {
+  const user = await ctx.context.internalAdapter.findUserById(passkeyUserId);
+  if (isStaffAuthUser(user) || customerIdentityVerifiedByBootstrap) return null;
+
+  const current = await getSessionFromCtx(ctx);
+  const level = (current?.session as Record<string, unknown> | undefined)?.authenticationLevel;
+  if (
+    current?.user.id !== passkeyUserId ||
+    (level !== "oauth_pending" && level !== "oauth_passkey")
+  ) {
+    throw oauthPasskeyRequired();
+  }
+  return current.session.token;
+}
+
+function oauthPasskeyRequired(): APIError {
+  return APIError.from("UNAUTHORIZED", {
+    code: "OAUTH_REQUIRED_BEFORE_PASSKEY",
+    message: "Continue with Google or Apple before confirming your passkey.",
+  });
+}
+
+function isPasskeyVerificationPath(path: string | undefined): boolean {
+  return path === "/passkey/verify-authentication" || path === "/passkey/verify-registration";
+}
+
+function isOAuthCallbackPath(path: string | undefined): boolean {
+  return path === "/callback/google" || path === "/callback/apple";
+}
+
+function isStaffAuthUser(user: unknown): boolean {
+  return (
+    typeof user === "object" &&
+    user !== null &&
+    (user as Record<string, unknown>).population === "staff_partner"
+  );
+}
+
+async function authContextUser(
+  userId: string,
+  context: { context?: { internalAdapter?: { findUserById?: (id: string) => Promise<unknown> } } } | null,
+): Promise<unknown> {
+  return context?.context?.internalAdapter?.findUserById?.(userId);
+}
