@@ -38,6 +38,7 @@ export function createInvestorOfferingRouter(
   downloadDocument?: DownloadDisclosureDocumentService,
   createReservation?: CreateReservationService,
   reconfirmReservation?: ReconfirmReservationService,
+  requireFreshAuthentication?: RequestHandler,
 ): Router {
   const router = Router();
 
@@ -53,7 +54,9 @@ export function createInvestorOfferingRouter(
   });
 
   if (createReservation !== undefined) {
-    router.post("/:offering_id/reservations", requireAuthentication, async (request, response) => {
+    router.post("/:offering_id/reservations", requireAuthentication,
+      ...(requireFreshAuthentication === undefined ? [] : [requireFreshAuthentication]),
+      async (request, response) => {
       const context = requireCustomerContext(response.locals.authContext);
       const params = investorOfferingParamsSchema.parse(request.params);
       const body = createReservationBodySchema.parse(request.body);
@@ -65,13 +68,14 @@ export function createInvestorOfferingRouter(
       });
       response.setHeader("Cache-Control", "no-store");
       response.status(201).json(createReservationResponseSchema.parse(result));
-    });
+      });
   }
 
   if (reconfirmReservation !== undefined) {
     router.post(
       "/:offering_id/reservations/:reservation_id/reconfirm",
       requireAuthentication,
+      ...(requireFreshAuthentication === undefined ? [] : [requireFreshAuthentication]),
       async (request, response) => {
         const context = requireCustomerContext(response.locals.authContext);
         const params = reservationParamsSchema.parse(request.params);

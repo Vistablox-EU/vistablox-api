@@ -35,7 +35,10 @@ function buildFakes() {
     assertEmailAvailable: vi.fn().mockResolvedValue(undefined),
     createOrResolveInvitedStaff: vi
       .fn()
-      .mockResolvedValue({ betterAuthUserId: "auth_invited" }),
+      .mockResolvedValue({
+        betterAuthUserId: "auth_invited",
+        passkeyRegistrationContext: "bootstrap_context_that_is_long_enough",
+      }),
   };
   return { repository, identities };
 }
@@ -119,7 +122,6 @@ describe("staff invitation services", () => {
 
     const result = await service.execute({
       token: "raw_invitation_token_that_is_never_stored",
-      password: "Unique safe password 2026!",
       traceId: "trace_accept",
     });
 
@@ -127,11 +129,11 @@ describe("staff invitation services", () => {
       accepted: true,
       account_id: "acct_invited",
       webauthn_enrollment_required: true,
+      passkey_registration_context: "bootstrap_context_that_is_long_enough",
     });
     expect(identities.createOrResolveInvitedStaff).toHaveBeenCalledWith({
       email: invitation.email,
       displayName: invitation.displayName,
-      password: "Unique safe password 2026!",
     });
     expect(repository.completeAcceptance).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -150,7 +152,6 @@ describe("staff invitation services", () => {
     await expect(
       service.execute({
         token: "unavailable_invitation_token_value",
-        password: "Unique safe password 2026!",
         traceId: "trace_accept",
       }),
     ).rejects.toMatchObject({
@@ -170,7 +171,6 @@ describe("staff invitation services", () => {
     await expect(
       service.execute({
         token: "retryable_invitation_token_value",
-        password: "Unique safe password 2026!",
         traceId: "trace_accept",
       }),
     ).rejects.toThrow("identity creation failed");

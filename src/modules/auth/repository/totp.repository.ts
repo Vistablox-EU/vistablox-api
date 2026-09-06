@@ -15,6 +15,11 @@ export interface TotpRepository {
     enrolledAt: Date;
   }): Promise<void>;
   recordTotpUse(accountId: string, usedAt: Date): Promise<void>;
+  recordSessionFreshAuth?(input: {
+    accountId: string;
+    providerSessionId: string;
+    verifiedAt: Date;
+  }): Promise<void>;
   countUnconsumedBackupCodes(accountId: string): Promise<number>;
   consumeBackupCode(input: {
     accountId: string;

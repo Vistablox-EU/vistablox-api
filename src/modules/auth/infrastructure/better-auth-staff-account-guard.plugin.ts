@@ -23,16 +23,28 @@ export function createBetterAuthStaffAccountGuardPlugin() {
                   const user = await context.context.internalAdapter.findUserById(
                     session.userId,
                   );
+                  if (isOAuthCallbackPath(contextPath(context)) && !isVerifiedEmailUser(user)) {
+                    throw APIError.from("FORBIDDEN", {
+                      code: "OAUTH_EMAIL_NOT_VERIFIED",
+                      message: "The identity provider did not verify this email address.",
+                    });
+                  }
                   if (isDisabledUser(user)) {
                     throw APIError.from("FORBIDDEN", {
                       code: "STAFF_ACCOUNT_DISABLED",
                       message: "This staff account has been disabled.",
                     });
                   }
-                  if (isRecoveryPendingUser(user)) {
+                  if (isRecoveryPendingUser(user) && !isRecoveryCompletionPath(contextPath(context))) {
                     throw APIError.from("FORBIDDEN", {
                       code: "STAFF_ACCOUNT_RECOVERY_REQUIRED",
                       message: "Complete staff account recovery before signing in.",
+                    });
+                  }
+                  if (isStaffUser(user) && !isStaffPasskeyPath(contextPath(context))) {
+                    throw APIError.from("FORBIDDEN", {
+                      code: "STAFF_PASSKEY_REQUIRED",
+                      message: "Staff accounts can only sign in with a passkey.",
                     });
                   }
                 },
@@ -43,6 +55,42 @@ export function createBetterAuthStaffAccountGuardPlugin() {
       };
     },
   };
+}
+
+function isVerifiedEmailUser(user: unknown): boolean {
+  return (
+    typeof user === "object" &&
+    user !== null &&
+    "emailVerified" in user &&
+    (user as Record<string, unknown>).emailVerified === true
+  );
+}
+
+function contextPath(context: unknown): string | null {
+  if (typeof context !== "object" || context === null || !("path" in context)) return null;
+  const path = (context as Record<string, unknown>).path;
+  return typeof path === "string" ? path : null;
+}
+
+function isStaffPasskeyPath(path: string | null): boolean {
+  return path === "/passkey/verify-authentication" || path === "/passkey/verify-registration";
+}
+
+function isRecoveryCompletionPath(path: string | null): boolean {
+  return path === "/passkey/verify-registration";
+}
+
+function isOAuthCallbackPath(path: string | null): boolean {
+  return path === "/callback/google" || path === "/callback/apple";
+}
+
+function isStaffUser(user: unknown): boolean {
+  return (
+    typeof user === "object" &&
+    user !== null &&
+    "population" in user &&
+    (user as Record<string, unknown>).population === "staff_partner"
+  );
 }
 
 function isRecoveryPendingUser(user: unknown): boolean {

@@ -1,4 +1,5 @@
 export type AccountStatus = "active" | "recovery_review" | "suspended_restricted";
+export type LoginMethodType = "passkey" | "google" | "apple";
 
 export interface LocalAccountContext {
   accountId: string;
@@ -16,5 +17,11 @@ export interface AccountRepository {
   syncVerifiedContactEmail(input: {
     betterAuthUserId: string;
     protectedContactEmail: string;
+  }): Promise<void>;
+  recordLoginMethod?(input: {
+    betterAuthUserId: string;
+    methodType: LoginMethodType;
+    providerSubject: string;
+    linkedAt: Date;
   }): Promise<void>;
 }

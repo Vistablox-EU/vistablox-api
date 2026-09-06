@@ -5,6 +5,7 @@ import type {
   AccountRepository,
   AccountStatus,
   LocalAccountContext,
+  LoginMethodType,
 } from "./account.repository.js";
 
 export class PrismaAccountRepository implements AccountRepository {
@@ -67,6 +68,35 @@ export class PrismaAccountRepository implements AccountRepository {
     await this.database.account.update({
       where: { betterAuthUserId: input.betterAuthUserId },
       data: { protectedContactEmail: input.protectedContactEmail },
+    });
+  }
+
+  public async recordLoginMethod(input: {
+    betterAuthUserId: string;
+    methodType: LoginMethodType;
+    providerSubject: string;
+    linkedAt: Date;
+  }): Promise<void> {
+    const account = await this.database.account.findUniqueOrThrow({
+      where: { betterAuthUserId: input.betterAuthUserId },
+      select: { id: true },
+    });
+    await this.database.loginMethod.upsert({
+      where: {
+        accountId_methodType: {
+          accountId: account.id,
+          methodType: input.methodType,
+        },
+      },
+      update: {},
+      create: {
+        id: `login_${ulid()}`,
+        accountId: account.id,
+        methodType: input.methodType,
+        providerSubject: input.providerSubject,
+        linkedAt: input.linkedAt,
+        linkedViaFreshAuth: true,
+      },
     });
   }
 }

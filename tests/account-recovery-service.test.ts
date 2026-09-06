@@ -86,14 +86,14 @@ function administrator(overrides: Partial<CustomerAccountAdministrator> = {}): C
   return {
     revokeAllSessions: vi.fn().mockResolvedValue(undefined),
     sendRecoveryCompletionEmail: vi.fn().mockResolvedValue(undefined),
+    prepareSelfServicePasskeyReplacement: vi.fn().mockResolvedValue("bootstrap_context"),
     ...overrides,
   };
 }
 
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
-    sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
-    sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
+    sendPasskeyRecoveryEmail: vi.fn().mockResolvedValue(undefined),
     sendStaffInvitationEmail: vi.fn().mockResolvedValue(undefined),
     sendApplicantResponseReminderEmail: vi.fn().mockResolvedValue(undefined),
     sendKycRenewalReminderEmail: vi.fn().mockResolvedValue(undefined),
@@ -450,7 +450,7 @@ describe("CompleteAccountRecoveryService", () => {
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })), completeCase }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender({ sendAccountRecoveryCompletedEmail }),
-      "https://app.vistablox.eu/reset-password",
+      "https://app.vistablox.eu/recover-account",
       () => now,
     );
 
@@ -458,7 +458,7 @@ describe("CompleteAccountRecoveryService", () => {
 
     expect(sendRecoveryCompletionEmail).toHaveBeenCalledWith({
       betterAuthUserId: "better_auth_user_01",
-      redirectTo: "https://app.vistablox.eu/reset-password",
+      redirectTo: "https://app.vistablox.eu/recover-account",
       traceId: "trace_01",
     });
     expect(completeCase).toHaveBeenCalledWith({
@@ -479,7 +479,7 @@ describe("CompleteAccountRecoveryService", () => {
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "open" })) }),
       administrator(),
       emailSender(),
-      "https://app.vistablox.eu/reset-password",
+      "https://app.vistablox.eu/recover-account",
     );
 
     await expect(
@@ -493,7 +493,7 @@ describe("CompleteAccountRecoveryService", () => {
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })), completeCase }),
       administrator({ sendRecoveryCompletionEmail: vi.fn().mockRejectedValue(new Error("smtp down")) }),
       emailSender(),
-      "https://app.vistablox.eu/reset-password",
+      "https://app.vistablox.eu/recover-account",
     );
 
     await expect(

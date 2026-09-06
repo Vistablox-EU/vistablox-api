@@ -5,7 +5,10 @@ import type { SessionResolver, AuthenticatedIdentity } from "../application/sess
 import type { VistaBloxAuth } from "./better-auth.factory.js";
 
 export class BetterAuthSessionResolver implements SessionResolver {
-  public constructor(private readonly auth: VistaBloxAuth) {}
+  public constructor(
+    private readonly auth: VistaBloxAuth,
+    private readonly options: { allowPendingOAuth?: boolean } = {},
+  ) {}
 
   public async resolve(headers: IncomingHttpHeaders): Promise<AuthenticatedIdentity | null> {
     const result = await this.auth.api.getSession({ headers: fromNodeHeaders(headers) });
@@ -15,6 +18,12 @@ export class BetterAuthSessionResolver implements SessionResolver {
     if (result.user.disabledAt != null || result.user.recoveryRequiredAt != null) {
       return null;
     }
+    const authenticationLevel = result.session.authenticationLevel;
+    const accepted =
+      authenticationLevel === "oauth_passkey" ||
+      authenticationLevel === "staff_passkey" ||
+      (this.options.allowPendingOAuth === true && authenticationLevel === "oauth_pending");
+    if (!accepted) return null;
 
     return {
       betterAuthUserId: result.user.id,

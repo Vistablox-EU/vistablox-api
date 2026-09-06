@@ -3,6 +3,5 @@ export interface StaffIdentityProvider {
   createOrResolveInvitedStaff(input: {
     email: string;
     displayName: string;
-    password: string;
-  }): Promise<{ betterAuthUserId: string }>;
+  }): Promise<{ betterAuthUserId: string; passkeyRegistrationContext: string }>;
 }

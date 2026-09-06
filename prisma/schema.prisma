@@ -28,6 +28,7 @@ model Account {
   operatingDistributionsApproved OperatingDistribution[]
   mfaTotpFactor           MfaTotpFactor?
   mfaBackupCodes          MfaBackupCode[]
+  accountRecoveryCode     AccountRecoveryCode?
   recoveryCases           AccountRecoveryCase[] @relation("RecoverySubject")
   primaryRecoveryReviews  AccountRecoveryCase[] @relation("PrimaryRecoveryReviewer")
   secondaryRecoveryReviews AccountRecoveryCase[] @relation("SecondaryRecoveryReviewer")
@@ -230,7 +231,7 @@ model MfaTotpFactor {
 }
 
 // AD-177: backup codes are hashed and marked consumed-on-use, mirroring
-// password-storage discipline rather than the TOTP secret's plaintext posture.
+// one-way secret-storage discipline rather than the TOTP secret's plaintext posture.
 model MfaBackupCode {
   id         String    @id @map("backup_code_id")
   accountId  String    @map("account_id")
@@ -266,6 +267,18 @@ model AccountRecoveryCase {
   @@index([reviewedByPrimary], map: "idx_recovery_cases_reviewed_primary")
   @@index([reviewedBySecondary], map: "idx_recovery_cases_reviewed_secondary")
   @@map("account_recovery_cases")
+  @@schema("account")
+}
+
+model AccountRecoveryCode {
+  accountId  String    @id @map("account_id")
+  codeHash   String    @map("code_hash")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+
+  account    Account   @relation(fields: [accountId], references: [id])
+
+  @@map("account_recovery_codes")
   @@schema("account")
 }
 

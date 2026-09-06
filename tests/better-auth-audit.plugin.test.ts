@@ -12,9 +12,6 @@ interface AuditDatabaseHooks {
     create: { after(session: Record<string, unknown>, context: unknown): Promise<void> };
     delete: { after(session: Record<string, unknown>, context: unknown): Promise<void> };
   };
-  account: {
-    update: { after(account: Record<string, unknown>, context: unknown): Promise<void> };
-  };
 }
 
 async function getDatabaseHooks(
@@ -35,7 +32,7 @@ async function getDatabaseHooks(
 }
 
 describe("Better Auth audit plugin", () => {
-  it("emits deterministic session, login, revocation, and password event keys", async () => {
+  it("emits deterministic session, passkey login, and revocation event keys", async () => {
     const events = new Map<string, AuthAuditEvent>();
     const sink: AuthAuditSink = {
       record: vi.fn(async (event) => {
@@ -60,39 +57,26 @@ describe("Better Auth audit plugin", () => {
         population: "customer",
         email: "secret@example.test",
       },
-      { path: "/sign-up/email", headers },
+      { path: "/callback/google", headers },
     );
     await hooks.session.create.after(session, {
-      path: "/sign-in/email",
+      path: "/passkey/verify-authentication",
       headers,
-      body: { email: "secret@example.test", password: "never-audited" },
+      body: { response: { id: "credential_01" } },
     });
     await hooks.session.create.after(session, {
-      path: "/sign-in/email",
+      path: "/passkey/verify-authentication",
       headers,
-      body: { email: "secret@example.test", password: "never-audited" },
+      body: { response: { id: "credential_01" } },
     });
     await hooks.session.delete.after(session, { path: "/sign-out", headers });
-    await hooks.account.update.after(
-      {
-        id: "credential_01",
-        userId: "auth_user_01",
-        providerId: "credential",
-        updatedAt: new Date("2026-08-31T19:29:30.000Z"),
-        password: "never-audited-hash",
-      },
-      { path: "/change-password", headers },
-    );
-
     expect([...events.keys()]).toEqual([
       "better_auth:identity_created:auth_user_01",
       "better_auth:session_created:session_01",
       "better_auth:login_succeeded:session_01",
       "better_auth:session_revoked:session_01",
-      "better_auth:password_changed:credential_01:auth_evt_request",
     ]);
     expect(JSON.stringify([...events.values()])).not.toContain("secret@example.test");
-    expect(JSON.stringify([...events.values()])).not.toContain("never-audited");
     expect(events.get("better_auth:session_revoked:session_01")?.changes.reason).toBe(
       "sign_out",
     );
@@ -113,14 +97,14 @@ describe("Better Auth audit plugin", () => {
       createdAt: new Date("2026-08-31T19:29:00.000Z"),
     };
 
-    await hooks.session.create.after(session, { path: "/sign-in/email", headers });
+    await hooks.session.create.after(session, { path: "/passkey/verify-authentication", headers });
     await hooks.session.delete.after(session, { path: "/revoke-session", headers });
 
     expect(sessionMirror.recordCreated).toHaveBeenCalledWith({
       betterAuthUserId: "auth_user_01",
       betterAuthSessionId: "session_01",
       betterAuthSessionToken: "tok_abc123",
-      authMethodAtLogin: "email_password",
+      authMethodAtLogin: "oauth_passkey",
       userAgent: "TestAgent/1.0",
       createdAt: new Date("2026-08-31T19:29:00.000Z"),
       idleExpiresAt: new Date("2026-08-31T19:59:00.000Z"),
@@ -150,7 +134,7 @@ describe("Better Auth audit plugin", () => {
           token: "tok_abc123",
           createdAt: new Date("2026-08-31T19:29:00.000Z"),
         },
-        { path: "/sign-in/email", headers: new Headers() },
+        { path: "/callback/google", headers: new Headers() },
       ),
     ).resolves.toBeUndefined();
     expect(onError).toHaveBeenCalledWith(new Error("mirror unavailable"));
@@ -171,7 +155,7 @@ describe("Better Auth audit plugin", () => {
           userId: "auth_user_01",
           createdAt: new Date("2026-08-31T19:29:00.000Z"),
         },
-        { path: "/sign-in/email", headers: new Headers() },
+        { path: "/callback/apple", headers: new Headers() },
       ),
     ).resolves.toBeUndefined();
     expect(onError).toHaveBeenCalledTimes(2);

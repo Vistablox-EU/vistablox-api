@@ -4,7 +4,7 @@ export interface InvestorProfileRecord {
   protectedContactEmail: string | null;
   createdAt: Date;
   loginMethods: Array<{
-    methodType: "google" | "email_password";
+    methodType: "passkey" | "google" | "apple";
     linkedAt: Date;
   }>;
   kyc: {

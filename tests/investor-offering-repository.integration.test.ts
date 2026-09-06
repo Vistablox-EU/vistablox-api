@@ -62,7 +62,7 @@ describe.skipIf(databaseUrl === undefined)(
             create: [
               {
                 id: `login_email_${suffix}`,
-                methodType: "email_password",
+                methodType: "apple",
                 providerSubject: `email_${suffix}`,
               },
               {
@@ -305,7 +305,7 @@ describe.skipIf(databaseUrl === undefined)(
         ],
         accountReadiness: {
           status: "active",
-          loginMethods: expect.arrayContaining(["google", "email_password"]),
+          loginMethods: expect.arrayContaining(["google", "apple"]),
           kycEligibilityState: "eligible",
           walletProvisioned: true,
           payoutWalletRegistered: true,
@@ -1010,8 +1010,7 @@ describe.skipIf(databaseUrl === undefined)(
       const account = await database.account.findUnique({ where: { id: fundedAccountId } });
       const expectedActed = account?.protectedContactEmail == null ? 0 : 1;
       const email: EmailSender = {
-        sendVerificationEmail: vi.fn(),
-        sendPasswordResetEmail: vi.fn(),
+        sendPasskeyRecoveryEmail: vi.fn(),
         sendStaffInvitationEmail: vi.fn(),
         sendApplicantResponseReminderEmail: vi.fn(),
         sendKycRenewalReminderEmail: vi.fn(),

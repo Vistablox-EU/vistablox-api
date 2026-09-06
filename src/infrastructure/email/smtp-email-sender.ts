@@ -1,15 +1,5 @@
 import nodemailer, { type Transporter } from "nodemailer";
 
-export interface VerificationEmail {
-  to: string;
-  verificationUrl: string;
-}
-
-export interface PasswordResetEmail {
-  to: string;
-  resetUrl: string;
-}
-
 export interface StaffInvitationEmail {
   to: string;
   displayName: string;
@@ -50,9 +40,13 @@ export interface AccountRecoveryCompletedEmail {
   cooldownEndsAt: Date;
 }
 
+export interface PasskeyRecoveryEmail {
+  to: string;
+  recoveryUrl: string;
+  population: "customer" | "staff_partner";
+}
+
 export interface EmailSender {
-  sendVerificationEmail(email: VerificationEmail): Promise<void>;
-  sendPasswordResetEmail(email: PasswordResetEmail): Promise<void>;
   sendStaffInvitationEmail(email: StaffInvitationEmail): Promise<void>;
   sendApplicantResponseReminderEmail(email: ApplicantResponseReminderEmail): Promise<void>;
   sendKycRenewalReminderEmail(email: KycRenewalReminderEmail): Promise<void>;
@@ -62,6 +56,7 @@ export interface EmailSender {
   sendAccountRecoveryApprovedEmail(email: AccountRecoveryDecisionEmail): Promise<void>;
   sendAccountRecoveryRejectedEmail(email: AccountRecoveryDecisionEmail): Promise<void>;
   sendAccountRecoveryCompletedEmail(email: AccountRecoveryCompletedEmail): Promise<void>;
+  sendPasskeyRecoveryEmail(email: PasskeyRecoveryEmail): Promise<void>;
 }
 
 export interface SmtpEmailSenderOptions {
@@ -82,26 +77,6 @@ export class SmtpEmailSender implements EmailSender {
       port: options.port,
       secure: options.secure,
       auth: { user: options.user, pass: options.password },
-    });
-  }
-
-  public async sendVerificationEmail(email: VerificationEmail): Promise<void> {
-    await this.transporter.sendMail({
-      from: this.options.from,
-      to: email.to,
-      subject: "Verify your VistaBlox email address",
-      text: `Verify your VistaBlox email address: ${email.verificationUrl}`,
-      html: `<p>Verify your VistaBlox email address:</p><p><a href="${escapeHtml(email.verificationUrl)}">Verify email</a></p>`,
-    });
-  }
-
-  public async sendPasswordResetEmail(email: PasswordResetEmail): Promise<void> {
-    await this.transporter.sendMail({
-      from: this.options.from,
-      to: email.to,
-      subject: "Reset your VistaBlox password",
-      text: `Reset your VistaBlox password: ${email.resetUrl}`,
-      html: `<p>Reset your VistaBlox password:</p><p><a href="${escapeHtml(email.resetUrl)}">Reset password</a></p>`,
     });
   }
 
@@ -200,6 +175,17 @@ export class SmtpEmailSender implements EmailSender {
       subject: "Your VistaBlox account access has been restored",
       text: `Your VistaBlox account recovery is complete. New investments, deposits, and account-control changes stay restricted until ${cooldownEndsAt} as a precaution.`,
       html: `<p>Your VistaBlox account recovery is complete.</p><p>New investments, deposits, and account-control changes stay restricted until ${escapeHtml(cooldownEndsAt)} as a precaution.</p>`,
+    });
+  }
+
+  public async sendPasskeyRecoveryEmail(email: PasskeyRecoveryEmail): Promise<void> {
+    const audience = email.population === "staff_partner" ? "staff" : "account";
+    await this.transporter.sendMail({
+      from: this.options.from,
+      to: email.to,
+      subject: "Create a new VistaBlox passkey",
+      text: `Complete your VistaBlox ${audience} recovery by creating a new passkey: ${email.recoveryUrl}. This link expires in 15 minutes.`,
+      html: `<p>Complete your VistaBlox ${audience} recovery by creating a new passkey.</p><p><a href="${escapeHtml(email.recoveryUrl)}">Create new passkey</a></p><p>This link expires in 15 minutes.</p>`,
     });
   }
 }

@@ -1,14 +1,17 @@
-import { randomUUID } from "node:crypto";
-
 import { AppError } from "../../../shared/errors/app-error.js";
+import type { EmailSender } from "../../../infrastructure/email/smtp-email-sender.js";
 import type {
   StaffAccountAdministrator,
   StaffOffboardingReason,
 } from "../application/staff-account-administrator.js";
 import type { VistaBloxAuth } from "./better-auth.factory.js";
+import { issuePasskeyBootstrap, withPasskeyBootstrapContext } from "./passkey-bootstrap.js";
 
 export class BetterAuthStaffAccountAdministrator implements StaffAccountAdministrator {
-  public constructor(private readonly auth: VistaBloxAuth) {}
+  public constructor(
+    private readonly auth: VistaBloxAuth,
+    private readonly emailSender: EmailSender,
+  ) {}
 
   public async prepareRecovery(input: {
     betterAuthUserId: string;
@@ -31,15 +34,17 @@ export class BetterAuthStaffAccountAdministrator implements StaffAccountAdminist
     const context = await this.auth.$context;
     const user = await context.internalAdapter.findUserById(input.betterAuthUserId);
     const activeStaffUser = assertActiveStaffUser(user);
-    await this.auth.api.requestPasswordReset({
-      body: {
-        email: activeStaffUser.email,
-        redirectTo: input.redirectTo,
-      },
-      headers: new Headers({
-        "x-trace-id": input.traceId,
-        "x-vistablox-auth-event-id": `auth_evt_${randomUUID()}`,
-      }),
+    const registrationContext = await issuePasskeyBootstrap({
+      auth: this.auth,
+      betterAuthUserId: input.betterAuthUserId,
+      email: activeStaffUser.email,
+      displayName: activeStaffUser.email,
+      replaceCredentials: true,
+    });
+    await this.emailSender.sendPasskeyRecoveryEmail({
+      to: activeStaffUser.email,
+      recoveryUrl: withPasskeyBootstrapContext(input.redirectTo, registrationContext),
+      population: "staff_partner",
     });
   }
 

@@ -24,7 +24,16 @@ const offering: PublicOfferingRecord = {
   },
 };
 
-function buildApp(options?: { databaseFailure?: boolean; offerings?: PublicOfferingRecord[] }) {
+function buildApp(options?: {
+  databaseFailure?: boolean;
+  offerings?: PublicOfferingRecord[];
+  passkeyAssociations?: {
+    appleTeamId: string;
+    appleBundleId: string;
+    androidPackageName: string;
+    androidCertificateFingerprints: string[];
+  };
+}) {
   const databaseProbe: DatabaseProbe = {
     check: options?.databaseFailure === true
       ? vi.fn().mockRejectedValue(new Error("offline"))
@@ -40,13 +49,50 @@ function buildApp(options?: { databaseFailure?: boolean; offerings?: PublicOffer
   };
 
   return {
-    app: createApp({ databaseProbe, offeringRepository, logger: pino({ level: "silent" }) }),
+    app: createApp({
+      databaseProbe,
+      offeringRepository,
+      logger: pino({ level: "silent" }),
+      ...(options?.passkeyAssociations === undefined
+        ? {}
+        : { passkeyAssociations: options.passkeyAssociations }),
+    }),
     databaseProbe,
     listPublic,
   };
 }
 
 describe("VistaBlox API", () => {
+  it("serves native app association metadata for passkeys", async () => {
+    const { app } = buildApp({
+      passkeyAssociations: {
+        appleTeamId: "TEAM123",
+        appleBundleId: "com.vistablox.app",
+        androidPackageName: "com.vistablox.app",
+        androidCertificateFingerprints: ["AA:BB:CC"],
+      },
+    });
+
+    const [apple, android] = await Promise.all([
+      request(app).get("/.well-known/apple-app-site-association"),
+      request(app).get("/.well-known/assetlinks.json"),
+    ]);
+
+    expect(apple.status).toBe(200);
+    expect(apple.body).toEqual({ webcredentials: { apps: ["TEAM123.com.vistablox.app"] } });
+    expect(android.status).toBe(200);
+    expect(android.body[0]).toMatchObject({
+      relation: [
+        "delegate_permission/common.handle_all_urls",
+        "delegate_permission/common.get_login_creds",
+      ],
+      target: {
+        package_name: "com.vistablox.app",
+        sha256_cert_fingerprints: ["AA:BB:CC"],
+      },
+    });
+  });
+
   it("reports liveness without touching the database", async () => {
     const { app, databaseProbe } = buildApp();
 
@@ -144,7 +190,7 @@ describe("VistaBlox API", () => {
     });
 
     const response = await request(app)
-      .post("/api/auth/sign-in/email")
+      .post("/api/auth/sign-in/social")
       .set("x-vistablox-auth-event-id", "attacker-controlled-value");
 
     expect(response.status).toBe(204);
@@ -165,10 +211,37 @@ describe("VistaBlox API", () => {
       rateLimitStore: store,
     });
 
-    const response = await request(app).post("/api/auth/sign-in/email");
+    const response = await request(app).post("/api/auth/sign-in/social");
 
     expect(response.status).toBe(429);
     expect(response.body).toMatchObject({ code: "rate_limit.exceeded", status: 429 });
+  });
+
+  it.each([
+    "/api/auth/sign-in/email",
+    "/api/auth/sign-up/email",
+    "/api/auth/change-password",
+    "/api/auth/email-otp/send-verification-otp",
+    "/api/auth/sign-in/email-otp",
+    "/api/auth/email-otp/request-password-reset",
+    "/api/auth/email-otp/reset-password",
+  ])("does not expose credential route %s", async (path) => {
+    const authHandler = vi.fn((_request, response) => response.status(204).end());
+    const app = createApp({
+      databaseProbe: { check: vi.fn() },
+      offeringRepository: {
+        listPublic: vi.fn().mockResolvedValue([]),
+        getInvestorDetail: vi.fn().mockResolvedValue(null),
+      },
+      logger: pino({ level: "silent" }),
+      authHandler,
+    });
+
+    const response = await request(app).post(path);
+
+    expect(response.status).toBe(404);
+    expect(response.body).toMatchObject({ code: "resource.not_found" });
+    expect(authHandler).not.toHaveBeenCalled();
   });
 
   it("applies the baseline rate limit tier to the public offerings endpoint", async () => {

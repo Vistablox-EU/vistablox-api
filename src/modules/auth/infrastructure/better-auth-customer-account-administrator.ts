@@ -1,16 +1,22 @@
-import { randomUUID } from "node:crypto";
-
 import { AppError } from "../../../shared/errors/app-error.js";
+import type { EmailSender } from "../../../infrastructure/email/smtp-email-sender.js";
 import type { CustomerAccountAdministrator } from "../application/customer-account-administrator.js";
 import type { VistaBloxAuth } from "./better-auth.factory.js";
+import { issuePasskeyBootstrap, withPasskeyBootstrapContext } from "./passkey-bootstrap.js";
 
 export class BetterAuthCustomerAccountAdministrator implements CustomerAccountAdministrator {
-  public constructor(private readonly auth: VistaBloxAuth) {}
+  public constructor(
+    private readonly auth: VistaBloxAuth,
+    private readonly emailSender: EmailSender,
+  ) {}
 
   public async revokeAllSessions(betterAuthUserId: string): Promise<void> {
     const context = await this.auth.$context;
     const user = await context.internalAdapter.findUserById(betterAuthUserId);
     assertCustomerUser(user);
+    await context.internalAdapter.updateUser(betterAuthUserId, {
+      recoveryRequiredAt: new Date(),
+    });
     await context.internalAdapter.deleteUserSessions(betterAuthUserId);
   }
 
@@ -22,21 +28,42 @@ export class BetterAuthCustomerAccountAdministrator implements CustomerAccountAd
     const context = await this.auth.$context;
     const user = await context.internalAdapter.findUserById(input.betterAuthUserId);
     const customerUser = assertCustomerUser(user);
-    await this.auth.api.requestPasswordReset({
-      body: {
-        email: customerUser.email,
-        redirectTo: input.redirectTo,
-      },
-      headers: new Headers({
-        "x-trace-id": input.traceId,
-        "x-vistablox-auth-event-id": `auth_evt_${randomUUID()}`,
-      }),
+    const registrationContext = await issuePasskeyBootstrap({
+      auth: this.auth,
+      betterAuthUserId: input.betterAuthUserId,
+      email: customerUser.email,
+      displayName: customerUser.name,
+      replaceCredentials: true,
+      customerIdentityVerified: true,
+    });
+    await this.emailSender.sendPasskeyRecoveryEmail({
+      to: customerUser.email,
+      recoveryUrl: withPasskeyBootstrapContext(input.redirectTo, registrationContext),
+      population: "customer",
+    });
+  }
+
+  public async prepareSelfServicePasskeyReplacement(
+    betterAuthUserId: string,
+  ): Promise<string> {
+    const context = await this.auth.$context;
+    const user = await context.internalAdapter.findUserById(betterAuthUserId);
+    const customerUser = assertCustomerUser(user);
+    await this.revokeAllSessions(betterAuthUserId);
+    return issuePasskeyBootstrap({
+      auth: this.auth,
+      betterAuthUserId,
+      email: customerUser.email,
+      displayName: customerUser.name,
+      replaceCredentials: true,
+      customerIdentityVerified: true,
     });
   }
 }
 
 interface CustomerAuthUser {
   email: string;
+  name: string;
 }
 
 function assertCustomerUser(user: unknown): CustomerAuthUser {
@@ -54,5 +81,11 @@ function assertCustomerUser(user: unknown): CustomerAuthUser {
       detail: "The target account is not an active customer authentication identity.",
     });
   }
-  return { email: (user as Record<string, unknown>).email as string };
+  const record = user as Record<string, unknown>;
+  return {
+    email: record.email as string,
+    name: typeof record.name === "string" && record.name.trim() !== ""
+      ? record.name
+      : (record.email as string),
+  };
 }

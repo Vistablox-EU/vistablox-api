@@ -21,9 +21,10 @@ function profileRecord(
     loginMethods: [
       { methodType: "google", linkedAt: new Date("2026-01-15T10:00:00.000Z") },
       {
-        methodType: "email_password",
+        methodType: "apple",
         linkedAt: new Date("2026-01-16T10:00:00.000Z"),
       },
+      { methodType: "passkey", linkedAt: new Date("2026-01-17T10:00:00.000Z") },
     ],
     kyc: {
       diditReference: "c2237bc6-a76c-4933-b329-6c81843b45c7",
@@ -89,9 +90,10 @@ describe("investor profile service", () => {
         login_methods: [
           { method_type: "google", linked_at: "2026-01-15T10:00:00.000Z" },
           {
-            method_type: "email_password",
+            method_type: "apple",
             linked_at: "2026-01-16T10:00:00.000Z",
           },
+          { method_type: "passkey", linked_at: "2026-01-17T10:00:00.000Z" },
         ],
         kyc: {
           eligibility_state: "eligible",

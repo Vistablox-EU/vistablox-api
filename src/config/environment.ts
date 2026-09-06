@@ -22,6 +22,11 @@ const environmentSchema = z
       (value) => (value === "" ? undefined : value),
       z.url().optional(),
     ),
+    PASSKEY_APPLE_TEAM_ID: optionalNonEmptyString(),
+    PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS: z.preprocess(
+      emptyStringToUndefined,
+      z.string().transform((value) => value.split(",").map((item) => item.trim()).filter(Boolean)).optional(),
+    ),
     STAFF_INVITATION_ACCEPT_URL: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.url().optional(),
@@ -38,6 +43,10 @@ const environmentSchema = z
       .string()
       .default("http://localhost:3000")
       .transform((value) => value.split(",").map((origin) => origin.trim()).filter(Boolean)),
+    GOOGLE_OAUTH_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     GOOGLE_CLIENT_ID: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),
@@ -46,6 +55,14 @@ const environmentSchema = z
       (value) => (value === "" ? undefined : value),
       z.string().min(1).optional(),
     ),
+    APPLE_OAUTH_ENABLED: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    APPLE_CLIENT_ID: optionalNonEmptyString(),
+    APPLE_TEAM_ID: optionalNonEmptyString(),
+    APPLE_KEY_ID: optionalNonEmptyString(),
+    APPLE_PRIVATE_KEY: optionalNonEmptyString(),
     SMTP_HOST: z.string().min(1),
     SMTP_PORT: z.coerce.number().int().min(1).max(65_535).default(587),
     SMTP_SECURE: z
@@ -55,13 +72,6 @@ const environmentSchema = z
     SMTP_USER: z.string().min(1),
     SMTP_PASSWORD: z.string().min(1),
     SMTP_FROM: z.string().min(1),
-    // Must stay "true" in production. Setting it "false" skips sending the
-    // verification email entirely and lets new accounts sign in unverified --
-    // for local/dev testing only, when SMTP isn't configured or reachable.
-    EMAIL_VERIFICATION_ENABLED: z
-      .enum(["true", "false"])
-      .default("true")
-      .transform((value) => value === "true"),
     PROFILE_CACHE_URL: z.preprocess(
       emptyStringToUndefined,
       z
@@ -216,6 +226,42 @@ const environmentSchema = z
     {
       message: "All MinIO document storage settings must be configured together",
       path: ["MINIO_ENDPOINT"],
+    },
+  )
+  .refine(
+    (environment) =>
+      !environment.GOOGLE_OAUTH_ENABLED ||
+      (environment.GOOGLE_CLIENT_ID !== undefined &&
+        environment.GOOGLE_CLIENT_SECRET !== undefined),
+    {
+      message: "Google OAuth credentials are required when GOOGLE_OAUTH_ENABLED=true",
+      path: ["GOOGLE_OAUTH_ENABLED"],
+    },
+  )
+  .refine(
+    (environment) => {
+      const values = [
+        environment.APPLE_CLIENT_ID,
+        environment.APPLE_TEAM_ID,
+        environment.APPLE_KEY_ID,
+        environment.APPLE_PRIVATE_KEY,
+      ];
+      return (
+        values.every((value) => value === undefined) ||
+        values.every((value) => value !== undefined)
+      );
+    },
+    {
+      message: "All Apple OAuth settings must be configured together",
+      path: ["APPLE_CLIENT_ID"],
+    },
+  )
+  .refine(
+    (environment) =>
+      !environment.APPLE_OAUTH_ENABLED || environment.APPLE_CLIENT_ID !== undefined,
+    {
+      message: "Apple OAuth credentials are required when APPLE_OAUTH_ENABLED=true",
+      path: ["APPLE_OAUTH_ENABLED"],
     },
   )
   .refine(

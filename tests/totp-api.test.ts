@@ -6,6 +6,7 @@ import { createTotpRouter } from "../src/modules/auth/api/totp.router.js";
 import { EnrollTotpService, VerifyTotpService } from "../src/modules/auth/application/totp.service.js";
 import type { TotpProvider } from "../src/modules/auth/infrastructure/otplib-totp.provider.js";
 import type { TotpRepository } from "../src/modules/auth/repository/totp.repository.js";
+import { AppError } from "../src/shared/errors/app-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -28,7 +29,10 @@ const provider: TotpProvider = {
   buildOtpAuthUri: vi.fn().mockReturnValue("otpauth://totp/VistaBlox:investor@example.com?secret=SECRET123"),
 };
 
-function appFor(population: "customer" | "staff_partner") {
+function appFor(
+  population: "customer" | "staff_partner",
+  requireFreshAuthentication?: RequestHandler,
+) {
   const app = express();
   const authenticated: RequestHandler = (_request, response, next) => {
     response.locals.authContext = {
@@ -46,6 +50,7 @@ function appFor(population: "customer" | "staff_partner") {
       authenticated,
       new EnrollTotpService(repository, provider, "test-hash-key"),
       new VerifyTotpService(repository, provider, "test-hash-key"),
+      requireFreshAuthentication,
     ),
   );
   app.use(errorHandler);
@@ -69,6 +74,28 @@ describe("TOTP API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data).toEqual({ verified: true, method: "totp" });
+  });
+
+  it("does not enroll or replace an authenticator without fresh authentication", async () => {
+    const before = vi.mocked(repository.enroll).mock.calls.length;
+    const requireFresh: RequestHandler = (_request, _response, next) => {
+      next(
+        new AppError({
+          code: "authentication.fresh_auth_required",
+          title: "Fresh authentication required",
+          status: 403,
+          detail: "Confirm with a passkey before continuing.",
+        }),
+      );
+    };
+
+    const response = await request(appFor("customer", requireFresh)).post(
+      "/v1/auth/totp/enroll",
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(vi.mocked(repository.enroll).mock.calls).toHaveLength(before);
   });
 
   it("rejects an invalid verify body", async () => {
