@@ -145,7 +145,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         create: {
           before: async (user, context) => {
             if (
-              isOAuthCallbackPath(context?.path) &&
+              isOAuthSignInCompletionPath(context?.path) &&
               user.emailVerified !== true
             ) {
               throw APIError.from("FORBIDDEN", {
@@ -330,7 +330,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       return "staff_passkey";
     }
     if (isPasskeyVerificationPath(context?.path)) return "oauth_passkey";
-    if (isOAuthCallbackPath(context?.path)) return "oauth_pending";
+    if (isOAuthSignInCompletionPath(context?.path)) return "oauth_pending";
     return "unassured";
   }
 }
@@ -445,8 +445,22 @@ function isPasskeyVerificationPath(path: string | undefined): boolean {
   return path === "/passkey/verify-authentication" || path === "/passkey/verify-registration";
 }
 
-function isOAuthCallbackPath(path: string | undefined): boolean {
-  return path === "/callback/google" || path === "/callback/apple";
+// "/callback/google"/"/callback/apple" is the browser-redirect completion
+// of a social sign-in. "/sign-in/social" reaches here too, for the mobile
+// client's native idToken exchange (authClient.signIn.social({ idToken })):
+// better-auth's own sign-in.mjs cryptographically verifies that token
+// (verifyProviderIdToken) before ever calling handleOAuthUserInfo, so a
+// user/session actually being created at this path is already proof
+// verification succeeded. That same endpoint's *other* branch (no idToken --
+// returns an authorize URL for the browser to redirect to) never creates a
+// user or session, so it can never reach either hook below with this path
+// value; there is no unverified way to arrive here.
+function isOAuthSignInCompletionPath(path: string | undefined): boolean {
+  return (
+    path === "/callback/google" ||
+    path === "/callback/apple" ||
+    path === "/sign-in/social"
+  );
 }
 
 function isStaffAuthUser(user: unknown): boolean {

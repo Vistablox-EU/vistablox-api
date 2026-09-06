@@ -23,7 +23,7 @@ export function createBetterAuthStaffAccountGuardPlugin() {
                   const user = await context.context.internalAdapter.findUserById(
                     session.userId,
                   );
-                  if (isOAuthCallbackPath(contextPath(context)) && !isVerifiedEmailUser(user)) {
+                  if (isOAuthSignInCompletionPath(contextPath(context)) && !isVerifiedEmailUser(user)) {
                     throw APIError.from("FORBIDDEN", {
                       code: "OAUTH_EMAIL_NOT_VERIFIED",
                       message: "The identity provider did not verify this email address.",
@@ -80,8 +80,17 @@ function isRecoveryCompletionPath(path: string | null): boolean {
   return path === "/passkey/verify-registration";
 }
 
-function isOAuthCallbackPath(path: string | null): boolean {
-  return path === "/callback/google" || path === "/callback/apple";
+// "/sign-in/social" also counts as a completed OAuth sign-in here, for the
+// mobile client's native idToken exchange -- better-auth verifies that
+// token cryptographically before ever creating a session, so reaching this
+// hook with that path is already proof it succeeded. In practice a staff
+// user is rejected below by isStaffPasskeyPath regardless (staff can only
+// sign in with a passkey), so this mainly closes the gap for consistency
+// rather than a currently-reachable one. See better-auth.factory.ts's
+// isOAuthSignInCompletionPath for the fuller reasoning (duplicated here
+// since this plugin has no shared import for it).
+function isOAuthSignInCompletionPath(path: string | null): boolean {
+  return path === "/callback/google" || path === "/callback/apple" || path === "/sign-in/social";
 }
 
 function isStaffUser(user: unknown): boolean {

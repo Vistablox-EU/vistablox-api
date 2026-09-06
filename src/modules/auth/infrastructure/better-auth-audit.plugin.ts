@@ -140,7 +140,7 @@ export function createBetterAuthAuditPlugin(
                         options.onError?.(error);
                       }
                     }
-                    const oauthPending = isOAuthCallbackPath(context?.path);
+                    const oauthPending = isOAuthSignInCompletionPath(context?.path);
                     await record({
                       eventKey: oauthPending
                         ? `better_auth:oauth_verified:${session.id}`
@@ -255,8 +255,13 @@ function isLoginPath(path: string | undefined): boolean {
   );
 }
 
-function isOAuthCallbackPath(path: string | undefined): boolean {
-  return path?.startsWith("/callback/") === true;
+// Mirrors isLoginPath above, minus the passkey paths: "/sign-in/social" also
+// counts here for the mobile client's native idToken exchange, which
+// better-auth verifies cryptographically before ever creating a session --
+// see better-auth.factory.ts's isOAuthSignInCompletionPath for the fuller
+// reasoning (duplicated here since this plugin has no shared import for it).
+function isOAuthSignInCompletionPath(path: string | undefined): boolean {
+  return path === "/sign-in/social" || path?.startsWith("/callback/") === true;
 }
 
 function resolveLoginMethod(
