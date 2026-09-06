@@ -154,7 +154,10 @@ const auth = createBetterAuth({
   trustedOrigins,
   webauthn: {
     rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
-    origins: [environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin],
+    origins: [
+      environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
+      ...(environment.PASSKEY_ANDROID_ORIGINS ?? []),
+    ],
   },
   ...(!environment.GOOGLE_OAUTH_ENABLED ||
   environment.GOOGLE_CLIENT_ID === undefined ||

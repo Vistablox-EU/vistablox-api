@@ -27,6 +27,17 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.string().transform((value) => value.split(",").map((item) => item.trim()).filter(Boolean)).optional(),
     ),
+    // Distinct from the fingerprints above (assetlinks.json/Digital Asset
+    // Links): this is the WebAuthn *origin* string Android's Credential
+    // Manager sends with a native passkey ceremony -- "android:apk-key-hash:
+    // <base64url>" -- which @better-auth/passkey's origin allowlist must
+    // match verbatim or every native registration/authentication fails with
+    // "Unexpected registration response origin". One entry per signing key
+    // (debug keystore, Play App Signing, etc.), same comma-separated style.
+    PASSKEY_ANDROID_ORIGINS: z.preprocess(
+      emptyStringToUndefined,
+      z.string().transform((value) => value.split(",").map((item) => item.trim()).filter(Boolean)).optional(),
+    ),
     STAFF_INVITATION_ACCEPT_URL: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.url().optional(),
