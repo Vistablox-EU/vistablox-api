@@ -1,0 +1,97 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: vistablox
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: vistablox
+    # No `ports:` here on purpose -- this stays reachable only from other
+    # services on the compose network (api/worker/migrate), never published
+    # to the host. Add a mapping back only if something outside this stack
+    # genuinely needs a direct connection.
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vistablox -d vistablox"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      target: migrate
+    environment:
+      DIRECT_DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD}@postgres:5432/vistablox
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api:
+    build:
+      context: .
+      target: api
+    # The one port Coolify's proxy actually routes to (api.vistablox.io -> this).
+    ports:
+      - "3000:3000"
+    environment: &app-environment
+      DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD}@postgres:5432/vistablox
+      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS}
+      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-VistaBlox}
+      PASSKEY_ANDROID_ORIGINS: ${PASSKEY_ANDROID_ORIGINS:-}
+      PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS: ${PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS:-}
+      GOOGLE_OAUTH_ENABLED: ${GOOGLE_OAUTH_ENABLED:-false}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      DIDIT_API_KEY: ${DIDIT_API_KEY:-}
+      DIDIT_APPLICATION_ID: ${DIDIT_APPLICATION_ID:-}
+      DIDIT_CALLBACK_URL: ${DIDIT_CALLBACK_URL:-}
+      DIDIT_ENVIRONMENT: ${DIDIT_ENVIRONMENT:-}
+      DIDIT_POA_WORKFLOW_ID: ${DIDIT_POA_WORKFLOW_ID:-}
+      DIDIT_WEBHOOK_SECRET: ${DIDIT_WEBHOOK_SECRET:-}
+      DIDIT_WORKFLOW_ID: ${DIDIT_WORKFLOW_ID:-}
+      RESERVATION_FUNDING_RAIL_ENABLED: ${RESERVATION_FUNDING_RAIL_ENABLED:-false}
+      EMAIL_VERIFICATION_ENABLED: ${EMAIL_VERIFICATION_ENABLED:-false}
+      OIDC_JWKS: ${OIDC_JWKS}
+      OIDC_NATIVE_REDIRECT_URIS: ${OIDC_NATIVE_REDIRECT_URIS}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      SMTP_HOST: ${SMTP_HOST}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_SECURE: ${SMTP_SECURE:-false}
+      SMTP_USER: ${SMTP_USER}
+      SMTP_PASSWORD: ${SMTP_PASSWORD}
+      SMTP_FROM: ${SMTP_FROM}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  worker:
+    build:
+      context: .
+      target: worker
+    environment:
+      <<: *app-environment
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  postgres-data:
