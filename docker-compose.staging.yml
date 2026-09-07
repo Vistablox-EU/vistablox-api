@@ -17,6 +17,15 @@ services:
       timeout: 5s
       retries: 10
 
+  # Email catcher: staging should never send to real inboxes, so SMTP_* below
+  # points here instead of a real provider. Web UI at http://<host>:1080.
+  maildev:
+    build:
+      context: .
+      dockerfile: infrastructure/maildev/Dockerfile
+    ports:
+      - "1080:1080"
+
   migrate:
     build:
       context: .
@@ -57,12 +66,12 @@ services:
       OIDC_JWKS: ${OIDC_JWKS}
       OIDC_NATIVE_REDIRECT_URIS: ${OIDC_NATIVE_REDIRECT_URIS}
       LOG_LEVEL: ${LOG_LEVEL:-info}
-      SMTP_HOST: ${SMTP_HOST}
-      SMTP_PORT: ${SMTP_PORT:-587}
-      SMTP_SECURE: ${SMTP_SECURE:-false}
-      SMTP_USER: ${SMTP_USER}
-      SMTP_PASSWORD: ${SMTP_PASSWORD}
-      SMTP_FROM: ${SMTP_FROM}
+      SMTP_HOST: maildev
+      SMTP_PORT: "1025"
+      SMTP_SECURE: "false"
+      SMTP_USER: vistablox
+      SMTP_PASSWORD: vistablox
+      SMTP_FROM: VistaBlox <no-reply@vistablox.local>
     depends_on:
       postgres:
         condition: service_healthy
