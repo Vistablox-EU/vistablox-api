@@ -10,7 +10,7 @@ services:
     # to the host. Add a mapping back only if something outside this stack
     # genuinely needs a direct connection.
     volumes:
-      - postgres-data:/var/lib/postgresql
+      - staging-postgres-data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vistablox -d vistablox-db"]
       interval: 5s
@@ -103,4 +103,4 @@ services:
         condition: service_completed_successfully
 
 volumes:
-  postgres-data:
+  staging-postgres-data:
