@@ -142,8 +142,9 @@ export const diditWebhookBodySchema = z
 
 // Durable-receipt acknowledgment only (AD-062 / ASYNC_JOBS.md's Webhook
 // Handling Rule) — duplicate/stale/ignored outcomes are now determined by
-// ProcessDiditWebhookService in the worker, after this response has already
-// been sent, so they can no longer be reported synchronously here.
+// ProcessDiditWebhookService in the standalone KYC service
+// (src/kyc-server.ts), after this response has already been sent, so they
+// can no longer be reported synchronously here.
 export const diditWebhookResponseSchema = z.object({
   received: z.literal(true),
 });

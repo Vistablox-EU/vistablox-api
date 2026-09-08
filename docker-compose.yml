@@ -140,9 +140,8 @@ services:
         condition: service_completed_successfully
 
   # Owns only the Didit webhook (KYC microservicing Phase 2) -- reuses the
-  # worker build stage's image, same trick render.yaml's vistablox-kyc uses,
-  # just with docker-compose's own `command:` override instead of Render's
-  # `dockerCommand`.
+  # worker build stage's image via a `command:` override rather than a
+  # dedicated build stage, since the image is otherwise identical.
   kyc:
     build:
       context: .
