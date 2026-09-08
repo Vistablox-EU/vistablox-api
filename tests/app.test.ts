@@ -27,6 +27,7 @@ const offering: PublicOfferingRecord = {
 function buildApp(options?: {
   databaseFailure?: boolean;
   offerings?: PublicOfferingRecord[];
+  corsOrigins?: string[];
   passkeyAssociations?: {
     appleTeamId: string;
     appleBundleId: string;
@@ -53,6 +54,7 @@ function buildApp(options?: {
       databaseProbe,
       offeringRepository,
       logger: pino({ level: "silent" }),
+      corsOrigins: options?.corsOrigins ?? [],
       ...(options?.passkeyAssociations === undefined
         ? {}
         : { passkeyAssociations: options.passkeyAssociations }),
@@ -91,6 +93,29 @@ describe("VistaBlox API", () => {
         sha256_cert_fingerprints: ["AA:BB:CC"],
       },
     });
+  });
+
+  it("allows a credentialed cross-origin request from a trusted frontend origin", async () => {
+    const { app } = buildApp({ corsOrigins: ["https://admin.vistablox.io"] });
+
+    const response = await request(app)
+      .get("/health/live")
+      .set("Origin", "https://admin.vistablox.io");
+
+    expect(response.headers["access-control-allow-origin"]).toBe(
+      "https://admin.vistablox.io",
+    );
+    expect(response.headers["access-control-allow-credentials"]).toBe("true");
+  });
+
+  it("omits CORS headers for a browser origin that isn't trusted", async () => {
+    const { app } = buildApp({ corsOrigins: ["https://admin.vistablox.io"] });
+
+    const response = await request(app)
+      .get("/health/live")
+      .set("Origin", "https://evil.example.com");
+
+    expect(response.headers["access-control-allow-origin"]).toBeUndefined();
   });
 
   it("reports liveness without touching the database", async () => {
@@ -183,6 +208,7 @@ describe("VistaBlox API", () => {
         getInvestorDetail: vi.fn().mockResolvedValue(null),
       },
       logger: pino({ level: "silent" }),
+      corsOrigins: [],
       authHandler: (request, response) => {
         capturedEventId = request.headers["x-vistablox-auth-event-id"];
         response.status(204).end();
@@ -207,6 +233,7 @@ describe("VistaBlox API", () => {
         getInvestorDetail: vi.fn().mockResolvedValue(null),
       },
       logger: pino({ level: "silent" }),
+      corsOrigins: [],
       authHandler: (_request, response) => response.status(204).end(),
       rateLimitStore: store,
     });
@@ -234,6 +261,7 @@ describe("VistaBlox API", () => {
         getInvestorDetail: vi.fn().mockResolvedValue(null),
       },
       logger: pino({ level: "silent" }),
+      corsOrigins: [],
       authHandler,
     });
 
@@ -253,6 +281,7 @@ describe("VistaBlox API", () => {
         getInvestorDetail: vi.fn().mockResolvedValue(null),
       },
       logger: pino({ level: "silent" }),
+      corsOrigins: [],
       rateLimitStore: store,
     });
 

@@ -337,6 +337,7 @@ const app = createApp({
   databaseProbe: new PrismaDatabaseProbe(database),
   offeringRepository,
   logger,
+  corsOrigins: trustedOrigins,
   authHandler: toNodeHandler(auth),
   passkeyAssociations: {
     ...(environment.PASSKEY_APPLE_TEAM_ID === undefined
