@@ -210,6 +210,21 @@ export interface CasePartnerAssignment {
   appraisalFirmId: string | null;
 }
 
+export interface AssignPartnerOrganizationInput {
+  caseId: string;
+  legalPracticeId?: string;
+  appraisalFirmId?: string;
+  actorAccountId: string;
+  traceId: string;
+  assignedAt: Date;
+}
+
+export interface AssignedPartnerOrganization {
+  caseId: string;
+  legalPracticeId: string | null;
+  appraisalFirmId: string | null;
+}
+
 export interface OriginationRepository {
   getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites>;
   createDraftIntake(input: CreateDraftIntakeInput): Promise<CreatedDraftIntake>;
@@ -227,6 +242,14 @@ export interface OriginationRepository {
   }): Promise<OwnedOriginationCase[]>;
   getCaseForOperations(caseId: string): Promise<OperationsCaseDetail | null>;
   getCasePartnerAssignment(caseId: string): Promise<CasePartnerAssignment | null>;
+  // Throws CaseReviewConflictError if the case's stage no longer allows
+  // partner assignment by the time this actually runs (the FOR UPDATE-locked
+  // recheck inside the transaction), matching every other stage-guarded
+  // write in this repository. Returns null only if the case has vanished
+  // entirely between the caller's own check and this call.
+  assignPartnerOrganization(
+    input: AssignPartnerOrganizationInput,
+  ): Promise<AssignedPartnerOrganization | null>;
   getApplicantResponseWindowBusinessDays(): Promise<number>;
   getInformationRequestReminderBusinessDays(): Promise<number[]>;
   publishInformationRequest(input: {

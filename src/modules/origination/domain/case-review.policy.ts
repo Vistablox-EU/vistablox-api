@@ -40,6 +40,18 @@ export function canCloseCase(input: { stage: string; outcome: CaseClosureOutcome
   return closableFromStage[input.outcome].has(input.stage);
 }
 
+// AD-166/PERMISSION_MATRIX.md: "Assign a Post-IPO structuring case to a
+// legal practice / appraisal firm" -- reachable from the moment a case
+// enters post_ipo_structuring, and still reassignable afterward, since
+// completing approved_for_final_offering doesn't cut off correcting an
+// assignment. Never earlier: legal/appraisal partners have no role at all
+// before a case's funding is fully collected (AD-244/AD-248).
+const partnerAssignableStages = new Set(["post_ipo_structuring", "approved_for_final_offering"]);
+
+export function canAssignPartnerOrganization(input: { stage: string }): boolean {
+  return partnerAssignableStages.has(input.stage);
+}
+
 export function addBusinessDays(start: Date, businessDays: number): Date {
   if (!Number.isInteger(businessDays) || businessDays < 1) {
     throw new Error("Business-day duration must be a positive integer");

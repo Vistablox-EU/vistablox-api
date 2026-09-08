@@ -32,9 +32,11 @@ function fakePartnerOrganizationRepository(
   return {
     createLegalPractice: vi.fn().mockResolvedValue(legalPractice),
     listLegalPractices: vi.fn().mockResolvedValue([legalPractice]),
+    getLegalPracticeById: vi.fn().mockResolvedValue(legalPractice),
     updateLegalPracticeStatus: vi.fn().mockResolvedValue({ ...legalPractice, status: "suspended" }),
     createAppraisalFirm: vi.fn().mockResolvedValue(appraisalFirm),
     listAppraisalFirms: vi.fn().mockResolvedValue([appraisalFirm]),
+    getAppraisalFirmById: vi.fn().mockResolvedValue(appraisalFirm),
     updateAppraisalFirmStatus: vi.fn().mockResolvedValue({ ...appraisalFirm, status: "suspended" }),
     ...overrides,
   };
@@ -64,6 +66,7 @@ function fakeOriginationRepository(): OriginationRepository {
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
+    assignPartnerOrganization: vi.fn().mockResolvedValue(null),
   };
 }
 

@@ -88,6 +88,7 @@ function buildProtectedApp(options?: {
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn().mockResolvedValue(null),
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
+    assignPartnerOrganization: vi.fn().mockResolvedValue(null),
   };
 
   return {

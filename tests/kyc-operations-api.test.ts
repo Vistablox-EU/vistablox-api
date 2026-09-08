@@ -85,6 +85,7 @@ function fakeOriginationRepository(): OriginationRepository {
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
+    assignPartnerOrganization: vi.fn().mockResolvedValue(null),
   };
 }
 

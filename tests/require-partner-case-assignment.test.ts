@@ -31,6 +31,7 @@ function fakeCases(
     listCasesForOperations: vi.fn(),
     getCaseForOperations: vi.fn(),
     getCasePartnerAssignment: vi.fn().mockResolvedValue(assignment),
+    assignPartnerOrganization: vi.fn(),
     getApplicantResponseWindowBusinessDays: vi.fn(),
     getInformationRequestReminderBusinessDays: vi.fn(),
     publishInformationRequest: vi.fn(),

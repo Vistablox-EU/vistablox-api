@@ -52,6 +52,11 @@ export class PrismaPartnerOrganizationRepository implements PartnerOrganizationR
     return practices.map(toLegalPracticeRecord);
   }
 
+  public async getLegalPracticeById(id: string): Promise<LegalPracticeRecord | null> {
+    const practice = await this.database.legalPractice.findUnique({ where: { id } });
+    return practice === null ? null : toLegalPracticeRecord(practice);
+  }
+
   public async updateLegalPracticeStatus(input: {
     id: string;
     status: PartnerOrganizationStatus;
@@ -125,6 +130,11 @@ export class PrismaPartnerOrganizationRepository implements PartnerOrganizationR
       orderBy: { name: "asc" },
     });
     return firms.map(toAppraisalFirmRecord);
+  }
+
+  public async getAppraisalFirmById(id: string): Promise<AppraisalFirmRecord | null> {
+    const firm = await this.database.appraisalFirm.findUnique({ where: { id } });
+    return firm === null ? null : toAppraisalFirmRecord(firm);
   }
 
   public async updateAppraisalFirmStatus(input: {

@@ -1,5 +1,6 @@
 import { AppError } from "../../../shared/errors/app-error.js";
 import type {
+  AssignPartnerOrganizationBody,
   CloseCaseBody,
   FounderDecisionBody,
   OperationsCaseListQuery,
@@ -8,10 +9,12 @@ import type {
 import { originationCaseStageSchema } from "../api/origination.schemas.js";
 import {
   addBusinessDays,
+  canAssignPartnerOrganization,
   canCloseCase,
   canRecordFounderDecision,
   evaluateInformationRequestPublication,
 } from "../domain/case-review.policy.js";
+import type { PartnerOrganizationRepository } from "../repository/partner-organization.repository.js";
 import {
   CaseReviewConflictError,
   type InformationRequestRecord,
@@ -251,6 +254,70 @@ export class CloseCaseService {
   }
 }
 
+export class AssignPartnerOrganizationService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly partnerOrganizations: PartnerOrganizationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    caseId: string;
+    actorAccountId: string;
+    traceId: string;
+    body: AssignPartnerOrganizationBody;
+  }) {
+    const assignment = await this.repository.getCasePartnerAssignment(input.caseId);
+    if (assignment === null) throw caseNotFoundError();
+    if (!canAssignPartnerOrganization({ stage: assignment.stage })) {
+      throw reviewConflictError("assign a legal practice or appraisal firm");
+    }
+
+    if (input.body.legal_practice_id !== undefined) {
+      const practice = await this.partnerOrganizations.getLegalPracticeById(
+        input.body.legal_practice_id,
+      );
+      if (practice === null) throw partnerOrganizationNotFoundError("legal_practice");
+      if (practice.status !== "active") throw partnerOrganizationNotActiveError("legal_practice");
+    }
+    if (input.body.appraisal_firm_id !== undefined) {
+      const firm = await this.partnerOrganizations.getAppraisalFirmById(
+        input.body.appraisal_firm_id,
+      );
+      if (firm === null) throw partnerOrganizationNotFoundError("appraisal_firm");
+      if (firm.status !== "active") throw partnerOrganizationNotActiveError("appraisal_firm");
+    }
+
+    try {
+      const assigned = await this.repository.assignPartnerOrganization({
+        caseId: input.caseId,
+        ...(input.body.legal_practice_id === undefined
+          ? {}
+          : { legalPracticeId: input.body.legal_practice_id }),
+        ...(input.body.appraisal_firm_id === undefined
+          ? {}
+          : { appraisalFirmId: input.body.appraisal_firm_id }),
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        assignedAt: this.clock(),
+      });
+      if (assigned === null) throw caseNotFoundError();
+      return {
+        data: {
+          case_id: assigned.caseId,
+          legal_practice_id: assigned.legalPracticeId,
+          appraisal_firm_id: assigned.appraisalFirmId,
+        },
+      };
+    } catch (error) {
+      if (error instanceof CaseReviewConflictError) {
+        throw reviewConflictError("assign a legal practice or appraisal firm", error);
+      }
+      throw error;
+    }
+  }
+}
+
 function toOperationsResponse(input: OperationsCaseDetail) {
   return {
     ...toOwnedCaseResponse(input),
@@ -323,5 +390,27 @@ function reviewConflictError(action: string, cause?: unknown): AppError {
     status: 409,
     detail: `The case can no longer ${action} from its current stage.`,
     cause,
+  });
+}
+
+function partnerOrganizationNotFoundError(
+  resourceType: "legal_practice" | "appraisal_firm",
+): AppError {
+  return new AppError({
+    code: `origination.${resourceType}_not_found`,
+    title: "Partner organization not found",
+    status: 404,
+    detail: `No ${resourceType.replace("_", " ")} exists with the given id.`,
+  });
+}
+
+function partnerOrganizationNotActiveError(
+  resourceType: "legal_practice" | "appraisal_firm",
+): AppError {
+  return new AppError({
+    code: `origination.${resourceType}_not_active`,
+    title: "Partner organization not active",
+    status: 409,
+    detail: `This ${resourceType.replace("_", " ")} is suspended and cannot be assigned to a case.`,
   });
 }
