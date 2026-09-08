@@ -25,7 +25,7 @@ export class PrismaAccountRepository implements AccountRepository {
 
   public async hasActiveStaffRole(
     accountId: string,
-    role: "admin_operations",
+    role: "admin_operations" | "legal_partner" | "appraisal_partner",
   ): Promise<boolean> {
     const assignment = await this.database.staffRoleAssignment.findFirst({
       where: { accountId, role, revokedAt: null },
@@ -40,6 +40,18 @@ export class PrismaAccountRepository implements AccountRepository {
       select: { id: true },
     });
     return assignment !== null;
+  }
+
+  public async getActivePartnerOrganizationId(
+    accountId: string,
+    role: "legal_partner" | "appraisal_partner",
+  ): Promise<string | null> {
+    const assignment = await this.database.staffRoleAssignment.findFirst({
+      where: { accountId, role, revokedAt: null },
+      select: { legalPracticeId: true, appraisalFirmId: true },
+    });
+    if (assignment === null) return null;
+    return role === "legal_partner" ? assignment.legalPracticeId : assignment.appraisalFirmId;
   }
 
   public async provision(input: {

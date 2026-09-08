@@ -97,6 +97,7 @@ function buildApp(options?: {
     hasAnyActiveStaffRole: vi.fn().mockResolvedValue(options?.hasAdminRole ?? true),
     provision: vi.fn(),
     syncVerifiedContactEmail: vi.fn(),
+    getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
   const publishInformationRequest = vi.fn(async (input): Promise<PublishedInformationRequest> => ({
     ...informationRequest,
@@ -175,6 +176,7 @@ function buildApp(options?: {
     closeCase,
     listCaseMessages,
     postCaseMessage,
+    getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
   };
 
   return {
