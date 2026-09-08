@@ -17,6 +17,8 @@ import { rejectDisabledAuthRoutes } from "./modules/auth/api/reject-disabled-aut
 import { createRequireFreshAuthentication } from "./modules/auth/api/require-fresh-authentication.js";
 import {
   createRequireAdminOperations,
+  createRequireAppraisalPartner,
+  createRequireLegalPartner,
   createRequireStaffIdentity,
   createRequireStaffWebAuthn,
 } from "./modules/auth/api/require-staff-role.js";
@@ -106,6 +108,11 @@ import {
   createLegalPracticeRouter,
 } from "./modules/origination/api/partner-organization.router.js";
 import {
+  createAppraisalPartnerCaseRouter,
+  createLegalPartnerCaseRouter,
+} from "./modules/origination/api/partner-case.router.js";
+import { createRequirePartnerCaseAssignment } from "./modules/origination/api/require-partner-case-assignment.js";
+import {
   CreateAppraisalFirmService,
   CreateLegalPracticeService,
   ListAppraisalFirmsService,
@@ -128,6 +135,12 @@ import {
   PublishInformationRequestService,
   RecordFounderDecisionService,
 } from "./modules/origination/application/operations-case.service.js";
+import {
+  GetCaseForPartnerService,
+  ListCasesForPartnerService,
+  RecordAppraisalService,
+  RecordLegalStructuringService,
+} from "./modules/origination/application/partner-case.service.js";
 import {
   ListOwnInformationRequestsService,
   RespondToInformationRequestService,
@@ -364,6 +377,8 @@ export function createApp(dependencies: AppDependencies): Express {
     const requireAdminOperations = createRequireAdminOperations(
       dependencies.protectedApi.accounts,
     );
+    const requireLegalPartner = createRequireLegalPartner(dependencies.protectedApi.accounts);
+    const requireAppraisalPartner = createRequireAppraisalPartner(dependencies.protectedApi.accounts);
     const requireStaffIdentity = createRequireStaffIdentity(
       dependencies.protectedApi.accounts,
     );
@@ -371,6 +386,16 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.protectedApi.staffWebAuthnRepository,
     );
     const originationRepository = dependencies.protectedApi.originationRepository;
+    const requireLegalPartnerCaseAssignment = createRequirePartnerCaseAssignment(
+      "legal_partner",
+      dependencies.protectedApi.accounts,
+      originationRepository,
+    );
+    const requireAppraisalPartnerCaseAssignment = createRequirePartnerCaseAssignment(
+      "appraisal_partner",
+      dependencies.protectedApi.accounts,
+      originationRepository,
+    );
     const staffWebAuthnService = new StaffWebAuthnService(
       dependencies.protectedApi.staffWebAuthnRepository,
       dependencies.protectedApi.staffWebAuthnCeremony,
@@ -693,6 +718,45 @@ export function createApp(dependencies: AppDependencies): Express {
         ),
       );
     }
+    // Unconditional, unlike the admin CRUD/assignment surface above: these
+    // only need the always-present accounts/originationRepository, not the
+    // optional partnerOrganizations.repository (legal-practice/appraisal-firm
+    // existence isn't looked up here -- createRequirePartnerCaseAssignment
+    // already resolved the caller's own organization by the time a handler
+    // runs).
+    const getCaseForPartner = new GetCaseForPartnerService(originationRepository);
+    app.use(
+      "/internal/v1/legal-partner/cases",
+      createLegalPartnerCaseRouter(
+        requireAuthentication,
+        requireLegalPartner,
+        requireStaffWebAuthn,
+        requireLegalPartnerCaseAssignment,
+        new ListCasesForPartnerService(
+          "legal_partner",
+          dependencies.protectedApi.accounts,
+          originationRepository,
+        ),
+        getCaseForPartner,
+        new RecordLegalStructuringService(originationRepository),
+      ),
+    );
+    app.use(
+      "/internal/v1/appraisal-partner/cases",
+      createAppraisalPartnerCaseRouter(
+        requireAuthentication,
+        requireAppraisalPartner,
+        requireStaffWebAuthn,
+        requireAppraisalPartnerCaseAssignment,
+        new ListCasesForPartnerService(
+          "appraisal_partner",
+          dependencies.protectedApi.accounts,
+          originationRepository,
+        ),
+        getCaseForPartner,
+        new RecordAppraisalService(originationRepository),
+      ),
+    );
   }
 
   app.use(notFoundHandler);

@@ -4,9 +4,11 @@ import {
   addBusinessDays,
   canCloseCase,
   canRecordFounderDecision,
+  canRecordPartnerWriteback,
   evaluateInformationRequestPublication,
   isApplicantReminderDue,
   isInformationRequestOverdue,
+  isPostIpoStructuringComplete,
 } from "../src/modules/origination/domain/case-review.policy.js";
 
 describe("origination founder-review policy", () => {
@@ -88,6 +90,29 @@ describe("origination founder-review policy", () => {
     ).toBe(true);
     expect(
       isApplicantReminderDue({ publishedAt: monday, today: dayFive, reminderBusinessDays: [3, 7] }),
+    ).toBe(false);
+  });
+
+  it("allows partner writeback only at post_ipo_structuring, unlike assignment which stays open later", () => {
+    expect(canRecordPartnerWriteback({ stage: "post_ipo_structuring" })).toBe(true);
+    for (const stage of ["approved_for_final_offering", "pre_offering_open", "submitted", "draft"]) {
+      expect(canRecordPartnerWriteback({ stage })).toBe(false);
+    }
+  });
+
+  it("treats post-IPO structuring as complete only once both workstreams have a completed_at", () => {
+    const at = new Date("2026-09-08T12:00:00.000Z");
+    expect(
+      isPostIpoStructuringComplete({ legalStructuringCompletedAt: at, appraisalCompletedAt: at }),
+    ).toBe(true);
+    expect(
+      isPostIpoStructuringComplete({ legalStructuringCompletedAt: at, appraisalCompletedAt: null }),
+    ).toBe(false);
+    expect(
+      isPostIpoStructuringComplete({ legalStructuringCompletedAt: null, appraisalCompletedAt: at }),
+    ).toBe(false);
+    expect(
+      isPostIpoStructuringComplete({ legalStructuringCompletedAt: null, appraisalCompletedAt: null }),
     ).toBe(false);
   });
 });

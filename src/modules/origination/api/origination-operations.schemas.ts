@@ -99,7 +99,14 @@ export const founderDecisionBodySchema = z.discriminatedUnion("decision", [
     ipo_value_eur: z
       .string()
       .regex(/^\d{1,13}\.\d{2}$/)
-      .refine((value) => BigInt(value.replace(".", "")) > 0n, "IPO value must be positive."),
+      // The regex check above doesn't short-circuit this one in zod v4 --
+      // both checks always run -- so this must independently guard against
+      // a non-numeric string before calling BigInt, which throws a raw
+      // SyntaxError (not a ZodError) on invalid input otherwise.
+      .refine(
+        (value) => /^\d+$/.test(value.replace(".", "")) && BigInt(value.replace(".", "")) > 0n,
+        "IPO value must be positive.",
+      ),
   }),
   z.object({
     decision: z.literal("reject"),

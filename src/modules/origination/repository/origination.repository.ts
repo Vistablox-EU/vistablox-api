@@ -225,6 +225,42 @@ export interface AssignedPartnerOrganization {
   appraisalFirmId: string | null;
 }
 
+// The partner-facing projection: everything a legal/appraisal partner is
+// allowed to see once createRequirePartnerCaseAssignment has already gated
+// access, deliberately excluding OperationsCaseDetail's founder-only fields
+// (founder_review_notes, ipo_value_eur, applicant identity, etc. --
+// PERMISSION_MATRIX.md's Protected Case Areas) by construction rather than
+// by filtering a bigger object down. Both partner roles see both
+// workstreams' fields read-only -- only the write side is
+// per-role-restricted (PERMISSION_MATRIX.md's Partner Writeback Allowlist).
+export interface PartnerCaseDetail extends OwnedOriginationCase {
+  legalDocumentRefs: string[];
+  legalStructuringCompletedAt: Date | null;
+  appraisalValueOpinionEur: string | null;
+  appraisalDocumentRefs: string[];
+  appraisalCompletedAt: Date | null;
+  postIpoStructuringCompletedAt: Date | null;
+}
+
+export interface RecordLegalStructuringInput {
+  caseId: string;
+  legalDocumentRefs?: string[];
+  markCompleted?: boolean;
+  actorAccountId: string;
+  traceId: string;
+  recordedAt: Date;
+}
+
+export interface RecordAppraisalInput {
+  caseId: string;
+  appraisalValueOpinionEur?: string;
+  appraisalDocumentRefs?: string[];
+  markCompleted?: boolean;
+  actorAccountId: string;
+  traceId: string;
+  recordedAt: Date;
+}
+
 export interface OriginationRepository {
   getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites>;
   createDraftIntake(input: CreateDraftIntakeInput): Promise<CreatedDraftIntake>;
@@ -250,6 +286,30 @@ export interface OriginationRepository {
   assignPartnerOrganization(
     input: AssignPartnerOrganizationInput,
   ): Promise<AssignedPartnerOrganization | null>;
+  // Filtered server-side by the caller's own organization id and role --
+  // never client-suppliable -- and by the same accessible-stage set
+  // require-partner-case-assignment.ts's middleware already enforces for a
+  // single case, so a partner's list can never surface a case their
+  // organization isn't assigned to or that hasn't reached that stage.
+  listCasesForPartner(input: {
+    role: "legal_partner" | "appraisal_partner";
+    organizationId: string;
+    limit: number;
+    after?: OriginationCaseCursor;
+  }): Promise<PartnerCaseDetail[]>;
+  // No role/organization parameter: createRequirePartnerCaseAssignment
+  // already fully gates access before this runs, the same
+  // scoping-happens-one-level-up split listCaseMessages/postCaseMessage
+  // below already use.
+  getCaseForPartner(caseId: string): Promise<PartnerCaseDetail | null>;
+  // Throws CaseReviewConflictError once the case is no longer at
+  // post_ipo_structuring (canRecordPartnerWriteback's own recheck under
+  // lock) -- including once it has already advanced to
+  // approved_for_final_offering, unlike assignPartnerOrganization, which
+  // stays open at that later stage. Returns null only if the case has
+  // vanished entirely since the caller's own check.
+  recordLegalStructuring(input: RecordLegalStructuringInput): Promise<PartnerCaseDetail | null>;
+  recordAppraisal(input: RecordAppraisalInput): Promise<PartnerCaseDetail | null>;
   getApplicantResponseWindowBusinessDays(): Promise<number>;
   getInformationRequestReminderBusinessDays(): Promise<number[]>;
   publishInformationRequest(input: {

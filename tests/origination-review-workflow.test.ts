@@ -178,6 +178,10 @@ function buildApp(options?: {
     postCaseMessage,
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
     assignPartnerOrganization: vi.fn().mockResolvedValue(null),
+    listCasesForPartner: vi.fn().mockResolvedValue([]),
+    getCaseForPartner: vi.fn().mockResolvedValue(null),
+    recordLegalStructuring: vi.fn().mockResolvedValue(null),
+    recordAppraisal: vi.fn().mockResolvedValue(null),
   };
 
   return {
@@ -322,6 +326,22 @@ describe("founder review and information requests", () => {
         founder_review_notes: "Invalid terms.",
         ipo_period_days: 30,
         ipo_value_eur: "0.00",
+      });
+
+    expect(response.status).toBe(422);
+    expect(recordFounderDecision).not.toHaveBeenCalled();
+  });
+
+  it("rejects a non-numeric ipo_value_eur with a clean 422, not a crash", async () => {
+    const { app, recordFounderDecision } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/decisions")
+      .send({
+        decision: "approve",
+        founder_review_notes: "Invalid terms.",
+        ipo_period_days: 30,
+        ipo_value_eur: "not-a-number",
       });
 
     expect(response.status).toBe(422);

@@ -27,9 +27,12 @@ import type {
   OriginationCaseCursor,
   OriginationRepository,
   OwnedOriginationCase,
+  PartnerCaseDetail,
   PublishedInformationRequest,
   PublishedInformationRequestForTimer,
+  RecordAppraisalInput,
   RecordedFounderDecision,
+  RecordLegalStructuringInput,
   ResubmittedCase,
   SubmitInitialCaseInput,
   SubmittedCase,
@@ -497,6 +500,188 @@ export class PrismaOriginationRepository
         },
       });
       return { caseId: input.caseId, stage: "post_ipo_structuring" };
+    });
+  }
+
+  public async listCasesForPartner(input: {
+    role: "legal_partner" | "appraisal_partner";
+    organizationId: string;
+    limit: number;
+    after?: OriginationCaseCursor;
+  }): Promise<PartnerCaseDetail[]> {
+    const cases = await this.database.originationCase.findMany({
+      where: {
+        ...(input.role === "legal_partner"
+          ? { legalPracticeId: input.organizationId }
+          : { appraisalFirmId: input.organizationId }),
+        // Same accessible-stage set require-partner-case-assignment.ts's
+        // middleware enforces for a single case -- a partner's list must
+        // never surface a case outside what they could otherwise open.
+        stage: { in: ["post_ipo_structuring", "approved_for_final_offering"] },
+        ...(input.after === undefined
+          ? {}
+          : {
+              OR: [
+                { createdAt: { lt: input.after.createdAt } },
+                { createdAt: input.after.createdAt, id: { lt: input.after.id } },
+              ],
+            }),
+      },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      take: input.limit,
+      select: partnerCaseSelect,
+    });
+    return cases.map(toPartnerCaseDetail);
+  }
+
+  public async getCaseForPartner(caseId: string): Promise<PartnerCaseDetail | null> {
+    const originationCase = await this.database.originationCase.findUnique({
+      where: { id: caseId },
+      select: partnerCaseSelect,
+    });
+    if (originationCase === null) return null;
+    return toPartnerCaseDetail(originationCase);
+  }
+
+  public async recordLegalStructuring(
+    input: RecordLegalStructuringInput,
+  ): Promise<PartnerCaseDetail | null> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return null;
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: { stage: true, legalStructuringCompletedAt: true, appraisalCompletedAt: true },
+      });
+      // Mirrors domain/case-review.policy.ts's canRecordPartnerWriteback --
+      // this repository layer doesn't import the domain layer, so the
+      // condition is duplicated here as this transaction's own recheck,
+      // matching every other stage-guarded write in this file.
+      if (current.stage !== "post_ipo_structuring") {
+        throw new CaseReviewConflictError(current.stage, "record legal structuring");
+      }
+
+      // A completed_at already set is never refreshed by a later call --
+      // it records when the work first finished, not when it was last
+      // touched. markCompleted is otherwise a one-way switch: there is no
+      // "uncomplete" (see recordAppraisal's mirrored comment).
+      const legalStructuringCompletedAt =
+        current.legalStructuringCompletedAt ?? (input.markCompleted === true ? input.recordedAt : null);
+      // Mirrors domain/case-review.policy.ts's isPostIpoStructuringComplete,
+      // duplicated here for the same reason as the recheck above.
+      const bothComplete = legalStructuringCompletedAt !== null && current.appraisalCompletedAt !== null;
+
+      const updated = await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: {
+          ...(input.legalDocumentRefs === undefined ? {} : { legalDocumentRefs: input.legalDocumentRefs }),
+          legalStructuringCompletedAt,
+          ...(bothComplete
+            ? {
+                stage: "approved_for_final_offering",
+                approvedForFinalOfferingAt: input.recordedAt,
+                postIpoStructuringCompletedAt: input.recordedAt,
+              }
+            : {}),
+          updatedAt: input.recordedAt,
+        },
+        select: partnerCaseSelect,
+      });
+      const detail = toPartnerCaseDetail(updated);
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.actorAccountId,
+          action: "origination.case_legal_structuring_recorded",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            legal_document_refs: detail.legalDocumentRefs,
+            legal_structuring_completed_at: detail.legalStructuringCompletedAt?.toISOString() ?? null,
+          },
+          createdAt: input.recordedAt,
+        },
+      });
+      if (bothComplete) {
+        await transaction.auditLog.create({ data: postIpoStructuringCompleteAuditData(input) });
+      }
+      return detail;
+    });
+  }
+
+  public async recordAppraisal(input: RecordAppraisalInput): Promise<PartnerCaseDetail | null> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return null;
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: { stage: true, legalStructuringCompletedAt: true, appraisalCompletedAt: true },
+      });
+      if (current.stage !== "post_ipo_structuring") {
+        throw new CaseReviewConflictError(current.stage, "record an appraisal");
+      }
+
+      // See recordLegalStructuring's mirrored comment: completed_at, once
+      // set, is never refreshed or unset by a later call.
+      const appraisalCompletedAt =
+        current.appraisalCompletedAt ?? (input.markCompleted === true ? input.recordedAt : null);
+      const bothComplete = current.legalStructuringCompletedAt !== null && appraisalCompletedAt !== null;
+
+      const updated = await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: {
+          ...(input.appraisalValueOpinionEur === undefined
+            ? {}
+            : { appraisalValueOpinionEur: input.appraisalValueOpinionEur }),
+          ...(input.appraisalDocumentRefs === undefined
+            ? {}
+            : { appraisalDocumentRefs: input.appraisalDocumentRefs }),
+          appraisalCompletedAt,
+          ...(bothComplete
+            ? {
+                stage: "approved_for_final_offering",
+                approvedForFinalOfferingAt: input.recordedAt,
+                postIpoStructuringCompletedAt: input.recordedAt,
+              }
+            : {}),
+          updatedAt: input.recordedAt,
+        },
+        select: partnerCaseSelect,
+      });
+      const detail = toPartnerCaseDetail(updated);
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.actorAccountId,
+          action: "origination.case_appraisal_recorded",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            appraisal_value_opinion_eur: detail.appraisalValueOpinionEur,
+            appraisal_document_refs: detail.appraisalDocumentRefs,
+            appraisal_completed_at: detail.appraisalCompletedAt?.toISOString() ?? null,
+          },
+          createdAt: input.recordedAt,
+        },
+      });
+      if (bothComplete) {
+        await transaction.auditLog.create({ data: postIpoStructuringCompleteAuditData(input) });
+      }
+      return detail;
     });
   }
 
@@ -1155,5 +1340,62 @@ function toOwnedCase(input: {
       ownerDeclaredValueEur: input.property.ownerDeclaredValueEur.toFixed(2),
       hasExistingEncumbrance: input.property.hasExistingEncumbrance,
     },
+  };
+}
+
+const partnerCaseSelect = {
+  ...ownedCaseSelect,
+  legalDocumentRefs: true,
+  legalStructuringCompletedAt: true,
+  appraisalValueOpinionEur: true,
+  appraisalDocumentRefs: true,
+  appraisalCompletedAt: true,
+  postIpoStructuringCompletedAt: true,
+} as const;
+
+function toPartnerCaseDetail(
+  input: Parameters<typeof toOwnedCase>[0] & {
+    legalDocumentRefs: string[];
+    legalStructuringCompletedAt: Date | null;
+    appraisalValueOpinionEur: { toFixed(fractionDigits: number): string } | null;
+    appraisalDocumentRefs: string[];
+    appraisalCompletedAt: Date | null;
+    postIpoStructuringCompletedAt: Date | null;
+  },
+): PartnerCaseDetail {
+  return {
+    ...toOwnedCase(input),
+    legalDocumentRefs: input.legalDocumentRefs,
+    legalStructuringCompletedAt: input.legalStructuringCompletedAt,
+    appraisalValueOpinionEur: input.appraisalValueOpinionEur?.toFixed(2) ?? null,
+    appraisalDocumentRefs: input.appraisalDocumentRefs,
+    appraisalCompletedAt: input.appraisalCompletedAt,
+    postIpoStructuringCompletedAt: input.postIpoStructuringCompletedAt,
+  };
+}
+
+// The second, separately-named audit entry for the system-computed
+// consequence (CORE_TABLES.md's post_ipo_structuring_completed_at comment)
+// of whichever partner's writeback happens to complete the pair -- kept
+// distinct from that writeback's own entry above so the case's lifecycle
+// transition is independently discoverable in the audit log, regardless of
+// which partner triggered it.
+function postIpoStructuringCompleteAuditData(input: {
+  caseId: string;
+  traceId: string;
+  recordedAt: Date;
+}) {
+  return {
+    id: `audit_${ulid()}`,
+    actorAccountId: null,
+    action: "origination.case_approved_for_final_offering",
+    resourceType: "origination_case",
+    resourceId: input.caseId,
+    changes: {
+      trace_id: input.traceId,
+      previous_stage: "post_ipo_structuring",
+      new_stage: "approved_for_final_offering",
+    },
+    createdAt: input.recordedAt,
   };
 }

@@ -47,6 +47,10 @@ function repository(overrides: Partial<OriginationRepository> = {}): Origination
     postCaseMessage: vi.fn(),
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
     assignPartnerOrganization: vi.fn().mockResolvedValue(null),
+    listCasesForPartner: vi.fn().mockResolvedValue([]),
+    getCaseForPartner: vi.fn().mockResolvedValue(null),
+    recordLegalStructuring: vi.fn().mockResolvedValue(null),
+    recordAppraisal: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }
