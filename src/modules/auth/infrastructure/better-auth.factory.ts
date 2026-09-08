@@ -124,8 +124,8 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         // better-auth's own default (true) additionally requires the
         // *existing* local account to have already verified its email
         // before allowing a trusted provider to link -- moot here, since
-        // Render's SMTP_HOST is still a placeholder (smtp.example.com) and
-        // verification emails have never been deliverable, so a
+        // SMTP_HOST is still a placeholder (smtp.example.com) in production
+        // and verification emails have never been deliverable, so a
         // pre-existing password account can never satisfy this on its own.
         // Google's real-time proof of ownership is the same signal
         // trustedProviders above already relies on, so requiring it a
