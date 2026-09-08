@@ -38,8 +38,8 @@ export function createCustomerSessionRouter(
   });
 
   router.post("/revoke-all", requireAuthentication, async (request, response) => {
-    const context = requireAuthContext(response.locals.authContext);
-    await revokeAllOwnSessions.execute(context.accountId, request.headers);
+    requireAuthContext(response.locals.authContext);
+    await revokeAllOwnSessions.execute(request.headers);
     response.status(204).end();
   });
 

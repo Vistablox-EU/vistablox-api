@@ -7,7 +7,7 @@ export interface AuthAuditEvent {
   // betterAuthUserId. Leave unset to resolve from betterAuthUserId as usual.
   accountId?: string;
   attributeToSubject: boolean;
-  resourceType: "account" | "session" | "oidc_grant" | "login_attempt";
+  resourceType: "account" | "session" | "login_attempt";
   resourceId: string;
   changes: Record<string, string | boolean | null>;
   occurredAt: Date;

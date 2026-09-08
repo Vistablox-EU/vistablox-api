@@ -9,8 +9,6 @@ const base = {
   SMTP_USER: "user",
   SMTP_PASSWORD: "password",
   SMTP_FROM: "VistaBlox <no-reply@example.com>",
-  OIDC_JWKS: JSON.stringify({ keys: [{ kty: "oct", k: "test" }] }),
-  OIDC_NATIVE_REDIRECT_URIS: "com.vistablox.app:/oauth/callback",
 };
 
 describe("customer OAuth environment configuration", () => {
