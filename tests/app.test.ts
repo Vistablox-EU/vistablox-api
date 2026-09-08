@@ -110,7 +110,7 @@ describe("VistaBlox API", () => {
 
     expect(response.status).toBe(503);
     expect(response.body).toMatchObject({
-      type: "https://api.vistablox.eu/errors/infrastructure.database_unavailable",
+      type: "https://api.vistablox.io/errors/infrastructure.database_unavailable",
       code: "infrastructure.database_unavailable",
       title: "Service unavailable",
       status: 503,

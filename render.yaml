@@ -38,7 +38,7 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: BETTER_AUTH_URL
-        sync: false # the service's own public Render URL, e.g. https://vistablox-api.onrender.com
+        sync: false # the service's own public URL, e.g. https://api.vistablox.io
       - key: BETTER_AUTH_SECRET
         sync: false # generate per-environment, see README's "Local setup" section
       - key: WEBAUTHN_RP_NAME
@@ -52,7 +52,7 @@ services:
       - key: STAFF_RECOVERY_REDIRECT_URL
         sync: false
       - key: AUTH_TRUSTED_ORIGINS
-        sync: false # e.g. https://vistablox-api.onrender.com,com.vistablox.app://
+        sync: false # e.g. https://api.vistablox.io,com.vistablox.app://
       - key: OIDC_JWKS
         sync: false # generate per-environment, see README's "Local setup" section — do not reuse the local-dev value
       - key: OIDC_NATIVE_REDIRECT_URIS

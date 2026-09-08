@@ -152,7 +152,7 @@ function buildApp(options?: {
           didit: fakeDiditClient(),
           webhookVerifier: new DiditWebhookVerifier("test-webhook-secret"),
           workflowId: "269214fe-77f7-4b1a-a028-b70e861d73c1",
-          callbackUrl: "https://app.vistablox.eu/kyc/complete",
+          callbackUrl: "https://app.vistablox.io/kyc/complete",
         },
       },
     }),

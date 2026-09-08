@@ -30,7 +30,7 @@ describe("Didit HTTP client", () => {
     const result = await client.createSession({
       workflowId,
       accountId: "acct_01",
-      callbackUrl: "https://app.vistablox.eu/kyc/complete",
+      callbackUrl: "https://app.vistablox.io/kyc/complete",
       sessionStartId: "kyc_start_01",
       purpose: "baseline_kyc",
       language: "en",
@@ -49,7 +49,7 @@ describe("Didit HTTP client", () => {
     expect(JSON.parse(String(init.body))).toEqual({
       workflow_id: workflowId,
       vendor_data: "acct_01",
-      callback: "https://app.vistablox.eu/kyc/complete",
+      callback: "https://app.vistablox.io/kyc/complete",
       metadata: {
         vistablox_session_start_id: "kyc_start_01",
         vistablox_verification_purpose: "baseline_kyc",
@@ -187,7 +187,7 @@ describe("Didit HTTP client", () => {
       client.createSession({
         workflowId,
         accountId: "acct_01",
-        callbackUrl: "https://app.vistablox.eu/kyc/complete",
+        callbackUrl: "https://app.vistablox.io/kyc/complete",
         sessionStartId: "kyc_start_01",
         purpose: "baseline_kyc",
       }),

@@ -242,7 +242,7 @@ describe("CreateRecoveryDiditSessionService", () => {
     const service = new CreateRecoveryDiditSessionService(
       repository({ recordDiditSession }),
       didit({ createSession }),
-      { workflowId: "workflow_01", callbackUrl: "https://api.vistablox.eu/webhooks/didit" },
+      { workflowId: "workflow_01", callbackUrl: "https://api.vistablox.io/webhooks/didit" },
       () => now,
     );
 
@@ -269,7 +269,7 @@ describe("CreateRecoveryDiditSessionService", () => {
     const service = new CreateRecoveryDiditSessionService(
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })) }),
       didit(),
-      { workflowId: "workflow_01", callbackUrl: "https://api.vistablox.eu/webhooks/didit" },
+      { workflowId: "workflow_01", callbackUrl: "https://api.vistablox.io/webhooks/didit" },
     );
 
     await expect(
@@ -450,7 +450,7 @@ describe("CompleteAccountRecoveryService", () => {
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })), completeCase }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender({ sendAccountRecoveryCompletedEmail }),
-      "https://app.vistablox.eu/recover-account",
+      "https://app.vistablox.io/recover-account",
       () => now,
     );
 
@@ -458,7 +458,7 @@ describe("CompleteAccountRecoveryService", () => {
 
     expect(sendRecoveryCompletionEmail).toHaveBeenCalledWith({
       betterAuthUserId: "better_auth_user_01",
-      redirectTo: "https://app.vistablox.eu/recover-account",
+      redirectTo: "https://app.vistablox.io/recover-account",
       traceId: "trace_01",
     });
     expect(completeCase).toHaveBeenCalledWith({
@@ -479,7 +479,7 @@ describe("CompleteAccountRecoveryService", () => {
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "open" })) }),
       administrator(),
       emailSender(),
-      "https://app.vistablox.eu/recover-account",
+      "https://app.vistablox.io/recover-account",
     );
 
     await expect(
@@ -493,7 +493,7 @@ describe("CompleteAccountRecoveryService", () => {
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })), completeCase }),
       administrator({ sendRecoveryCompletionEmail: vi.fn().mockRejectedValue(new Error("smtp down")) }),
       emailSender(),
-      "https://app.vistablox.eu/recover-account",
+      "https://app.vistablox.io/recover-account",
     );
 
     await expect(
