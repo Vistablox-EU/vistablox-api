@@ -783,6 +783,10 @@ describe.skipIf(databaseUrl === undefined)(
       // notification handoff inside its own transaction — the queue must
       // already exist or that send() fails against a queue that doesn't.
       await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
+      // publishFinalOfferingTerms also unconditionally hands off to
+      // origination (AD-145/AD-248) once a case's funding target is
+      // reached — same "queue must already exist" requirement.
+      await boss.createQueue("case_timers.post_ipo_structuring_handoff");
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10), ($11, $12, $13, $14, $15)',
         [
@@ -1049,6 +1053,50 @@ describe.skipIf(databaseUrl === undefined)(
           },
         }),
       ).toBe(expectedActed);
+    });
+
+    it("durably enqueues the post-IPO-structuring handoff, carrying the offering's own case_id", async () => {
+      const { offeringId, pivId } = await createOffering({ targetRaiseEur: "500.00" });
+      const piv = await database.piv.findUniqueOrThrow({ where: { id: pivId }, select: { caseId: true } });
+      const reservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "500.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_post_ipo_handoff_01",
+        capitalState: "eurc_reserved",
+        amountEur: "500.00",
+        amountEurc: null,
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      const traceId = `trace_post_ipo_handoff_${suffix}`;
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: founderAccountId,
+        founderReviewNotes: "notes",
+        traceId,
+        publishedAt,
+      });
+
+      // AD-145/AD-248: unlike the reconfirmation-window job above, this
+      // handoff is unconditional on every successful publish -- it does not
+      // depend on whether any reservation needed reconfirmation.
+      const enqueued = await authPool.query<{ name: string; data: { case_id: string; trace_id: string } }>(
+        "SELECT name, data FROM pgboss.job WHERE name = $1 AND data->>'case_id' = $2",
+        ["case_timers.post_ipo_structuring_handoff", piv.caseId],
+      );
+      expect(enqueued.rows).toHaveLength(1);
+      expect(enqueued.rows[0]?.data).toEqual({ case_id: piv.caseId, trace_id: traceId });
     });
 
     it("reports offering_not_found for an unknown offering", async () => {

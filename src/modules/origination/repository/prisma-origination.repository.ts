@@ -7,6 +7,11 @@ import type { DatabaseClient } from "../../../infrastructure/database/prisma.js"
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import { CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
+  PostIpoStructuringHandoffRepository,
+  TransitionedToPostIpoStructuring,
+  TransitionToPostIpoStructuringInput,
+} from "./post-ipo-structuring-handoff.repository.js";
+import type {
   AssignedPartnerOrganization,
   AssignPartnerOrganizationInput,
   CaseMessageRecord,
@@ -43,7 +48,9 @@ const reminderDaysSettingSchema = z.object({
   business_days: z.array(z.number().int().min(1).max(60)).min(1),
 });
 
-export class PrismaOriginationRepository implements OriginationRepository {
+export class PrismaOriginationRepository
+  implements OriginationRepository, PostIpoStructuringHandoffRepository
+{
   public constructor(
     private readonly database: DatabaseClient,
     private readonly pgBoss: PgBoss,
@@ -427,6 +434,69 @@ export class PrismaOriginationRepository implements OriginationRepository {
         legalPracticeId: updated.legalPracticeId,
         appraisalFirmId: updated.appraisalFirmId,
       };
+    });
+  }
+
+  public async transitionToPostIpoStructuring(
+    input: TransitionToPostIpoStructuringInput,
+  ): Promise<TransitionedToPostIpoStructuring> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) {
+        throw new Error(
+          `Origination case ${input.caseId} not found while transitioning to post_ipo_structuring.`,
+        );
+      }
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: { stage: true },
+      });
+      // A retried or twice-delivered job replaying an already-applied
+      // transition must be a safe no-op, the same idempotency
+      // openOfferingForApprovedCase's own reverse-direction handoff relies
+      // on -- never a thrown error just because the write already landed.
+      if (current.stage === "post_ipo_structuring" || current.stage === "approved_for_final_offering") {
+        return { caseId: input.caseId, stage: current.stage };
+      }
+      if (current.stage !== "pre_offering_open") {
+        // Not a CaseReviewConflictError: that class models an HTTP staff
+        // action losing a race against the case's current stage. This is a
+        // worker-only invariant -- publishFinalOfferingTerms only ever
+        // enqueues this job for a case that already reached
+        // pre_offering_open (the only path to having an offering at all) --
+        // so reaching any other stage here means the data is inconsistent,
+        // not that the caller should retry.
+        throw new Error(
+          `Origination case ${input.caseId} is in stage ${current.stage}, not pre_offering_open; cannot transition to post_ipo_structuring.`,
+        );
+      }
+
+      await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: { stage: "post_ipo_structuring", updatedAt: input.transitionedAt },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: null,
+          action: "origination.case_post_ipo_structuring_started",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            previous_stage: "pre_offering_open",
+            new_stage: "post_ipo_structuring",
+          },
+          createdAt: input.transitionedAt,
+        },
+      });
+      return { caseId: input.caseId, stage: "post_ipo_structuring" };
     });
   }
 

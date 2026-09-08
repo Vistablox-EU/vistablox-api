@@ -677,12 +677,19 @@ export class PrismaOfferingRepository
           status: string;
           target_raise_eur: string;
           final_offering_published_at: Date | null;
+          case_id: string;
         }>
       >`
-        SELECT offering_id, status, target_raise_eur::text, final_offering_published_at
-        FROM offering.offerings
-        WHERE offering_id = ${input.offeringId}
-        FOR UPDATE
+        SELECT
+          offering.offering_id,
+          offering.status,
+          offering.target_raise_eur::text,
+          offering.final_offering_published_at,
+          piv.case_id
+        FROM offering.offerings AS offering
+        JOIN origination.pivs AS piv ON piv.piv_id = offering.piv_id
+        WHERE offering.offering_id = ${input.offeringId}
+        FOR UPDATE OF offering
       `;
       const offering = locked[0];
       if (offering === undefined) {
@@ -866,6 +873,19 @@ export class PrismaOfferingRepository
           input.traceId,
         );
       }
+
+      // AD-145/AD-248: reaching this point means canPublishFinalOfferingTerms
+      // already confirmed the case's ipo_value_eur is fully collected
+      // (AD-245) — unlike the reconfirmation-window job just above, this
+      // handoff does not depend on whether any individual reservation
+      // needed reconfirmation, so it is never gated on that count.
+      await enqueueTransactionalJob(
+        this.pgBoss,
+        transaction,
+        "case_timers.post_ipo_structuring_handoff",
+        { case_id: offering.case_id },
+        input.traceId,
+      );
 
       return {
         published: {
