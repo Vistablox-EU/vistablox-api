@@ -9,6 +9,7 @@ import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.
 import { disclosureDocumentTypes } from "../src/modules/offering/domain/disclosure-pack.policy.js";
 import { NotifyReconfirmationWindowOpenedService } from "../src/modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
+import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -42,7 +43,7 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      repository = new PrismaOfferingRepository(database, boss);
+      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
       await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
@@ -430,7 +431,7 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      repository = new PrismaOfferingRepository(database, boss);
+      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
       await boss.start();
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
@@ -777,7 +778,7 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      repository = new PrismaOfferingRepository(database, boss);
+      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
       await boss.start();
       // publishFinalOfferingTerms enqueues the AD-214/AD-145 window-opened
       // notification handoff inside its own transaction — the queue must
@@ -2101,7 +2102,7 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      repository = new PrismaOfferingRepository(database, boss);
+      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
       await boss.start();
       await boss.createQueue("settlement.open_ipo_escrow_campaign");
       await authPool.query(

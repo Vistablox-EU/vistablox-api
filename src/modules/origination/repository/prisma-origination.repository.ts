@@ -5,6 +5,7 @@ import { z } from "zod";
 import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
+import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
   PostIpoStructuringHandoffRepository,
@@ -57,17 +58,12 @@ export class PrismaOriginationRepository
   public constructor(
     private readonly database: DatabaseClient,
     private readonly pgBoss: PgBoss,
+    private readonly kycEligibilityReader: KycEligibilityReader,
   ) {}
 
   public async getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites> {
     const [eligibility, floorSetting] = await Promise.all([
-      this.database.kycEligibility.findUnique({
-        where: { accountId },
-        select: {
-          eligibilityState: true,
-          proofOfAddressCurrentUntil: true,
-        },
-      }),
+      this.kycEligibilityReader.getEligibilitySnapshot(accountId),
       this.database.platformSetting.findUnique({
         where: { key: "origination.minimum_property_value_eur" },
         select: { value: true },

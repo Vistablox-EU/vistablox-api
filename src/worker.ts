@@ -145,8 +145,8 @@ const expireStuckSessionCreations = new ExpireStuckSessionCreationsService(kycRe
 const reconcileStuckOpenSessions =
   diditClient === undefined ? undefined : new ReconcileStuckOpenSessionsService(kycRepository, diditClient);
 
-const offeringRepository = new PrismaOfferingRepository(database, boss);
-const originationRepository = new PrismaOriginationRepository(database, boss);
+const offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
+const originationRepository = new PrismaOriginationRepository(database, boss, kycRepository);
 const sendApplicantReminders = new SendApplicantResponseRemindersService(
   originationRepository,
   emailSender,

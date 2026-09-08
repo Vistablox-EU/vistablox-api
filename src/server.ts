@@ -75,8 +75,14 @@ await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
 if (environment.DIDIT_API_KEY !== undefined) {
   await jobQueue.createQueue("provider_events.didit_webhook");
 }
-const offeringRepository = new PrismaOfferingRepository(database, jobQueue);
-const originationRepository = new PrismaOriginationRepository(database, jobQueue);
+// Constructed unconditionally (unlike diditKyc below, which only wires up
+// live Didit-backed session behavior when all six DIDIT_* vars are set):
+// this repository has no Didit-specific dependency itself, and origination/
+// offering/investor-profile need a KycEligibilityReader regardless of
+// whether Didit is configured in this environment.
+const kycRepository = new PrismaKycRepository(database, jobQueue);
+const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
+const originationRepository = new PrismaOriginationRepository(database, jobQueue, kycRepository);
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
 const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
@@ -227,7 +233,7 @@ const diditKyc =
   environment.DIDIT_APPLICATION_ID !== undefined &&
   environment.DIDIT_ENVIRONMENT !== undefined
     ? {
-        repository: new PrismaKycRepository(database, jobQueue),
+        repository: kycRepository,
         didit: diditClient,
         webhookVerifier: new DiditWebhookVerifier(environment.DIDIT_WEBHOOK_SECRET),
         workflowId: environment.DIDIT_WORKFLOW_ID,
@@ -369,7 +375,7 @@ const app = createApp({
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
     investorProfile: {
-      repository: new PrismaInvestorProfileRepository(database),
+      repository: new PrismaInvestorProfileRepository(database, kycRepository),
       displayProfiles,
     },
     disclosureDocuments: {

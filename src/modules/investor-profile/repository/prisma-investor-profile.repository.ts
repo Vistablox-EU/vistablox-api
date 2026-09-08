@@ -1,6 +1,7 @@
 import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import {
   WalletAddressConflictError,
   type InvestorPositionRecord,
@@ -11,7 +12,10 @@ import {
 } from "./investor-profile.repository.js";
 
 export class PrismaInvestorProfileRepository implements InvestorProfileRepository {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly kycEligibilityReader: KycEligibilityReader,
+  ) {}
 
   public async registerWallet(input: {
     accountId: string;
@@ -84,45 +88,35 @@ export class PrismaInvestorProfileRepository implements InvestorProfileRepositor
   }
 
   public async get(accountId: string): Promise<InvestorProfileRecord | null> {
-    const account = await this.database.account.findUnique({
-      where: { id: accountId },
-      select: {
-        id: true,
-        status: true,
-        protectedContactEmail: true,
-        createdAt: true,
-        loginMethods: {
-          select: { methodType: true, linkedAt: true },
-          orderBy: [{ linkedAt: "asc" }, { id: "asc" }],
-        },
-        kycEligibility: {
-          select: {
-            diditReference: true,
-            providerStatus: true,
-            eligibilityState: true,
-            residenceCountryCode: true,
-            taxResidenceCountryCode: true,
-            proofOfAddressStatus: true,
-            proofOfAddressCurrentUntil: true,
-            lastVerifiedAt: true,
-            renewalDueAt: true,
+    const [account, kycSnapshot] = await Promise.all([
+      this.database.account.findUnique({
+        where: { id: accountId },
+        select: {
+          id: true,
+          status: true,
+          protectedContactEmail: true,
+          createdAt: true,
+          loginMethods: {
+            select: { methodType: true, linkedAt: true },
+            orderBy: [{ linkedAt: "asc" }, { id: "asc" }],
           },
-        },
-        walletRegistration: {
-          select: { requestedAt: true, registeredAt: true },
-        },
-        _count: {
-          select: {
-            reservations: true,
-            positions: {
-              where: {
-                positionStatus: { in: ["pending_internal_settlement", "active"] },
+          walletRegistration: {
+            select: { requestedAt: true, registeredAt: true },
+          },
+          _count: {
+            select: {
+              reservations: true,
+              positions: {
+                where: {
+                  positionStatus: { in: ["pending_internal_settlement", "active"] },
+                },
               },
             },
           },
         },
-      },
-    });
+      }),
+      this.kycEligibilityReader.getEligibilitySnapshot(accountId),
+    ]);
     if (account === null) return null;
     return {
       accountId: account.id,
@@ -133,7 +127,7 @@ export class PrismaInvestorProfileRepository implements InvestorProfileRepositor
         methodType: asLoginMethod(method.methodType),
         linkedAt: method.linkedAt,
       })),
-      kyc: account.kycEligibility,
+      kyc: kycSnapshot,
       reservationCount: account._count.reservations,
       activePositionCount: account._count.positions,
       walletRegistration: account.walletRegistration,

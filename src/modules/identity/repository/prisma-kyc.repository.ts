@@ -18,14 +18,40 @@ import type {
   KycEligibilityRecord,
   KycRepository,
 } from "./kyc.repository.js";
+import type { KycEligibilityReader, KycEligibilitySnapshot } from "./kyc-eligibility-reader.js";
 
 const renewalLeadDaysSettingSchema = z.object({ days: z.number().int().min(1).max(365) });
 
-export class PrismaKycRepository implements KycRepository {
+export class PrismaKycRepository implements KycRepository, KycEligibilityReader {
   public constructor(
     private readonly database: DatabaseClient,
     private readonly pgBoss: PgBoss,
   ) {}
+
+  // Backs KycEligibilityReader for consumers outside identity (origination,
+  // offering, investor-profile) — a separate projection from getForAccount
+  // below rather than a shared one, so this module's internal
+  // KycEligibilityRecord shape (operationalSubstatus etc.) can keep
+  // evolving without touching the external contract, and vice versa.
+  public async getEligibilitySnapshot(
+    accountId: string,
+  ): Promise<KycEligibilitySnapshot | null> {
+    return this.database.kycEligibility.findUnique({
+      where: { accountId },
+      select: {
+        accountId: true,
+        diditReference: true,
+        providerStatus: true,
+        eligibilityState: true,
+        residenceCountryCode: true,
+        taxResidenceCountryCode: true,
+        proofOfAddressStatus: true,
+        proofOfAddressCurrentUntil: true,
+        lastVerifiedAt: true,
+        renewalDueAt: true,
+      },
+    });
+  }
 
   // AD-062 / ASYNC_JOBS.md's Webhook Handling Rule: "the endpoint verifies
   // authenticity and schema... the downstream job is enqueued... the HTTP
