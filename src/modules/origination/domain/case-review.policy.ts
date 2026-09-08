@@ -52,6 +52,29 @@ export function canAssignPartnerOrganization(input: { stage: string }): boolean 
   return partnerAssignableStages.has(input.stage);
 }
 
+// PERMISSION_MATRIX.md's Partner Writeback Allowlist: narrower than
+// canAssignPartnerOrganization above -- writeback closes once a case has
+// already moved on to approved_for_final_offering (both sides already
+// complete), unlike assignment/reassignment, which the founder can still
+// redo at that later stage.
+export function canRecordPartnerWriteback(input: { stage: string }): boolean {
+  return input.stage === "post_ipo_structuring";
+}
+
+// CORE_TABLES.md's post_ipo_structuring_completed_at comment: "set once
+// both legal_structuring_completed_at and appraisal_completed_at are set;
+// stage moves post_ipo_structuring -> approved_for_final_offering in the
+// same action". This is a system-computed side effect of whichever
+// partner's writeback happens to complete second, not a founder decision
+// (PERMISSION_MATRIX.md's "only admin/operations moves stage" is about
+// stage as someone's own direct action, not this automatic consequence).
+export function isPostIpoStructuringComplete(input: {
+  legalStructuringCompletedAt: Date | null;
+  appraisalCompletedAt: Date | null;
+}): boolean {
+  return input.legalStructuringCompletedAt !== null && input.appraisalCompletedAt !== null;
+}
+
 export function addBusinessDays(start: Date, businessDays: number): Date {
   if (!Number.isInteger(businessDays) || businessDays < 1) {
     throw new Error("Business-day duration must be a positive integer");
