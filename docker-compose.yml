@@ -139,6 +139,26 @@ services:
       migrate:
         condition: service_completed_successfully
 
+  # Owns only the Didit webhook (KYC microservicing Phase 2) -- reuses the
+  # worker build stage's image, same trick render.yaml's vistablox-kyc uses,
+  # just with docker-compose's own `command:` override instead of Render's
+  # `dockerCommand`.
+  kyc:
+    build:
+      context: .
+      target: worker
+    command: ["node", "dist/kyc-server.js"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://vistablox:vistablox@postgres:5432/vistablox
+      PROFILE_CACHE_URL: redis://cache:6379
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
 volumes:
   postgres-data:
   minio-data:

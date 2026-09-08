@@ -42,7 +42,6 @@ import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-o
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
-import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import {
   DiditProtectedDisplayProfileProvider,
@@ -229,13 +228,11 @@ const diditKyc =
   diditClient !== undefined &&
   environment.DIDIT_WORKFLOW_ID !== undefined &&
   environment.DIDIT_CALLBACK_URL !== undefined &&
-  environment.DIDIT_WEBHOOK_SECRET !== undefined &&
   environment.DIDIT_APPLICATION_ID !== undefined &&
   environment.DIDIT_ENVIRONMENT !== undefined
     ? {
         repository: kycRepository,
         didit: diditClient,
-        webhookVerifier: new DiditWebhookVerifier(environment.DIDIT_WEBHOOK_SECRET),
         workflowId: environment.DIDIT_WORKFLOW_ID,
         callbackUrl: environment.DIDIT_CALLBACK_URL,
         ...(environment.DIDIT_POA_WORKFLOW_ID === undefined

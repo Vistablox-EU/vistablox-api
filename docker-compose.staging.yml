@@ -65,7 +65,6 @@ services:
       DIDIT_CALLBACK_URL: ${DIDIT_CALLBACK_URL:-}
       DIDIT_ENVIRONMENT: ${DIDIT_ENVIRONMENT:-}
       DIDIT_POA_WORKFLOW_ID: ${DIDIT_POA_WORKFLOW_ID:-}
-      DIDIT_WEBHOOK_SECRET: ${DIDIT_WEBHOOK_SECRET:-}
       DIDIT_WORKFLOW_ID: ${DIDIT_WORKFLOW_ID:-}
       RESERVATION_FUNDING_RAIL_ENABLED: ${RESERVATION_FUNDING_RAIL_ENABLED:-false}
       EMAIL_VERIFICATION_ENABLED: ${EMAIL_VERIFICATION_ENABLED:-false}
@@ -102,6 +101,32 @@ services:
       target: worker
     environment:
       <<: *app-environment
+    depends_on:
+      vistablox-db-server:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  # Owns only the Didit webhook (KYC microservicing Phase 2). Deliberately
+  # not built on *app-environment: that anchor carries BETTER_AUTH_*, SMTP_*,
+  # OIDC_*, and other vars this service's own schema (src/config/
+  # kyc-environment.ts) doesn't need -- only DATABASE_URL and the Didit
+  # settings this service actually reads, no DIDIT_CALLBACK_URL (it never
+  # creates a session, only verifies and processes webhooks).
+  vistablox-kyc:
+    build:
+      context: .
+      target: worker
+    command: ["node", "dist/kyc-server.js"]
+    environment:
+      DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD}@vistablox-db-server:5432/vistablox-db
+      DIDIT_API_KEY: ${DIDIT_API_KEY}
+      DIDIT_WORKFLOW_ID: ${DIDIT_WORKFLOW_ID}
+      DIDIT_POA_WORKFLOW_ID: ${DIDIT_POA_WORKFLOW_ID:-}
+      DIDIT_WEBHOOK_SECRET: ${DIDIT_WEBHOOK_SECRET}
+      DIDIT_APPLICATION_ID: ${DIDIT_APPLICATION_ID}
+      DIDIT_ENVIRONMENT: ${DIDIT_ENVIRONMENT}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
     depends_on:
       vistablox-db-server:
         condition: service_healthy

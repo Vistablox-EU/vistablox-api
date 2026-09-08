@@ -1,11 +1,19 @@
 # Render Blueprint for vistablox-api.
 #
 # Render's Docker-runtime services don't support selecting a build stage in a
-# multi-stage Dockerfile (--target), so both services below build from the
-# same Dockerfile, which defaults to its last stage: `worker`. The `worker`
-# and `api` stages are otherwise identical (same node_modules, same dist/,
-# only the final CMD differs), so the `api` service below overrides its
-# startup command via `dockerCommand` instead of needing a second Dockerfile.
+# multi-stage Dockerfile (--target), so all three services below build from
+# the same Dockerfile, which defaults to its last stage: `worker`. The
+# `worker` and `api` stages are otherwise identical (same node_modules, same
+# dist/, only the final CMD differs), so `api` and `kyc` below each override
+# their startup command via `dockerCommand` instead of needing their own
+# Dockerfile stage.
+#
+# vistablox-kyc owns only the Didit webhook (receive, verify, durably
+# enqueue, and process) -- KYC microservicing Phase 2, following PR #34's
+# KycEligibilityReader boundary. /v1/kyc and /internal/v1/kyc-accounts
+# deliberately stay on vistablox-api for now (see src/kyc-server.ts's own
+# comment); the KycEligibility table stays in the same Postgres instance
+# vistablox-api/vistablox-worker already use.
 #
 # `migrate` (prisma migrate deploy) is deliberately NOT run as a Render
 # service — it needs the `build` stage's devDependencies (the Prisma CLI),
@@ -105,8 +113,6 @@ services:
         sync: false
       - key: DIDIT_CALLBACK_URL
         sync: false
-      - key: DIDIT_WEBHOOK_SECRET
-        sync: false
       - key: DIDIT_APPLICATION_ID
         sync: false
       - key: DIDIT_ENVIRONMENT
@@ -157,8 +163,6 @@ services:
         sync: false
       - key: SMTP_FROM
         sync: false
-      - key: PROFILE_CACHE_URL
-        sync: false
       - key: DIDIT_API_KEY
         sync: false
       - key: DIDIT_WORKFLOW_ID
@@ -166,8 +170,6 @@ services:
       - key: DIDIT_POA_WORKFLOW_ID
         sync: false
       - key: DIDIT_CALLBACK_URL
-        sync: false
-      - key: DIDIT_WEBHOOK_SECRET
         sync: false
       - key: DIDIT_APPLICATION_ID
         sync: false
@@ -201,4 +203,46 @@ services:
       - key: EURC_TOKEN_ADDRESS
         sync: false
       - key: PIV_TREASURY_ADDRESS
+        sync: false
+
+  - type: web
+    name: vistablox-kyc
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: node dist/kyc-server.js
+    healthCheckPath: /health/ready
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: "0.0.0.0"
+      - key: LOG_LEVEL
+        value: info
+      - key: DATABASE_URL
+        sync: false
+      # This service's Didit settings are required outright (see
+      # src/config/kyc-environment.ts) -- there is no "KYC disabled" mode
+      # here, unlike vistablox-api/vistablox-worker's optional-together
+      # DIDIT_* block. DIDIT_CALLBACK_URL is deliberately absent: this
+      # service never creates a Didit session, only verifies and processes
+      # webhooks for sessions vistablox-api already created.
+      - key: DIDIT_API_KEY
+        sync: false
+      - key: DIDIT_WORKFLOW_ID
+        sync: false
+      - key: DIDIT_POA_WORKFLOW_ID
+        sync: false
+      - key: DIDIT_WEBHOOK_SECRET
+        sync: false
+      - key: DIDIT_APPLICATION_ID
+        sync: false
+      - key: DIDIT_ENVIRONMENT
+        sync: false
+      # Optional: best-effort invalidation of the cached protected display
+      # profile on a KYC state change, same as vistablox-api's own use of
+      # this cache. Safe to leave unset -- invalidation is just skipped.
+      - key: PROFILE_CACHE_URL
         sync: false

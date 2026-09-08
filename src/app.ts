@@ -156,17 +156,12 @@ import type { OriginationRepository } from "./modules/origination/repository/ori
 import {
   GetKycAccountForOperationsService,
   GetKycStatusService,
-  ReceiveDiditWebhookService,
   StartProofOfAddressSessionService,
   StartKycSessionService,
 } from "./modules/identity/application/kyc.service.js";
 import { createKycOperationsRouter } from "./modules/identity/api/kyc-operations.router.js";
 import type { DiditClient } from "./modules/identity/application/didit-client.js";
-import {
-  createDiditWebhookRouter,
-  createKycRouter,
-} from "./modules/identity/api/kyc.router.js";
-import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
+import { createKycRouter } from "./modules/identity/api/kyc.router.js";
 import type { KycRepository } from "./modules/identity/repository/kyc.repository.js";
 import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
 import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
@@ -220,7 +215,6 @@ export interface AppDependencies {
     kyc?: {
       repository: KycRepository;
       didit: DiditClient;
-      webhookVerifier: DiditWebhookVerifier;
       workflowId: string;
       callbackUrl: string;
       proofOfAddressWorkflowId?: string;
@@ -565,13 +559,6 @@ export function createApp(dependencies: AppDependencies): Express {
                   callbackUrl: kyc.callbackUrl,
                 },
               ),
-        ),
-      );
-      app.use(
-        "/webhooks/didit",
-        createDiditWebhookRouter(
-          kyc.webhookVerifier,
-          new ReceiveDiditWebhookService(kyc.repository),
         ),
       );
       app.use(

@@ -126,10 +126,6 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.url().optional(),
     ),
-    DIDIT_WEBHOOK_SECRET: z.preprocess(
-      emptyStringToUndefined,
-      z.string().min(16).optional(),
-    ),
     DIDIT_APPLICATION_ID: optionalUuid(),
     DIDIT_ENVIRONMENT: z.preprocess(
       emptyStringToUndefined,
@@ -290,7 +286,6 @@ const environmentSchema = z
         environment.DIDIT_API_KEY,
         environment.DIDIT_WORKFLOW_ID,
         environment.DIDIT_CALLBACK_URL,
-        environment.DIDIT_WEBHOOK_SECRET,
         environment.DIDIT_APPLICATION_ID,
         environment.DIDIT_ENVIRONMENT,
       ];

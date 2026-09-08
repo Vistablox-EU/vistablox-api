@@ -31,7 +31,6 @@ describe("Didit environment configuration", () => {
       DIDIT_WORKFLOW_ID: "269214fe-77f7-4b1a-a028-b70e861d73c1",
       DIDIT_POA_WORKFLOW_ID: "bb17fe44-5b38-48f3-acb7-39dbc38c9317",
       DIDIT_CALLBACK_URL: "https://app.vistablox.io/kyc/complete",
-      DIDIT_WEBHOOK_SECRET: "didit-webhook-secret-for-test",
       DIDIT_APPLICATION_ID: "c5f501a8-0a32-42cd-ac24-13d0d0b15699",
       DIDIT_ENVIRONMENT: "sandbox",
     });
@@ -57,7 +56,6 @@ describe("Didit environment configuration", () => {
         DIDIT_WORKFLOW_ID: "269214fe-77f7-4b1a-a028-b70e861d73c1",
         DIDIT_POA_WORKFLOW_ID: "269214fe-77f7-4b1a-a028-b70e861d73c1",
         DIDIT_CALLBACK_URL: "https://app.vistablox.io/kyc/complete",
-        DIDIT_WEBHOOK_SECRET: "didit-webhook-secret-for-test",
         DIDIT_APPLICATION_ID: "c5f501a8-0a32-42cd-ac24-13d0d0b15699",
         DIDIT_ENVIRONMENT: "sandbox",
       }),
