@@ -4,6 +4,7 @@ import express, {
   type RequestHandler,
   type Response,
 } from "express";
+import cors from "cors";
 import helmet from "helmet";
 import type Provider from "oidc-provider";
 import type { Logger } from "pino";
@@ -163,6 +164,15 @@ export interface AppDependencies {
   databaseProbe: DatabaseProbe;
   offeringRepository: OfferingRepository;
   logger: Logger;
+  // Browser-enforced, so distinct from auth's own AUTH_TRUSTED_ORIGINS check
+  // (which rejects untrusted requests server-side) -- without this, a
+  // browser blocks every cross-origin fetch, credentialed or not, before
+  // the response ever reaches application code, regardless of what auth
+  // itself would have allowed. Same source list as AUTH_TRUSTED_ORIGINS by
+  // design (one list of trusted frontends, not two to keep in sync); a
+  // non-http(s) entry like a mobile custom scheme is harmless here since a
+  // browser's Origin header can never match one.
+  corsOrigins: string[];
   authHandler?: RequestHandler;
   passkeyAssociations?: {
     appleTeamId?: string;
@@ -285,6 +295,7 @@ export function createApp(dependencies: AppDependencies): Express {
     response.locals.logger = request.log;
     next();
   });
+  app.use(cors({ origin: dependencies.corsOrigins, credentials: true }));
   app.use(helmet());
   if (dependencies.passkeyAssociations?.appleTeamId !== undefined) {
     app.get("/.well-known/apple-app-site-association", (_request, response) => {

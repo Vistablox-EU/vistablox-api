@@ -185,6 +185,7 @@ function buildApp(options?: {
         getInvestorDetail: vi.fn().mockResolvedValue(null),
       },
       logger: pino({ level: "silent" }),
+      corsOrigins: [],
       protectedApi: {
         accounts,
         sessions,
