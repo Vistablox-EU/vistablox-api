@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
-import { DiditWebhookVerifier } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
 import type {
   KycEligibilityRecord,
   KycRepository,
@@ -158,7 +157,6 @@ function buildApp(options?: {
         kyc: {
           repository: options?.kycRepository ?? fakeKycRepository(),
           didit: fakeDiditClient(),
-          webhookVerifier: new DiditWebhookVerifier("test-webhook-secret"),
           workflowId: "269214fe-77f7-4b1a-a028-b70e861d73c1",
           callbackUrl: "https://app.vistablox.io/kyc/complete",
         },

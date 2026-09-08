@@ -101,7 +101,7 @@ npm run dev
 
 `DATABASE_URL` is the runtime connection; `DIRECT_DATABASE_URL` is the connection Prisma migrations use. Locally these are the same local instance (`.env.example`'s defaults already point at one, matching `prisma.config.ts`'s own local-dev fallback role); in production they instead point at Neon's pooled and direct connections respectively (`DEPLOYMENT_TOPOLOGY.md`).
 
-Didit baseline KYC remains disabled unless the required `DIDIT_*` values in `.env.example` are configured together. `DIDIT_POA_WORKFLOW_ID` independently enables the owner-only hosted address workflow. `PROFILE_CACHE_URL` enables the short-lived Didit-verified display-name cache; the profile route remains available and omits names when the cache is absent or unavailable. The provider webhook destination is `/webhooks/didit`; the callback URL is the frontend destination Didit uses after either hosted verification flow. See [`docs/didit-kyc.md`](docs/didit-kyc.md) and [`docs/investor-profile.md`](docs/investor-profile.md) for the reviewed workflows and data boundaries.
+Didit baseline KYC remains disabled unless the required `DIDIT_*` values in `.env.example` are configured together. `DIDIT_POA_WORKFLOW_ID` independently enables the owner-only hosted address workflow. `PROFILE_CACHE_URL` enables the short-lived Didit-verified display-name cache; the profile route remains available and omits names when the cache is absent or unavailable. The callback URL is the frontend destination Didit uses after either hosted verification flow. The provider webhook destination, `/webhooks/didit`, is served by the separate KYC service below, not this API. See [`docs/didit-kyc.md`](docs/didit-kyc.md) and [`docs/investor-profile.md`](docs/investor-profile.md) for the reviewed workflows and data boundaries.
 
 `RATE_LIMIT_CACHE_URL` enables the general-purpose `/v1` rate limiter (it may point at the same Redis/Valkey deployment as `PROFILE_CACHE_URL`); requests are allowed through unmetered, not blocked, while it is absent or unavailable.
 
@@ -115,9 +115,11 @@ node -e "const {generateKeyPairSync}=require('node:crypto');const {privateKey}=g
 
 The scheduled-job worker is a separate process from the API and must be started alongside it for reminders/expiry to run: `npm run worker:dev` locally, `npm run worker:start` against a build. It shares `DATABASE_URL`/SMTP configuration with the API; it also loads the same environment schema as the API (so `OIDC_JWKS`/`OIDC_NATIVE_REDIRECT_URIS` must be set for it to start even though the worker itself never uses them, the same way it already requires but never uses `BETTER_AUTH_SECRET`), but needs no worker-specific environment variables of its own.
 
+The KYC service (`npm run kyc:dev` locally, `npm run kyc:start` against a build) is a third, standalone process owning only the Didit webhook — receive, verify, durably enqueue, and process. It's the first step of splitting KYC out of this monolith: `/v1/kyc` and `/internal/v1/kyc-accounts` stay on the main API for now (see `src/kyc-server.ts`'s own comment for why), and it reads the same `KycEligibility` table on the same Postgres instance, just through its own small environment schema (`src/config/kyc-environment.ts`) rather than the API's — every `DIDIT_*` value it needs is required outright (no "KYC disabled" mode), and it doesn't need `DIDIT_CALLBACK_URL` at all, since it never creates a session.
+
 ## Docker
 
-`docker-compose.yml` runs the whole stack — Postgres, Valkey, the API, and the worker — plus Mailpit as a local SMTP catcher (`http://localhost:8025`) so `docker compose up` works without real SMTP credentials.
+`docker-compose.yml` runs the whole stack — Postgres, Valkey, the API, the worker, and the standalone KYC service — plus Mailpit as a local SMTP catcher (`http://localhost:8025`) so `docker compose up` works without real SMTP credentials.
 
 ```bash
 cp .env.example .env
@@ -160,15 +162,19 @@ npm run check          # type checking, architecture rules, tests
 npm run build          # production TypeScript build
 npm run worker:dev     # run the pg-boss scheduled-job worker (watch mode)
 npm run worker:start   # run the built worker
+npm run kyc:dev        # run the standalone KYC (Didit webhook) service (watch mode)
+npm run kyc:start      # run the built KYC service
 npm run db:validate    # validate Prisma schema
 npm run db:generate    # regenerate Prisma client
 npm run db:migrate:dev # create/apply a development migration
 npm run db:migrate:deploy
-docker compose up --build   # run the full stack (Postgres, Valkey, API, worker, Mailpit) in containers
+docker compose up --build   # run the full stack (Postgres, Valkey, API, worker, KYC service, Mailpit) in containers
 docker compose down -v      # stop and remove containers + the Postgres volume
 ```
 
 ## HTTP surface currently available
+
+The main API's surface. The separate KYC service has its own, much smaller surface — see below the table.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -215,7 +221,6 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `GET` | `/v1/kyc` | Read the authenticated customer's local eligibility status and renewal dates |
 | `POST` | `/v1/kyc/sessions` | Create one hosted Didit individual-KYC session for an eligible customer account |
 | `POST` | `/v1/kyc/proof-of-address/sessions` | Create an owner-only hosted Didit address-verification session after baseline KYC |
-| `POST` | `/webhooks/didit` | Authenticate and idempotently process Didit status/data webhooks |
 | `GET` | `/internal/v1/kyc-accounts/:account_id` | WebAuthn-protected founder/operations read of one account's operational KYC eligibility record |
 | `POST` | `/v1/origination-cases` | Create an authenticated, eligibility-gated draft owner intake |
 | `GET` | `/v1/origination-cases?limit=20&after=...` | List the authenticated owner's cases |
@@ -234,6 +239,14 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `POST` | `/internal/v1/origination-cases/:case_id/messages` | Post to either lane on any case, as the founder |
 
 All errors follow the documented envelope: `type`, `code`, `title`, `status`, `detail`, `trace_id`, and optional `field_errors`.
+
+The KYC service's own surface (`src/kyc-server.ts`):
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/health/live` | Process liveness; does not query dependencies |
+| `GET` | `/health/ready` | Readiness; verifies PostgreSQL connectivity |
+| `POST` | `/webhooks/didit` | Authenticate and idempotently process Didit status/data webhooks |
 
 ## Database notes
 
