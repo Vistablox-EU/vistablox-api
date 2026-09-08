@@ -177,6 +177,7 @@ function buildApp(options?: {
     listCaseMessages,
     postCaseMessage,
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
+    assignPartnerOrganization: vi.fn().mockResolvedValue(null),
   };
 
   return {

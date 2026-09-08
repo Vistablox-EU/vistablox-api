@@ -121,6 +121,7 @@ import {
 } from "./modules/origination/application/read-own-cases.service.js";
 import { SubmitInitialCaseService } from "./modules/origination/application/submit-initial-case.service.js";
 import {
+  AssignPartnerOrganizationService,
   CloseCaseService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
@@ -649,6 +650,7 @@ export function createApp(dependencies: AppDependencies): Express {
         new PostOwnCaseMessageService(originationRepository),
       ),
     );
+    const partnerOrganizationRepository = dependencies.protectedApi.partnerOrganizations?.repository;
     app.use(
       "/internal/v1/origination-cases",
       createOriginationOperationsRouter(
@@ -662,11 +664,12 @@ export function createApp(dependencies: AppDependencies): Express {
         new CloseCaseService(originationRepository),
         new ListCaseMessagesForOperationsService(originationRepository),
         new PostCaseMessageForOperationsService(originationRepository),
+        partnerOrganizationRepository === undefined
+          ? undefined
+          : new AssignPartnerOrganizationService(originationRepository, partnerOrganizationRepository),
       ),
     );
-    if (dependencies.protectedApi.partnerOrganizations !== undefined) {
-      const partnerOrganizationRepository =
-        dependencies.protectedApi.partnerOrganizations.repository;
+    if (partnerOrganizationRepository !== undefined) {
       app.use(
         "/internal/v1/legal-practices",
         createLegalPracticeRouter(

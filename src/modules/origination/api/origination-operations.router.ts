@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
 import {
+  AssignPartnerOrganizationService,
   CloseCaseService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
@@ -14,6 +15,8 @@ import {
 } from "../application/case-message.service.js";
 import { caseIdParamsSchema, listCaseMessagesResponseSchema, postCaseMessageResponseSchema } from "./origination.schemas.js";
 import {
+  assignPartnerOrganizationBodySchema,
+  assignPartnerOrganizationResponseSchema,
   closeCaseBodySchema,
   closeCaseResponseSchema,
   founderDecisionBodySchema,
@@ -38,6 +41,10 @@ export function createOriginationOperationsRouter(
   closeCase: CloseCaseService,
   listCaseMessages: ListCaseMessagesForOperationsService,
   postCaseMessage: PostCaseMessageForOperationsService,
+  // Optional: only present once the partner-organizations feature
+  // (protectedApi.partnerOrganizations) is configured, unlike everything
+  // else on this router, which is unconditional. See app.ts.
+  assignPartnerOrganization?: AssignPartnerOrganizationService,
 ): Router {
   const router = Router();
   const staffOnly = [requireAuthentication, requireAdminOperations, requireStaffWebAuthn];
@@ -92,6 +99,21 @@ export function createOriginationOperationsRouter(
     });
     response.json(closeCaseResponseSchema.parse(result));
   });
+
+  if (assignPartnerOrganization !== undefined) {
+    router.post("/:case_id/partner-assignment", ...staffOnly, async (request, response) => {
+      const authContext = requireAuthContext(response.locals.authContext);
+      const params = caseIdParamsSchema.parse(request.params);
+      const body = assignPartnerOrganizationBodySchema.parse(request.body);
+      const result = await assignPartnerOrganization.execute({
+        caseId: params.case_id,
+        actorAccountId: authContext.accountId,
+        traceId: String(response.locals.traceId),
+        body,
+      });
+      response.json(assignPartnerOrganizationResponseSchema.parse(result));
+    });
+  }
 
   router.get("/:case_id/messages", ...staffOnly, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);

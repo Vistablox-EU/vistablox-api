@@ -23,6 +23,7 @@ export interface PartnerOrganizationRepository {
     createdAt: Date;
   }): Promise<LegalPracticeRecord>;
   listLegalPractices(): Promise<LegalPracticeRecord[]>;
+  getLegalPracticeById(id: string): Promise<LegalPracticeRecord | null>;
   updateLegalPracticeStatus(input: {
     id: string;
     status: PartnerOrganizationStatus;
@@ -39,6 +40,7 @@ export interface PartnerOrganizationRepository {
     createdAt: Date;
   }): Promise<AppraisalFirmRecord>;
   listAppraisalFirms(): Promise<AppraisalFirmRecord[]>;
+  getAppraisalFirmById(id: string): Promise<AppraisalFirmRecord | null>;
   updateAppraisalFirmStatus(input: {
     id: string;
     status: PartnerOrganizationStatus;

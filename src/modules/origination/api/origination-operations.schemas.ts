@@ -145,9 +145,28 @@ export const closeCaseResponseSchema = z.object({
   }),
 });
 
+export const assignPartnerOrganizationBodySchema = z
+  .object({
+    legal_practice_id: z.string().trim().min(1).optional(),
+    appraisal_firm_id: z.string().trim().min(1).optional(),
+  })
+  .refine(
+    (value) => value.legal_practice_id !== undefined || value.appraisal_firm_id !== undefined,
+    { message: "At least one of legal_practice_id or appraisal_firm_id is required." },
+  );
+
+export const assignPartnerOrganizationResponseSchema = z.object({
+  data: z.object({
+    case_id: z.string(),
+    legal_practice_id: z.string().nullable(),
+    appraisal_firm_id: z.string().nullable(),
+  }),
+});
+
 export type OperationsCaseListQuery = z.infer<typeof operationsCaseListQuerySchema>;
 export type PublishInformationRequestBody = z.infer<typeof publishInformationRequestBodySchema>;
 export type FounderDecisionBody = z.infer<typeof founderDecisionBodySchema>;
 export type CloseCaseBody = z.infer<typeof closeCaseBodySchema>;
+export type AssignPartnerOrganizationBody = z.infer<typeof assignPartnerOrganizationBodySchema>;
 export type ListCaseMessagesQuery = z.infer<typeof listCaseMessagesQuerySchema>;
 export type PostOperationsCaseMessageBody = z.infer<typeof postOperationsCaseMessageBodySchema>;

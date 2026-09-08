@@ -7,6 +7,8 @@ import type { DatabaseClient } from "../../../infrastructure/database/prisma.js"
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import { CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
+  AssignedPartnerOrganization,
+  AssignPartnerOrganizationInput,
   CaseMessageRecord,
   CasePartnerAssignment,
   ClosedCase,
@@ -363,6 +365,69 @@ export class PrismaOriginationRepository implements OriginationRepository {
       legalPracticeId: originationCase.legalPracticeId,
       appraisalFirmId: originationCase.appraisalFirmId,
     };
+  }
+
+  public async assignPartnerOrganization(
+    input: AssignPartnerOrganizationInput,
+  ): Promise<AssignedPartnerOrganization | null> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return null;
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: { stage: true },
+      });
+      // Mirrors domain/case-review.policy.ts's canAssignPartnerOrganization --
+      // this repository layer doesn't import the domain layer, so the
+      // condition is duplicated here as this transaction's own recheck,
+      // matching every other stage-guarded write in this file.
+      if (current.stage !== "post_ipo_structuring" && current.stage !== "approved_for_final_offering") {
+        throw new CaseReviewConflictError(
+          current.stage,
+          "assign a legal practice or appraisal firm",
+        );
+      }
+
+      const updated = await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: {
+          ...(input.legalPracticeId === undefined
+            ? {}
+            : { legalPracticeId: input.legalPracticeId }),
+          ...(input.appraisalFirmId === undefined
+            ? {}
+            : { appraisalFirmId: input.appraisalFirmId }),
+          updatedAt: input.assignedAt,
+        },
+        select: { id: true, legalPracticeId: true, appraisalFirmId: true },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.actorAccountId,
+          action: "origination.case_partner_organization_assigned",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            legal_practice_id: updated.legalPracticeId,
+            appraisal_firm_id: updated.appraisalFirmId,
+          },
+          createdAt: input.assignedAt,
+        },
+      });
+      return {
+        caseId: updated.id,
+        legalPracticeId: updated.legalPracticeId,
+        appraisalFirmId: updated.appraisalFirmId,
+      };
+    });
   }
 
   public async getApplicantResponseWindowBusinessDays(): Promise<number> {
