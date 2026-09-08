@@ -3,6 +3,7 @@ import { ulid } from "ulid";
 import { z } from "zod";
 
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
+import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { toCents, toEurcMicros } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import type {
@@ -83,6 +84,7 @@ export class PrismaOfferingRepository
   public constructor(
     private readonly database: DatabaseClient,
     private readonly pgBoss: PgBoss,
+    private readonly kycEligibilityReader: KycEligibilityReader,
   ) {}
 
   public async openOfferingForApprovedCase(
@@ -245,7 +247,7 @@ export class PrismaOfferingRepository
     offeringId: string;
     accountId: string;
   }): Promise<InvestorOfferingDetailRecord | null> {
-    const [offering, account, progressRows] = await Promise.all([
+    const [offering, account, progressRows, kycSnapshot] = await Promise.all([
       this.database.offering.findUnique({
         where: { id: input.offeringId },
         select: {
@@ -318,9 +320,6 @@ export class PrismaOfferingRepository
         select: {
           status: true,
           loginMethods: { select: { methodType: true } },
-          kycEligibility: {
-            select: { eligibilityState: true, renewalDueAt: true },
-          },
           walletRegistration: {
             select: { walletAddress: true, registeredAt: true },
           },
@@ -363,6 +362,7 @@ export class PrismaOfferingRepository
         ) AS latest_money ON TRUE
         WHERE reservation.offering_id = ${input.offeringId}
       `,
+      this.kycEligibilityReader.getEligibilitySnapshot(input.accountId),
     ]);
 
     if (offering === null || account === null) return null;
@@ -420,8 +420,8 @@ export class PrismaOfferingRepository
         loginMethods: account.loginMethods.map((method) =>
           asLoginMethod(method.methodType),
         ),
-        kycEligibilityState: account.kycEligibility?.eligibilityState ?? null,
-        kycRenewalDueAt: account.kycEligibility?.renewalDueAt ?? null,
+        kycEligibilityState: kycSnapshot?.eligibilityState ?? null,
+        kycRenewalDueAt: kycSnapshot?.renewalDueAt ?? null,
         walletProvisioned: account.walletRegistration !== null,
         walletAddress: account.walletRegistration?.walletAddress ?? null,
         payoutWalletRegistered:

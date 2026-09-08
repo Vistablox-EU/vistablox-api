@@ -1,10 +1,12 @@
 import { randomUUID } from "node:crypto";
 
+import { PgBoss } from "pg-boss";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaInvestorProfileRepository } from "../src/modules/investor-profile/repository/prisma-investor-profile.repository.js";
+import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -27,11 +29,19 @@ describe.skipIf(databaseUrl === undefined)("investor profile PostgreSQL integrat
   const otherReservationId = `reservation_other_${suffix}`;
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
-  const repository = new PrismaInvestorProfileRepository(database);
   const linkedAt = new Date("2026-01-15T10:00:00.000Z");
   const requestedAt = new Date("2026-08-10T12:00:00.000Z");
+  // PgBoss's constructor eagerly validates its connection string (unlike
+  // PrismaClient/Pool above, which connect lazily), so it must not be
+  // constructed at describe-body scope: that body runs even when skipIf
+  // skips every test, and databaseUrl is undefined in that case.
+  let repository: PrismaInvestorProfileRepository;
 
   beforeAll(async () => {
+    repository = new PrismaInvestorProfileRepository(
+      database,
+      new PrismaKycRepository(database, new PgBoss(databaseUrl ?? "")),
+    );
     await authPool.query(
       'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
       [

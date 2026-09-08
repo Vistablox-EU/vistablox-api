@@ -8,6 +8,7 @@ import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { OpenOfferingForApprovedCaseService } from "../src/modules/offering/application/open-offering-for-approved-case.service.js";
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOriginationRepository } from "../src/modules/origination/repository/prisma-origination.repository.js";
+import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -35,8 +36,9 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      originationRepository = new PrismaOriginationRepository(database, boss);
-      offeringRepository = new PrismaOfferingRepository(database, boss);
+      const kycRepository = new PrismaKycRepository(database, boss);
+      originationRepository = new PrismaOriginationRepository(database, boss, kycRepository);
+      offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
       openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
       await boss.start();
       await boss.createQueue("case_timers.pre_offering_open_handoff");
@@ -179,7 +181,11 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      originationRepository = new PrismaOriginationRepository(database, boss);
+      originationRepository = new PrismaOriginationRepository(
+        database,
+        boss,
+        new PrismaKycRepository(database, boss),
+      );
       await boss.start();
 
       await authPool.query(
