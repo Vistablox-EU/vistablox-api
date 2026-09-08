@@ -101,6 +101,19 @@ import { ListPublicOfferingsService } from "./modules/offering/application/list-
 import type { OfferingRepository } from "./modules/offering/repository/offering.repository.js";
 import { createOriginationRouter } from "./modules/origination/api/origination.router.js";
 import { createOriginationOperationsRouter } from "./modules/origination/api/origination-operations.router.js";
+import {
+  createAppraisalFirmRouter,
+  createLegalPracticeRouter,
+} from "./modules/origination/api/partner-organization.router.js";
+import {
+  CreateAppraisalFirmService,
+  CreateLegalPracticeService,
+  ListAppraisalFirmsService,
+  ListLegalPracticesService,
+  UpdateAppraisalFirmStatusService,
+  UpdateLegalPracticeStatusService,
+} from "./modules/origination/application/partner-organization.service.js";
+import type { PartnerOrganizationRepository } from "./modules/origination/repository/partner-organization.repository.js";
 import { CreateDraftIntakeService } from "./modules/origination/application/create-draft-intake.service.js";
 import {
   GetOwnCaseService,
@@ -210,6 +223,9 @@ export interface AppDependencies {
       repository: StaffAccountLifecycleRepository;
       administrator: StaffAccountAdministrator;
       recoveryRedirectUrl: string;
+    };
+    partnerOrganizations?: {
+      repository: PartnerOrganizationRepository;
     };
     accountRecovery?: {
       repository: AccountRecoveryRepository;
@@ -648,6 +664,32 @@ export function createApp(dependencies: AppDependencies): Express {
         new PostCaseMessageForOperationsService(originationRepository),
       ),
     );
+    if (dependencies.protectedApi.partnerOrganizations !== undefined) {
+      const partnerOrganizationRepository =
+        dependencies.protectedApi.partnerOrganizations.repository;
+      app.use(
+        "/internal/v1/legal-practices",
+        createLegalPracticeRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new CreateLegalPracticeService(partnerOrganizationRepository),
+          new ListLegalPracticesService(partnerOrganizationRepository),
+          new UpdateLegalPracticeStatusService(partnerOrganizationRepository),
+        ),
+      );
+      app.use(
+        "/internal/v1/appraisal-firms",
+        createAppraisalFirmRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new CreateAppraisalFirmService(partnerOrganizationRepository),
+          new ListAppraisalFirmsService(partnerOrganizationRepository),
+          new UpdateAppraisalFirmStatusService(partnerOrganizationRepository),
+        ),
+      );
+    }
   }
 
   app.use(notFoundHandler);
