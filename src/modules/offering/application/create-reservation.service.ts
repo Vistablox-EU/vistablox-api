@@ -59,7 +59,7 @@ export class CreateReservationService {
     this.fundingRailAvailable = options.fundingRailAvailable ?? false;
     this.blockchain = options.blockchain ?? "base";
     this.buildRedirectUrl =
-      options.buildRedirectUrl ?? ((reservationId) => `https://app.vistablox.eu/reservations/${reservationId}`);
+      options.buildRedirectUrl ?? ((reservationId) => `https://app.vistablox.io/reservations/${reservationId}`);
     this.expiryMinutes = options.expiryMinutes ?? 15;
   }
 

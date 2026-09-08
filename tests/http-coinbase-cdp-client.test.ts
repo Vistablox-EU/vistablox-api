@@ -72,11 +72,11 @@ describe("Coinbase CDP HTTP client", () => {
     const url = client.buildOnrampUrl({
       sessionToken: "session-token-01",
       partnerUserRef: "reservation_01",
-      redirectUrl: "https://app.vistablox.eu/reservations/reservation_01",
+      redirectUrl: "https://app.vistablox.io/reservations/reservation_01",
     });
 
     expect(url).toBe(
-      "https://pay.coinbase.com/buy/select-asset?sessionToken=session-token-01&partnerUserRef=reservation_01&redirectUrl=https%3A%2F%2Fapp.vistablox.eu%2Freservations%2Freservation_01",
+      "https://pay.coinbase.com/buy/select-asset?sessionToken=session-token-01&partnerUserRef=reservation_01&redirectUrl=https%3A%2F%2Fapp.vistablox.io%2Freservations%2Freservation_01",
     );
   });
 

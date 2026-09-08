@@ -27,7 +27,7 @@ export class AppError extends Error {
     this.code = options.code;
     this.title = options.title;
     this.status = options.status;
-    this.type = options.type ?? `https://api.vistablox.eu/errors/${options.code}`;
+    this.type = options.type ?? `https://api.vistablox.io/errors/${options.code}`;
     this.fieldErrors = options.fieldErrors;
   }
 }

@@ -94,7 +94,7 @@ describe("KYC application services", () => {
     const service = new StartKycSessionService(
       storage,
       provider,
-      { workflowId, callbackUrl: "https://app.vistablox.eu/kyc/complete" },
+      { workflowId, callbackUrl: "https://app.vistablox.io/kyc/complete" },
       () => now,
       invalidateDisplayProfile,
     );
@@ -130,7 +130,7 @@ describe("KYC application services", () => {
     const service = new StartKycSessionService(
       storage,
       provider,
-      { workflowId, callbackUrl: "https://app.vistablox.eu/kyc/complete" },
+      { workflowId, callbackUrl: "https://app.vistablox.io/kyc/complete" },
       () => now,
     );
 
@@ -205,7 +205,7 @@ describe("KYC application services", () => {
       provider,
       {
         workflowId: proofOfAddressWorkflowId,
-        callbackUrl: "https://app.vistablox.eu/kyc/complete",
+        callbackUrl: "https://app.vistablox.io/kyc/complete",
       },
       () => now,
     ).execute({ accountId, traceId: "req_01", language: "de" });
