@@ -1,4 +1,5 @@
 import { betterAuth } from "better-auth";
+import { bearer } from "better-auth/plugins";
 import { expo } from "@better-auth/expo";
 import { passkey } from "@better-auth/passkey";
 import { APIError, getSessionFromCtx } from "better-auth/api";
@@ -52,6 +53,16 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
   const defaultOrigin = new URL(options.baseURL).origin;
   const rpId = options.webauthn?.rpId ?? new URL(defaultOrigin).hostname;
   const origins = options.webauthn?.origins ?? [defaultOrigin];
+  // Lets the admin frontend (a separate subdomain, not a separate origin in
+  // the eTLD+1 sense) read the same session cookie as this API -- only
+  // meaningful once rpId actually looks like "api.vistablox.io" (three-plus
+  // labels); on "localhost" (one label) there is no shared parent domain to
+  // scope a cookie to, so this stays off there. Assumes a single level of
+  // subdomain nesting under the shared root, matching the one real
+  // deployment shape today -- revisit the derivation if that ever changes.
+  const hostnameLabels = rpId.split(".");
+  const crossSubDomainCookieDomain =
+    hostnameLabels.length >= 3 ? `.${hostnameLabels.slice(1).join(".")}` : undefined;
   const apple = options.apple;
   const socialProviders = {
     ...(options.google === undefined ? {} : { google: options.google }),
@@ -180,6 +191,12 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     },
     plugins: [
       expo(),
+      // Native mobile no longer goes through a separate OIDC bearer-token
+      // subsystem (removed -- confirmed nothing ever authenticated through
+      // it, oidc_model_instances had zero rows in production): the session
+      // itself, sent as a bearer token via the Authorization header instead
+      // of a cookie, now covers that case directly.
+      bearer(),
       passkey({
         rpID: rpId,
         rpName: "VistaBlox",
@@ -293,6 +310,14 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       ipAddress: { disableIpTracking: true },
       cookiePrefix: "vb",
       useSecureCookies: options.secureCookies,
+      ...(crossSubDomainCookieDomain === undefined
+        ? {}
+        : {
+            crossSubDomainCookies: {
+              enabled: true,
+              domain: crossSubDomainCookieDomain,
+            },
+          }),
       cookies: {
         // No custom `name` here: the client only recognizes and reacts to
         // cookies whose wire name contains "session_token" (its

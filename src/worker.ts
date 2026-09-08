@@ -1,7 +1,6 @@
 import "dotenv/config";
 
 import { PgBoss } from "pg-boss";
-import { Pool } from "pg";
 import { ulid } from "ulid";
 
 import { loadEnvironment } from "./config/environment.js";
@@ -21,8 +20,6 @@ import {
   ReconcileStuckOpenSessionsService,
 } from "./modules/identity/application/kyc-stuck-session.service.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
-import { RunOidcCleanupService } from "./modules/auth/application/oidc-cleanup.service.js";
-import { PostgresOidcCleanupRepository } from "./modules/auth/infrastructure/postgres-oidc-cleanup.repository.js";
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
@@ -44,7 +41,6 @@ import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
-const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -83,7 +79,6 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(originationRepository);
 const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(originationRepository);
 const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
-const runOidcCleanup = new RunOidcCleanupService(new PostgresOidcCleanupRepository(authDatabase));
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
@@ -170,7 +165,6 @@ await boss.createQueue("case_timers.offering_reconfirmation_reminders");
 await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
 await boss.createQueue("case_timers.post_ipo_structuring_handoff");
 await boss.createQueue("maintenance.kyc_renewal");
-await boss.createQueue("maintenance.oidc_cleanup");
 await boss.createQueue("maintenance.kyc_stuck_session_expiry");
 // Only registered when Coinbase CDP credentials are configured — unlike
 // every other job here, this one's sole dependency (the onramp REST client)
@@ -201,10 +195,6 @@ await boss.schedule("case_timers.response_window_expiry", "0 * * * *", null, {
   ...RETRY_OPTIONS,
 });
 await boss.schedule("maintenance.kyc_renewal", "0 9 * * *", null, {
-  tz: "UTC",
-  ...RETRY_OPTIONS,
-});
-await boss.schedule("maintenance.oidc_cleanup", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
@@ -284,9 +274,6 @@ await boss.work("case_timers.response_window_expiry", async () => {
 });
 await boss.work("maintenance.kyc_renewal", async () => {
   await runJob("maintenance.kyc_renewal", (traceId) => runKycRenewalTimer.execute(traceId));
-});
-await boss.work("maintenance.oidc_cleanup", async () => {
-  await runJob("maintenance.oidc_cleanup", () => runOidcCleanup.execute());
 });
 await boss.work("maintenance.kyc_stuck_session_expiry", async () => {
   await runJob("maintenance.kyc_stuck_session_expiry", (traceId) =>
@@ -459,7 +446,7 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
   } catch (error: unknown) {
     logger.error({ err: error }, "pg-boss shutdown failed");
   }
-  await Promise.all([database.$disconnect(), authDatabase.end()]);
+  await database.$disconnect();
 }
 
 process.once("SIGINT", () => void shutdown("SIGINT"));

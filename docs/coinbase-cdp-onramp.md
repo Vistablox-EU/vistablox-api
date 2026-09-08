@@ -13,7 +13,7 @@ There is no onramp/offramp webhook (confirmed against CDP's own API reference, n
 
 ## Authentication
 
-Every request carries a short-lived (120s) JWT bearer token, generated per request and verified directly against `@coinbase/cdp-sdk`'s own `auth/utils/jwt.ts` rather than assumed: EdDSA (a 64-byte base64 Ed25519 secret) or ES256 (a PEM EC private key) auto-detected from the configured secret's shape, header `{alg, kid: <key ID>, typ: "JWT", nonce}`, claims `{sub: <key ID>, iss: "cdp", aud: ["cdp_service"], uris: ["METHOD host/path"]}`. VistaBlox signs this itself with `jose` (already a transitive dependency via `better-auth`/`oidc-provider`) rather than depending on the full `@coinbase/cdp-sdk` package, which pulls in an unrelated Solana/viem/axios dependency tree for the ~30 lines this actually needs.
+Every request carries a short-lived (120s) JWT bearer token, generated per request and verified directly against `@coinbase/cdp-sdk`'s own `auth/utils/jwt.ts` rather than assumed: EdDSA (a 64-byte base64 Ed25519 secret) or ES256 (a PEM EC private key) auto-detected from the configured secret's shape, header `{alg, kid: <key ID>, typ: "JWT", nonce}`, claims `{sub: <key ID>, iss: "cdp", aud: ["cdp_service"], uris: ["METHOD host/path"]}`. VistaBlox signs this itself with `jose` (already a transitive dependency via `better-auth`) rather than depending on the full `@coinbase/cdp-sdk` package, which pulls in an unrelated Solana/viem/axios dependency tree for the ~30 lines this actually needs.
 
 ## Configuration
 

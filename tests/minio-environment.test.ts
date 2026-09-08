@@ -9,8 +9,6 @@ const base = {
   SMTP_USER: "user",
   SMTP_PASSWORD: "password",
   SMTP_FROM: "no-reply@example.com",
-  OIDC_JWKS: JSON.stringify({ keys: [{ kty: "RSA" }] }),
-  OIDC_NATIVE_REDIRECT_URIS: "com.vistablox.app:/oauth/callback",
 };
 
 describe("MinIO environment", () => {
