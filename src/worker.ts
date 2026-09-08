@@ -14,6 +14,7 @@ import {
   ExpireOverdueInformationRequestsService,
   SendApplicantResponseRemindersService,
 } from "./modules/origination/application/case-timer.service.js";
+import { TransitionCaseToPostIpoStructuringService } from "./modules/origination/application/post-ipo-structuring-handoff.service.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
@@ -151,6 +152,7 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
   emailSender,
 );
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(originationRepository);
+const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(originationRepository);
 const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
 const runOidcCleanup = new RunOidcCleanupService(new PostgresOidcCleanupRepository(authDatabase));
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
@@ -237,6 +239,7 @@ await boss.createQueue("case_timers.reservation_unfunded_expiry");
 await boss.createQueue("case_timers.offering_reconfirmation_window_close");
 await boss.createQueue("case_timers.offering_reconfirmation_reminders");
 await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
+await boss.createQueue("case_timers.post_ipo_structuring_handoff");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.oidc_cleanup");
 await boss.createQueue("maintenance.kyc_stuck_session_expiry");
@@ -491,6 +494,31 @@ await boss.work("case_timers.offering_reconfirmation_window_opened", async (jobs
     } catch (error) {
       logger.error(
         { err: error, trace_id: traceId, job: "case_timers.offering_reconfirmation_window_opened" },
+        "case timer job failed",
+      );
+      throw error;
+    }
+  }
+});
+
+// AD-152: this job's trace_id is the originating publishFinalOfferingTerms
+// request's own, carried forward by the enqueue path — the same pattern
+// case_timers.pre_offering_open_handoff above already uses.
+await boss.work("case_timers.post_ipo_structuring_handoff", async (jobs) => {
+  for (const job of jobs) {
+    const traceId =
+      typeof job.data === "object" && job.data !== null && "trace_id" in job.data
+        ? String((job.data as { trace_id: unknown }).trace_id)
+        : "unknown";
+    try {
+      const result = await transitionCaseToPostIpoStructuring.execute(job.data);
+      logger.info(
+        { trace_id: traceId, job: "case_timers.post_ipo_structuring_handoff", ...result },
+        "case timer job completed",
+      );
+    } catch (error) {
+      logger.error(
+        { err: error, trace_id: traceId, job: "case_timers.post_ipo_structuring_handoff" },
         "case timer job failed",
       );
       throw error;

@@ -162,3 +162,90 @@ describe.skipIf(databaseUrl === undefined)(
     }, 30_000);
   },
 );
+
+describe.skipIf(databaseUrl === undefined)(
+  "offering finalization to post-IPO-structuring handoff PostgreSQL integration",
+  () => {
+    const suffix = randomUUID();
+    const accountId = `acct_post_ipo_${suffix}`;
+    const betterAuthUserId = `auth_post_ipo_${suffix}`;
+    const propertyId = `property_post_ipo_${suffix}`;
+    const caseId = `case_post_ipo_${suffix}`;
+    const authPool = new Pool({ connectionString: databaseUrl });
+    const database = createPrismaClient(databaseUrl ?? "");
+    // Same PgBoss-construction-timing note as the describe block above.
+    let boss: PgBoss;
+    let originationRepository: PrismaOriginationRepository;
+
+    beforeAll(async () => {
+      boss = new PgBoss(databaseUrl ?? "");
+      originationRepository = new PrismaOriginationRepository(database, boss);
+      await boss.start();
+
+      await authPool.query(
+        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
+        [betterAuthUserId, "Post-IPO Handoff Applicant", `post-ipo-handoff-${suffix}@example.test`, true, "customer"],
+      );
+      await database.account.create({ data: { id: accountId, betterAuthUserId } });
+      await database.property.create({
+        data: {
+          id: propertyId,
+          countryCode: "RS",
+          city: "Belgrade",
+          addressLine: "Post-IPO Handoff Test 1",
+          ownerDeclaredValueEur: "300000.00",
+        },
+      });
+      await database.originationCase.create({
+        data: {
+          id: caseId,
+          propertyId,
+          applicantAccountId: accountId,
+          stage: "pre_offering_open",
+          legalExecutionEventRefs: [],
+          legalDocumentRefs: [],
+          appraisalDocumentRefs: [],
+        },
+      });
+    }, 30_000);
+
+    afterAll(async () => {
+      await database.auditLog.deleteMany({ where: { resourceId: caseId } });
+      await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
+    });
+
+    it("transitions a pre_offering_open case to post_ipo_structuring, and replaying the job is a safe no-op", async () => {
+      const traceId = `trace_post_ipo_${suffix}`;
+      const result = await originationRepository.transitionToPostIpoStructuring({
+        caseId,
+        traceId,
+        transitionedAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+      expect(result).toEqual({ caseId, stage: "post_ipo_structuring" });
+
+      const updated = await database.originationCase.findUniqueOrThrow({ where: { id: caseId } });
+      expect(updated.stage).toBe("post_ipo_structuring");
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: caseId, action: "origination.case_post_ipo_structuring_started" },
+        }),
+      ).toBe(1);
+
+      // Replaying the same job (as pg-boss would on a retry, or on
+      // at-least-once redelivery) must not double-write or throw merely
+      // because the transition already landed -- the same idempotency
+      // openOfferingForApprovedCase's own reverse-direction handoff relies on.
+      const replayed = await originationRepository.transitionToPostIpoStructuring({
+        caseId,
+        traceId,
+        transitionedAt: new Date("2026-09-02T13:00:00.000Z"),
+      });
+      expect(replayed).toEqual({ caseId, stage: "post_ipo_structuring" });
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: caseId, action: "origination.case_post_ipo_structuring_started" },
+        }),
+      ).toBe(1);
+    }, 30_000);
+  },
+);

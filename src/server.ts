@@ -66,6 +66,7 @@ await jobQueue.start();
 // deploy — a send() would otherwise fail against a queue that doesn't exist.
 await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
 await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
+await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
 // Only when Didit is configured — same "all six configured together or
 // none" contract environment.ts's own refine enforces (see diditKyc
 // below), so this single check is equivalent to checking all six.
