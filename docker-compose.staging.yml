@@ -30,6 +30,11 @@ services:
     build:
       context: .
       target: migrate
+    # One-shot: applies pending migrations then exits. Coolify defaults every
+    # service to `restart: unless-stopped` when unset, which would otherwise
+    # restart this forever (unless-stopped ignores exit code, so even a
+    # clean exit-0 with nothing to migrate gets relaunched).
+    restart: "no"
     environment:
       DIRECT_DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD}@vistablox-db-server:5432/vistablox-db
     depends_on:
