@@ -8,6 +8,7 @@ import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import { CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
   CaseMessageRecord,
+  CasePartnerAssignment,
   ClosedCase,
   CloseCaseInput,
   FounderDecisionInput,
@@ -348,6 +349,19 @@ export class PrismaOriginationRepository implements OriginationRepository {
               })),
             },
       informationRequests: originationCase.informationRequests.map(toInformationRequest),
+    };
+  }
+
+  public async getCasePartnerAssignment(caseId: string): Promise<CasePartnerAssignment | null> {
+    const originationCase = await this.database.originationCase.findUnique({
+      where: { id: caseId },
+      select: { stage: true, legalPracticeId: true, appraisalFirmId: true },
+    });
+    if (originationCase === null) return null;
+    return {
+      stage: originationCase.stage,
+      legalPracticeId: originationCase.legalPracticeId,
+      appraisalFirmId: originationCase.appraisalFirmId,
     };
   }
 

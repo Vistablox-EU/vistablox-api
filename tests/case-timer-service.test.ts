@@ -45,6 +45,7 @@ function repository(overrides: Partial<OriginationRepository> = {}): Origination
     closeCase: vi.fn(),
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
+    getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }

@@ -37,6 +37,40 @@ export function createRequireAdminOperations(
   };
 }
 
+export function createRequireLegalPartner(accounts: AccountRepository): RequestHandler {
+  return createRequirePartnerRole(accounts, "legal_partner");
+}
+
+export function createRequireAppraisalPartner(accounts: AccountRepository): RequestHandler {
+  return createRequirePartnerRole(accounts, "appraisal_partner");
+}
+
+// AD-153's role check only -- "this account holds an active legal_partner /
+// appraisal_partner assignment somewhere." It says nothing about *which*
+// case the account may act on; that's a separate, resource-scoped check
+// (AD-166, require-partner-case-assignment.ts in the origination module),
+// since a partner's practice/firm being assigned to a specific case is a
+// different question than the role existing at all.
+function createRequirePartnerRole(
+  accounts: AccountRepository,
+  role: "legal_partner" | "appraisal_partner",
+): RequestHandler {
+  return async (_request, response, next) => {
+    try {
+      const authContext = response.locals.authContext;
+      if (authContext === undefined) throw missingContextError();
+
+      const authorized =
+        authContext.population === "staff_partner" &&
+        (await accounts.hasActiveStaffRole(authContext.accountId, role));
+      if (!authorized) throw staffForbiddenError();
+      next();
+    } catch (error) {
+      next(error);
+    }
+  };
+}
+
 export function createRequireStaffIdentity(accounts: AccountRepository): RequestHandler {
   return async (_request, response, next) => {
     try {

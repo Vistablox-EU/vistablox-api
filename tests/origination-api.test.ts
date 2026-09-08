@@ -53,6 +53,7 @@ function buildProtectedApp(options?: {
     hasAnyActiveStaffRole: vi.fn().mockResolvedValue(false),
     provision: vi.fn(),
     syncVerifiedContactEmail: vi.fn(),
+    getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
   const createDraftIntake = vi.fn(async (_input: CreateDraftIntakeInput) => ({
     caseId: "case_01",
@@ -86,6 +87,7 @@ function buildProtectedApp(options?: {
     closeCase: vi.fn().mockResolvedValue(null),
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn().mockResolvedValue(null),
+    getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
   };
 
   return {

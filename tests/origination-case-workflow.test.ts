@@ -70,6 +70,7 @@ function buildApp(options?: {
     hasAnyActiveStaffRole: vi.fn().mockResolvedValue(false),
     provision: vi.fn(),
     syncVerifiedContactEmail: vi.fn(),
+    getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
   const submitInitialCase = vi.fn(async (_input: SubmitInitialCaseInput) => {
     if (options?.submissionConflict === true) throw new CaseSubmissionConflictError("submitted");
@@ -116,6 +117,7 @@ function buildApp(options?: {
     closeCase: vi.fn().mockResolvedValue(null),
     listCaseMessages,
     postCaseMessage,
+    getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
   };
 
   return {

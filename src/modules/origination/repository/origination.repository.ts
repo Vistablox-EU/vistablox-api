@@ -200,6 +200,16 @@ export interface CaseMessageRecord {
   createdAt: Date;
 }
 
+// A minimal, auth-check-sized projection -- deliberately not
+// OperationsCaseDetail, which carries founder review notes and other
+// pre-IPO data a legal/appraisal partner middleware has no business
+// touching even transiently.
+export interface CasePartnerAssignment {
+  stage: string;
+  legalPracticeId: string | null;
+  appraisalFirmId: string | null;
+}
+
 export interface OriginationRepository {
   getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites>;
   createDraftIntake(input: CreateDraftIntakeInput): Promise<CreatedDraftIntake>;
@@ -216,6 +226,7 @@ export interface OriginationRepository {
     after?: OriginationCaseCursor;
   }): Promise<OwnedOriginationCase[]>;
   getCaseForOperations(caseId: string): Promise<OperationsCaseDetail | null>;
+  getCasePartnerAssignment(caseId: string): Promise<CasePartnerAssignment | null>;
   getApplicantResponseWindowBusinessDays(): Promise<number>;
   getInformationRequestReminderBusinessDays(): Promise<number[]>;
   publishInformationRequest(input: {

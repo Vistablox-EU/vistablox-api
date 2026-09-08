@@ -23,6 +23,7 @@ function buildApp(rateLimiter?: RequestHandler) {
     hasAnyActiveStaffRole: vi.fn(),
     provision: vi.fn(),
     syncVerifiedContactEmail: vi.fn(),
+    getActivePartnerOrganizationId: vi.fn(),
   };
   const requireAuthentication = createRequireAuthentication(sessions, accounts, rateLimiter);
 

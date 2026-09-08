@@ -63,6 +63,7 @@ function fakeOriginationRepository(): OriginationRepository {
     closeCase: vi.fn(),
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
+    getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
   };
 }
 
@@ -110,6 +111,7 @@ function buildApp(options?: {
     hasAnyActiveStaffRole: vi.fn().mockResolvedValue(options?.hasAdminRole ?? true),
     provision: vi.fn(),
     syncVerifiedContactEmail: vi.fn(),
+    getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
   const repository = options?.repository ?? fakePartnerOrganizationRepository();
 
