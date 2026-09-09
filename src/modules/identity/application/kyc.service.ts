@@ -325,9 +325,8 @@ export class StartProofOfAddressSessionService {
  * no provider calls and no policy evaluation, only a durable enqueue
  * (KycRepository.enqueueDiditWebhookProcessing) of the already
  * signature-verified, schema-validated body. ProcessDiditWebhookService
- * below — unchanged in its own logic — is now the consumer of the job this
- * enqueues (provider_events.didit_webhook), processed by the standalone KYC
- * service (src/kyc-server.ts), not this API or its worker.
+ * below is the consumer of the job this enqueues (provider_events.
+ * didit_webhook), run from worker.ts's own .work() handler.
  */
 export class ReceiveDiditWebhookService {
   public constructor(private readonly repository: KycRepository) {}

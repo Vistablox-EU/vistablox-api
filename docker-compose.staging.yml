@@ -60,17 +60,16 @@ services:
       GOOGLE_OAUTH_ENABLED: ${GOOGLE_OAUTH_ENABLED:-false}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
-      # Account recovery's own Didit usage only -- /v1/kyc and
-      # /internal/v1/kyc-accounts forward to vistablox-kyc below, which
-      # takes DIDIT_APPLICATION_ID/DIDIT_ENVIRONMENT/DIDIT_POA_WORKFLOW_ID
-      # instead (this API's own environment.ts schema no longer has them).
-      DIDIT_API_KEY: ${DIDIT_API_KEY:-}
-      DIDIT_CALLBACK_URL: ${DIDIT_CALLBACK_URL:-}
-      DIDIT_WORKFLOW_ID: ${DIDIT_WORKFLOW_ID:-}
-      # Compose-internal hostname, not a secret -- see vistablox-kyc's own
-      # environment block below for the service this points at.
-      KYC_SERVICE_URL: http://vistablox-kyc:3000
-      INTERNAL_KYC_API_SECRET: ${INTERNAL_KYC_API_SECRET}
+      # Required outright -- no disabled mode. Both /v1/kyc's own session
+      # creation/status and account recovery's re-verification flow read
+      # this same required set.
+      DIDIT_API_KEY: ${DIDIT_API_KEY}
+      DIDIT_CALLBACK_URL: ${DIDIT_CALLBACK_URL}
+      DIDIT_WORKFLOW_ID: ${DIDIT_WORKFLOW_ID}
+      DIDIT_POA_WORKFLOW_ID: ${DIDIT_POA_WORKFLOW_ID:-}
+      DIDIT_WEBHOOK_SECRET: ${DIDIT_WEBHOOK_SECRET}
+      DIDIT_APPLICATION_ID: ${DIDIT_APPLICATION_ID}
+      DIDIT_ENVIRONMENT: ${DIDIT_ENVIRONMENT}
       RESERVATION_FUNDING_RAIL_ENABLED: ${RESERVATION_FUNDING_RAIL_ENABLED:-false}
       EMAIL_VERIFICATION_ENABLED: ${EMAIL_VERIFICATION_ENABLED:-false}
       LOG_LEVEL: ${LOG_LEVEL:-info}
@@ -109,55 +108,6 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-
-  # Owns the whole KYC domain (the Didit webhook, session creation/status,
-  # staff lookups, renewal-reminder timer, stuck-session reconciliation).
-  # Deliberately not built on *app-environment: that anchor carries
-  # BETTER_AUTH_* and other vars this service's own schema
-  # (src/config/kyc-environment.ts) doesn't need -- only DATABASE_URL, SMTP_*
-  # (its own renewal-reminder email, pointed at the same maildev catcher
-  # *app-environment's SMTP_* uses above), and what else it actually reads.
-  vistablox-kyc:
-    build:
-      context: .
-      target: worker
-    command: ["node", "dist/kyc-server.js"]
-    environment:
-      DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD}@vistablox-db-server:5432/vistablox-db
-      DIDIT_API_KEY: ${DIDIT_API_KEY}
-      DIDIT_WORKFLOW_ID: ${DIDIT_WORKFLOW_ID}
-      DIDIT_POA_WORKFLOW_ID: ${DIDIT_POA_WORKFLOW_ID:-}
-      DIDIT_CALLBACK_URL: ${DIDIT_CALLBACK_URL:-}
-      DIDIT_WEBHOOK_SECRET: ${DIDIT_WEBHOOK_SECRET}
-      DIDIT_APPLICATION_ID: ${DIDIT_APPLICATION_ID}
-      DIDIT_ENVIRONMENT: ${DIDIT_ENVIRONMENT}
-      # Same value as vistablox-api/worker's own copy above -- one Coolify
-      # env var, referenced from both service blocks.
-      INTERNAL_KYC_API_SECRET: ${INTERNAL_KYC_API_SECRET}
-      LOG_LEVEL: ${LOG_LEVEL:-info}
-      SMTP_HOST: maildev
-      SMTP_PORT: "1025"
-      SMTP_SECURE: "false"
-      SMTP_USER: vistablox
-      SMTP_PASSWORD: vistablox
-      SMTP_FROM: VistaBlox <no-reply@vistablox.local>
-    depends_on:
-      vistablox-db-server:
-        condition: service_healthy
-      migrate:
-        condition: service_completed_successfully
-    healthcheck:
-      test:
-        [
-          "CMD",
-          "node",
-          "-e",
-          "fetch('http://localhost:3000/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
-        ]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 10s
 
 volumes:
   staging-postgres-data:

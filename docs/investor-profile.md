@@ -1,13 +1,13 @@
 # Investor profile
 
-`GET /v1/investor-profile` returns the authenticated customer's consolidated profile. It implements the documented cross-reference and deliberately does not introduce a table of its own for any of investor-profile's own entities. It does, since Phase 7, read from one table this module owns: a local, event-driven projection of KYC eligibility — see the note on eligibility below and [`kyc-eligibility-read-model.md`](kyc-eligibility-read-model.md).
+`GET /v1/investor-profile` returns the authenticated customer's consolidated profile. It implements the documented cross-reference and deliberately does not introduce a table of its own for any of investor-profile's own entities — see the note on eligibility below for how it reads identity's own KYC eligibility table.
 
 ## Durable aggregate
 
 The repository reads the existing source-of-truth records in one account-scoped query:
 
 - account status, protected contact email, membership date, and linked login methods from `account`
-- local eligibility, declared country codes, proof-of-address state, and renewal dates from this module's own KYC eligibility projection (`account.kyc_eligibility_projection`, kept in sync with `identity`'s own table via `identity.kyc_eligibility_changed` events and a periodic reconcile pass — not a live read against `identity` itself; see [`kyc-eligibility-read-model.md`](kyc-eligibility-read-model.md))
+- local eligibility, declared country codes, proof-of-address state, and renewal dates from identity's own `KycEligibility` table, via the same shared `PrismaKycRepository` instance `/v1/kyc` itself reads through — a live read, not a local copy
 - reservation and non-redeemed position counts from `money` and `settlement`
 - wallet registration progress and distinct investment/payment/payout readiness from `settlement`, this same eligibility projection, and linked-login state
 
@@ -24,16 +24,16 @@ Limits default to 20 and are capped at 100. Cursors include their resource kind,
 
 ## Verified display-name cache
 
-Didit remains authoritative for identity names. VistaBlox does not persist them in PostgreSQL. The whole cache lives on the standalone KYC service now (`GetKycDisplayProfileService`, reached through `KycServiceGateway` the same way `/v1/kyc` itself is) — this API holds neither the Redis connection nor a Didit client for it. When both Didit and the KYC service's own `PROFILE_CACHE_URL` are configured there, an approved, correlated individual decision may populate a server-side Redis/Valkey entry containing exactly:
+Didit remains authoritative for identity names. VistaBlox does not persist them in PostgreSQL. `GetKycDisplayProfileService` (identity's own application service, called in-process — no gateway, no internal HTTP call) owns the whole cache. When both Didit and `PROFILE_CACHE_URL` are configured, an approved, correlated individual decision may populate a server-side Redis/Valkey entry containing exactly:
 
 - `given_name`
 - `family_name`
 - `full_display_name`
 - `didit_profile_last_synced_at`
 
-Entries use the opaque key `kyc_display:{account_id}`, refresh after six hours, and expire after 24 hours. Configure the managed EU cache without routine backups. Unknown fields make an entry invalid and cause deletion. Starting a new baseline KYC session or receiving a correlated baseline KYC webhook invalidates the account's cached names — unchanged by this move, since that invalidation already ran inside the KYC service.
+Entries use the opaque key `kyc_display:{account_id}`, refresh after six hours, and expire after 24 hours. Configure the managed EU cache without routine backups. Unknown fields make an entry invalid and cause deletion. Starting a new baseline KYC session or receiving a correlated baseline KYC webhook invalidates the account's cached names — the API and the worker each hold their own connection to the same Redis instance so invalidation keeps working regardless of which process the triggering change came through (see [`didit-kyc.md`](didit-kyc.md)).
 
-If Redis/Valkey is absent or unavailable, or the KYC service itself doesn't respond, the endpoint continues to return the durable aggregate with `display_profile: null`. It does not bypass the required cache by turning Didit into a normal profile-read dependency. A transient Didit refresh failure may use an existing unexpired cache entry — but only for a request the KYC service itself serves; this API keeps no cache of its own to fall back to if that internal call fails outright.
+If Redis/Valkey is absent or unavailable, or a live Didit lookup fails, the endpoint continues to return the durable aggregate with `display_profile: null`. It does not bypass the required cache by turning Didit into a normal profile-read dependency. A transient Didit refresh failure may use an existing unexpired cache entry — but only when one exists; there is no other fallback.
 
 ## Response sections
 

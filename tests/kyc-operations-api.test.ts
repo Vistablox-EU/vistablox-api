@@ -4,37 +4,75 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import type { KycServiceGateway } from "../src/modules/identity/application/kyc-service-gateway.js";
-import { AppError } from "../src/shared/errors/app-error.js";
+import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
+import {
+  GetKycAccountForOperationsService,
+  GetKycStatusService,
+  ReceiveDiditWebhookService,
+  StartKycSessionService,
+} from "../src/modules/identity/application/kyc.service.js";
+import { DiditWebhookVerifier } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
+import type {
+  KycEligibilityRecord,
+  KycRepository,
+} from "../src/modules/identity/repository/kyc.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
 
-const operationsRecord = {
-  account_id: "acct_reviewed",
-  eligibility_state: "pending_manual_review",
-  operational_substatus: "kyc_manual_review",
-  didit_reference: "c2237bc6-a76c-4933-b329-6c81843b45c7",
-  residence_country_code: "DE",
-  tax_residence_country_code: "HR",
-  proof_of_address_status: "not_started",
-  proof_of_address_didit_reference: null,
-  proof_of_address_provider_status: null,
-  proof_of_address_provider_updated_at: null,
-  proof_of_address_current_until: null,
-  last_verified_at: null,
-  ever_required_manual_review: true,
-  renewal_due_at: null,
+const workflowId = "269214fe-77f7-4b1a-a028-b70e861d73c1";
+const callbackUrl = "https://app.vistablox.io/kyc/complete";
+
+const operationsRecord: KycEligibilityRecord = {
+  accountId: "acct_reviewed",
+  eligibilityState: "pending_manual_review",
+  operationalSubstatus: "kyc_manual_review",
+  diditReference: "c2237bc6-a76c-4933-b329-6c81843b45c7",
+  residenceCountryCode: "DE",
+  taxResidenceCountryCode: "HR",
+  proofOfAddressStatus: "not_started",
+  proofOfAddressDiditReference: null,
+  proofOfAddressProviderStatus: null,
+  proofOfAddressProviderUpdatedAt: null,
+  proofOfAddressCurrentUntil: null,
+  lastVerifiedAt: null,
+  everRequiredManualReview: true,
+  renewalDueAt: null,
 };
 
-function fakeKycServiceGateway(overrides: Partial<KycServiceGateway> = {}): KycServiceGateway {
+// Defaults to answering "acct_reviewed" with the record above and every
+// other account_id with no record -- covers both the happy-path lookup and
+// the not-found case below without needing a per-test override.
+function fakeKycRepository(overrides: Partial<KycRepository> = {}): KycRepository {
   return {
-    getStatus: vi.fn(),
-    startSession: vi.fn(),
-    startProofOfAddressSession: vi.fn(),
-    getAccountForOperations: vi.fn().mockResolvedValue({ data: operationsRecord }),
-    getDisplayProfile: vi.fn().mockResolvedValue({ data: null }),
+    getForAccount: vi
+      .fn()
+      .mockImplementation((accountId: string) =>
+        Promise.resolve(accountId === operationsRecord.accountId ? operationsRecord : null),
+      ),
+    findByDiditReference: vi.fn().mockResolvedValue(null),
+    findByProofOfAddressDiditReference: vi.fn().mockResolvedValue(null),
+    hasProcessedProviderEvent: vi.fn().mockResolvedValue(false),
+    enqueueDiditWebhookProcessing: vi.fn().mockResolvedValue(undefined),
+    reserveSessionStart: vi.fn().mockResolvedValue(true),
+    completeSessionStart: vi.fn().mockResolvedValue(true),
+    failSessionStart: vi.fn().mockResolvedValue(undefined),
+    reserveProofOfAddressSessionStart: vi.fn().mockResolvedValue(true),
+    completeProofOfAddressSessionStart: vi.fn().mockResolvedValue(true),
+    failProofOfAddressSessionStart: vi.fn().mockResolvedValue(undefined),
+    applyProviderOutcome: vi.fn().mockResolvedValue("applied"),
+    applyProofOfAddressOutcome: vi.fn().mockResolvedValue("applied"),
+    recordUnmatchedProviderEvent: vi.fn().mockResolvedValue(undefined),
+    getRenewalReminderLeadDays: vi.fn().mockResolvedValue(30),
+    listEligibleAccountsForRenewalTimer: vi.fn().mockResolvedValue([]),
+    transitionToRequiresRenewal: vi.fn().mockResolvedValue(false),
+    listStuckSessionCreationsForTimer: vi.fn().mockResolvedValue([]),
+    listStuckOpenSessionsForTimer: vi.fn().mockResolvedValue([]),
     ...overrides,
   };
+}
+
+function fakeDiditClient(): DiditClient {
+  return { createSession: vi.fn(), getDecision: vi.fn() };
 }
 
 // origination routes are mounted unconditionally, so createApp requires a
@@ -95,7 +133,7 @@ function buildApp(options?: {
   population?: "customer" | "staff_partner";
   hasAdminRole?: boolean;
   mfaVerified?: boolean;
-  kycGateway?: KycServiceGateway;
+  repository?: KycRepository;
 }) {
   const sessions: SessionResolver = {
     resolve: vi.fn().mockResolvedValue({
@@ -115,6 +153,8 @@ function buildApp(options?: {
     syncVerifiedContactEmail: vi.fn(),
     getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
+  const repository = options?.repository ?? fakeKycRepository();
+  const didit = fakeDiditClient();
 
   return {
     app: createApp({
@@ -132,7 +172,12 @@ function buildApp(options?: {
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
         kyc: {
-          client: options?.kycGateway ?? fakeKycServiceGateway(),
+          getStatus: new GetKycStatusService(repository, didit),
+          startSession: new StartKycSessionService(repository, didit, { workflowId, callbackUrl }),
+          startProofOfAddressSession: undefined,
+          getAccountForOperations: new GetKycAccountForOperationsService(repository),
+          webhookVerifier: new DiditWebhookVerifier("didit-webhook-secret-for-test"),
+          receiveWebhook: new ReceiveDiditWebhookService(repository),
         },
       },
     }),
@@ -187,18 +232,7 @@ describe("operations KYC decision display", () => {
   });
 
   it("reports 404 for an account with no KYC record", async () => {
-    const { app } = buildApp({
-      kycGateway: fakeKycServiceGateway({
-        getAccountForOperations: vi.fn().mockRejectedValue(
-          new AppError({
-            code: "identity.kyc_account_not_found",
-            title: "KYC record not found",
-            status: 404,
-            detail: "No KYC eligibility record was found for that account.",
-          }),
-        ),
-      }),
-    });
+    const { app } = buildApp();
 
     const response = await request(app).get("/internal/v1/kyc-accounts/acct_unknown");
 

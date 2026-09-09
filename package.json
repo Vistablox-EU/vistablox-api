@@ -9,11 +9,9 @@
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "worker:dev": "tsx watch src/worker.ts",
-    "kyc:dev": "tsx watch src/kyc-server.ts",
     "build": "npm run db:generate && tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "worker:start": "node dist/worker.js",
-    "kyc:start": "node dist/kyc-server.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

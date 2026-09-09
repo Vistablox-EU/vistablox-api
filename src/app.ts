@@ -151,8 +151,15 @@ import {
 import type { OriginationRepository } from "./modules/origination/repository/origination.repository.js";
 import { createKycOperationsRouter } from "./modules/identity/api/kyc-operations.router.js";
 import type { DiditClient } from "./modules/identity/application/didit-client.js";
-import type { KycServiceGateway } from "./modules/identity/application/kyc-service-gateway.js";
-import { createKycRouter } from "./modules/identity/api/kyc.router.js";
+import type {
+  GetKycAccountForOperationsService,
+  GetKycStatusService,
+  ReceiveDiditWebhookService,
+  StartKycSessionService,
+  StartProofOfAddressSessionService,
+} from "./modules/identity/application/kyc.service.js";
+import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
+import { createDiditWebhookRouter, createKycRouter } from "./modules/identity/api/kyc.router.js";
 import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
 import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
 import { RegisterWalletService } from "./modules/investor-profile/application/register-wallet.service.js";
@@ -203,7 +210,17 @@ export interface AppDependencies {
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
     kyc?: {
-      client: KycServiceGateway;
+      getStatus: GetKycStatusService;
+      startSession: StartKycSessionService;
+      startProofOfAddressSession: StartProofOfAddressSessionService | undefined;
+      getAccountForOperations: GetKycAccountForOperationsService;
+      // POST /webhooks/didit itself is unauthenticated (HMAC-signature
+      // verified, not session-gated) -- grouped here anyway rather than as
+      // its own top-level AppDependencies field, so the ~10 existing test
+      // files that build a minimal AppDependencies with no KYC surface at
+      // all don't also need to supply these.
+      webhookVerifier: DiditWebhookVerifier;
+      receiveWebhook: ReceiveDiditWebhookService;
     };
     investorProfile?: {
       repository: InvestorProfileRepository;
@@ -502,15 +519,30 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     if (dependencies.protectedApi.kyc !== undefined) {
       const kyc = dependencies.protectedApi.kyc;
-      app.use("/v1/kyc", createKycRouter(requireAuthentication, kyc.client));
+      app.use(
+        "/v1/kyc",
+        createKycRouter(
+          requireAuthentication,
+          kyc.getStatus,
+          kyc.startSession,
+          kyc.startProofOfAddressSession,
+        ),
+      );
       app.use(
         "/internal/v1/kyc-accounts",
         createKycOperationsRouter(
           requireAuthentication,
           requireAdminOperations,
           requireStaffWebAuthn,
-          kyc.client,
+          kyc.getAccountForOperations,
         ),
+      );
+      // Reversal (undoing the KYC microservice split): mounted directly
+      // here now, unauthenticated like every other Didit-facing surface --
+      // this used to live only in src/kyc-app.ts.
+      app.use(
+        "/webhooks/didit",
+        createDiditWebhookRouter(kyc.webhookVerifier, kyc.receiveWebhook),
       );
     }
     if (dependencies.protectedApi.staffInvitations !== undefined) {

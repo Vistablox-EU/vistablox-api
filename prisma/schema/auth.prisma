@@ -1,0 +1,221 @@
+model StaffWebAuthnCredential {
+  id         String    @id @map("credential_id")
+  accountId  String    @map("account_id")
+  publicKey  Bytes     @map("public_key") @db.ByteA
+  counter    BigInt    @default(0)
+  deviceType String    @map("device_type")
+  backedUp   Boolean   @default(false) @map("backed_up")
+  transports String[]
+  label      String?
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+
+  account     Account           @relation(fields: [accountId], references: [id])
+  mfaSessions StaffSessionMfa[]
+
+  @@index([accountId], map: "idx_staff_webauthn_credentials_account")
+  @@map("staff_webauthn_credentials")
+  @@schema("auth")
+}
+
+model StaffWebAuthnChallenge {
+  id                String    @id @map("challenge_id")
+  accountId         String    @map("account_id")
+  providerSessionId String    @map("provider_session_id")
+  purpose           String
+  challenge         String    @unique
+  credentialLabel   String?   @map("credential_label")
+  expiresAt         DateTime  @map("expires_at") @db.Timestamptz(6)
+  usedAt            DateTime? @map("used_at") @db.Timestamptz(6)
+  createdAt         DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, providerSessionId, purpose], map: "idx_staff_webauthn_challenges_session")
+  @@index([expiresAt], map: "idx_staff_webauthn_challenges_expiry")
+  @@map("staff_webauthn_challenges")
+  @@schema("auth")
+}
+
+model StaffSessionMfa {
+  providerSessionId String   @id @map("provider_session_id")
+  accountId         String   @map("account_id")
+  credentialId      String   @map("credential_id")
+  verifiedAt        DateTime @map("verified_at") @db.Timestamptz(6)
+
+  account    Account                 @relation(fields: [accountId], references: [id])
+  credential StaffWebAuthnCredential @relation(fields: [credentialId], references: [id])
+
+  @@index([accountId], map: "idx_staff_session_mfa_account")
+  @@index([credentialId], map: "idx_staff_session_mfa_credential")
+  @@map("staff_session_mfa")
+  @@schema("auth")
+}
+
+model StaffInvitation {
+  id                 String    @id @map("invitation_id")
+  email              String
+  displayName        String    @map("display_name")
+  role               String
+  legalPracticeId    String?   @map("legal_practice_id")
+  appraisalFirmId    String?   @map("appraisal_firm_id")
+  tokenHash          String    @unique @map("token_hash")
+  invitedByAccountId String    @map("invited_by_account_id")
+  acceptedAccountId  String?   @unique @map("accepted_account_id")
+  claimId            String?   @map("claim_id")
+  claimedAt          DateTime? @map("claimed_at") @db.Timestamptz(6)
+  expiresAt          DateTime  @map("expires_at") @db.Timestamptz(6)
+  acceptedAt         DateTime? @map("accepted_at") @db.Timestamptz(6)
+  revokedAt          DateTime? @map("revoked_at") @db.Timestamptz(6)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  invitedBy       Account        @relation("StaffInvitationIssuer", fields: [invitedByAccountId], references: [id])
+  acceptedAccount Account?       @relation("StaffInvitationAcceptance", fields: [acceptedAccountId], references: [id])
+  legalPractice   LegalPractice? @relation(fields: [legalPracticeId], references: [id])
+  appraisalFirm   AppraisalFirm? @relation(fields: [appraisalFirmId], references: [id])
+
+  @@index([email], map: "idx_staff_invitations_email")
+  @@index([expiresAt], map: "idx_staff_invitations_expiry")
+  @@index([invitedByAccountId], map: "idx_staff_invitations_invited_by")
+  @@map("staff_invitations")
+  @@schema("auth")
+}
+
+model StaffRoleAssignment {
+  id              String    @id @map("assignment_id")
+  accountId       String    @map("account_id")
+  role            String
+  legalPracticeId String?   @map("legal_practice_id")
+  appraisalFirmId String?   @map("appraisal_firm_id")
+  grantedAt       DateTime  @default(now()) @map("granted_at") @db.Timestamptz(6)
+  revokedAt       DateTime? @map("revoked_at") @db.Timestamptz(6)
+
+  account       Account        @relation(fields: [accountId], references: [id])
+  legalPractice LegalPractice? @relation(fields: [legalPracticeId], references: [id])
+  appraisalFirm AppraisalFirm? @relation(fields: [appraisalFirmId], references: [id])
+
+  @@index([accountId], map: "idx_staff_role_assignments_account")
+  @@index([legalPracticeId], map: "idx_staff_role_assignments_legal_practice")
+  @@index([appraisalFirmId], map: "idx_staff_role_assignments_appraisal_firm")
+  @@map("staff_role_assignments")
+  @@schema("auth")
+}
+
+model LoginMethod {
+  id                 String   @id @map("login_method_id")
+  accountId          String   @map("account_id")
+  methodType         String   @map("method_type")
+  providerSubject    String   @map("provider_subject")
+  linkedAt           DateTime @default(now()) @map("linked_at") @db.Timestamptz(6)
+  linkedViaFreshAuth Boolean  @default(true) @map("linked_via_fresh_auth")
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@unique([accountId, methodType])
+  @@unique([methodType, providerSubject])
+  @@map("login_methods")
+  @@schema("auth")
+}
+
+model Session {
+  id                     String    @id @map("session_id")
+  accountId              String    @map("account_id")
+  channel                String
+  status                 String    @default("active")
+  betterAuthUserId       String    @map("better_auth_user_id")
+  betterAuthSessionId    String?   @map("better_auth_session_id")
+  betterAuthSessionToken String?   @unique @map("better_auth_session_token")
+  providerGrantRef       String?   @map("provider_grant_ref")
+  authMethodAtLogin      String    @map("auth_method_at_login")
+  createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt             DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+  idleExpiresAt          DateTime  @map("idle_expires_at") @db.Timestamptz(6)
+  absoluteExpiresAt      DateTime  @map("absolute_expires_at") @db.Timestamptz(6)
+  lastFreshAuthAt        DateTime? @map("last_fresh_auth_at") @db.Timestamptz(6)
+  riskState              String    @default("normal") @map("risk_state")
+  deviceLabel            String?   @map("device_label")
+  userAgentHash          String?   @map("user_agent_hash")
+  initialCountryCode     String?   @map("initial_country_code")
+  lastCountryCode        String?   @map("last_country_code")
+  networkMarkerHash      String?   @map("network_marker_hash")
+  csrfSecretHash         String?   @map("csrf_secret_hash")
+  revokedAt              DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revocationReason       String?   @map("revocation_reason")
+  replacedBySessionId    String?   @map("replaced_by_session_id")
+
+  account    Account   @relation(fields: [accountId], references: [id])
+  replacedBy Session?  @relation("SessionReplacement", fields: [replacedBySessionId], references: [id])
+  replaces   Session[] @relation("SessionReplacement")
+
+  @@index([accountId, status], map: "idx_sessions_account_status")
+  @@index([replacedBySessionId], map: "idx_sessions_replaced_by")
+  @@map("sessions")
+  @@schema("auth")
+}
+
+// AD-120/AD-128: the shared secret must be reversible to compute a live TOTP
+// code, so it is stored as plaintext here — phase 1 relies on storage/
+// transport-level encryption only, not field-level encryption.
+model MfaTotpFactor {
+  accountId  String    @id @map("account_id")
+  secret     String
+  enrolledAt DateTime  @default(now()) @map("enrolled_at") @db.Timestamptz(6)
+  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@map("mfa_totp_factors")
+  @@schema("auth")
+}
+
+// AD-177: backup codes are hashed and marked consumed-on-use, mirroring
+// one-way secret-storage discipline rather than the TOTP secret's plaintext posture.
+model MfaBackupCode {
+  id         String    @id @map("backup_code_id")
+  accountId  String    @map("account_id")
+  codeHash   String    @map("code_hash")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@unique([accountId, codeHash], map: "mfa_backup_codes_account_code_key")
+  @@index([accountId], map: "idx_mfa_backup_codes_account")
+  @@map("mfa_backup_codes")
+  @@schema("auth")
+}
+
+model AccountRecoveryCase {
+  id                        String    @id @map("recovery_case_id")
+  accountId                 String    @map("account_id")
+  trigger                   String
+  status                    String    @default("open")
+  freshDiditVerificationRef String?   @map("fresh_didit_verification_ref")
+  reviewedByPrimary         String?   @map("reviewed_by_primary")
+  reviewedBySecondary       String?   @map("reviewed_by_secondary")
+  cooldownEndsAt            DateTime? @map("cooldown_ends_at") @db.Timestamptz(6)
+  createdAt                 DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  resolvedAt                DateTime? @map("resolved_at") @db.Timestamptz(6)
+
+  account           Account  @relation("RecoverySubject", fields: [accountId], references: [id])
+  primaryReviewer   Account? @relation("PrimaryRecoveryReviewer", fields: [reviewedByPrimary], references: [id])
+  secondaryReviewer Account? @relation("SecondaryRecoveryReviewer", fields: [reviewedBySecondary], references: [id])
+
+  @@index([accountId], map: "idx_recovery_cases_account")
+  @@index([reviewedByPrimary], map: "idx_recovery_cases_reviewed_primary")
+  @@index([reviewedBySecondary], map: "idx_recovery_cases_reviewed_secondary")
+  @@map("account_recovery_cases")
+  @@schema("auth")
+}
+
+model AccountRecoveryCode {
+  accountId  String    @id @map("account_id")
+  codeHash   String    @map("code_hash")
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@map("account_recovery_codes")
+  @@schema("auth")
+}
