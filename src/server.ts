@@ -37,6 +37,7 @@ import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-o
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
+import { HttpKycServiceClient } from "./modules/identity/infrastructure/kyc-service.client.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import {
   DiditProtectedDisplayProfileProvider,
@@ -63,17 +64,12 @@ await jobQueue.start();
 await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
 await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
 await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
-// Only when Didit is configured — same "all six configured together or
-// none" contract environment.ts's own refine enforces (see diditKyc
-// below), so this single check is equivalent to checking all six.
-if (environment.DIDIT_API_KEY !== undefined) {
-  await jobQueue.createQueue("provider_events.didit_webhook");
-}
-// Constructed unconditionally (unlike diditKyc below, which only wires up
-// live Didit-backed session behavior when all six DIDIT_* vars are set):
-// this repository has no Didit-specific dependency itself, and origination/
+// This repository has no Didit-specific dependency itself -- origination/
 // offering/investor-profile need a KycEligibilityReader regardless of
-// whether Didit is configured in this environment.
+// whether Didit is configured in this environment. The provider_events.
+// didit_webhook queue itself is created and consumed only by the
+// standalone KYC service (src/kyc-server.ts); nothing in this process ever
+// sends to it.
 const kycRepository = new PrismaKycRepository(database, jobQueue);
 const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
 const originationRepository = new PrismaOriginationRepository(database, jobQueue, kycRepository);
@@ -219,56 +215,38 @@ const diditClient =
         apiKey: environment.DIDIT_API_KEY,
         timeoutMs: 4_000,
       });
-const diditKyc =
-  diditClient !== undefined &&
-  environment.DIDIT_WORKFLOW_ID !== undefined &&
-  environment.DIDIT_CALLBACK_URL !== undefined &&
-  environment.DIDIT_APPLICATION_ID !== undefined &&
-  environment.DIDIT_ENVIRONMENT !== undefined
-    ? {
-        repository: kycRepository,
-        didit: diditClient,
-        workflowId: environment.DIDIT_WORKFLOW_ID,
-        callbackUrl: environment.DIDIT_CALLBACK_URL,
-        ...(environment.DIDIT_POA_WORKFLOW_ID === undefined
-          ? {}
-          : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),
-        ...(protectedProfileCache === undefined
-          ? {}
-          : {
-              invalidateDisplayProfile: async (accountId: string) => {
-                try {
-                  await protectedProfileCache.delete(accountId);
-                } catch (error) {
-                  logger.warn(
-                    { err: error, account_id: accountId },
-                    "protected display profile cache invalidation failed",
-                  );
-                }
-              },
-            }),
-      }
-    : undefined;
+// /v1/kyc's own session-creation surface, and DIDIT_APPLICATION_ID/
+// DIDIT_ENVIRONMENT/DIDIT_POA_WORKFLOW_ID with it, now live only in
+// vistablox-kyc (src/kyc-server.ts) -- see kycServiceClient below. This
+// account is still needed here for account recovery, independent of that.
+const kycServiceClient = new HttpKycServiceClient({
+  baseUrl: environment.KYC_SERVICE_URL,
+  secret: environment.INTERNAL_KYC_API_SECRET,
+});
 // Reuses the same baseline Didit workflow as ordinary KYC (AD-062's didit-kyc.md
 // follow-on work): a fresh recovery verification only needs to re-prove a live
-// human with a valid ID, not a separate provider configuration.
+// human with a valid ID, not a separate provider configuration. Gated directly
+// on what this flow itself needs, independent of whether /v1/kyc's own
+// session-start surface exists in this codebase at all.
 const customerAccountAdministrator = new BetterAuthCustomerAccountAdministrator(
   auth,
   emailSender,
 );
 const accountRecovery =
-  diditKyc === undefined
-    ? undefined
-    : {
+  diditClient !== undefined &&
+  environment.DIDIT_WORKFLOW_ID !== undefined &&
+  environment.DIDIT_CALLBACK_URL !== undefined
+    ? {
         repository: new PrismaAccountRecoveryRepository(database),
         administrator: customerAccountAdministrator,
-        didit: diditKyc.didit,
-        workflowId: diditKyc.workflowId,
-        callbackUrl: diditKyc.callbackUrl,
+        didit: diditClient,
+        workflowId: environment.DIDIT_WORKFLOW_ID,
+        callbackUrl: environment.DIDIT_CALLBACK_URL,
         recoveryRedirectUrl:
           environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "com.vistablox.app://recover-account",
         emailSender,
-      };
+      }
+    : undefined;
 const onrampRedirectUrl = environment.COINBASE_ONRAMP_REDIRECT_URL;
 const coinbaseCdpClient =
   environment.COINBASE_CDP_API_KEY_ID === undefined ||
@@ -387,7 +365,7 @@ const app = createApp({
       administrator: customerAccountAdministrator,
       hashKey: environment.BETTER_AUTH_SECRET,
     },
-    ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
+    kyc: { client: kycServiceClient },
     staffAccountLifecycle: {
       repository: staffAccountLifecycleRepository,
       administrator: new BetterAuthStaffAccountAdministrator(auth, emailSender),

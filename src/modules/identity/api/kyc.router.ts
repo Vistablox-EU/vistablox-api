@@ -1,11 +1,9 @@
 import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
+import type { KycServiceGateway } from "../application/kyc-service-gateway.js";
 import {
-  GetKycStatusService,
   ReceiveDiditWebhookService,
-  StartProofOfAddressSessionService,
-  StartKycSessionService,
 } from "../application/kyc.service.js";
 import { DiditWebhookVerifier } from "../infrastructure/didit-webhook-verifier.js";
 import {
@@ -18,23 +16,26 @@ import {
   startKycSessionResponseSchema,
 } from "./kyc.schemas.js";
 
+// KycServiceGateway forwards to vistablox-kyc, where KycEligibility (and
+// StartKycSessionService/GetKycStatusService/etc.) now actually live -- this
+// router's own job is unchanged: enforce the customer session, validate the
+// request shape, and translate to/from the gateway's already-matching
+// response schemas.
 export function createKycRouter(
   requireAuthentication: RequestHandler,
-  getStatus: GetKycStatusService,
-  startSession: StartKycSessionService,
-  startProofOfAddressSession?: StartProofOfAddressSessionService,
+  gateway: KycServiceGateway,
 ): Router {
   const router = Router();
   router.get("/", requireAuthentication, async (_request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
-    const result = await getStatus.execute(context.accountId);
+    const result = await gateway.getStatus(context.accountId);
     response.setHeader("Cache-Control", "no-store");
     response.json(kycStatusResponseSchema.parse(result));
   });
   router.post("/sessions", requireAuthentication, async (request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
     const body = startKycSessionBodySchema.parse(request.body);
-    const result = await startSession.execute({
+    const result = await gateway.startSession({
       accountId: context.accountId,
       traceId: String(response.locals.traceId),
       residenceCountryCode: body.residence_country_code,
@@ -44,25 +45,28 @@ export function createKycRouter(
     response.setHeader("Cache-Control", "no-store");
     response.status(201).json(startKycSessionResponseSchema.parse(result));
   });
-  if (startProofOfAddressSession !== undefined) {
-    router.post(
-      "/proof-of-address/sessions",
-      requireAuthentication,
-      async (request, response) => {
-        const context = requireCustomerContext(response.locals.authContext);
-        const body = startProofOfAddressSessionBodySchema.parse(request.body);
-        const result = await startProofOfAddressSession.execute({
-          accountId: context.accountId,
-          traceId: String(response.locals.traceId),
-          ...(body.language === undefined ? {} : { language: body.language }),
-        });
-        response.setHeader("Cache-Control", "no-store");
-        response
-          .status(201)
-          .json(startProofOfAddressSessionResponseSchema.parse(result));
-      },
-    );
-  }
+  // Always mounted now, unlike the old optional-third-argument shape --
+  // vistablox-api has no local visibility into whether vistablox-kyc has a
+  // proof-of-address workflow configured. An unconfigured deployment
+  // reports a structured error from the gateway call itself instead of this
+  // route simply not existing (see kyc-internal.router.ts).
+  router.post(
+    "/proof-of-address/sessions",
+    requireAuthentication,
+    async (request, response) => {
+      const context = requireCustomerContext(response.locals.authContext);
+      const body = startProofOfAddressSessionBodySchema.parse(request.body);
+      const result = await gateway.startProofOfAddressSession({
+        accountId: context.accountId,
+        traceId: String(response.locals.traceId),
+        ...(body.language === undefined ? {} : { language: body.language }),
+      });
+      response.setHeader("Cache-Control", "no-store");
+      response
+        .status(201)
+        .json(startProofOfAddressSessionResponseSchema.parse(result));
+    },
+  );
   return router;
 }
 

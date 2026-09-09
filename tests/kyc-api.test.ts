@@ -9,29 +9,27 @@ import { AppError } from "../src/shared/errors/app-error.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
 
-const operationsRecord = {
-  account_id: "acct_reviewed",
-  eligibility_state: "pending_manual_review",
-  operational_substatus: "kyc_manual_review",
-  didit_reference: "c2237bc6-a76c-4933-b329-6c81843b45c7",
-  residence_country_code: "DE",
-  tax_residence_country_code: "HR",
-  proof_of_address_status: "not_started",
-  proof_of_address_didit_reference: null,
-  proof_of_address_provider_status: null,
-  proof_of_address_provider_updated_at: null,
-  proof_of_address_current_until: null,
-  last_verified_at: null,
-  ever_required_manual_review: true,
-  renewal_due_at: null,
-};
-
 function fakeKycServiceGateway(overrides: Partial<KycServiceGateway> = {}): KycServiceGateway {
   return {
-    getStatus: vi.fn(),
-    startSession: vi.fn(),
+    getStatus: vi.fn().mockResolvedValue({
+      data: {
+        eligibility_state: "not_started",
+        proof_of_address_status: "not_started",
+        proof_of_address_current_until: null,
+        last_verified_at: null,
+        renewal_due_at: null,
+        active_session: null,
+      },
+    }),
+    startSession: vi.fn().mockResolvedValue({
+      data: {
+        verification_session_id: "269214fe-77f7-4b1a-a028-b70e861d73c1",
+        verification_url: "https://verify.didit.me/session/abc",
+        eligibility_state: "not_started",
+      },
+    }),
     startProofOfAddressSession: vi.fn(),
-    getAccountForOperations: vi.fn().mockResolvedValue({ data: operationsRecord }),
+    getAccountForOperations: vi.fn(),
     ...overrides,
   };
 }
@@ -68,11 +66,11 @@ function fakeOriginationRepository(): OriginationRepository {
   };
 }
 
-function fakeStaffWebAuthnRepository(verified: boolean) {
+function fakeStaffWebAuthnRepository() {
   return {
     listCredentials: vi.fn().mockResolvedValue([]),
     findCredential: vi.fn().mockResolvedValue(null),
-    isSessionVerified: vi.fn().mockResolvedValue(verified),
+    isSessionVerified: vi.fn().mockResolvedValue(true),
     replaceChallenge: vi.fn(),
     getActiveChallenge: vi.fn().mockResolvedValue(null),
     failChallenge: vi.fn().mockResolvedValue(false),
@@ -91,29 +89,29 @@ function fakeStaffWebAuthnCeremony() {
 }
 
 function buildApp(options?: {
+  noSession?: boolean;
   population?: "customer" | "staff_partner";
-  hasAdminRole?: boolean;
-  mfaVerified?: boolean;
   kycGateway?: KycServiceGateway;
 }) {
   const sessions: SessionResolver = {
-    resolve: vi.fn().mockResolvedValue({
-      betterAuthUserId: "auth_actor",
-      providerSessionId: "session_actor",
-      population: options?.population ?? "staff_partner",
-    }),
+    resolve:
+      options?.noSession === true
+        ? vi.fn().mockResolvedValue(null)
+        : vi.fn().mockResolvedValue({
+            betterAuthUserId: "auth_customer",
+            providerSessionId: "session_customer",
+            population: options?.population ?? "customer",
+          }),
   };
   const accounts: AccountRepository = {
-    findByBetterAuthUserId: vi.fn().mockResolvedValue({
-      accountId: options?.population === "customer" ? "acct_customer" : "acct_founder",
-      status: "active",
-    }),
-    hasActiveStaffRole: vi.fn().mockResolvedValue(options?.hasAdminRole ?? true),
-    hasAnyActiveStaffRole: vi.fn().mockResolvedValue(options?.hasAdminRole ?? true),
+    findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_customer", status: "active" }),
+    hasActiveStaffRole: vi.fn().mockResolvedValue(false),
+    hasAnyActiveStaffRole: vi.fn().mockResolvedValue(false),
     provision: vi.fn(),
     syncVerifiedContactEmail: vi.fn(),
     getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
+  const kycGateway = options?.kycGateway ?? fakeKycServiceGateway();
 
   return {
     app: createApp({
@@ -128,80 +126,99 @@ function buildApp(options?: {
         accounts,
         sessions,
         originationRepository: fakeOriginationRepository(),
-        staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
+        staffWebAuthnRepository: fakeStaffWebAuthnRepository(),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
-        kyc: {
-          client: options?.kycGateway ?? fakeKycServiceGateway(),
-        },
+        kyc: { client: kycGateway },
       },
     }),
-    accounts,
+    kycGateway,
   };
 }
 
-describe("operations KYC decision display", () => {
-  it("denies the internal surface to a customer even if a role lookup would pass", async () => {
-    const { app, accounts } = buildApp({ population: "customer", hasAdminRole: true });
+describe("customer KYC API", () => {
+  it("requires an authenticated session", async () => {
+    const { app } = buildApp({ noSession: true });
 
-    const response = await request(app).get("/internal/v1/kyc-accounts/acct_reviewed");
+    const response = await request(app).get("/v1/kyc");
+
+    expect(response.status).toBe(401);
+    expect(response.body.code).toBe("authentication.required");
+  });
+
+  it("denies a staff session on the customer surface", async () => {
+    const { app } = buildApp({ population: "staff_partner" });
+
+    const response = await request(app).get("/v1/kyc");
 
     expect(response.status).toBe(403);
     expect(response.body.code).toBe("authorization.forbidden");
-    expect(accounts.hasActiveStaffRole).not.toHaveBeenCalled();
   });
 
-  it("denies staff without an active admin operations assignment", async () => {
-    const { app } = buildApp({ hasAdminRole: false });
+  it("resolves status using the session's own accountId, never anything client-supplied", async () => {
+    const { app, kycGateway } = buildApp();
 
-    const response = await request(app).get("/internal/v1/kyc-accounts/acct_reviewed");
-
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("authorization.forbidden");
-  });
-
-  it("denies an authorized reviewer until WebAuthn is verified for the session", async () => {
-    const { app } = buildApp({ mfaVerified: false });
-
-    const response = await request(app).get("/internal/v1/kyc-accounts/acct_reviewed");
-
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("authentication.staff_mfa_required");
-  });
-
-  it("returns the operational KYC record to an authorized, WebAuthn-verified reviewer", async () => {
-    const { app } = buildApp();
-
-    const response = await request(app).get("/internal/v1/kyc-accounts/acct_reviewed");
+    const response = await request(app).get("/v1/kyc");
 
     expect(response.status).toBe(200);
-    expect(response.headers["cache-control"]).toBe("no-store");
-    expect(response.body.data).toMatchObject({
-      account_id: "acct_reviewed",
-      eligibility_state: "pending_manual_review",
-      operational_substatus: "kyc_manual_review",
-      residence_country_code: "DE",
-      tax_residence_country_code: "HR",
-      ever_required_manual_review: true,
-    });
+    expect(kycGateway.getStatus).toHaveBeenCalledWith("acct_customer");
   });
 
-  it("reports 404 for an account with no KYC record", async () => {
+  it("starts a session using the session's own accountId, ignoring any account_id in the body", async () => {
+    const { app, kycGateway } = buildApp();
+
+    const response = await request(app)
+      .post("/v1/kyc/sessions")
+      .send({
+        residence_country_code: "DE",
+        tax_residence_country_code: "DE",
+        account_id: "acct_someone_else",
+      });
+
+    expect(response.status).toBe(201);
+    expect(kycGateway.startSession).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "acct_customer" }),
+    );
+  });
+
+  it("passes a gateway-reported business error through unchanged", async () => {
     const { app } = buildApp({
       kycGateway: fakeKycServiceGateway({
-        getAccountForOperations: vi.fn().mockRejectedValue(
+        startSession: vi.fn().mockRejectedValue(
           new AppError({
-            code: "identity.kyc_account_not_found",
-            title: "KYC record not found",
-            status: 404,
-            detail: "No KYC eligibility record was found for that account.",
+            code: "identity.kyc_session_unavailable",
+            title: "Identity verification session unavailable",
+            status: 409,
+            detail: "This account cannot start another identity verification session right now.",
           }),
         ),
       }),
     });
 
-    const response = await request(app).get("/internal/v1/kyc-accounts/acct_unknown");
+    const response = await request(app)
+      .post("/v1/kyc/sessions")
+      .send({ residence_country_code: "DE", tax_residence_country_code: "DE" });
 
-    expect(response.status).toBe(404);
-    expect(response.body.code).toBe("identity.kyc_account_not_found");
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("identity.kyc_session_unavailable");
+  });
+
+  it("reports the KYC service being unreachable as a 503, not a raw 500", async () => {
+    const { app } = buildApp({
+      kycGateway: fakeKycServiceGateway({
+        getStatus: vi.fn().mockRejectedValue(
+          new AppError({
+            code: "identity.kyc_service_unavailable",
+            title: "Identity verification unavailable",
+            status: 503,
+            detail: "The KYC service is temporarily unavailable.",
+          }),
+        ),
+      }),
+    });
+
+    const response = await request(app).get("/v1/kyc");
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe("identity.kyc_service_unavailable");
   });
 });

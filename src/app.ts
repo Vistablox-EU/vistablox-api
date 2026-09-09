@@ -149,16 +149,10 @@ import {
   PostOwnCaseMessageService,
 } from "./modules/origination/application/case-message.service.js";
 import type { OriginationRepository } from "./modules/origination/repository/origination.repository.js";
-import {
-  GetKycAccountForOperationsService,
-  GetKycStatusService,
-  StartProofOfAddressSessionService,
-  StartKycSessionService,
-} from "./modules/identity/application/kyc.service.js";
 import { createKycOperationsRouter } from "./modules/identity/api/kyc-operations.router.js";
 import type { DiditClient } from "./modules/identity/application/didit-client.js";
+import type { KycServiceGateway } from "./modules/identity/application/kyc-service-gateway.js";
 import { createKycRouter } from "./modules/identity/api/kyc.router.js";
-import type { KycRepository } from "./modules/identity/repository/kyc.repository.js";
 import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
 import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
 import { RegisterWalletService } from "./modules/investor-profile/application/register-wallet.service.js";
@@ -209,12 +203,7 @@ export interface AppDependencies {
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
     kyc?: {
-      repository: KycRepository;
-      didit: DiditClient;
-      workflowId: string;
-      callbackUrl: string;
-      proofOfAddressWorkflowId?: string;
-      invalidateDisplayProfile?: (accountId: string) => Promise<void>;
+      client: KycServiceGateway;
     };
     investorProfile?: {
       repository: InvestorProfileRepository;
@@ -513,34 +502,14 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     if (dependencies.protectedApi.kyc !== undefined) {
       const kyc = dependencies.protectedApi.kyc;
-      app.use(
-        "/v1/kyc",
-        createKycRouter(
-          requireAuthentication,
-          new GetKycStatusService(kyc.repository, kyc.didit),
-          new StartKycSessionService(kyc.repository, kyc.didit, {
-            workflowId: kyc.workflowId,
-            callbackUrl: kyc.callbackUrl,
-          }, undefined, kyc.invalidateDisplayProfile),
-          kyc.proofOfAddressWorkflowId === undefined
-            ? undefined
-            : new StartProofOfAddressSessionService(
-                kyc.repository,
-                kyc.didit,
-                {
-                  workflowId: kyc.proofOfAddressWorkflowId,
-                  callbackUrl: kyc.callbackUrl,
-                },
-              ),
-        ),
-      );
+      app.use("/v1/kyc", createKycRouter(requireAuthentication, kyc.client));
       app.use(
         "/internal/v1/kyc-accounts",
         createKycOperationsRouter(
           requireAuthentication,
           requireAdminOperations,
           requireStaffWebAuthn,
-          new GetKycAccountForOperationsService(kyc.repository),
+          kyc.client,
         ),
       );
     }

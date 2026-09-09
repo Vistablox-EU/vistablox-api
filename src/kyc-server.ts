@@ -10,22 +10,26 @@ import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { createKycApp } from "./kyc-app.js";
 import {
+  GetKycAccountForOperationsService,
+  GetKycStatusService,
   ProcessDiditWebhookService,
   ReceiveDiditWebhookService,
+  StartKycSessionService,
+  StartProofOfAddressSessionService,
 } from "./modules/identity/application/kyc.service.js";
 import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
+import { InternalApiSignatureVerifier } from "./modules/identity/infrastructure/internal-api-signature.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 
-// Standalone deployable owning only the Didit webhook (receive, verify,
-// durably enqueue, and process) -- Phase 2 of the KYC microservicing effort
-// following PR #34's KycEligibilityReader boundary. /v1/kyc (session
-// start/status), /internal/v1/kyc-accounts (staff review), and
-// KycEligibility itself deliberately stay in vistablox-api/vistablox-worker
-// for now: this service never creates a Didit session or authenticates a
-// customer/staff caller, so it doesn't need DIDIT_CALLBACK_URL or any
-// session-resolution capability, only what verifying and applying an
-// already-created session's outcome requires.
+// Standalone deployable owning the whole KYC domain: the Didit webhook
+// (receive, verify, durably enqueue, and process -- Phase 2), and session
+// creation/status plus staff lookups (Phase 4) -- KycEligibility itself
+// lives only here now. vistablox-api reaches /v1/kyc and
+// /internal/v1/kyc-accounts through HttpKycServiceClient, an internal,
+// signature-verified call over the compose-internal network -- it already
+// did all session/WebAuthn auth before calling in, so nothing here
+// re-verifies that; see kyc-internal.router.ts's own comment.
 
 const environment = loadKycEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
@@ -42,12 +46,12 @@ const diditClient = new HttpDiditClient({
   timeoutMs: 4_000,
 });
 const webhookVerifier = new DiditWebhookVerifier(environment.DIDIT_WEBHOOK_SECRET);
+const internalApiVerifier = new InternalApiSignatureVerifier(environment.INTERNAL_KYC_API_SECRET);
 
 // Mirrors server.ts/worker.ts's own best-effort protected-profile-cache
-// wiring: this process now owns the only code path that invalidates that
-// cache on a KYC state change, so it needs the same optional Redis
-// capability those processes already had, to preserve that behavior
-// unchanged now that webhook processing lives here instead.
+// wiring: this process now owns every code path that invalidates that
+// cache on a KYC state change (both the webhook and session creation), so
+// it needs the same optional Redis capability those processes already had.
 const profileCacheClient =
   environment.PROFILE_CACHE_URL === undefined
     ? undefined
@@ -72,6 +76,19 @@ const protectedProfileCache =
   profileCacheClient?.isReady === true
     ? new RedisProtectedProfileCache(profileCacheClient)
     : undefined;
+const invalidateDisplayProfile =
+  protectedProfileCache === undefined
+    ? undefined
+    : async (accountId: string) => {
+        try {
+          await protectedProfileCache.delete(accountId);
+        } catch (error) {
+          logger.warn(
+            { err: error, account_id: accountId },
+            "protected display profile cache invalidation failed",
+          );
+        }
+      };
 
 const processDiditWebhook = new ProcessDiditWebhookService(
   kycRepository,
@@ -84,19 +101,24 @@ const processDiditWebhook = new ProcessDiditWebhookService(
       ? {}
       : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),
   },
-  protectedProfileCache === undefined
-    ? undefined
-    : async (accountId: string) => {
-        try {
-          await protectedProfileCache.delete(accountId);
-        } catch (error) {
-          logger.warn(
-            { err: error, account_id: accountId },
-            "protected display profile cache invalidation failed",
-          );
-        }
-      },
+  invalidateDisplayProfile,
 );
+const getStatus = new GetKycStatusService(kycRepository, diditClient);
+const startSession = new StartKycSessionService(
+  kycRepository,
+  diditClient,
+  { workflowId: environment.DIDIT_WORKFLOW_ID, callbackUrl: environment.DIDIT_CALLBACK_URL },
+  undefined,
+  invalidateDisplayProfile,
+);
+const startProofOfAddressSession =
+  environment.DIDIT_POA_WORKFLOW_ID === undefined
+    ? undefined
+    : new StartProofOfAddressSessionService(kycRepository, diditClient, {
+        workflowId: environment.DIDIT_POA_WORKFLOW_ID,
+        callbackUrl: environment.DIDIT_CALLBACK_URL,
+      });
+const getAccountForOperations = new GetKycAccountForOperationsService(kycRepository);
 
 await boss.start();
 // createQueue is ON CONFLICT DO NOTHING -- same convention server.ts/
@@ -129,6 +151,11 @@ const app = createKycApp({
   logger,
   webhookVerifier,
   receiveWebhook: new ReceiveDiditWebhookService(kycRepository),
+  internalApiVerifier,
+  getStatus,
+  startSession,
+  startProofOfAddressSession,
+  getAccountForOperations,
 });
 
 const server = app.listen(environment.PORT, environment.HOST, () => {

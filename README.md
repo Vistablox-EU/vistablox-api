@@ -101,13 +101,13 @@ npm run dev
 
 `DATABASE_URL` is the runtime connection; `DIRECT_DATABASE_URL` is the connection Prisma migrations use. Locally these are the same local instance (`.env.example`'s defaults already point at one, matching `prisma.config.ts`'s own local-dev fallback role); in production they instead point at Neon's pooled and direct connections respectively (`DEPLOYMENT_TOPOLOGY.md`).
 
-Didit baseline KYC remains disabled unless the required `DIDIT_*` values in `.env.example` are configured together. `DIDIT_POA_WORKFLOW_ID` independently enables the owner-only hosted address workflow. `PROFILE_CACHE_URL` enables the short-lived Didit-verified display-name cache; the profile route remains available and omits names when the cache is absent or unavailable. The callback URL is the frontend destination Didit uses after either hosted verification flow. The provider webhook destination, `/webhooks/didit`, is served by the separate KYC service below, not this API. See [`docs/didit-kyc.md`](docs/didit-kyc.md) and [`docs/investor-profile.md`](docs/investor-profile.md) for the reviewed workflows and data boundaries, and [`docs/kyc-eligibility-read-model.md`](docs/kyc-eligibility-read-model.md) for the (not built, design-only) plan for how origination/offering/investor-profile would keep reading eligibility if `KycEligibility` itself ever moves too.
+`/v1/kyc` and `/internal/v1/kyc-accounts` are this API's own routes (session/WebAuthn enforcement unchanged), but forward internally to the standalone KYC service below for everything else — this API's own Didit usage is account recovery's re-verification flow alone now, disabled unless `DIDIT_API_KEY`/`DIDIT_WORKFLOW_ID`/`DIDIT_CALLBACK_URL` are configured together. `KYC_SERVICE_URL`/`INTERNAL_KYC_API_SECRET` are required outright (not optional-together) for the forwarding itself to work at all. `PROFILE_CACHE_URL` enables the short-lived Didit-verified display-name cache; the profile route remains available and omits names when the cache is absent or unavailable. The provider webhook destination, `/webhooks/didit`, is served by the KYC service directly, never reaching this API. See [`docs/didit-kyc.md`](docs/didit-kyc.md) and [`docs/investor-profile.md`](docs/investor-profile.md) for the reviewed workflows and data boundaries, and [`docs/kyc-eligibility-read-model.md`](docs/kyc-eligibility-read-model.md) for the (not built, design-only) plan for how origination/offering/investor-profile would keep reading eligibility if `KycEligibility` itself ever moves too.
 
 `RATE_LIMIT_CACHE_URL` enables the general-purpose `/v1` rate limiter (it may point at the same Redis/Valkey deployment as `PROFILE_CACHE_URL`); requests are allowed through unmetered, not blocked, while it is absent or unavailable.
 
 The scheduled-job worker is a separate process from the API and must be started alongside it for reminders/expiry to run: `npm run worker:dev` locally, `npm run worker:start` against a build. It shares `DATABASE_URL`/SMTP configuration with the API; it also loads the same environment schema as the API, so it requires but never uses `BETTER_AUTH_SECRET`, but needs no worker-specific environment variables of its own.
 
-The KYC service (`npm run kyc:dev` locally, `npm run kyc:start` against a build) is a third, standalone process owning only the Didit webhook — receive, verify, durably enqueue, and process. It's the first step of splitting KYC out of this monolith: `/v1/kyc` and `/internal/v1/kyc-accounts` stay on the main API for now (see `src/kyc-server.ts`'s own comment for why), and it reads the same `KycEligibility` table on the same Postgres instance, just through its own small environment schema (`src/config/kyc-environment.ts`) rather than the API's — every `DIDIT_*` value it needs is required outright (no "KYC disabled" mode), and it doesn't need `DIDIT_CALLBACK_URL` at all, since it never creates a session.
+The KYC service (`npm run kyc:dev` locally, `npm run kyc:start` against a build) is a third, standalone process owning the whole KYC domain: the Didit webhook, session creation/status, and staff lookups — `KycEligibility` itself lives only here now, on the same Postgres instance, through its own small environment schema (`src/config/kyc-environment.ts`) rather than the API's; every `DIDIT_*` value it needs is required outright (no "KYC disabled" mode). The main API reaches it only through `HttpKycServiceClient`, an internal, HMAC-signed call (`src/modules/identity/infrastructure/internal-api-signature.ts`) over the compose-internal network (`KYC_SERVICE_URL`/`INTERNAL_KYC_API_SECRET`) — the API already did all session/WebAuthn auth before calling in, so the KYC service re-verifies none of it, only that the caller holds the matching signing secret. See [`docs/didit-kyc.md`](docs/didit-kyc.md) for the full request flow.
 
 ## Docker
 
@@ -228,13 +228,17 @@ The main API's surface. The separate KYC service has its own, much smaller surfa
 
 All errors follow the documented envelope: `type`, `code`, `title`, `status`, `detail`, `trace_id`, and optional `field_errors`.
 
-The KYC service's own surface (`src/kyc-server.ts`):
+The KYC service's own surface (`src/kyc-server.ts`). The `/internal/kyc/*` routes are signature-verified (`INTERNAL_KYC_API_SECRET`), not session-authenticated — reachable only from the main API's `HttpKycServiceClient`, never intended to be called directly:
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `GET` | `/health/live` | Process liveness; does not query dependencies |
 | `GET` | `/health/ready` | Readiness; verifies PostgreSQL connectivity |
 | `POST` | `/webhooks/didit` | Authenticate and idempotently process Didit status/data webhooks |
+| `GET` | `/internal/kyc/status?account_id=...` | Backs the main API's `GET /v1/kyc` |
+| `POST` | `/internal/kyc/sessions` | Backs the main API's `POST /v1/kyc/sessions` |
+| `POST` | `/internal/kyc/proof-of-address/sessions` | Backs the main API's `POST /v1/kyc/proof-of-address/sessions`; reports a structured error if this deployment has no proof-of-address workflow configured |
+| `GET` | `/internal/kyc/accounts/:account_id` | Backs the main API's `GET /internal/v1/kyc-accounts/:account_id` |
 
 ## Database notes
 

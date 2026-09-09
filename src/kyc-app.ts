@@ -5,9 +5,17 @@ import type { Logger } from "pino";
 
 import type { DatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createHealthRouter } from "./modules/health/health.router.js";
+import { createKycInternalRouter } from "./modules/identity/api/kyc-internal.router.js";
 import { createDiditWebhookRouter } from "./modules/identity/api/kyc.router.js";
-import type { ReceiveDiditWebhookService } from "./modules/identity/application/kyc.service.js";
+import type {
+  GetKycAccountForOperationsService,
+  GetKycStatusService,
+  ReceiveDiditWebhookService,
+  StartKycSessionService,
+  StartProofOfAddressSessionService,
+} from "./modules/identity/application/kyc.service.js";
 import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
+import type { InternalApiSignatureVerifier } from "./modules/identity/infrastructure/internal-api-signature.js";
 import { errorHandler } from "./shared/http/error-handler.js";
 import { requestContext } from "./shared/http/request-context.js";
 
@@ -21,6 +29,11 @@ export interface KycAppDependencies {
   logger: Logger;
   webhookVerifier: DiditWebhookVerifier;
   receiveWebhook: ReceiveDiditWebhookService;
+  internalApiVerifier: InternalApiSignatureVerifier;
+  getStatus: GetKycStatusService;
+  startSession: StartKycSessionService;
+  startProofOfAddressSession: StartProofOfAddressSessionService | undefined;
+  getAccountForOperations: GetKycAccountForOperationsService;
 }
 
 export function createKycApp(dependencies: KycAppDependencies): Express {
@@ -45,6 +58,20 @@ export function createKycApp(dependencies: KycAppDependencies): Express {
   app.use(
     "/webhooks/didit",
     createDiditWebhookRouter(dependencies.webhookVerifier, dependencies.receiveWebhook),
+  );
+  // Reached only by vistablox-api's HttpKycServiceClient over the
+  // compose-internal network -- see kyc-internal.router.ts's own comment
+  // for the trust model (signature-verified, not session-authenticated;
+  // there's no Better Auth/WebAuthn here at all).
+  app.use(
+    "/internal/kyc",
+    createKycInternalRouter(
+      dependencies.internalApiVerifier,
+      dependencies.getStatus,
+      dependencies.startSession,
+      dependencies.startProofOfAddressSession,
+      dependencies.getAccountForOperations,
+    ),
   );
 
   app.use(errorHandler);

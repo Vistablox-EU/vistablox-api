@@ -88,6 +88,7 @@ services:
       DATABASE_URL: postgresql://vistablox:vistablox@postgres:5432/vistablox
       PROFILE_CACHE_URL: redis://cache:6379
       RATE_LIMIT_CACHE_URL: redis://cache:6379
+      KYC_SERVICE_URL: http://kyc:3000
       BETTER_AUTH_URL: http://localhost:3000
       AUTH_TRUSTED_ORIGINS: http://localhost:3000
       SMTP_HOST: mailpit
@@ -139,9 +140,14 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  # Owns only the Didit webhook (KYC microservicing Phase 2) -- reuses the
-  # worker build stage's image via a `command:` override rather than a
-  # dedicated build stage, since the image is otherwise identical.
+  # Owns the whole KYC domain (the Didit webhook, session creation/status,
+  # staff lookups -- KYC microservicing effort) -- reuses the worker build
+  # stage's image via a `command:` override rather than a dedicated build
+  # stage, since the image is otherwise identical. Its DIDIT_*/
+  # INTERNAL_KYC_API_SECRET values come from .env via env_file below, same
+  # as api/worker's do -- only DATABASE_URL/PROFILE_CACHE_URL need the
+  # compose-network override, since those two point at a different host
+  # (postgres/cache's service names) than a real deployment would use.
   kyc:
     build:
       context: .

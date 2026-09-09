@@ -4,9 +4,11 @@ This slice implements the baseline B2C workflow described in the backend design 
 
 ## Runtime flow
 
+`/v1/kyc` and `/internal/v1/kyc-accounts` are still this API's own public routes — the URL surface and session/WebAuthn enforcement haven't changed. What changed is where the business logic and `KycEligibility` itself live: this API authenticates the caller exactly as before, then forwards to the standalone KYC service (`src/kyc-server.ts`) over an internal, signature-verified call (`HttpKycServiceClient` / `kyc-internal.router.ts`) rather than handling the request in-process. The KYC service trusts that forwarded call entirely — it has no Better Auth session or WebAuthn verification of its own, by design; see [`kyc-eligibility-read-model.md`](kyc-eligibility-read-model.md) for the unrelated, still-undone question of whether `KycEligibility` itself ever needs to move again.
+
 1. An authenticated customer calls `POST /v1/kyc/sessions` with ISO 3166-1 alpha-2 residence and tax-residence declarations.
-2. VistaBlox reserves a local session start, then creates a Didit v3 hosted session. The VistaBlox `account_id` is opaque `vendor_data`; a unique local start ID is provider metadata.
-3. Didit sends `status.updated` or `data.updated` to `POST /webhooks/didit`.
+2. This API forwards the request (with the account ID resolved from the customer's own session, never anything client-supplied) to the KYC service, which reserves a local session start and creates a Didit v3 hosted session. The VistaBlox `account_id` is opaque `vendor_data`; a unique local start ID is provider metadata.
+3. Didit sends `status.updated` or `data.updated` to `POST /webhooks/didit`, served directly by the KYC service (this API never sees this call at all).
 4. VistaBlox verifies `X-Signature-V2` and the five-minute timestamp window, then durably enqueues the verified body and acknowledges immediately (`AD-062`/`ASYNC_JOBS.md`'s Webhook Handling Rule: "workers, not synchronous HTTP request handlers, own the heavy business processing") — the handler itself never calls Didit or touches eligibility state.
 5. The `provider_events.didit_webhook` job — consumed by the standalone KYC service (`src/kyc-server.ts`), not this API or its worker — processes that event: it correlates application/environment/workflow/session/account, deduplicates `event_id`, and — for decision-bearing statuses — fetches the current decision from Didit before applying local policy. It does not trust redirect parameters or a webhook status alone. A retried or duplicate-delivered job is a safe no-op, the same `event_id` deduplication already covered a synchronous redelivery before this change.
 
@@ -34,21 +36,13 @@ Deliberately not built: alerting. `AD-089`'s alert-source list scopes `pg-boss` 
 
 ## Configuration
 
-This API (session creation/status, `/v1/kyc`) and the standalone KYC service (`src/kyc-server.ts`, the Didit webhook) load separate environment schemas (`src/config/environment.ts` and `src/config/kyc-environment.ts`) and are configured independently.
+This API and the standalone KYC service (`src/kyc-server.ts`) load separate environment schemas (`src/config/environment.ts` and `src/config/kyc-environment.ts`) and are configured independently — `/v1/kyc`/`/internal/v1/kyc-accounts` existing on this API doesn't mean this API still does any KYC-specific Didit configuration; that moved with the business logic.
 
-This API: configure all of these values together or leave all of them empty to disable the integration:
+This API's own Didit usage is account recovery's alone now (a separate, unrelated re-verification flow — see [`account-recovery.md`](account-recovery.md)): configure `DIDIT_API_KEY`, `DIDIT_WORKFLOW_ID`, and `DIDIT_CALLBACK_URL` together, or leave them all empty to disable it. `DIDIT_API_BASE_URL` defaults to `https://verification.didit.me`. It also needs `KYC_SERVICE_URL` (where the KYC service is reachable — a compose-internal hostname in this deployment, not a public one) and `INTERNAL_KYC_API_SECRET` (signs/verifies the internal forwarding calls above, must match the KYC service's own copy of the same value) — both required outright, since `/v1/kyc` isn't an optional feature.
 
-- `DIDIT_API_KEY`
-- `DIDIT_WORKFLOW_ID`
-- `DIDIT_CALLBACK_URL`
-- `DIDIT_APPLICATION_ID`
-- `DIDIT_ENVIRONMENT` (`sandbox` or `live`)
+The KYC service has no "disabled" mode either — every value it needs is required outright: `DIDIT_API_KEY`, `DIDIT_WORKFLOW_ID`, `DIDIT_CALLBACK_URL`, `DIDIT_WEBHOOK_SECRET`, `DIDIT_APPLICATION_ID`, `DIDIT_ENVIRONMENT`, `INTERNAL_KYC_API_SECRET`. Unlike Phase 2 (webhook-only), it now creates sessions itself, so it needs `DIDIT_CALLBACK_URL` too.
 
-`DIDIT_API_BASE_URL` defaults to `https://verification.didit.me`.
-
-The KYC service has no "disabled" mode — every value it needs is required outright: `DIDIT_API_KEY`, `DIDIT_WORKFLOW_ID`, `DIDIT_WEBHOOK_SECRET`, `DIDIT_APPLICATION_ID`, `DIDIT_ENVIRONMENT`. It doesn't use `DIDIT_CALLBACK_URL` at all — it never creates a session, only verifies and processes webhooks for sessions this API already created.
-
-`DIDIT_POA_WORKFLOW_ID` is optional and enables the separate owner proof-of-address route. That workflow must contain a Proof of Address feature and enforce the supported document types and three-month maximum document age.
+`DIDIT_POA_WORKFLOW_ID` (KYC service only) is optional and enables the separate owner proof-of-address route. That workflow must contain a Proof of Address feature and enforce the supported document types and three-month maximum document age. Unconfigured, `POST /v1/kyc/proof-of-address/sessions` still exists on this API (it always does now, regardless of configuration) but reports a structured "not configured" error from the KYC service rather than this API 404ing the route itself.
 
 The baseline Didit workflow must include government-ID verification, liveness, face match, and AML screening. The local policy additionally requires age 18 or older and both declared residence countries to be in the documented EU/EEA allowlist. A successful baseline decision uses `kyc_verified_owner_poa_missing` until the separate proof-of-address workflow is complete, and renews after 24 months for a low-risk account or 12 months for one that has ever resolved to `kyc_manual_review` (`ever_required_manual_review`, latched permanently the first time that happens, per `KYC_WORKFLOW.md`'s Renewal Policy). Approved proof-of-address evidence must match the declared residence country and remains current only until three calendar months after its document issue date.
 
@@ -60,7 +54,7 @@ The Didit adapter temporarily projects the fetched response in memory to the min
 
 ## Operations review
 
-`GET /internal/v1/kyc-accounts/:account_id` gives an authorized operations reviewer (`admin_operations` role, verified staff WebAuthn — the same gate as founder origination review) a read of one account's full operational eligibility record: `eligibility_state` and the more granular `operational_substatus`, the Didit provider reference, declared residence/tax-residence countries, and the equivalent proof-of-address fields. This is the same already-persisted, already privacy-minimized record the customer's own `GET /v1/kyc` reads from — never raw Didit artifacts (documents, biometrics, full provider payloads), which the data boundary above never persists in the first place. An `account_id` with no KYC record at all reports `404` rather than a synthesized "not started" response, since an arbitrary staff-supplied ID might just be a typo.
+`GET /internal/v1/kyc-accounts/:account_id` gives an authorized operations reviewer (`admin_operations` role, verified staff WebAuthn — the same gate as founder origination review, enforced on this API exactly as before) a read of one account's full operational eligibility record: `eligibility_state` and the more granular `operational_substatus`, the Didit provider reference, declared residence/tax-residence countries, and the equivalent proof-of-address fields. This API forwards the already-authorized lookup to the KYC service internally; the record itself is the same already-persisted, already privacy-minimized one the customer's own `GET /v1/kyc` reads from — never raw Didit artifacts (documents, biometrics, full provider payloads), which the data boundary above never persists in the first place. An `account_id` with no KYC record at all reports `404` rather than a synthesized "not started" response, since an arbitrary staff-supplied ID might just be a typo.
 
 ## Follow-on work
 
