@@ -1,9 +1,11 @@
 import "dotenv/config";
 
 import { PgBoss } from "pg-boss";
+import { createClient } from "redis";
 import { ulid } from "ulid";
 
 import { loadEnvironment } from "./config/environment.js";
+import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
@@ -13,8 +15,14 @@ import {
 } from "./modules/origination/application/case-timer.service.js";
 import { TransitionCaseToPostIpoStructuringService } from "./modules/origination/application/post-ipo-structuring-handoff.service.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
-import { PrismaOriginationKycProjectionRepository } from "./modules/origination/repository/prisma-origination-kyc-projection.repository.js";
-import type { KycEligibilitySnapshot } from "./modules/identity/repository/kyc-eligibility-reader.js";
+import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
+import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
+import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
+import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
+import {
+  ExpireStuckSessionCreationsService,
+  ReconcileStuckOpenSessionsService,
+} from "./modules/identity/application/kyc-stuck-session.service.js";
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
@@ -22,8 +30,6 @@ import { CommitOfferingFinalizationService } from "./modules/offering/applicatio
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
 import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
-import { PrismaOfferingKycProjectionRepository } from "./modules/offering/repository/prisma-offering-kyc-projection.repository.js";
-import { PrismaInvestorProfileKycProjectionRepository } from "./modules/investor-profile/repository/prisma-investor-profile-kyc-projection.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { CalculateOperatingDistributionService } from "./modules/rental/application/calculate-operating-distribution.service.js";
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
@@ -51,24 +57,76 @@ boss.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
 });
 
-// Phase 7: origination's, offering's, and investor-profile's own local,
-// event-driven copies of KycEligibility (docs/kyc-eligibility-read-model.md)
-// -- PrismaKycRepository is gone from this file entirely now: neither this
-// file's own jobs nor origination's/offering's repositories read
-// identity.kyc_eligibility directly any more. Read side: getEligibilitySnapshot
-// below, unchanged from each repository's own perspective (investor-profile's
-// own repository reads this same projection, but is constructed in
-// server.ts, not here -- this file only owns this projection's write side,
-// same as it owns origination's/offering's). Write side: applyEvent/
-// reconcile, wired into <domain>.kyc_eligibility_apply/
-// <domain>.kyc_eligibility_reconcile further down -- investor-profile's own
-// pair is this file's first background-job presence for that module.
-const originationKycProjection = new PrismaOriginationKycProjectionRepository(database);
-const offeringKycProjection = new PrismaOfferingKycProjectionRepository(database);
-const investorProfileKycProjection = new PrismaInvestorProfileKycProjectionRepository(database);
+// origination/offering read identity.kyc_eligibility directly via a shared
+// PrismaKycRepository.
+const kycRepository = new PrismaKycRepository(database, boss);
+// Unconditional -- Didit config has no disabled mode any more (Stage 4).
+const diditClient = new HttpDiditClient({
+  baseUrl: environment.DIDIT_API_BASE_URL,
+  apiKey: environment.DIDIT_API_KEY,
+  timeoutMs: 4_000,
+});
+const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
+const expireStuckSessionCreations = new ExpireStuckSessionCreationsService(kycRepository);
+const reconcileStuckOpenSessions = new ReconcileStuckOpenSessionsService(kycRepository, diditClient);
+// Mirrors server.ts's own best-effort protected-profile-cache wiring, a
+// separate client on the same PROFILE_CACHE_URL Redis instance -- this
+// process needs its own copy of it only so ProcessDiditWebhookService's
+// invalidation-on-KYC-change (below) still runs from wherever the webhook
+// itself is now processed, exactly as it did in src/kyc-server.ts before.
+const profileCacheClient =
+  environment.PROFILE_CACHE_URL === undefined
+    ? undefined
+    : createClient({
+        url: environment.PROFILE_CACHE_URL,
+        socket: { connectTimeout: 3_000, reconnectStrategy: false },
+      });
+profileCacheClient?.on("error", (error) => {
+  logger.warn({ err: error }, "protected profile cache connection error");
+});
+if (profileCacheClient !== undefined) {
+  try {
+    await profileCacheClient.connect();
+  } catch (error) {
+    logger.warn(
+      { err: error },
+      "protected profile cache unavailable; display-name invalidation on KYC events will be skipped",
+    );
+  }
+}
+const protectedProfileCache =
+  profileCacheClient?.isReady === true
+    ? new RedisProtectedProfileCache(profileCacheClient)
+    : undefined;
+const invalidateDisplayProfile =
+  protectedProfileCache === undefined
+    ? undefined
+    : async (accountId: string) => {
+        try {
+          await protectedProfileCache.delete(accountId);
+        } catch (error) {
+          logger.warn(
+            { err: error, account_id: accountId },
+            "protected display profile cache invalidation failed",
+          );
+        }
+      };
+const processDiditWebhook = new ProcessDiditWebhookService(
+  kycRepository,
+  diditClient,
+  {
+    workflowId: environment.DIDIT_WORKFLOW_ID,
+    applicationId: environment.DIDIT_APPLICATION_ID,
+    environment: environment.DIDIT_ENVIRONMENT,
+    ...(environment.DIDIT_POA_WORKFLOW_ID === undefined
+      ? {}
+      : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),
+  },
+  invalidateDisplayProfile,
+);
 
-const offeringRepository = new PrismaOfferingRepository(database, boss, offeringKycProjection);
-const originationRepository = new PrismaOriginationRepository(database, boss, originationKycProjection);
+const offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
+const originationRepository = new PrismaOriginationRepository(database, boss, kycRepository);
 const sendApplicantReminders = new SendApplicantResponseRemindersService(
   originationRepository,
   emailSender,
@@ -147,20 +205,6 @@ async function runJob(name: string, run: (traceId: string) => Promise<JobRunSumm
   }
 }
 
-// Shared by every identity.kyc_eligibility_changed subscriber below (Phase
-// 7): the published payload is always a KycEligibilitySnapshot plus the
-// trace_id publishTransactionalEvent injects (enqueue-job.ts) -- split them
-// apart once here rather than at each of origination's/offering's/
-// investor-profile's own apply handlers.
-function parseEligibilityChangedEvent(data: unknown): {
-  snapshot: KycEligibilitySnapshot;
-  traceId: string;
-} {
-  const record = data as KycEligibilitySnapshot & { trace_id?: unknown };
-  const { trace_id, ...snapshot } = record;
-  return { snapshot, traceId: typeof trace_id === "string" ? trace_id : "unknown" };
-}
-
 await boss.start();
 
 // pg-boss v12 requires a queue to exist (queue.name has a foreign key from
@@ -190,24 +234,16 @@ if (openIpoEscrowCampaign !== undefined) {
 if (finalizeIpoEscrowCampaigns !== undefined) {
   await boss.createQueue("settlement.finalize_ipo_escrow_campaigns");
 }
-// Phase 7: origination's own event-driven KYC eligibility projection --
-// see docs/kyc-eligibility-read-model.md. _apply applies one
-// identity.kyc_eligibility_changed event at a time (subscribed below);
-// _reconcile is both the cold-start backfill and the ongoing staleness
-// backstop for whatever _apply missed.
-await boss.createQueue("origination.kyc_eligibility_apply");
-await boss.createQueue("origination.kyc_eligibility_reconcile");
-await boss.createQueue("offering.kyc_eligibility_apply");
-await boss.createQueue("offering.kyc_eligibility_reconcile");
-await boss.createQueue("investor_profile.kyc_eligibility_apply");
-await boss.createQueue("investor_profile.kyc_eligibility_reconcile");
-// subscribe is ON CONFLICT (event, name) DO UPDATE -- the same
-// idempotent-on-every-start convention createQueue already establishes here,
-// just pg-boss's own publish/subscribe primitive instead. Static ops config,
-// not something that changes at runtime.
-await boss.subscribe("identity.kyc_eligibility_changed", "origination.kyc_eligibility_apply");
-await boss.subscribe("identity.kyc_eligibility_changed", "offering.kyc_eligibility_apply");
-await boss.subscribe("identity.kyc_eligibility_changed", "investor_profile.kyc_eligibility_apply");
+// Reversal (undoing the KYC microservice split): identity's own scheduled
+// jobs, back in this worker alongside everything else -- these used to
+// live only in src/kyc-server.ts.
+await boss.createQueue("maintenance.kyc_renewal");
+await boss.createQueue("maintenance.kyc_stuck_session_expiry");
+await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
+// Reversal (undoing the KYC microservice split): the Didit webhook's own
+// consumer, back in this worker -- used to live only in src/kyc-server.ts.
+// The webhook itself is received and durably enqueued by server.ts/app.ts.
+await boss.createQueue("provider_events.didit_webhook");
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
   tz: "UTC",
@@ -267,39 +303,21 @@ if (runOperatingDistributionSweep !== undefined) {
     ...RETRY_OPTIONS,
   });
 }
-// Hourly, matching maintenance.kyc_stuck_session_expiry's own "generous
-// headroom" precedent -- origination has no read path where staleness
-// touches money, unlike offering's own copy of this job just below.
-await boss.schedule("origination.kyc_eligibility_reconcile", "0 * * * *", null, {
+await boss.schedule("maintenance.kyc_renewal", "0 9 * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
-// Every 5 minutes, not hourly like origination's copy above: this is the
-// one projection on CreateReservationService's path, where the
-// degraded-case staleness bound (a stuck subscriber, falling back to this
-// reconcile job) actually touches money -- see
-// docs/kyc-eligibility-read-model.md's consistency-model discussion. Made
-// affordable at this cadence by reconcile's own diff-then-write design
-// (nearly all reads once a projection is in sync), not by anything specific
-// to offering.
-await boss.schedule("offering.kyc_eligibility_reconcile", "*/5 * * * *", null, {
+// Hourly is generous headroom either side of both thresholds this pair
+// checks against (15 minutes for a stuck session creation, an hour before
+// the first reconciliation re-check of a stuck open session).
+await boss.schedule("maintenance.kyc_stuck_session_expiry", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
-// Hourly, same reasoning as origination's own copy above -- no read path
-// here where staleness touches money the way offering's does.
-await boss.schedule("investor_profile.kyc_eligibility_reconcile", "0 * * * *", null, {
+await boss.schedule("maintenance.kyc_stuck_session_reconciliation", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
-// One immediate run of each at every worker start, in addition to their own
-// schedules above -- cold-start backfill (an empty projection table)
-// shouldn't have to wait for the first scheduled tick. Cheap on every other
-// start too: reconcile is diff-then-write, so an already-synced table is
-// nearly all reads.
-await boss.send("origination.kyc_eligibility_reconcile", {}, RETRY_OPTIONS);
-await boss.send("offering.kyc_eligibility_reconcile", {}, RETRY_OPTIONS);
-await boss.send("investor_profile.kyc_eligibility_reconcile", {}, RETRY_OPTIONS);
 
 await boss.work("case_timers.applicant_reminders", async () => {
   await runJob("case_timers.applicant_reminders", () => sendApplicantReminders.execute());
@@ -458,74 +476,39 @@ await boss.work("case_timers.post_ipo_structuring_handoff", async (jobs) => {
     }
   }
 });
-
-// This job's trace_id is the originating write's own (the KYC service's),
-// carried through publishTransactionalEvent -- not a freshly minted one,
-// same reasoning as case_timers.pre_offering_open_handoff above.
-await boss.work("origination.kyc_eligibility_apply", async (jobs) => {
-  for (const job of jobs) {
-    const { snapshot, traceId } = parseEligibilityChangedEvent(job.data);
-    try {
-      const summary = await originationKycProjection.applyEvent(snapshot);
-      logger.info(
-        { trace_id: traceId, job: "origination.kyc_eligibility_apply", ...summary },
-        "case timer job completed",
-      );
-    } catch (error) {
-      logger.error(
-        { err: error, trace_id: traceId, job: "origination.kyc_eligibility_apply" },
-        "case timer job failed",
-      );
-      throw error;
-    }
-  }
+await boss.work("maintenance.kyc_renewal", async () => {
+  await runJob("maintenance.kyc_renewal", (traceId) => runKycRenewalTimer.execute(traceId));
 });
-await boss.work("origination.kyc_eligibility_reconcile", async () => {
-  await runJob("origination.kyc_eligibility_reconcile", () => originationKycProjection.reconcile());
-});
-await boss.work("offering.kyc_eligibility_apply", async (jobs) => {
-  for (const job of jobs) {
-    const { snapshot, traceId } = parseEligibilityChangedEvent(job.data);
-    try {
-      const summary = await offeringKycProjection.applyEvent(snapshot);
-      logger.info(
-        { trace_id: traceId, job: "offering.kyc_eligibility_apply", ...summary },
-        "case timer job completed",
-      );
-    } catch (error) {
-      logger.error(
-        { err: error, trace_id: traceId, job: "offering.kyc_eligibility_apply" },
-        "case timer job failed",
-      );
-      throw error;
-    }
-  }
-});
-await boss.work("offering.kyc_eligibility_reconcile", async () => {
-  await runJob("offering.kyc_eligibility_reconcile", () => offeringKycProjection.reconcile());
-});
-await boss.work("investor_profile.kyc_eligibility_apply", async (jobs) => {
-  for (const job of jobs) {
-    const { snapshot, traceId } = parseEligibilityChangedEvent(job.data);
-    try {
-      const summary = await investorProfileKycProjection.applyEvent(snapshot);
-      logger.info(
-        { trace_id: traceId, job: "investor_profile.kyc_eligibility_apply", ...summary },
-        "case timer job completed",
-      );
-    } catch (error) {
-      logger.error(
-        { err: error, trace_id: traceId, job: "investor_profile.kyc_eligibility_apply" },
-        "case timer job failed",
-      );
-      throw error;
-    }
-  }
-});
-await boss.work("investor_profile.kyc_eligibility_reconcile", async () => {
-  await runJob("investor_profile.kyc_eligibility_reconcile", () =>
-    investorProfileKycProjection.reconcile(),
+await boss.work("maintenance.kyc_stuck_session_expiry", async () => {
+  await runJob("maintenance.kyc_stuck_session_expiry", (traceId) =>
+    expireStuckSessionCreations.execute(traceId),
   );
+});
+await boss.work("maintenance.kyc_stuck_session_reconciliation", async () => {
+  await runJob("maintenance.kyc_stuck_session_reconciliation", (traceId) =>
+    reconcileStuckOpenSessions.execute(traceId),
+  );
+});
+await boss.work("provider_events.didit_webhook", async (jobs) => {
+  for (const job of jobs) {
+    const traceId =
+      typeof job.data === "object" && job.data !== null && "traceId" in job.data
+        ? String((job.data as { traceId: unknown }).traceId)
+        : "unknown";
+    try {
+      const result = await processDiditWebhook.execute(job.data);
+      logger.info(
+        { trace_id: traceId, job: "provider_events.didit_webhook", ...result },
+        "webhook job completed",
+      );
+    } catch (error) {
+      logger.error(
+        { err: error, trace_id: traceId, job: "provider_events.didit_webhook" },
+        "webhook job failed",
+      );
+      throw error;
+    }
+  }
 });
 
 logger.info("VistaBlox worker started");
@@ -536,6 +519,9 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
     await boss.stop();
   } catch (error: unknown) {
     logger.error({ err: error }, "pg-boss shutdown failed");
+  }
+  if (profileCacheClient?.isOpen === true) {
+    await profileCacheClient.close();
   }
   await database.$disconnect();
 }

@@ -1,21 +1,21 @@
-import type { KycServiceGateway } from "../../modules/identity/application/kyc-service-gateway.js";
+import type { GetKycDisplayProfileService } from "../../modules/identity/application/kyc-display-profile.service.js";
 import type {
   ProtectedDisplayProfile,
   ProtectedDisplayProfileProvider,
 } from "../../modules/investor-profile/application/protected-display-profile.js";
 
-// Replaces DiditProtectedDisplayProfileProvider (Phase 6): the Redis cache
-// and the live Didit fetch both moved into the KYC service's own
+// Reversal (undoing the KYC microservice split): the Redis cache and the
+// live Didit fetch both live in-process again, in identity's own
 // GetKycDisplayProfileService, alongside every other Didit call. This class
 // keeps only the cheap, local skip check -- most GET /v1/investor-profile
 // reads are for accounts with no approved decision yet, and that's already
 // known from the same row this caller just read, so there's no reason to
-// pay an internal HTTP round trip to find out. Once there's something to
-// look up, the KYC service re-derives its own authoritative copy rather
-// than trusting the diditReference/providerStatus passed in here.
-export class KycServiceDisplayProfileProvider implements ProtectedDisplayProfileProvider {
+// call through to the service to find out. Once there's something to look
+// up, GetKycDisplayProfileService re-derives its own authoritative copy
+// rather than trusting the diditReference/providerStatus passed in here.
+export class IdentityDisplayProfileProvider implements ProtectedDisplayProfileProvider {
   public constructor(
-    private readonly kycService: KycServiceGateway,
+    private readonly getDisplayProfile: GetKycDisplayProfileService,
     private readonly onError: (error: unknown, operation: string) => void = () => {},
   ) {}
 
@@ -28,7 +28,7 @@ export class KycServiceDisplayProfileProvider implements ProtectedDisplayProfile
       return null;
     }
     try {
-      const result = await this.kycService.getDisplayProfile(input.accountId);
+      const result = await this.getDisplayProfile.execute(input.accountId);
       if (result.data === null) return null;
       return {
         givenName: result.data.given_name,
@@ -38,11 +38,11 @@ export class KycServiceDisplayProfileProvider implements ProtectedDisplayProfile
       };
     } catch (error) {
       // Same best-effort degradation the old Didit-direct provider used for
-      // a Didit outage -- just one layer up now, since a KYC-service outage
-      // is the new failure mode this internal hop introduces. There is no
-      // local cache left to fall back to here (see the class comment above),
-      // so this degrades straight to null rather than a stale value.
-      this.onError(error, "kyc_service_display_profile_fetch");
+      // a Didit outage -- GetKycDisplayProfileService itself already
+      // catches Didit/cache failures internally (degrading to a cached or
+      // null value), so anything reaching this catch is an unexpected
+      // failure one layer further down (e.g. the eligibility read itself).
+      this.onError(error, "kyc_display_profile_fetch");
       return null;
     }
   }

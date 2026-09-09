@@ -9,8 +9,12 @@ const base = {
   SMTP_USER: "user",
   SMTP_PASSWORD: "password",
   SMTP_FROM: "no-reply@example.com",
-  KYC_SERVICE_URL: "http://vistablox-kyc:3000",
-  INTERNAL_KYC_API_SECRET: "an-internal-kyc-api-secret-value-32-chars",
+  DIDIT_API_KEY: "key",
+  DIDIT_WORKFLOW_ID: "269214fe-77f7-4b1a-a028-b70e861d73c1",
+  DIDIT_CALLBACK_URL: "https://app.vistablox.io/kyc/complete",
+  DIDIT_WEBHOOK_SECRET: "a-didit-webhook-secret-value-32-chars",
+  DIDIT_APPLICATION_ID: "c2237bc6-a76c-4933-b329-6c81843b45c7",
+  DIDIT_ENVIRONMENT: "sandbox",
 };
 
 describe("MinIO environment", () => {

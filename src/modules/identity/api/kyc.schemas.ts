@@ -95,22 +95,6 @@ export const kycAccountIdParamsSchema = z.object({
   account_id: z.string().min(1),
 });
 
-// Internal-only (Phase 6): backs vistablox-api's own display-profile lookup
-// for GET /v1/investor-profile, reached through KycServiceGateway rather
-// than exposed on any customer-facing route here. null when there's no
-// approved, correlated Didit decision to show -- a normal, common outcome,
-// not an error.
-export const displayProfileResponseSchema = z.object({
-  data: z
-    .object({
-      given_name: z.string(),
-      family_name: z.string(),
-      full_display_name: z.string(),
-      synced_at: z.iso.datetime(),
-    })
-    .nullable(),
-});
-
 // Operations-only view for authorized reviewers (admin_operations + staff
 // WebAuthn): the same privacy-minimized eligibility record the customer's
 // own GET /v1/kyc reads from, plus the operational detail a reviewer needs
@@ -157,10 +141,10 @@ export const diditWebhookBodySchema = z
   .passthrough();
 
 // Durable-receipt acknowledgment only (AD-062 / ASYNC_JOBS.md's Webhook
-// Handling Rule) — duplicate/stale/ignored outcomes are now determined by
-// ProcessDiditWebhookService in the standalone KYC service
-// (src/kyc-server.ts), after this response has already been sent, so they
-// can no longer be reported synchronously here.
+// Handling Rule) — duplicate/stale/ignored outcomes are determined by
+// ProcessDiditWebhookService in worker.ts's own consumer, after this
+// response has already been sent, so they can't be reported synchronously
+// here.
 export const diditWebhookResponseSchema = z.object({
   received: z.literal(true),
 });

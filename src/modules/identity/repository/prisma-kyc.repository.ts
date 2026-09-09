@@ -3,7 +3,7 @@ import { ulid } from "ulid";
 import { z } from "zod";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
-import { JOB_RETRY_OPTIONS, publishTransactionalEvent } from "../../../shared/jobs/enqueue-job.js";
+import { JOB_RETRY_OPTIONS } from "../../../shared/jobs/enqueue-job.js";
 import type {
   DiditStatus,
   KycEligibilityState,
@@ -22,10 +22,7 @@ import type { KycEligibilityReader, KycEligibilitySnapshot } from "./kyc-eligibi
 
 const renewalLeadDaysSettingSchema = z.object({ days: z.number().int().min(1).max(365) });
 
-// Shared by getEligibilitySnapshot and every publishEligibilityChanged call
-// site below -- the one place the KycEligibilitySnapshot field list is
-// spelled out, rather than repeated at each of the 9 write methods that
-// need it too.
+// The one place the KycEligibilitySnapshot field list is spelled out.
 const SNAPSHOT_SELECT = {
   accountId: true,
   diditReference: true,
@@ -50,9 +47,7 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
   // below rather than a shared one, so this module's internal
   // KycEligibilityRecord shape (operationalSubstatus etc.) can keep
   // evolving without touching the external contract, and vice versa. Those
-  // three modules no longer call this directly (Phase 7: they read their own
-  // event-driven projection instead) -- this remains the one place that
-  // projection's contents ultimately come from.
+  // three modules read this directly, live, on every request that needs it.
   public async getEligibilitySnapshot(
     accountId: string,
   ): Promise<KycEligibilitySnapshot | null> {
@@ -60,35 +55,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
       where: { accountId },
       select: SNAPSHOT_SELECT,
     });
-  }
-
-  // Phase 7: publishes identity.kyc_eligibility_changed so origination's,
-  // offering's, and investor-profile's own projections of
-  // KycEligibilitySnapshot (docs/kyc-eligibility-read-model.md) can converge
-  // without a live cross-schema read against this table. Re-reads through
-  // `transaction` -- never `this.database`, a different connection that
-  // would race outside the write this same call is publishing about -- so
-  // every one of the 9 write methods below can call this once, right after
-  // their own actual-write-succeeded branch, without hand-computing the
-  // post-write snapshot from whatever subset of fields that method itself
-  // happened to touch.
-  private async publishEligibilityChanged(
-    transaction: Parameters<Parameters<DatabaseClient["$transaction"]>[0]>[0],
-    accountId: string,
-    traceId: string,
-  ): Promise<void> {
-    const snapshot = await transaction.kycEligibility.findUnique({
-      where: { accountId },
-      select: SNAPSHOT_SELECT,
-    });
-    if (snapshot === null) return;
-    await publishTransactionalEvent(
-      this.pgBoss,
-      transaction,
-      "identity.kyc_eligibility_changed",
-      snapshot,
-      traceId,
-    );
   }
 
   // AD-062 / ASYNC_JOBS.md's Webhook Handling Rule: "the endpoint verifies
@@ -197,7 +163,7 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
       if (current !== null && !canStartSession(current.operationalSubstatus)) {
         return false;
       }
-      const updated = await transaction.kycEligibility.upsert({
+      await transaction.kycEligibility.upsert({
         where: { accountId: input.accountId },
         create: {
           accountId: input.accountId,
@@ -215,15 +181,7 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
           sessionStartId: input.sessionStartId,
           updatedAt: input.startedAt,
         },
-        select: SNAPSHOT_SELECT,
       });
-      await publishTransactionalEvent(
-        this.pgBoss,
-        transaction,
-        "identity.kyc_eligibility_changed",
-        updated,
-        input.traceId,
-      );
       return true;
     });
   }
@@ -280,7 +238,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
           createdAt: input.completedAt,
         },
       });
-      await this.publishEligibilityChanged(transaction, input.accountId, input.traceId);
       return true;
     });
   }
@@ -316,13 +273,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
           createdAt: input.failedAt,
         },
       });
-      // This write only ever touches operationalSubstatus/updatedAt, neither
-      // a KycEligibilitySnapshot field -- the published payload here will
-      // always be identical to the previous one. Publishing anyway rather
-      // than special-casing this one method, matching
-      // docs/kyc-eligibility-read-model.md's "unconditional beats a
-      // hand-maintained per-method list" reasoning.
-      await this.publishEligibilityChanged(transaction, input.accountId, input.traceId);
     });
   }
 
@@ -354,22 +304,14 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
       ) {
         return false;
       }
-      const updated = await transaction.kycEligibility.update({
+      await transaction.kycEligibility.update({
         where: { accountId: input.accountId },
         data: {
           proofOfAddressStatus: "creating",
           proofOfAddressSessionStartId: input.sessionStartId,
           updatedAt: input.startedAt,
         },
-        select: SNAPSHOT_SELECT,
       });
-      await publishTransactionalEvent(
-        this.pgBoss,
-        transaction,
-        "identity.kyc_eligibility_changed",
-        updated,
-        input.traceId,
-      );
       return true;
     });
   }
@@ -425,7 +367,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
           createdAt: input.completedAt,
         },
       });
-      await this.publishEligibilityChanged(transaction, input.accountId, input.traceId);
       return true;
     });
   }
@@ -461,7 +402,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
           createdAt: input.failedAt,
         },
       });
-      await this.publishEligibilityChanged(transaction, input.accountId, input.traceId);
     });
   }
 
@@ -531,7 +471,7 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
         current.proofOfAddressCurrentUntil > input.providerUpdatedAt
           ? "kyc_verified"
           : input.outcome.operationalSubstatus;
-      const updated = await transaction.kycEligibility.update({
+      await transaction.kycEligibility.update({
         where: { accountId: current.accountId },
         data: {
           providerStatus: input.providerStatus,
@@ -550,7 +490,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
               ? input.providerUpdatedAt
               : current.updatedAt,
         },
-        select: SNAPSHOT_SELECT,
       });
       await transaction.kycEligibilityHistory.create({
         data: {
@@ -572,13 +511,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
         operational_substatus: operationalSubstatus,
         reason_code: input.outcome.reasonCode,
       });
-      await publishTransactionalEvent(
-        this.pgBoss,
-        transaction,
-        "identity.kyc_eligibility_changed",
-        updated,
-        input.traceId,
-      );
       return "applied";
     });
   }
@@ -649,7 +581,7 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
           : input.outcome.status === "current"
             ? "kyc_verified"
             : "kyc_verified_owner_poa_missing";
-      const updated = await transaction.kycEligibility.update({
+      await transaction.kycEligibility.update({
         where: { accountId: current.accountId },
         data: {
           proofOfAddressProviderStatus: input.providerStatus,
@@ -662,7 +594,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
               ? input.providerUpdatedAt
               : current.updatedAt,
         },
-        select: SNAPSHOT_SELECT,
       });
       await transaction.kycEligibilityHistory.create({
         data: {
@@ -684,13 +615,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
         operational_substatus: operationalSubstatus,
         reason_code: input.outcome.reasonCode,
       });
-      await publishTransactionalEvent(
-        this.pgBoss,
-        transaction,
-        "identity.kyc_eligibility_changed",
-        updated,
-        input.traceId,
-      );
       return "applied";
     });
   }
@@ -785,7 +709,6 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
           createdAt: input.transitionedAt,
         },
       });
-      await this.publishEligibilityChanged(transaction, input.accountId, input.traceId);
       return true;
     });
   }

@@ -1,8 +1,7 @@
-// Lives here, not under either module that uses it: identity's KYC service
-// (which now fetches and caches this) and investor-profile (which reads it
-// through ProtectedDisplayProfileProvider) can't import from each other's
-// application layer (no-cross-domain-internals), and this value genuinely
-// crosses that boundary over HTTP now -- see kyc-display-profile.service.ts.
+// Lives here, not under either module that uses it: identity (which fetches
+// and caches this, in kyc-display-profile.service.ts) and investor-profile
+// (which reads it through ProtectedDisplayProfileProvider) can't import
+// from each other's application layer (no-cross-domain-internals).
 export interface ProtectedDisplayProfile {
   givenName: string;
   familyName: string;

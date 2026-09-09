@@ -4,33 +4,50 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import type { KycServiceGateway } from "../src/modules/identity/application/kyc-service-gateway.js";
-import { AppError } from "../src/shared/errors/app-error.js";
+import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
+import {
+  GetKycAccountForOperationsService,
+  GetKycStatusService,
+  ReceiveDiditWebhookService,
+  StartKycSessionService,
+} from "../src/modules/identity/application/kyc.service.js";
+import { DiditWebhookVerifier } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
+import type { KycRepository } from "../src/modules/identity/repository/kyc.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
 
-function fakeKycServiceGateway(overrides: Partial<KycServiceGateway> = {}): KycServiceGateway {
+const workflowId = "269214fe-77f7-4b1a-a028-b70e861d73c1";
+const callbackUrl = "https://app.vistablox.io/kyc/complete";
+
+function fakeKycRepository(overrides: Partial<KycRepository> = {}): KycRepository {
   return {
-    getStatus: vi.fn().mockResolvedValue({
-      data: {
-        eligibility_state: "not_started",
-        proof_of_address_status: "not_started",
-        proof_of_address_current_until: null,
-        last_verified_at: null,
-        renewal_due_at: null,
-        active_session: null,
-      },
-    }),
-    startSession: vi.fn().mockResolvedValue({
-      data: {
-        verification_session_id: "269214fe-77f7-4b1a-a028-b70e861d73c1",
-        verification_url: "https://verify.didit.me/session/abc",
-        eligibility_state: "not_started",
-      },
-    }),
-    startProofOfAddressSession: vi.fn(),
-    getAccountForOperations: vi.fn(),
-    getDisplayProfile: vi.fn().mockResolvedValue({ data: null }),
+    getForAccount: vi.fn().mockResolvedValue(null),
+    findByDiditReference: vi.fn().mockResolvedValue(null),
+    findByProofOfAddressDiditReference: vi.fn().mockResolvedValue(null),
+    hasProcessedProviderEvent: vi.fn().mockResolvedValue(false),
+    enqueueDiditWebhookProcessing: vi.fn().mockResolvedValue(undefined),
+    reserveSessionStart: vi.fn().mockResolvedValue(true),
+    completeSessionStart: vi.fn().mockResolvedValue(true),
+    failSessionStart: vi.fn().mockResolvedValue(undefined),
+    reserveProofOfAddressSessionStart: vi.fn().mockResolvedValue(true),
+    completeProofOfAddressSessionStart: vi.fn().mockResolvedValue(true),
+    failProofOfAddressSessionStart: vi.fn().mockResolvedValue(undefined),
+    applyProviderOutcome: vi.fn().mockResolvedValue("applied"),
+    applyProofOfAddressOutcome: vi.fn().mockResolvedValue("applied"),
+    recordUnmatchedProviderEvent: vi.fn().mockResolvedValue(undefined),
+    getRenewalReminderLeadDays: vi.fn().mockResolvedValue(30),
+    listEligibleAccountsForRenewalTimer: vi.fn().mockResolvedValue([]),
+    transitionToRequiresRenewal: vi.fn().mockResolvedValue(false),
+    listStuckSessionCreationsForTimer: vi.fn().mockResolvedValue([]),
+    listStuckOpenSessionsForTimer: vi.fn().mockResolvedValue([]),
+    ...overrides,
+  };
+}
+
+function fakeDiditClient(overrides: Partial<DiditClient> = {}): DiditClient {
+  return {
+    createSession: vi.fn(),
+    getDecision: vi.fn(),
     ...overrides,
   };
 }
@@ -92,7 +109,8 @@ function fakeStaffWebAuthnCeremony() {
 function buildApp(options?: {
   noSession?: boolean;
   population?: "customer" | "staff_partner";
-  kycGateway?: KycServiceGateway;
+  repository?: KycRepository;
+  didit?: DiditClient;
 }) {
   const sessions: SessionResolver = {
     resolve:
@@ -112,7 +130,8 @@ function buildApp(options?: {
     syncVerifiedContactEmail: vi.fn(),
     getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
-  const kycGateway = options?.kycGateway ?? fakeKycServiceGateway();
+  const repository = options?.repository ?? fakeKycRepository();
+  const didit = options?.didit ?? fakeDiditClient();
 
   return {
     app: createApp({
@@ -129,10 +148,18 @@ function buildApp(options?: {
         originationRepository: fakeOriginationRepository(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
-        kyc: { client: kycGateway },
+        kyc: {
+          getStatus: new GetKycStatusService(repository, didit),
+          startSession: new StartKycSessionService(repository, didit, { workflowId, callbackUrl }),
+          startProofOfAddressSession: undefined,
+          getAccountForOperations: new GetKycAccountForOperationsService(repository),
+          webhookVerifier: new DiditWebhookVerifier("didit-webhook-secret-for-test"),
+          receiveWebhook: new ReceiveDiditWebhookService(repository),
+        },
       },
     }),
-    kycGateway,
+    repository,
+    didit,
   };
 }
 
@@ -156,16 +183,25 @@ describe("customer KYC API", () => {
   });
 
   it("resolves status using the session's own accountId, never anything client-supplied", async () => {
-    const { app, kycGateway } = buildApp();
+    const { app, repository } = buildApp();
 
     const response = await request(app).get("/v1/kyc");
 
     expect(response.status).toBe(200);
-    expect(kycGateway.getStatus).toHaveBeenCalledWith("acct_customer");
+    expect(repository.getForAccount).toHaveBeenCalledWith("acct_customer");
   });
 
   it("starts a session using the session's own accountId, ignoring any account_id in the body", async () => {
-    const { app, kycGateway } = buildApp();
+    const didit = fakeDiditClient({
+      createSession: vi.fn().mockResolvedValue({
+        sessionId: "c2237bc6-a76c-4933-b329-6c81843b45c7",
+        verificationUrl: "https://verify.didit.me/session/abc",
+        status: "Not Started",
+        workflowId,
+        vendorData: "acct_customer",
+      }),
+    });
+    const { app, repository } = buildApp({ didit });
 
     const response = await request(app)
       .post("/v1/kyc/sessions")
@@ -176,23 +212,14 @@ describe("customer KYC API", () => {
       });
 
     expect(response.status).toBe(201);
-    expect(kycGateway.startSession).toHaveBeenCalledWith(
+    expect(repository.reserveSessionStart).toHaveBeenCalledWith(
       expect.objectContaining({ accountId: "acct_customer" }),
     );
   });
 
-  it("passes a gateway-reported business error through unchanged", async () => {
+  it("passes a business-rule conflict through unchanged", async () => {
     const { app } = buildApp({
-      kycGateway: fakeKycServiceGateway({
-        startSession: vi.fn().mockRejectedValue(
-          new AppError({
-            code: "identity.kyc_session_unavailable",
-            title: "Identity verification session unavailable",
-            status: 409,
-            detail: "This account cannot start another identity verification session right now.",
-          }),
-        ),
-      }),
+      repository: fakeKycRepository({ reserveSessionStart: vi.fn().mockResolvedValue(false) }),
     });
 
     const response = await request(app)
@@ -203,23 +230,12 @@ describe("customer KYC API", () => {
     expect(response.body.code).toBe("identity.kyc_session_unavailable");
   });
 
-  it("reports the KYC service being unreachable as a 503, not a raw 500", async () => {
-    const { app } = buildApp({
-      kycGateway: fakeKycServiceGateway({
-        getStatus: vi.fn().mockRejectedValue(
-          new AppError({
-            code: "identity.kyc_service_unavailable",
-            title: "Identity verification unavailable",
-            status: 503,
-            detail: "The KYC service is temporarily unavailable.",
-          }),
-        ),
-      }),
-    });
+  it("reports proof-of-address as not configured when this deployment has no workflow for it", async () => {
+    const { app } = buildApp();
 
-    const response = await request(app).get("/v1/kyc");
+    const response = await request(app).post("/v1/kyc/proof-of-address/sessions").send({});
 
-    expect(response.status).toBe(503);
-    expect(response.body.code).toBe("identity.kyc_service_unavailable");
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe("identity.proof_of_address_not_configured");
   });
 });

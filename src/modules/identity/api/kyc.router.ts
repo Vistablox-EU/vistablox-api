@@ -1,9 +1,11 @@
 import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
-import type { KycServiceGateway } from "../application/kyc-service-gateway.js";
-import {
+import type {
+  GetKycStatusService,
   ReceiveDiditWebhookService,
+  StartKycSessionService,
+  StartProofOfAddressSessionService,
 } from "../application/kyc.service.js";
 import { DiditWebhookVerifier } from "../infrastructure/didit-webhook-verifier.js";
 import {
@@ -16,26 +18,33 @@ import {
   startKycSessionResponseSchema,
 } from "./kyc.schemas.js";
 
-// KycServiceGateway forwards to vistablox-kyc, where KycEligibility (and
-// StartKycSessionService/GetKycStatusService/etc.) now actually live -- this
-// router's own job is unchanged: enforce the customer session, validate the
-// request shape, and translate to/from the gateway's already-matching
-// response schemas.
+// Reversal (undoing the KYC microservice split): calls the concrete
+// application services directly, in-process -- no more gateway/signed
+// internal HTTP call. This router's own job is otherwise unchanged: enforce
+// the customer session, validate the request shape, translate to/from the
+// same response schemas. Security-critical, unchanged by this move: every
+// accountId below comes from requireCustomerContext(response.locals.authContext)
+// -- the verified session -- never from client-supplied input. That's the
+// one thing that must never be copied from kyc-internal.router.ts's own
+// account_id-from-query-param shape, which is only safe there because its
+// caller had already resolved the id from a session before making the call.
 export function createKycRouter(
   requireAuthentication: RequestHandler,
-  gateway: KycServiceGateway,
+  getStatus: GetKycStatusService,
+  startSession: StartKycSessionService,
+  startProofOfAddressSession: StartProofOfAddressSessionService | undefined,
 ): Router {
   const router = Router();
   router.get("/", requireAuthentication, async (_request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
-    const result = await gateway.getStatus(context.accountId);
+    const result = await getStatus.execute(context.accountId);
     response.setHeader("Cache-Control", "no-store");
     response.json(kycStatusResponseSchema.parse(result));
   });
   router.post("/sessions", requireAuthentication, async (request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
     const body = startKycSessionBodySchema.parse(request.body);
-    const result = await gateway.startSession({
+    const result = await startSession.execute({
       accountId: context.accountId,
       traceId: String(response.locals.traceId),
       residenceCountryCode: body.residence_country_code,
@@ -45,18 +54,23 @@ export function createKycRouter(
     response.setHeader("Cache-Control", "no-store");
     response.status(201).json(startKycSessionResponseSchema.parse(result));
   });
-  // Always mounted now, unlike the old optional-third-argument shape --
-  // vistablox-api has no local visibility into whether vistablox-kyc has a
-  // proof-of-address workflow configured. An unconfigured deployment
-  // reports a structured error from the gateway call itself instead of this
-  // route simply not existing (see kyc-internal.router.ts).
+  // Always mounted, matching the pre-reversal behavior: an unconfigured
+  // deployment (no DIDIT_POA_WORKFLOW_ID) reports a structured error from
+  // this handler instead of the route simply not existing -- a better API
+  // contract on its own merits (the endpoint's existence doesn't depend on
+  // server config, only its outcome does), independent of the original,
+  // now-moot reason this was chosen (keeping two separate processes'
+  // startup independent).
   router.post(
     "/proof-of-address/sessions",
     requireAuthentication,
     async (request, response) => {
       const context = requireCustomerContext(response.locals.authContext);
       const body = startProofOfAddressSessionBodySchema.parse(request.body);
-      const result = await gateway.startProofOfAddressSession({
+      if (startProofOfAddressSession === undefined) {
+        throw proofOfAddressNotConfiguredError();
+      }
+      const result = await startProofOfAddressSession.execute({
         accountId: context.accountId,
         traceId: String(response.locals.traceId),
         ...(body.language === undefined ? {} : { language: body.language }),
@@ -68,6 +82,15 @@ export function createKycRouter(
     },
   );
   return router;
+}
+
+function proofOfAddressNotConfiguredError(): AppError {
+  return new AppError({
+    code: "identity.proof_of_address_not_configured",
+    title: "Not found",
+    status: 404,
+    detail: "Proof of address verification is not configured.",
+  });
 }
 
 export function createDiditWebhookRouter(

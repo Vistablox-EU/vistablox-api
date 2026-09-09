@@ -6,7 +6,7 @@ const directDatabaseUrl =
   "postgresql://prisma:prisma@localhost:5432/vistablox";
 
 export default defineConfig({
-  schema: "prisma/schema.prisma",
+  schema: "prisma/schema",
   migrations: {
     path: "prisma/migrations",
   },
