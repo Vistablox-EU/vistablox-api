@@ -65,4 +65,12 @@ export interface KycServiceGateway {
       renewal_due_at: string | null;
     };
   }>;
+  getDisplayProfile(accountId: string): Promise<{
+    data: {
+      given_name: string;
+      family_name: string;
+      full_display_name: string;
+      synced_at: string;
+    } | null;
+  }>;
 }

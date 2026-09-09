@@ -24,16 +24,16 @@ Limits default to 20 and are capped at 100. Cursors include their resource kind,
 
 ## Verified display-name cache
 
-Didit remains authoritative for identity names. VistaBlox does not persist them in PostgreSQL. When both Didit and `PROFILE_CACHE_URL` are configured, an approved, correlated individual decision may populate a server-side Redis/Valkey entry containing exactly:
+Didit remains authoritative for identity names. VistaBlox does not persist them in PostgreSQL. The whole cache lives on the standalone KYC service now (`GetKycDisplayProfileService`, reached through `KycServiceGateway` the same way `/v1/kyc` itself is) — this API holds neither the Redis connection nor a Didit client for it. When both Didit and the KYC service's own `PROFILE_CACHE_URL` are configured there, an approved, correlated individual decision may populate a server-side Redis/Valkey entry containing exactly:
 
 - `given_name`
 - `family_name`
 - `full_display_name`
 - `didit_profile_last_synced_at`
 
-Entries use the opaque key `kyc_display:{account_id}`, refresh after six hours, and expire after 24 hours. Configure the managed EU cache without routine backups. Unknown fields make an entry invalid and cause deletion. Starting a new baseline KYC session or receiving a correlated baseline KYC webhook invalidates the account's cached names.
+Entries use the opaque key `kyc_display:{account_id}`, refresh after six hours, and expire after 24 hours. Configure the managed EU cache without routine backups. Unknown fields make an entry invalid and cause deletion. Starting a new baseline KYC session or receiving a correlated baseline KYC webhook invalidates the account's cached names — unchanged by this move, since that invalidation already ran inside the KYC service.
 
-If Redis/Valkey is absent or unavailable, the endpoint continues to return the durable aggregate with `display_profile: null`. It does not bypass the required cache by turning Didit into a normal profile-read dependency. A transient Didit refresh failure may use an existing unexpired cache entry.
+If Redis/Valkey is absent or unavailable, or the KYC service itself doesn't respond, the endpoint continues to return the durable aggregate with `display_profile: null`. It does not bypass the required cache by turning Didit into a normal profile-read dependency. A transient Didit refresh failure may use an existing unexpired cache entry — but only for a request the KYC service itself serves; this API keeps no cache of its own to fall back to if that internal call fails outright.
 
 ## Response sections
 

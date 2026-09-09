@@ -30,6 +30,7 @@ function fakeKycServiceGateway(overrides: Partial<KycServiceGateway> = {}): KycS
     }),
     startProofOfAddressSession: vi.fn(),
     getAccountForOperations: vi.fn(),
+    getDisplayProfile: vi.fn().mockResolvedValue({ data: null }),
     ...overrides,
   };
 }

@@ -83,16 +83,6 @@ const environmentSchema = z
     SMTP_USER: z.string().min(1),
     SMTP_PASSWORD: z.string().min(1),
     SMTP_FROM: z.string().min(1),
-    PROFILE_CACHE_URL: z.preprocess(
-      emptyStringToUndefined,
-      z
-        .url()
-        .refine(
-          (value) => value.startsWith("redis://") || value.startsWith("rediss://"),
-          { message: "PROFILE_CACHE_URL must be a Redis or TLS Redis URL" },
-        )
-        .optional(),
-    ),
     RATE_LIMIT_CACHE_URL: z.preprocess(
       emptyStringToUndefined,
       z

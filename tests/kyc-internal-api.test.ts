@@ -4,6 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createKycApp } from "../src/kyc-app.js";
 import type { DatabaseProbe } from "../src/infrastructure/database/database-probe.js";
+import type { ProtectedProfileCache } from "../src/infrastructure/cache/protected-profile-cache.js";
+import { GetKycDisplayProfileService } from "../src/modules/identity/application/kyc-display-profile.service.js";
 import {
   GetKycAccountForOperationsService,
   GetKycStatusService,
@@ -17,6 +19,10 @@ import {
   InternalApiSignatureVerifier,
   signInternalRequest,
 } from "../src/modules/identity/infrastructure/internal-api-signature.js";
+import type {
+  KycEligibilityReader,
+  KycEligibilitySnapshot,
+} from "../src/modules/identity/repository/kyc-eligibility-reader.js";
 import type {
   KycEligibilityRecord,
   KycRepository,
@@ -71,9 +77,42 @@ function fakeDiditClient(): DiditClient {
   return { createSession: vi.fn(), getDecision: vi.fn() };
 }
 
-function buildApp(options?: { repository?: KycRepository; withProofOfAddress?: boolean }) {
+const eligibleSnapshot: KycEligibilitySnapshot = {
+  accountId: "acct_01",
+  diditReference: "c2237bc6-a76c-4933-b329-6c81843b45c7",
+  providerStatus: "Approved",
+  eligibilityState: "eligible",
+  residenceCountryCode: "DE",
+  taxResidenceCountryCode: "DE",
+  proofOfAddressStatus: "not_started",
+  proofOfAddressCurrentUntil: null,
+  lastVerifiedAt: null,
+  renewalDueAt: null,
+};
+
+function fakeEligibilityReader(
+  result: KycEligibilitySnapshot | null = eligibleSnapshot,
+): KycEligibilityReader {
+  return { getEligibilitySnapshot: vi.fn().mockResolvedValue(result) };
+}
+
+function fakeProfileCache(overrides: Partial<ProtectedProfileCache> = {}): ProtectedProfileCache {
+  return {
+    get: vi.fn().mockResolvedValue(null),
+    set: vi.fn().mockResolvedValue(undefined),
+    delete: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  };
+}
+
+function buildApp(options?: {
+  repository?: KycRepository;
+  withProofOfAddress?: boolean;
+  eligibilityReader?: KycEligibilityReader;
+  didit?: DiditClient;
+}) {
   const repository = options?.repository ?? fakeKycRepository();
-  const didit = fakeDiditClient();
+  const didit = options?.didit ?? fakeDiditClient();
   const databaseProbe: DatabaseProbe = { check: vi.fn().mockResolvedValue(undefined) };
   const app = createKycApp({
     databaseProbe,
@@ -94,6 +133,12 @@ function buildApp(options?: { repository?: KycRepository; withProofOfAddress?: b
             callbackUrl: "https://app.vistablox.io/kyc/complete",
           }),
     getAccountForOperations: new GetKycAccountForOperationsService(repository),
+    getDisplayProfile: new GetKycDisplayProfileService(
+      options?.eligibilityReader ?? fakeEligibilityReader(),
+      didit,
+      fakeProfileCache(),
+      () => now,
+    ),
   });
   return { app, repository };
 }
@@ -129,6 +174,52 @@ describe("KYC service internal API", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data.account_id).toBe("acct_01");
+  });
+
+  it("accepts a validly-signed display-profile lookup", async () => {
+    const didit = fakeDiditClient();
+    vi.mocked(didit.getDecision).mockResolvedValue({
+      sessionId: "c2237bc6-a76c-4933-b329-6c81843b45c7",
+      sessionKind: "user",
+      workflowId: "269214fe-77f7-4b1a-a028-b70e861d73c1",
+      vendorData: "acct_01",
+      status: "Approved",
+      idVerifications: [],
+      livenessChecks: [],
+      faceMatches: [],
+      amlScreenings: [],
+      proofOfAddressVerifications: [],
+      verifiedDisplayProfile: {
+        givenName: "Carmen",
+        familyName: "Silva",
+        fullDisplayName: "Carmen Silva",
+      },
+    });
+    const { app } = buildApp({ didit });
+    const path = "/internal/kyc/accounts/acct_01/display-profile";
+    const { signature, timestamp } = signed("GET", path);
+
+    const response = await request(app)
+      .get(path)
+      .set("x-internal-signature", signature)
+      .set("x-internal-timestamp", timestamp);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.full_display_name).toBe("Carmen Silva");
+  });
+
+  it("reports no display profile for an account with no approved decision", async () => {
+    const { app } = buildApp({ eligibilityReader: fakeEligibilityReader(null) });
+    const path = "/internal/kyc/accounts/acct_01/display-profile";
+    const { signature, timestamp } = signed("GET", path);
+
+    const response = await request(app)
+      .get(path)
+      .set("x-internal-signature", signature)
+      .set("x-internal-timestamp", timestamp);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toBeNull();
   });
 
   it.each([

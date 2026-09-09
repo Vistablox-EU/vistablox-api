@@ -3,6 +3,7 @@ import { errorResponseSchema } from "../../../shared/http/error-schema.js";
 import type { KycServiceGateway } from "../application/kyc-service-gateway.js";
 import { signInternalRequest } from "./internal-api-signature.js";
 import {
+  displayProfileResponseSchema,
   kycStatusResponseSchema,
   operationsKycAccountResponseSchema,
   startKycSessionResponseSchema,
@@ -71,6 +72,16 @@ export class HttpKycServiceClient implements KycServiceGateway {
       `/internal/kyc/accounts/${encodeURIComponent(accountId)}`,
     );
     return parseBody(response, operationsKycAccountResponseSchema);
+  }
+
+  public async getDisplayProfile(
+    accountId: string,
+  ): ReturnType<KycServiceGateway["getDisplayProfile"]> {
+    const response = await this.request(
+      "GET",
+      `/internal/kyc/accounts/${encodeURIComponent(accountId)}/display-profile`,
+    );
+    return parseBody(response, displayProfileResponseSchema);
   }
 
   private async request(method: string, path: string, body?: unknown): Promise<Response> {

@@ -1,6 +1,7 @@
 import { Router } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
+import type { GetKycDisplayProfileService } from "../application/kyc-display-profile.service.js";
 import type {
   GetKycAccountForOperationsService,
   GetKycStatusService,
@@ -14,6 +15,7 @@ import {
   internalStartProofOfAddressSessionBodySchema,
 } from "./kyc-internal.schemas.js";
 import {
+  displayProfileResponseSchema,
   kycAccountIdParamsSchema,
   kycStatusResponseSchema,
   operationsKycAccountResponseSchema,
@@ -37,6 +39,7 @@ export function createKycInternalRouter(
   startSession: StartKycSessionService,
   startProofOfAddressSession: StartProofOfAddressSessionService | undefined,
   getAccountForOperations: GetKycAccountForOperationsService,
+  getDisplayProfile: GetKycDisplayProfileService,
 ): Router {
   const router = Router();
 
@@ -97,6 +100,12 @@ export function createKycInternalRouter(
     const params = kycAccountIdParamsSchema.parse(request.params);
     const result = await getAccountForOperations.execute(params.account_id);
     response.json(operationsKycAccountResponseSchema.parse(result));
+  });
+
+  router.get("/accounts/:account_id/display-profile", async (request, response) => {
+    const params = kycAccountIdParamsSchema.parse(request.params);
+    const result = await getDisplayProfile.execute(params.account_id);
+    response.json(displayProfileResponseSchema.parse(result));
   });
 
   return router;

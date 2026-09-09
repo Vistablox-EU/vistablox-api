@@ -78,6 +78,26 @@ describe("KYC service HTTP client", () => {
     });
   });
 
+  it("requests the display profile at the expected account-scoped path", async () => {
+    const fetch = vi.fn().mockResolvedValue(
+      Response.json({
+        data: {
+          given_name: "Carmen",
+          family_name: "Silva",
+          full_display_name: "Carmen Silva",
+          synced_at: "2026-09-01T12:00:00.000Z",
+        },
+      }),
+    );
+    const client = new HttpKycServiceClient({ baseUrl, secret, fetch });
+
+    const result = await client.getDisplayProfile("acct_01");
+
+    expect(result.data?.full_display_name).toBe("Carmen Silva");
+    const [url] = fetch.mock.calls[0] as [URL, RequestInit];
+    expect(url.toString()).toBe(`${baseUrl}/internal/kyc/accounts/acct_01/display-profile`);
+  });
+
   it("reconstructs a structured error from a non-2xx response", async () => {
     const fetch = vi.fn().mockResolvedValue(
       Response.json(

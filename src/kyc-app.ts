@@ -7,6 +7,7 @@ import type { DatabaseProbe } from "./infrastructure/database/database-probe.js"
 import { createHealthRouter } from "./modules/health/health.router.js";
 import { createKycInternalRouter } from "./modules/identity/api/kyc-internal.router.js";
 import { createDiditWebhookRouter } from "./modules/identity/api/kyc.router.js";
+import type { GetKycDisplayProfileService } from "./modules/identity/application/kyc-display-profile.service.js";
 import type {
   GetKycAccountForOperationsService,
   GetKycStatusService,
@@ -34,6 +35,7 @@ export interface KycAppDependencies {
   startSession: StartKycSessionService;
   startProofOfAddressSession: StartProofOfAddressSessionService | undefined;
   getAccountForOperations: GetKycAccountForOperationsService;
+  getDisplayProfile: GetKycDisplayProfileService;
 }
 
 export function createKycApp(dependencies: KycAppDependencies): Express {
@@ -71,6 +73,7 @@ export function createKycApp(dependencies: KycAppDependencies): Express {
       dependencies.startSession,
       dependencies.startProofOfAddressSession,
       dependencies.getAccountForOperations,
+      dependencies.getDisplayProfile,
     ),
   );
 

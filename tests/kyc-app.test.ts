@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createKycApp } from "../src/kyc-app.js";
 import type { DatabaseProbe } from "../src/infrastructure/database/database-probe.js";
+import { GetKycDisplayProfileService } from "../src/modules/identity/application/kyc-display-profile.service.js";
 import {
   GetKycAccountForOperationsService,
   GetKycStatusService,
@@ -18,6 +19,7 @@ import {
   DiditWebhookVerifier,
 } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
 import { InternalApiSignatureVerifier } from "../src/modules/identity/infrastructure/internal-api-signature.js";
+import type { KycEligibilityReader } from "../src/modules/identity/repository/kyc-eligibility-reader.js";
 import type { KycRepository } from "../src/modules/identity/repository/kyc.repository.js";
 
 const secret = "didit-webhook-secret-for-tests";
@@ -59,6 +61,10 @@ function fakeDiditClient(): DiditClient {
   return { createSession: vi.fn(), getDecision: vi.fn() };
 }
 
+function fakeEligibilityReader(): KycEligibilityReader {
+  return { getEligibilitySnapshot: vi.fn().mockResolvedValue(null) };
+}
+
 function buildApp(options?: { databaseFailure?: boolean; repository?: KycRepository }) {
   const databaseProbe: DatabaseProbe = {
     check:
@@ -84,6 +90,7 @@ function buildApp(options?: { databaseFailure?: boolean; repository?: KycReposit
     }),
     startProofOfAddressSession: undefined,
     getAccountForOperations: new GetKycAccountForOperationsService(repository),
+    getDisplayProfile: new GetKycDisplayProfileService(fakeEligibilityReader(), didit, undefined),
   });
   return { app, repository };
 }

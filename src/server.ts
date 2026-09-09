@@ -9,7 +9,6 @@ import { createApp } from "./app.js";
 import { loadEnvironment } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
-import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
@@ -39,10 +38,7 @@ import { PrismaOriginationRepository } from "./modules/origination/repository/pr
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { HttpKycServiceClient } from "./modules/identity/infrastructure/kyc-service.client.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
-import {
-  DiditProtectedDisplayProfileProvider,
-  UnavailableProtectedDisplayProfileProvider,
-} from "./infrastructure/profile/didit-protected-display-profile.provider.js";
+import { KycServiceDisplayProfileProvider } from "./infrastructure/profile/kyc-service-display-profile.provider.js";
 import { PrismaInvestorProfileRepository } from "./modules/investor-profile/repository/prisma-investor-profile.repository.js";
 import {
   MinioDisclosureDocumentStore,
@@ -80,30 +76,6 @@ const staffAccountLifecycleRepository = new PrismaStaffAccountLifecycleRepositor
 const authAuditSink = new PrismaAuthAuditSink(database);
 const authBaseUrl = new URL(environment.BETTER_AUTH_URL);
 const accountProvisioner = new AccountProvisioner(accountRepository);
-const profileCacheClient =
-  environment.PROFILE_CACHE_URL === undefined
-    ? undefined
-    : createClient({
-        url: environment.PROFILE_CACHE_URL,
-        socket: { connectTimeout: 3_000, reconnectStrategy: false },
-      });
-profileCacheClient?.on("error", (error) => {
-  logger.warn({ err: error }, "protected profile cache connection error");
-});
-if (profileCacheClient !== undefined) {
-  try {
-    await profileCacheClient.connect();
-  } catch (error) {
-    logger.warn(
-      { err: error },
-      "protected profile cache unavailable; investor names will be omitted",
-    );
-  }
-}
-const protectedProfileCache =
-  profileCacheClient?.isReady === true
-    ? new RedisProtectedProfileCache(profileCacheClient)
-    : undefined;
 const rateLimitCacheClient =
   environment.RATE_LIMIT_CACHE_URL === undefined
     ? undefined
@@ -269,20 +241,16 @@ const coinbaseCdpClient =
 const reservationFundingRailEnabled =
   environment.RESERVATION_FUNDING_RAIL_ENABLED && coinbaseCdpClient !== undefined;
 const betterAuthSessionResolver = new BetterAuthSessionResolver(auth);
-const displayProfiles =
-  protectedProfileCache !== undefined && diditClient !== undefined
-    ? new DiditProtectedDisplayProfileProvider(
-        protectedProfileCache,
-        diditClient,
-        undefined,
-        (error, operation) => {
-          logger.warn(
-            { err: error, operation },
-            "protected display profile refresh failed",
-          );
-        },
-      )
-    : new UnavailableProtectedDisplayProfileProvider();
+// Unconditional now (Phase 6) -- the KYC service is already a required
+// dependency for /v1/kyc itself (kycServiceClient above), so there's no
+// "unavailable at construction time" state left to model here, only a
+// possible runtime failure the provider itself degrades to null for.
+const displayProfiles = new KycServiceDisplayProfileProvider(
+  kycServiceClient,
+  (error, operation) => {
+    logger.warn({ err: error, operation }, "protected display profile refresh failed");
+  },
+);
 const disclosureDocumentStore =
   environment.MINIO_ENDPOINT !== undefined &&
   environment.MINIO_ACCESS_KEY !== undefined &&
@@ -400,9 +368,6 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
       authDatabase.end(),
       jobQueue.stop(),
     ];
-    if (profileCacheClient?.isOpen === true) {
-      shutdownTasks.push(profileCacheClient.close());
-    }
     if (rateLimitCacheClient?.isOpen === true) {
       shutdownTasks.push(rateLimitCacheClient.close());
     }

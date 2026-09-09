@@ -35,14 +35,4 @@ describe("Didit environment configuration", () => {
     expect(result.DIDIT_API_BASE_URL).toBe("https://verification.didit.me");
     expect(result.DIDIT_CALLBACK_URL).toBe("https://app.vistablox.io/kyc/complete");
   });
-
-  it("accepts only Redis-compatible protected profile cache URLs", () => {
-    expect(
-      loadEnvironment({ ...base, PROFILE_CACHE_URL: "rediss://cache.example.test:6380" })
-        .PROFILE_CACHE_URL,
-    ).toBe("rediss://cache.example.test:6380");
-    expect(() =>
-      loadEnvironment({ ...base, PROFILE_CACHE_URL: "https://cache.example.test" }),
-    ).toThrow("PROFILE_CACHE_URL must be a Redis or TLS Redis URL");
-  });
 });

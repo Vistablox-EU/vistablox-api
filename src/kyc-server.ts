@@ -11,6 +11,7 @@ import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { createKycApp } from "./kyc-app.js";
+import { GetKycDisplayProfileService } from "./modules/identity/application/kyc-display-profile.service.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
 import {
   GetKycAccountForOperationsService,
@@ -137,6 +138,20 @@ const startProofOfAddressSession =
         callbackUrl: environment.DIDIT_CALLBACK_URL,
       });
 const getAccountForOperations = new GetKycAccountForOperationsService(kycRepository);
+// Backs vistablox-api's GET /v1/investor-profile display-name lookup
+// (Phase 6, moved off DiditProtectedDisplayProfileProvider) -- reuses the
+// exact same cache instance provider_events.didit_webhook/session-start
+// already invalidate above, so a read here always reflects the most recent
+// invalidation from this same process.
+const getDisplayProfile = new GetKycDisplayProfileService(
+  kycRepository,
+  diditClient,
+  protectedProfileCache,
+  undefined,
+  (error, operation) => {
+    logger.warn({ err: error, operation }, "display profile lookup failed");
+  },
+);
 const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
 const expireStuckSessionCreations = new ExpireStuckSessionCreationsService(kycRepository);
 const reconcileStuckOpenSessions = new ReconcileStuckOpenSessionsService(kycRepository, diditClient);
@@ -226,6 +241,7 @@ const app = createKycApp({
   startSession,
   startProofOfAddressSession,
   getAccountForOperations,
+  getDisplayProfile,
 });
 
 const server = app.listen(environment.PORT, environment.HOST, () => {
