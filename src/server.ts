@@ -9,7 +9,6 @@ import { createApp } from "./app.js";
 import { loadEnvironment } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
-import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
@@ -34,15 +33,15 @@ import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-sessio
 import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
 import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { PrismaOfferingKycProjectionRepository } from "./modules/offering/repository/prisma-offering-kyc-projection.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
+import { PrismaOriginationKycProjectionRepository } from "./modules/origination/repository/prisma-origination-kyc-projection.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
-import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
-import {
-  DiditProtectedDisplayProfileProvider,
-  UnavailableProtectedDisplayProfileProvider,
-} from "./infrastructure/profile/didit-protected-display-profile.provider.js";
+import { HttpKycServiceClient } from "./modules/identity/infrastructure/kyc-service.client.js";
+import { KycServiceDisplayProfileProvider } from "./infrastructure/profile/kyc-service-display-profile.provider.js";
 import { PrismaInvestorProfileRepository } from "./modules/investor-profile/repository/prisma-investor-profile.repository.js";
+import { PrismaInvestorProfileKycProjectionRepository } from "./modules/investor-profile/repository/prisma-investor-profile-kyc-projection.repository.js";
 import {
   MinioDisclosureDocumentStore,
   UnavailableDisclosureDocumentStore,
@@ -63,20 +62,20 @@ await jobQueue.start();
 await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
 await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
 await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
-// Only when Didit is configured — same "all six configured together or
-// none" contract environment.ts's own refine enforces (see diditKyc
-// below), so this single check is equivalent to checking all six.
-if (environment.DIDIT_API_KEY !== undefined) {
-  await jobQueue.createQueue("provider_events.didit_webhook");
-}
-// Constructed unconditionally (unlike diditKyc below, which only wires up
-// live Didit-backed session behavior when all six DIDIT_* vars are set):
-// this repository has no Didit-specific dependency itself, and origination/
-// offering/investor-profile need a KycEligibilityReader regardless of
-// whether Didit is configured in this environment.
-const kycRepository = new PrismaKycRepository(database, jobQueue);
-const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
-const originationRepository = new PrismaOriginationRepository(database, jobQueue, kycRepository);
+// Phase 7: origination's, offering's, and investor-profile's own local,
+// event-driven copies of KycEligibility -- see
+// docs/kyc-eligibility-read-model.md and worker.ts's matching construction,
+// which owns every one of these projections' write side (the
+// <domain>.kyc_eligibility_apply/_reconcile jobs). PrismaKycRepository is
+// gone from this file entirely now -- this was its last remaining
+// consumer; the provider_events.didit_webhook queue itself is created and
+// consumed only by the standalone KYC service (src/kyc-server.ts), nothing
+// in this process ever sent to it either.
+const originationKycProjection = new PrismaOriginationKycProjectionRepository(database);
+const offeringKycProjection = new PrismaOfferingKycProjectionRepository(database);
+const investorProfileKycProjection = new PrismaInvestorProfileKycProjectionRepository(database);
+const offeringRepository = new PrismaOfferingRepository(database, jobQueue, offeringKycProjection);
+const originationRepository = new PrismaOriginationRepository(database, jobQueue, originationKycProjection);
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
 const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
@@ -84,30 +83,6 @@ const staffAccountLifecycleRepository = new PrismaStaffAccountLifecycleRepositor
 const authAuditSink = new PrismaAuthAuditSink(database);
 const authBaseUrl = new URL(environment.BETTER_AUTH_URL);
 const accountProvisioner = new AccountProvisioner(accountRepository);
-const profileCacheClient =
-  environment.PROFILE_CACHE_URL === undefined
-    ? undefined
-    : createClient({
-        url: environment.PROFILE_CACHE_URL,
-        socket: { connectTimeout: 3_000, reconnectStrategy: false },
-      });
-profileCacheClient?.on("error", (error) => {
-  logger.warn({ err: error }, "protected profile cache connection error");
-});
-if (profileCacheClient !== undefined) {
-  try {
-    await profileCacheClient.connect();
-  } catch (error) {
-    logger.warn(
-      { err: error },
-      "protected profile cache unavailable; investor names will be omitted",
-    );
-  }
-}
-const protectedProfileCache =
-  profileCacheClient?.isReady === true
-    ? new RedisProtectedProfileCache(profileCacheClient)
-    : undefined;
 const rateLimitCacheClient =
   environment.RATE_LIMIT_CACHE_URL === undefined
     ? undefined
@@ -219,56 +194,38 @@ const diditClient =
         apiKey: environment.DIDIT_API_KEY,
         timeoutMs: 4_000,
       });
-const diditKyc =
-  diditClient !== undefined &&
-  environment.DIDIT_WORKFLOW_ID !== undefined &&
-  environment.DIDIT_CALLBACK_URL !== undefined &&
-  environment.DIDIT_APPLICATION_ID !== undefined &&
-  environment.DIDIT_ENVIRONMENT !== undefined
-    ? {
-        repository: kycRepository,
-        didit: diditClient,
-        workflowId: environment.DIDIT_WORKFLOW_ID,
-        callbackUrl: environment.DIDIT_CALLBACK_URL,
-        ...(environment.DIDIT_POA_WORKFLOW_ID === undefined
-          ? {}
-          : { proofOfAddressWorkflowId: environment.DIDIT_POA_WORKFLOW_ID }),
-        ...(protectedProfileCache === undefined
-          ? {}
-          : {
-              invalidateDisplayProfile: async (accountId: string) => {
-                try {
-                  await protectedProfileCache.delete(accountId);
-                } catch (error) {
-                  logger.warn(
-                    { err: error, account_id: accountId },
-                    "protected display profile cache invalidation failed",
-                  );
-                }
-              },
-            }),
-      }
-    : undefined;
+// /v1/kyc's own session-creation surface, and DIDIT_APPLICATION_ID/
+// DIDIT_ENVIRONMENT/DIDIT_POA_WORKFLOW_ID with it, now live only in
+// vistablox-kyc (src/kyc-server.ts) -- see kycServiceClient below. This
+// account is still needed here for account recovery, independent of that.
+const kycServiceClient = new HttpKycServiceClient({
+  baseUrl: environment.KYC_SERVICE_URL,
+  secret: environment.INTERNAL_KYC_API_SECRET,
+});
 // Reuses the same baseline Didit workflow as ordinary KYC (AD-062's didit-kyc.md
 // follow-on work): a fresh recovery verification only needs to re-prove a live
-// human with a valid ID, not a separate provider configuration.
+// human with a valid ID, not a separate provider configuration. Gated directly
+// on what this flow itself needs, independent of whether /v1/kyc's own
+// session-start surface exists in this codebase at all.
 const customerAccountAdministrator = new BetterAuthCustomerAccountAdministrator(
   auth,
   emailSender,
 );
 const accountRecovery =
-  diditKyc === undefined
-    ? undefined
-    : {
+  diditClient !== undefined &&
+  environment.DIDIT_WORKFLOW_ID !== undefined &&
+  environment.DIDIT_CALLBACK_URL !== undefined
+    ? {
         repository: new PrismaAccountRecoveryRepository(database),
         administrator: customerAccountAdministrator,
-        didit: diditKyc.didit,
-        workflowId: diditKyc.workflowId,
-        callbackUrl: diditKyc.callbackUrl,
+        didit: diditClient,
+        workflowId: environment.DIDIT_WORKFLOW_ID,
+        callbackUrl: environment.DIDIT_CALLBACK_URL,
         recoveryRedirectUrl:
           environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "com.vistablox.app://recover-account",
         emailSender,
-      };
+      }
+    : undefined;
 const onrampRedirectUrl = environment.COINBASE_ONRAMP_REDIRECT_URL;
 const coinbaseCdpClient =
   environment.COINBASE_CDP_API_KEY_ID === undefined ||
@@ -291,20 +248,16 @@ const coinbaseCdpClient =
 const reservationFundingRailEnabled =
   environment.RESERVATION_FUNDING_RAIL_ENABLED && coinbaseCdpClient !== undefined;
 const betterAuthSessionResolver = new BetterAuthSessionResolver(auth);
-const displayProfiles =
-  protectedProfileCache !== undefined && diditClient !== undefined
-    ? new DiditProtectedDisplayProfileProvider(
-        protectedProfileCache,
-        diditClient,
-        undefined,
-        (error, operation) => {
-          logger.warn(
-            { err: error, operation },
-            "protected display profile refresh failed",
-          );
-        },
-      )
-    : new UnavailableProtectedDisplayProfileProvider();
+// Unconditional now (Phase 6) -- the KYC service is already a required
+// dependency for /v1/kyc itself (kycServiceClient above), so there's no
+// "unavailable at construction time" state left to model here, only a
+// possible runtime failure the provider itself degrades to null for.
+const displayProfiles = new KycServiceDisplayProfileProvider(
+  kycServiceClient,
+  (error, operation) => {
+    logger.warn({ err: error, operation }, "protected display profile refresh failed");
+  },
+);
 const disclosureDocumentStore =
   environment.MINIO_ENDPOINT !== undefined &&
   environment.MINIO_ACCESS_KEY !== undefined &&
@@ -355,7 +308,7 @@ const app = createApp({
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
     investorProfile: {
-      repository: new PrismaInvestorProfileRepository(database, kycRepository),
+      repository: new PrismaInvestorProfileRepository(database, investorProfileKycProjection),
       displayProfiles,
     },
     disclosureDocuments: {
@@ -387,7 +340,7 @@ const app = createApp({
       administrator: customerAccountAdministrator,
       hashKey: environment.BETTER_AUTH_SECRET,
     },
-    ...(diditKyc === undefined ? {} : { kyc: diditKyc }),
+    kyc: { client: kycServiceClient },
     staffAccountLifecycle: {
       repository: staffAccountLifecycleRepository,
       administrator: new BetterAuthStaffAccountAdministrator(auth, emailSender),
@@ -422,9 +375,6 @@ async function shutdown(signal: NodeJS.Signals): Promise<void> {
       authDatabase.end(),
       jobQueue.stop(),
     ];
-    if (profileCacheClient?.isOpen === true) {
-      shutdownTasks.push(profileCacheClient.close());
-    }
     if (rateLimitCacheClient?.isOpen === true) {
       shutdownTasks.push(rateLimitCacheClient.close());
     }

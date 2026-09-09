@@ -1,9 +1,6 @@
-export interface ProtectedDisplayProfile {
-  givenName: string;
-  familyName: string;
-  fullDisplayName: string;
-  syncedAt: Date;
-}
+import type { ProtectedDisplayProfile } from "../../../infrastructure/cache/protected-profile-cache.js";
+
+export type { ProtectedDisplayProfile };
 
 export interface ProtectedDisplayProfileProvider {
   get(input: {

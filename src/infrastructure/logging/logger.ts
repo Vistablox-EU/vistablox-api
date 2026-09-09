@@ -9,6 +9,7 @@ export function createLogger(level: string): Logger {
         "req.headers.authorization",
         "req.headers.cookie",
         "req.headers['x-csrf-token']",
+        "req.headers['x-internal-signature']",
         "res.headers['set-cookie']",
         "password",
         "token",

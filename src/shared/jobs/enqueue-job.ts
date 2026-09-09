@@ -36,3 +36,37 @@ export async function enqueueTransactionalJob(
     },
   );
 }
+
+/**
+ * The publish-side sibling of enqueueTransactionalJob, for topics with zero
+ * or more subscribers rather than one fixed queue name (pg-boss's own
+ * publish/subscribe primitive: boss.publish() looks up every queue currently
+ * subscribed to `event` and calls send() for each). Confirmed directly
+ * against pg-boss's own source (node_modules/pg-boss/dist/manager.js) that
+ * the same transaction-bound `db` adapter used here is forwarded correctly
+ * to every one of those fanned-out send() calls, not just a single one --
+ * the subscriber *lookup* itself runs outside the transaction, on pg-boss's
+ * own connection, but that's immaterial here since subscriptions are static
+ * ops config set once via boss.subscribe() at process startup, never created
+ * or changed mid-transaction.
+ */
+export async function publishTransactionalEvent(
+  boss: PgBoss,
+  transaction: Prisma.TransactionClient,
+  event: string,
+  data: Record<string, unknown>,
+  traceId: string,
+): Promise<void> {
+  await boss.publish(
+    event,
+    { ...data, trace_id: traceId },
+    {
+      ...JOB_RETRY_OPTIONS,
+      db: {
+        executeSql: async (text: string, values?: unknown[]) => ({
+          rows: await transaction.$queryRawUnsafe<unknown[]>(text, ...(values ?? [])),
+        }),
+      },
+    },
+  );
+}

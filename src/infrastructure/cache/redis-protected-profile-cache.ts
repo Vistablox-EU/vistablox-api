@@ -1,7 +1,6 @@
 import { z } from "zod";
 
-import type { ProtectedDisplayProfile } from "../../modules/investor-profile/application/protected-display-profile.js";
-import type { ProtectedProfileCache } from "./protected-profile-cache.js";
+import type { ProtectedDisplayProfile, ProtectedProfileCache } from "./protected-profile-cache.js";
 
 interface RedisStringClient {
   readonly isReady: boolean;

@@ -9,6 +9,8 @@ const base = {
   SMTP_USER: "user",
   SMTP_PASSWORD: "password",
   SMTP_FROM: "VistaBlox <no-reply@example.com>",
+  KYC_SERVICE_URL: "http://vistablox-kyc:3000",
+  INTERNAL_KYC_API_SECRET: "an-internal-kyc-api-secret-value-32-chars",
 };
 
 describe("customer OAuth environment configuration", () => {

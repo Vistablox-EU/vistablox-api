@@ -83,16 +83,6 @@ const environmentSchema = z
     SMTP_USER: z.string().min(1),
     SMTP_PASSWORD: z.string().min(1),
     SMTP_FROM: z.string().min(1),
-    PROFILE_CACHE_URL: z.preprocess(
-      emptyStringToUndefined,
-      z
-        .url()
-        .refine(
-          (value) => value.startsWith("redis://") || value.startsWith("rediss://"),
-          { message: "PROFILE_CACHE_URL must be a Redis or TLS Redis URL" },
-        )
-        .optional(),
-    ),
     RATE_LIMIT_CACHE_URL: z.preprocess(
       emptyStringToUndefined,
       z
@@ -118,19 +108,23 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
     ),
+    // Account-recovery's own Didit usage only, as of the KYC service move --
+    // /v1/kyc's own session creation, and DIDIT_APPLICATION_ID/
+    // DIDIT_ENVIRONMENT/DIDIT_POA_WORKFLOW_ID with it, now live only in
+    // src/config/kyc-environment.ts.
     DIDIT_API_BASE_URL: z.url().default("https://verification.didit.me"),
     DIDIT_API_KEY: optionalNonEmptyString(),
     DIDIT_WORKFLOW_ID: optionalUuid(),
-    DIDIT_POA_WORKFLOW_ID: optionalUuid(),
     DIDIT_CALLBACK_URL: z.preprocess(
       emptyStringToUndefined,
       z.url().optional(),
     ),
-    DIDIT_APPLICATION_ID: optionalUuid(),
-    DIDIT_ENVIRONMENT: z.preprocess(
-      emptyStringToUndefined,
-      z.enum(["sandbox", "live"]).optional(),
-    ),
+    // The standalone KYC service /v1/kyc and /internal/v1/kyc-accounts now
+    // forward to (src/modules/identity/infrastructure/kyc-service.client.ts).
+    // Required outright, unlike the Didit settings above -- those routes
+    // aren't an optional feature the way the rest of Didit-as-a-whole is.
+    KYC_SERVICE_URL: z.url(),
+    INTERNAL_KYC_API_SECRET: z.string().min(32),
     COINBASE_CDP_API_BASE_URL: z.url().default("https://api.developer.coinbase.com"),
     COINBASE_CDP_PAY_HOSTED_URL: z.url().default("https://pay.coinbase.com/buy/select-asset"),
     COINBASE_CDP_API_KEY_ID: optionalUuid(),
@@ -254,8 +248,6 @@ const environmentSchema = z
         environment.DIDIT_API_KEY,
         environment.DIDIT_WORKFLOW_ID,
         environment.DIDIT_CALLBACK_URL,
-        environment.DIDIT_APPLICATION_ID,
-        environment.DIDIT_ENVIRONMENT,
       ];
       return (
         values.every((value) => value === undefined) ||
@@ -263,26 +255,8 @@ const environmentSchema = z
       );
     },
     {
-      message: "All Didit KYC settings must be configured together",
+      message: "All Didit account-recovery settings must be configured together",
       path: ["DIDIT_API_KEY"],
-    },
-  )
-  .refine(
-    (environment) =>
-      environment.DIDIT_POA_WORKFLOW_ID === undefined ||
-      environment.DIDIT_API_KEY !== undefined,
-    {
-      message: "DIDIT_POA_WORKFLOW_ID requires the Didit KYC integration",
-      path: ["DIDIT_POA_WORKFLOW_ID"],
-    },
-  )
-  .refine(
-    (environment) =>
-      environment.DIDIT_POA_WORKFLOW_ID === undefined ||
-      environment.DIDIT_POA_WORKFLOW_ID !== environment.DIDIT_WORKFLOW_ID,
-    {
-      message: "DIDIT_POA_WORKFLOW_ID must differ from DIDIT_WORKFLOW_ID",
-      path: ["DIDIT_POA_WORKFLOW_ID"],
     },
   )
   .refine(

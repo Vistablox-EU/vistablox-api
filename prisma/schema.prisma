@@ -282,6 +282,39 @@ model AccountRecoveryCode {
   @@schema("account")
 }
 
+// Phase 7: investor-profile's own event-driven local copy of
+// KycEligibilitySnapshot (src/modules/identity/repository/
+// kyc-eligibility-reader.ts) -- lives here rather than a dedicated
+// investor-profile schema, since none exists (see docs/investor-profile.md).
+// Kept in sync by PrismaInvestorProfileKycProjectionRepository, subscribed
+// to identity.kyc_eligibility_changed, plus a periodic reconcile pass -- not
+// a live read against identity.kyc_eligibility.
+//
+// Deliberately no relation to Account, unlike every other model in this
+// file: every accountId this table ever receives already passed through
+// KycEligibility's own FK to Account (either directly, from an
+// identity.kyc_eligibility_changed event, or via the reconcile job's own
+// read of that same table), so a second FK here could never actually reject
+// anything -- it would be pure ceremony, not real protection. The one
+// concrete thing skipping it gives up is a free ON DELETE CASCADE if Account
+// rows are ever hard-deleted, which no code path does today.
+model InvestorProfileKycEligibilityProjection {
+  accountId                  String    @id @map("account_id")
+  diditReference              String?   @map("didit_reference")
+  providerStatus               String?   @map("provider_status")
+  eligibilityState             String    @map("eligibility_state")
+  residenceCountryCode          String?   @map("residence_country_code")
+  taxResidenceCountryCode       String?   @map("tax_residence_country_code")
+  proofOfAddressStatus          String    @map("proof_of_address_status")
+  proofOfAddressCurrentUntil    DateTime? @map("proof_of_address_current_until") @db.Timestamptz(6)
+  lastVerifiedAt                DateTime? @map("last_verified_at") @db.Timestamptz(6)
+  renewalDueAt                  DateTime? @map("renewal_due_at") @db.Timestamptz(6)
+  projectionUpdatedAt           DateTime  @default(now()) @map("projection_updated_at") @db.Timestamptz(6)
+
+  @@map("kyc_eligibility_projection")
+  @@schema("account")
+}
+
 model KycEligibility {
   accountId                   String    @id @map("account_id")
   diditReference              String?   @unique(map: "kyc_eligibility_didit_reference_key") @map("didit_reference")
@@ -644,6 +677,27 @@ model Piv {
   @@schema("origination")
 }
 
+// Phase 7: origination's own event-driven local copy of
+// KycEligibilitySnapshot -- see InvestorProfileKycEligibilityProjection's
+// comment above (account schema) for the full reasoning, including why
+// there is deliberately no relation to Account here either.
+model OriginationKycEligibilityProjection {
+  accountId                  String    @id @map("account_id")
+  diditReference              String?   @map("didit_reference")
+  providerStatus               String?   @map("provider_status")
+  eligibilityState             String    @map("eligibility_state")
+  residenceCountryCode          String?   @map("residence_country_code")
+  taxResidenceCountryCode       String?   @map("tax_residence_country_code")
+  proofOfAddressStatus          String    @map("proof_of_address_status")
+  proofOfAddressCurrentUntil    DateTime? @map("proof_of_address_current_until") @db.Timestamptz(6)
+  lastVerifiedAt                DateTime? @map("last_verified_at") @db.Timestamptz(6)
+  renewalDueAt                  DateTime? @map("renewal_due_at") @db.Timestamptz(6)
+  projectionUpdatedAt           DateTime  @default(now()) @map("projection_updated_at") @db.Timestamptz(6)
+
+  @@map("kyc_eligibility_projection")
+  @@schema("origination")
+}
+
 model Offering {
   id                         String    @id @map("offering_id")
   pivId                      String    @map("piv_id")
@@ -733,6 +787,32 @@ model MaterialityRecord {
   @@index([offeringId], map: "idx_materiality_offering")
   @@index([classifiedByAccountId], map: "idx_materiality_classified_by")
   @@map("materiality_records")
+  @@schema("offering")
+}
+
+// Phase 7: offering's own event-driven local copy of
+// KycEligibilitySnapshot -- see InvestorProfileKycEligibilityProjection's
+// comment (account schema) for the full reasoning, including why there is
+// deliberately no relation to Account here either. Reconciled on a
+// materially tighter cadence than origination's/investor-profile's own
+// copies (5 minutes, not hourly) -- this is the one projection on
+// CreateReservationService's path, where the degraded-case staleness bound
+// (subscriber stuck, falling back to the reconcile job) actually touches
+// money; see docs/kyc-eligibility-read-model.md.
+model OfferingKycEligibilityProjection {
+  accountId                  String    @id @map("account_id")
+  diditReference              String?   @map("didit_reference")
+  providerStatus               String?   @map("provider_status")
+  eligibilityState             String    @map("eligibility_state")
+  residenceCountryCode          String?   @map("residence_country_code")
+  taxResidenceCountryCode       String?   @map("tax_residence_country_code")
+  proofOfAddressStatus          String    @map("proof_of_address_status")
+  proofOfAddressCurrentUntil    DateTime? @map("proof_of_address_current_until") @db.Timestamptz(6)
+  lastVerifiedAt                DateTime? @map("last_verified_at") @db.Timestamptz(6)
+  renewalDueAt                  DateTime? @map("renewal_due_at") @db.Timestamptz(6)
+  projectionUpdatedAt           DateTime  @default(now()) @map("projection_updated_at") @db.Timestamptz(6)
+
+  @@map("kyc_eligibility_projection")
   @@schema("offering")
 }
 
