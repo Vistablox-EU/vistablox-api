@@ -1,15 +1,15 @@
 # Investor profile
 
-`GET /v1/investor-profile` returns the authenticated customer's consolidated profile. It implements the documented cross-reference and deliberately does not introduce an `investor_profile` table.
+`GET /v1/investor-profile` returns the authenticated customer's consolidated profile. It implements the documented cross-reference and deliberately does not introduce a table of its own for any of investor-profile's own entities. It does, since Phase 7, read from one table this module owns: a local, event-driven projection of KYC eligibility — see the note on eligibility below and [`kyc-eligibility-read-model.md`](kyc-eligibility-read-model.md).
 
 ## Durable aggregate
 
 The repository reads the existing source-of-truth records in one account-scoped query:
 
 - account status, protected contact email, membership date, and linked login methods from `account`
-- local eligibility, declared country codes, proof-of-address state, and renewal dates from `identity`
+- local eligibility, declared country codes, proof-of-address state, and renewal dates from this module's own KYC eligibility projection (`account.kyc_eligibility_projection`, kept in sync with `identity`'s own table via `identity.kyc_eligibility_changed` events and a periodic reconcile pass — not a live read against `identity` itself; see [`kyc-eligibility-read-model.md`](kyc-eligibility-read-model.md))
 - reservation and non-redeemed position counts from `money` and `settlement`
-- wallet registration progress and distinct investment/payment/payout readiness from `settlement`, `identity`, and linked-login state
+- wallet registration progress and distinct investment/payment/payout readiness from `settlement`, this same eligibility projection, and linked-login state
 
 The response does not include raw wallet addresses, monetary balances, KYC evidence, provider payloads, session data, or notification preferences. It is customer-only, uses the authenticated account ID rather than a path parameter, and sends `Cache-Control: no-store`.
 

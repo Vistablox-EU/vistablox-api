@@ -33,13 +33,15 @@ import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-sessio
 import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
 import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { PrismaOfferingKycProjectionRepository } from "./modules/offering/repository/prisma-offering-kyc-projection.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
+import { PrismaOriginationKycProjectionRepository } from "./modules/origination/repository/prisma-origination-kyc-projection.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { HttpKycServiceClient } from "./modules/identity/infrastructure/kyc-service.client.js";
-import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import { KycServiceDisplayProfileProvider } from "./infrastructure/profile/kyc-service-display-profile.provider.js";
 import { PrismaInvestorProfileRepository } from "./modules/investor-profile/repository/prisma-investor-profile.repository.js";
+import { PrismaInvestorProfileKycProjectionRepository } from "./modules/investor-profile/repository/prisma-investor-profile-kyc-projection.repository.js";
 import {
   MinioDisclosureDocumentStore,
   UnavailableDisclosureDocumentStore,
@@ -60,15 +62,20 @@ await jobQueue.start();
 await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
 await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
 await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
-// This repository has no Didit-specific dependency itself -- origination/
-// offering/investor-profile need a KycEligibilityReader regardless of
-// whether Didit is configured in this environment. The provider_events.
-// didit_webhook queue itself is created and consumed only by the
-// standalone KYC service (src/kyc-server.ts); nothing in this process ever
-// sends to it.
-const kycRepository = new PrismaKycRepository(database, jobQueue);
-const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
-const originationRepository = new PrismaOriginationRepository(database, jobQueue, kycRepository);
+// Phase 7: origination's, offering's, and investor-profile's own local,
+// event-driven copies of KycEligibility -- see
+// docs/kyc-eligibility-read-model.md and worker.ts's matching construction,
+// which owns every one of these projections' write side (the
+// <domain>.kyc_eligibility_apply/_reconcile jobs). PrismaKycRepository is
+// gone from this file entirely now -- this was its last remaining
+// consumer; the provider_events.didit_webhook queue itself is created and
+// consumed only by the standalone KYC service (src/kyc-server.ts), nothing
+// in this process ever sent to it either.
+const originationKycProjection = new PrismaOriginationKycProjectionRepository(database);
+const offeringKycProjection = new PrismaOfferingKycProjectionRepository(database);
+const investorProfileKycProjection = new PrismaInvestorProfileKycProjectionRepository(database);
+const offeringRepository = new PrismaOfferingRepository(database, jobQueue, offeringKycProjection);
+const originationRepository = new PrismaOriginationRepository(database, jobQueue, originationKycProjection);
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
 const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
@@ -301,7 +308,7 @@ const app = createApp({
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
     investorProfile: {
-      repository: new PrismaInvestorProfileRepository(database, kycRepository),
+      repository: new PrismaInvestorProfileRepository(database, investorProfileKycProjection),
       displayProfiles,
     },
     disclosureDocuments: {

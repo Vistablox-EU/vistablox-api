@@ -5,8 +5,16 @@
 // internal read/write contract for the session state machine and carries
 // internal-only fields (operationalSubstatus, everRequiredManualReview,
 // proof-of-address session bookkeeping) that consumers outside this module
-// have no business depending on. This one exposes exactly the fields the
-// three known external call sites read today.
+// have no business depending on. This one exposes exactly the fields those
+// three modules' own event-driven projections need to stay in sync with
+// (Phase 7, docs/kyc-eligibility-read-model.md) -- their repositories no
+// longer read this table directly, only their own local copy of it.
+//
+// A fourth consumer, GetKycDisplayProfileService, lives inside identity
+// itself (src/kyc-server.ts) and is out of scope for that Phase 7 move --
+// it's injected with PrismaKycRepository directly, reading identity's own
+// source of truth for identity's own purpose, never crossing the service
+// boundary this port exists to guard.
 export interface KycEligibilitySnapshot {
   accountId: string;
   diditReference: string | null;
