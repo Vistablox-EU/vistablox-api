@@ -111,10 +111,12 @@ services:
         condition: service_completed_successfully
 
   # Owns the whole KYC domain (the Didit webhook, session creation/status,
-  # staff lookups). Deliberately not built on *app-environment: that anchor
-  # carries BETTER_AUTH_*, SMTP_*, and other vars this service's own schema
-  # (src/config/kyc-environment.ts) doesn't need -- only DATABASE_URL and
-  # what it actually reads.
+  # staff lookups, renewal-reminder timer, stuck-session reconciliation).
+  # Deliberately not built on *app-environment: that anchor carries
+  # BETTER_AUTH_* and other vars this service's own schema
+  # (src/config/kyc-environment.ts) doesn't need -- only DATABASE_URL, SMTP_*
+  # (its own renewal-reminder email, pointed at the same maildev catcher
+  # *app-environment's SMTP_* uses above), and what else it actually reads.
   vistablox-kyc:
     build:
       context: .
@@ -133,6 +135,12 @@ services:
       # env var, referenced from both service blocks.
       INTERNAL_KYC_API_SECRET: ${INTERNAL_KYC_API_SECRET}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      SMTP_HOST: maildev
+      SMTP_PORT: "1025"
+      SMTP_SECURE: "false"
+      SMTP_USER: vistablox
+      SMTP_PASSWORD: vistablox
+      SMTP_FROM: VistaBlox <no-reply@vistablox.local>
     depends_on:
       vistablox-db-server:
         condition: service_healthy

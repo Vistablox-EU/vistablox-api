@@ -6,11 +6,18 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createKycApp } from "../src/kyc-app.js";
 import type { DatabaseProbe } from "../src/infrastructure/database/database-probe.js";
-import { ReceiveDiditWebhookService } from "../src/modules/identity/application/kyc.service.js";
+import {
+  GetKycAccountForOperationsService,
+  GetKycStatusService,
+  ReceiveDiditWebhookService,
+  StartKycSessionService,
+} from "../src/modules/identity/application/kyc.service.js";
+import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
 import {
   canonicalize,
   DiditWebhookVerifier,
 } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
+import { InternalApiSignatureVerifier } from "../src/modules/identity/infrastructure/internal-api-signature.js";
 import type { KycRepository } from "../src/modules/identity/repository/kyc.repository.js";
 
 const secret = "didit-webhook-secret-for-tests";
@@ -48,6 +55,10 @@ function fakeKycRepository(overrides: Partial<KycRepository> = {}): KycRepositor
   };
 }
 
+function fakeDiditClient(): DiditClient {
+  return { createSession: vi.fn(), getDecision: vi.fn() };
+}
+
 function buildApp(options?: { databaseFailure?: boolean; repository?: KycRepository }) {
   const databaseProbe: DatabaseProbe = {
     check:
@@ -56,11 +67,23 @@ function buildApp(options?: { databaseFailure?: boolean; repository?: KycReposit
         : vi.fn().mockResolvedValue(undefined),
   };
   const repository = options?.repository ?? fakeKycRepository();
+  const didit = fakeDiditClient();
   const app = createKycApp({
     databaseProbe,
     logger: pino({ level: "silent" }),
     webhookVerifier: new DiditWebhookVerifier(secret, () => now),
     receiveWebhook: new ReceiveDiditWebhookService(repository),
+    internalApiVerifier: new InternalApiSignatureVerifier(
+      "an-internal-kyc-api-secret-value-32-chars",
+      () => now,
+    ),
+    getStatus: new GetKycStatusService(repository, didit),
+    startSession: new StartKycSessionService(repository, didit, {
+      workflowId: "269214fe-77f7-4b1a-a028-b70e861d73c1",
+      callbackUrl: "https://app.vistablox.io/kyc/complete",
+    }),
+    startProofOfAddressSession: undefined,
+    getAccountForOperations: new GetKycAccountForOperationsService(repository),
   });
   return { app, repository };
 }

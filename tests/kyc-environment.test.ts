@@ -11,6 +11,10 @@ const base = {
   DIDIT_APPLICATION_ID: "c5f501a8-0a32-42cd-ac24-13d0d0b15699",
   DIDIT_ENVIRONMENT: "sandbox",
   INTERNAL_KYC_API_SECRET: "an-internal-kyc-api-secret-value-32-chars",
+  SMTP_HOST: "smtp.example.com",
+  SMTP_USER: "user",
+  SMTP_PASSWORD: "password",
+  SMTP_FROM: "VistaBlox <no-reply@example.com>",
 };
 
 describe("KYC service environment configuration", () => {
@@ -20,6 +24,8 @@ describe("KYC service environment configuration", () => {
     expect(result.PORT).toBe(3_000);
     expect(result.DIDIT_POA_WORKFLOW_ID).toBeUndefined();
     expect(result.PROFILE_CACHE_URL).toBeUndefined();
+    expect(result.SMTP_PORT).toBe(587);
+    expect(result.SMTP_SECURE).toBe(false);
   });
 
   it.each([
@@ -31,6 +37,10 @@ describe("KYC service environment configuration", () => {
     "DIDIT_APPLICATION_ID",
     "DIDIT_ENVIRONMENT",
     "INTERNAL_KYC_API_SECRET",
+    "SMTP_HOST",
+    "SMTP_USER",
+    "SMTP_PASSWORD",
+    "SMTP_FROM",
   ] as const)("requires %s outright -- there is no disabled mode for this service", (key) => {
     const withoutKey: Record<string, string | undefined> = { ...base };
     delete withoutKey[key];

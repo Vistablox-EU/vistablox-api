@@ -13,12 +13,6 @@ import {
 } from "./modules/origination/application/case-timer.service.js";
 import { TransitionCaseToPostIpoStructuringService } from "./modules/origination/application/post-ipo-structuring-handoff.service.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
-import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
-import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
-import {
-  ExpireStuckSessionCreationsService,
-  ReconcileStuckOpenSessionsService,
-} from "./modules/identity/application/kyc-stuck-session.service.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
@@ -54,21 +48,12 @@ boss.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
 });
 
+// Kept unconditionally: origination/offering still need this for their own
+// KycEligibilityReader (Phase 1), independent of the KYC-specific jobs that
+// used to live in this file -- those, and this file's own Didit client
+// (used only by reconcileStuckOpenSessions), moved to the KYC service's own
+// process in Phase 5.
 const kycRepository = new PrismaKycRepository(database, boss);
-const diditClient =
-  environment.DIDIT_API_KEY === undefined
-    ? undefined
-    : new HttpDiditClient({
-        baseUrl: environment.DIDIT_API_BASE_URL,
-        apiKey: environment.DIDIT_API_KEY,
-        timeoutMs: 4_000,
-      });
-const expireStuckSessionCreations = new ExpireStuckSessionCreationsService(kycRepository);
-// diditClient !== undefined is equivalent to "Didit is configured" in
-// practice, since environment.ts's own refine enforces all five Didit
-// settings configured together or none.
-const reconcileStuckOpenSessions =
-  diditClient === undefined ? undefined : new ReconcileStuckOpenSessionsService(kycRepository, diditClient);
 
 const offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
 const originationRepository = new PrismaOriginationRepository(database, boss, kycRepository);
@@ -78,7 +63,6 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 );
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(originationRepository);
 const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(originationRepository);
-const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
@@ -164,17 +148,12 @@ await boss.createQueue("case_timers.offering_reconfirmation_window_close");
 await boss.createQueue("case_timers.offering_reconfirmation_reminders");
 await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
 await boss.createQueue("case_timers.post_ipo_structuring_handoff");
-await boss.createQueue("maintenance.kyc_renewal");
-await boss.createQueue("maintenance.kyc_stuck_session_expiry");
 // Only registered when Coinbase CDP credentials are configured — unlike
 // every other job here, this one's sole dependency (the onramp REST client)
 // is genuinely optional, matching how server.ts only wires reservation
 // creation itself when the same credentials are present.
 if (pollOnrampTransactions !== undefined) {
   await boss.createQueue("case_timers.reservation_onramp_poll");
-}
-if (reconcileStuckOpenSessions !== undefined) {
-  await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
 }
 if (runOperatingDistributionSweep !== undefined) {
   await boss.createQueue("rental.operating_distribution_sweep");
@@ -194,25 +173,6 @@ await boss.schedule("case_timers.response_window_expiry", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
-await boss.schedule("maintenance.kyc_renewal", "0 9 * * *", null, {
-  tz: "UTC",
-  ...RETRY_OPTIONS,
-});
-// Hourly is generous headroom either side of both thresholds this pair
-// checks against (15 minutes for a stuck session creation, an hour before
-// the first reconciliation re-check of a stuck open session) — there is no
-// promised recovery time to keep pace with here, unlike the 15-minute
-// unfunded-reservation sweep above.
-await boss.schedule("maintenance.kyc_stuck_session_expiry", "0 * * * *", null, {
-  tz: "UTC",
-  ...RETRY_OPTIONS,
-});
-if (reconcileStuckOpenSessions !== undefined) {
-  await boss.schedule("maintenance.kyc_stuck_session_reconciliation", "0 * * * *", null, {
-    tz: "UTC",
-    ...RETRY_OPTIONS,
-  });
-}
 // Every minute, not hourly like the other timers above: the capacity-hold
 // policy decided alongside AD-255 promises unfunded capacity is released
 // within ~15 minutes, and a stale hold blocks other investors from an
@@ -272,21 +232,6 @@ await boss.work("case_timers.response_window_expiry", async () => {
     expireOverdueRequests.execute(traceId),
   );
 });
-await boss.work("maintenance.kyc_renewal", async () => {
-  await runJob("maintenance.kyc_renewal", (traceId) => runKycRenewalTimer.execute(traceId));
-});
-await boss.work("maintenance.kyc_stuck_session_expiry", async () => {
-  await runJob("maintenance.kyc_stuck_session_expiry", (traceId) =>
-    expireStuckSessionCreations.execute(traceId),
-  );
-});
-if (reconcileStuckOpenSessions !== undefined) {
-  await boss.work("maintenance.kyc_stuck_session_reconciliation", async () => {
-    await runJob("maintenance.kyc_stuck_session_reconciliation", (traceId) =>
-      reconcileStuckOpenSessions.execute(traceId),
-    );
-  });
-}
 await boss.work("case_timers.reservation_unfunded_expiry", async () => {
   await runJob("case_timers.reservation_unfunded_expiry", (traceId) =>
     expireUnfundedReservations.execute(traceId),

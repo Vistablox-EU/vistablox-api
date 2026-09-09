@@ -141,13 +141,16 @@ services:
         condition: service_completed_successfully
 
   # Owns the whole KYC domain (the Didit webhook, session creation/status,
-  # staff lookups -- KYC microservicing effort) -- reuses the worker build
-  # stage's image via a `command:` override rather than a dedicated build
-  # stage, since the image is otherwise identical. Its DIDIT_*/
-  # INTERNAL_KYC_API_SECRET values come from .env via env_file below, same
-  # as api/worker's do -- only DATABASE_URL/PROFILE_CACHE_URL need the
-  # compose-network override, since those two point at a different host
-  # (postgres/cache's service names) than a real deployment would use.
+  # staff lookups, renewal-reminder timer, stuck-session reconciliation --
+  # KYC microservicing effort) -- reuses the worker build stage's image via
+  # a `command:` override rather than a dedicated build stage, since the
+  # image is otherwise identical. Its DIDIT_*/INTERNAL_KYC_API_SECRET values
+  # come from .env via env_file below, same as api/worker's do -- only
+  # DATABASE_URL/PROFILE_CACHE_URL need the compose-network override, since
+  # those two point at a different host (postgres/cache's service names)
+  # than a real deployment would use. SMTP_* is overridden the same way
+  # api/worker's is below, so its renewal-reminder email also lands in the
+  # local mailpit catcher instead of whatever real SMTP_* is in .env.
   kyc:
     build:
       context: .
@@ -158,6 +161,12 @@ services:
     environment:
       DATABASE_URL: postgresql://vistablox:vistablox@postgres:5432/vistablox
       PROFILE_CACHE_URL: redis://cache:6379
+      SMTP_HOST: mailpit
+      SMTP_PORT: "1025"
+      SMTP_SECURE: "false"
+      SMTP_USER: vistablox
+      SMTP_PASSWORD: vistablox
+      SMTP_FROM: VistaBlox <no-reply@vistablox.local>
     depends_on:
       postgres:
         condition: service_healthy
