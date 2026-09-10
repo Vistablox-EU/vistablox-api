@@ -55,8 +55,26 @@ model Account {
   auditEntries                   AuditLog[]
   idempotencyKeys                IdempotencyKey[]
   updatedSettings                PlatformSetting[]
+  preferences                    AccountPreferences?
+  closureRequests                AccountClosureRequest[] @relation("ClosureRequestSubject")
+  resolvedClosureRequests        AccountClosureRequest[] @relation("ClosureRequestResolver")
 
   @@map("accounts")
+  @@schema("account")
+}
+
+model AccountPreferences {
+  accountId       String   @id @map("account_id")
+  dealAlertsEmail Boolean  @default(true) @map("deal_alerts_email")
+  statementsEmail Boolean  @default(true) @map("statements_email")
+  marketingEmail  Boolean  @default(false) @map("marketing_email")
+  locale          String   @default("en-US") @map("locale")
+  timezone        String   @default("UTC") @map("timezone")
+  updatedAt       DateTime @default(now()) @updatedAt @map("updated_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@map("account_preferences")
   @@schema("account")
 }
 

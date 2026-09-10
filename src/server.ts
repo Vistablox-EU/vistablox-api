@@ -27,12 +27,14 @@ import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit
 import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
 import { BetterAuthCustomerAccountAdministrator } from "./modules/auth/infrastructure/better-auth-customer-account-administrator.js";
 import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
+import { PrismaAccountClosureRepository } from "./modules/auth/repository/prisma-account-closure.repository.js";
 import { PrismaAccountRecoveryCodeRepository } from "./modules/auth/repository/prisma-account-recovery-code.repository.js";
 import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
 import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
 import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
 import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
 import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
+import { BetterAuthLoginMethodUnlinker } from "./modules/auth/infrastructure/better-auth-login-method-unlinker.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
@@ -47,8 +49,14 @@ import {
 } from "./modules/identity/application/kyc.service.js";
 import { GetKycDisplayProfileService } from "./modules/identity/application/kyc-display-profile.service.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
-import { IdentityDisplayProfileProvider } from "./infrastructure/profile/kyc-service-display-profile.provider.js";
-import { PrismaInvestorProfileRepository } from "./modules/investor-profile/repository/prisma-investor-profile.repository.js";
+import { IdentityDisplayProfileProvider } from "./infrastructure/profile/identity-display-profile.provider.js";
+import { PrismaProfileRepository } from "./modules/profile/repository/prisma-profile.repository.js";
+import { PrismaAccountPreferencesRepository } from "./modules/profile/repository/prisma-account-preferences.repository.js";
+import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
+import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
+import { createChainReader } from "./infrastructure/blockchain/chain-client.js";
+import { ViemWalletChainReader } from "./infrastructure/blockchain/chain-wallet-reader.js";
+import { PrismaInvestorActivityRepository } from "./modules/investor-activity/repository/prisma-investor-activity.repository.js";
 import {
   MinioDisclosureDocumentStore,
   UnavailableDisclosureDocumentStore,
@@ -71,7 +79,7 @@ await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
 await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
 await jobQueue.createQueue("provider_events.didit_webhook");
 // Reversal (undoing the KYC microservice split): origination, offering,
-// and investor-profile read identity.kyc_eligibility directly via a shared
+// profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
 const kycRepository = new PrismaKycRepository(database, jobQueue);
 const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
@@ -245,6 +253,7 @@ const customerAccountAdministrator = new BetterAuthCustomerAccountAdministrator(
   auth,
   emailSender,
 );
+const accountClosureRepository = new PrismaAccountClosureRepository(database);
 const accountRecovery = {
   repository: new PrismaAccountRecoveryRepository(database),
   administrator: customerAccountAdministrator,
@@ -258,7 +267,7 @@ const accountRecovery = {
 // Reversal (undoing the KYC microservice split): identity's own
 // application services, constructed directly in-process again -- these
 // used to live only in src/kyc-server.ts. kycRepository is the same shared
-// instance origination/offering/investor-profile already read through
+// instance origination/offering/profile/wallet already read through
 // (Stage 1a above); diditClient is the same one account recovery uses.
 const getKycStatus = new GetKycStatusService(kycRepository, diditClient);
 const startKycSession = new StartKycSessionService(
@@ -335,6 +344,39 @@ const disclosureDocumentStore =
         bucket: environment.MINIO_DOCUMENT_BUCKET,
       })
     : new UnavailableDisclosureDocumentStore();
+
+const walletRepository = new PrismaWalletRepository(database);
+// Dormant unless the CHAIN_* env group is configured -- same all-or-none
+// gate as the write-side ChainClients worker.ts constructs, minus the
+// operator private key: this is a read-only client (eth_call only, no
+// account), so the API process has no reason to ever hold that key. See
+// AD-240 and ChainReader's own doc comment for why that separation matters.
+const walletBalances =
+  environment.CHAIN_NETWORK === undefined ||
+  environment.CHAIN_RPC_URL === undefined ||
+  environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS === undefined ||
+  environment.EURC_TOKEN_ADDRESS === undefined
+    ? undefined
+    : {
+        pivTokenHoldingsReader: new PrismaSettlementRepository(database),
+        chainReader: new ViemWalletChainReader(
+          createChainReader({
+            network: environment.CHAIN_NETWORK,
+            rpcUrl: environment.CHAIN_RPC_URL,
+            propertyContractAddress: environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS as `0x${string}`,
+            eurcTokenAddress: environment.EURC_TOKEN_ADDRESS as `0x${string}`,
+          }),
+        ),
+      };
+const investorActivityRepository = new PrismaInvestorActivityRepository(database);
+const accountPreferencesRepository = new PrismaAccountPreferencesRepository(database);
+const profileRepository = new PrismaProfileRepository(
+  database,
+  kycRepository,
+  walletRepository,
+  investorActivityRepository,
+  accountClosureRepository,
+);
 const app = createApp({
   databaseProbe: new PrismaDatabaseProbe(database),
   offeringRepository,
@@ -370,9 +412,21 @@ const app = createApp({
       rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
       expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
     }),
-    investorProfile: {
-      repository: new PrismaInvestorProfileRepository(database, kycRepository),
+    profile: {
+      repository: profileRepository,
       displayProfiles,
+      preferencesRepository: accountPreferencesRepository,
+    },
+    loginMethods: {
+      unlinker: new BetterAuthLoginMethodUnlinker(auth),
+    },
+    wallet: {
+      repository: walletRepository,
+      kycEligibilityReader: kycRepository,
+      ...(walletBalances === undefined ? {} : { balances: walletBalances }),
+    },
+    investorActivity: {
+      repository: investorActivityRepository,
     },
     disclosureDocuments: {
       repository: offeringRepository,
@@ -419,6 +473,10 @@ const app = createApp({
         new URL("/staff/recover-account", authBaseUrl).toString(),
     },
     accountRecovery,
+    accountClosure: {
+      repository: accountClosureRepository,
+      administrator: customerAccountAdministrator,
+    },
     staffInvitations: {
       repository: staffInvitationRepository,
       identities: new BetterAuthStaffIdentityProvider(staffProvisioningAuth),

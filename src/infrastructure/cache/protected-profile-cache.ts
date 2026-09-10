@@ -1,5 +1,5 @@
 // Lives here, not under either module that uses it: identity (which fetches
-// and caches this, in kyc-display-profile.service.ts) and investor-profile
+// and caches this, in kyc-display-profile.service.ts) and profile
 // (which reads it through ProtectedDisplayProfileProvider) can't import
 // from each other's application layer (no-cross-domain-internals).
 export interface ProtectedDisplayProfile {

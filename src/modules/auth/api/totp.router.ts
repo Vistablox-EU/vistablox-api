@@ -51,7 +51,7 @@ export function createTotpRouter(
 }
 
 function requireCustomerContext(
-  context: { accountId: string; population: string; providerSessionId: string } | undefined,
+  context: Express.Locals["authContext"],
 ): { accountId: string; providerSessionId: string } {
   if (context === undefined) {
     throw new AppError({

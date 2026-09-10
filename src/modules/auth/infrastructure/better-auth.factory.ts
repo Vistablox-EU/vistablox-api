@@ -10,6 +10,7 @@ import type { SessionMirror } from "../application/session-mirror.js";
 import type { LoginMethodType } from "../../account/repository/account.repository.js";
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 import { createBetterAuthStaffAccountGuardPlugin } from "./better-auth-staff-account-guard.plugin.js";
+import { createBetterAuthRegistrationAccountGuardPlugin } from "./better-auth-registration-account-guard.plugin.js";
 
 export interface AuthUserSnapshot {
   id: string;
@@ -287,6 +288,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         },
       }),
       createBetterAuthStaffAccountGuardPlugin(),
+      createBetterAuthRegistrationAccountGuardPlugin(),
       ...(options.authAuditSink === undefined
         ? []
         : [

@@ -60,6 +60,15 @@ import {
 import type { CustomerAccountAdministrator } from "./modules/auth/application/customer-account-administrator.js";
 import type { AccountRecoveryCodeRepository } from "./modules/auth/repository/account-recovery-code.repository.js";
 import type { AccountRecoveryRepository } from "./modules/auth/repository/account-recovery.repository.js";
+import { createAccountClosureRouter } from "./modules/auth/api/account-closure.router.js";
+import { createAccountClosureOperationsRouter } from "./modules/auth/api/account-closure-operations.router.js";
+import {
+  CancelAccountClosureService,
+  DecideAccountClosureRequestService,
+  ListPendingAccountClosureRequestsService,
+  RequestAccountClosureService,
+} from "./modules/auth/application/account-closure.service.js";
+import type { AccountClosureRepository } from "./modules/auth/repository/account-closure.repository.js";
 import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.service.js";
 import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
 import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
@@ -160,15 +169,27 @@ import type {
 } from "./modules/identity/application/kyc.service.js";
 import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import { createDiditWebhookRouter, createKycRouter } from "./modules/identity/api/kyc.router.js";
-import { createInvestorProfileRouter } from "./modules/investor-profile/api/investor-profile.router.js";
-import { GetInvestorProfileService } from "./modules/investor-profile/application/get-investor-profile.service.js";
-import { RegisterWalletService } from "./modules/investor-profile/application/register-wallet.service.js";
+import type { KycEligibilityReader } from "./modules/identity/repository/kyc-eligibility-reader.js";
+import { createProfileRouter } from "./modules/profile/api/profile.router.js";
+import { GetProfileService } from "./modules/profile/application/get-profile.service.js";
+import type { ProtectedDisplayProfileProvider } from "./modules/profile/application/protected-display-profile.js";
+import { UpdateAccountPreferencesService } from "./modules/profile/application/update-account-preferences.service.js";
+import type { AccountPreferencesRepository } from "./modules/profile/repository/account-preferences.repository.js";
+import type { ProfileRepository } from "./modules/profile/repository/profile.repository.js";
+import { createLoginMethodsRouter } from "./modules/auth/api/login-methods.router.js";
+import { UnlinkLoginMethodService } from "./modules/auth/application/unlink-login-method.service.js";
+import type { LoginMethodUnlinker } from "./modules/auth/application/login-method-unlinker.js";
+import { createWalletRouter } from "./modules/wallet/api/wallet.router.js";
+import { RegisterWalletService } from "./modules/wallet/application/register-wallet.service.js";
+import { GetWalletBalanceService, type WalletChainReader } from "./modules/wallet/application/get-wallet-balance.service.js";
+import type { WalletRepository } from "./modules/wallet/repository/wallet.repository.js";
+import type { PivTokenHoldingsReader } from "./modules/settlement/repository/settlement.repository.js";
+import { createInvestorActivityRouter } from "./modules/investor-activity/api/investor-activity.router.js";
 import {
   ListInvestorCurrentPositionsService,
   ListInvestorReservationsService,
-} from "./modules/investor-profile/application/list-investor-activity.service.js";
-import type { ProtectedDisplayProfileProvider } from "./modules/investor-profile/application/protected-display-profile.js";
-import type { InvestorProfileRepository } from "./modules/investor-profile/repository/investor-profile.repository.js";
+} from "./modules/investor-activity/application/list-investor-activity.service.js";
+import type { InvestorActivityRepository } from "./modules/investor-activity/repository/investor-activity.repository.js";
 import { errorHandler } from "./shared/http/error-handler.js";
 import { notFoundHandler } from "./shared/http/not-found.js";
 import { requestContext } from "./shared/http/request-context.js";
@@ -222,9 +243,30 @@ export interface AppDependencies {
       webhookVerifier: DiditWebhookVerifier;
       receiveWebhook: ReceiveDiditWebhookService;
     };
-    investorProfile?: {
-      repository: InvestorProfileRepository;
+    profile?: {
+      repository: ProfileRepository;
       displayProfiles: ProtectedDisplayProfileProvider;
+      preferencesRepository: AccountPreferencesRepository;
+    };
+    loginMethods?: {
+      unlinker: LoginMethodUnlinker;
+    };
+    wallet?: {
+      repository: WalletRepository;
+      kycEligibilityReader: KycEligibilityReader;
+      // Both required together to read on-chain balances (dormant unless
+      // the CHAIN_* env group is configured, same all-or-none gate the
+      // write-side ChainClients in worker.ts already uses). Investor
+      // wallets are self-custodied (AD-240): this can only ever read a
+      // balance the investor's wallet already holds, never sign or move
+      // anything.
+      balances?: {
+        pivTokenHoldingsReader: PivTokenHoldingsReader;
+        chainReader: WalletChainReader;
+      };
+    };
+    investorActivity?: {
+      repository: InvestorActivityRepository;
     };
     disclosureDocuments?: {
       repository: DisclosureDocumentRepository;
@@ -266,6 +308,10 @@ export interface AppDependencies {
       repository: AccountRecoveryCodeRepository;
       administrator: CustomerAccountAdministrator;
       hashKey: string;
+    };
+    accountClosure?: {
+      repository: AccountClosureRepository;
+      administrator: CustomerAccountAdministrator;
     };
     staffInvitations?: {
       repository: StaffInvitationRepository;
@@ -451,19 +497,52 @@ export function createApp(dependencies: AppDependencies): Express {
         ),
       );
     }
-    if (dependencies.protectedApi.investorProfile !== undefined) {
-      const investorProfile = dependencies.protectedApi.investorProfile;
+    if (dependencies.protectedApi.profile !== undefined) {
+      const profile = dependencies.protectedApi.profile;
       app.use(
         "/v1/investor-profile",
-        createInvestorProfileRouter(
+        createProfileRouter(
           requireAuthentication,
-          new GetInvestorProfileService(
-            investorProfile.repository,
-            investorProfile.displayProfiles,
-          ),
-          new ListInvestorReservationsService(investorProfile.repository),
-          new ListInvestorCurrentPositionsService(investorProfile.repository),
-          new RegisterWalletService(investorProfile.repository),
+          new GetProfileService(profile.repository, profile.displayProfiles),
+          new UpdateAccountPreferencesService(profile.preferencesRepository),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.loginMethods !== undefined) {
+      const loginMethods = dependencies.protectedApi.loginMethods;
+      app.use(
+        "/v1/auth/login-methods",
+        createLoginMethodsRouter(
+          requireAuthentication,
+          new UnlinkLoginMethodService(loginMethods.unlinker),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.wallet !== undefined) {
+      const wallet = dependencies.protectedApi.wallet;
+      app.use(
+        "/v1/investor-profile/wallet",
+        createWalletRouter(
+          requireAuthentication,
+          new RegisterWalletService(wallet.repository, wallet.kycEligibilityReader),
+          wallet.balances === undefined
+            ? undefined
+            : new GetWalletBalanceService(
+                wallet.repository,
+                wallet.balances.pivTokenHoldingsReader,
+                wallet.balances.chainReader,
+              ),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.investorActivity !== undefined) {
+      const investorActivity = dependencies.protectedApi.investorActivity;
+      app.use(
+        "/v1/investor-profile",
+        createInvestorActivityRouter(
+          requireAuthentication,
+          new ListInvestorReservationsService(investorActivity.repository),
+          new ListInvestorCurrentPositionsService(investorActivity.repository),
         ),
       );
     }
@@ -621,6 +700,27 @@ export function createApp(dependencies: AppDependencies): Express {
             recovery.emailSender,
             recovery.recoveryRedirectUrl,
           ),
+        ),
+      );
+    }
+    if (dependencies.protectedApi.accountClosure !== undefined) {
+      const closure = dependencies.protectedApi.accountClosure;
+      app.use(
+        "/v1/auth/account-closure",
+        createAccountClosureRouter(
+          requireAuthentication,
+          new RequestAccountClosureService(closure.repository),
+          new CancelAccountClosureService(closure.repository),
+        ),
+      );
+      app.use(
+        "/internal/v1/account-closure-requests",
+        createAccountClosureOperationsRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new ListPendingAccountClosureRequestsService(closure.repository),
+          new DecideAccountClosureRequestService(closure.repository, closure.administrator),
         ),
       );
     }

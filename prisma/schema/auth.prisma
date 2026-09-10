@@ -208,6 +208,29 @@ model AccountRecoveryCase {
   @@schema("auth")
 }
 
+// Customer-initiated, staff-reviewed request to close an investment account.
+// Deliberately single-reviewer (unlike AccountRecoveryCase's dual review):
+// recovery's second reviewer exists to guard against a fraudulent takeover
+// impersonating the account holder, a risk that doesn't apply here since the
+// account is already authenticated and asking to leave voluntarily.
+model AccountClosureRequest {
+  id             String    @id @map("closure_request_id")
+  accountId      String    @map("account_id")
+  status         String    @default("pending")
+  reason         String?
+  requestedAt    DateTime  @default(now()) @map("requested_at") @db.Timestamptz(6)
+  resolvedAt     DateTime? @map("resolved_at") @db.Timestamptz(6)
+  resolvedBy     String?   @map("resolved_by")
+  resolutionNote String?   @map("resolution_note")
+
+  account           Account  @relation("ClosureRequestSubject", fields: [accountId], references: [id])
+  resolvedByAccount Account? @relation("ClosureRequestResolver", fields: [resolvedBy], references: [id])
+
+  @@index([accountId], map: "idx_closure_requests_account")
+  @@map("account_closure_requests")
+  @@schema("auth")
+}
+
 model AccountRecoveryCode {
   accountId  String    @id @map("account_id")
   codeHash   String    @map("code_hash")

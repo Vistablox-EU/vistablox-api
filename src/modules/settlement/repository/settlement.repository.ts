@@ -29,3 +29,19 @@ export interface SettlementRepository {
   hasPosition(pivId: string, accountId: string): Promise<boolean>;
   recordEscrowMintedPosition(input: RecordEscrowMintedPositionInput): Promise<{ positionId: string }>;
 }
+
+export interface PivTokenHolding {
+  pivId: string;
+  tokenId: string;
+}
+
+// Read-only boundary port for the set of on-chain-minted PIVs an account
+// holds a position in, for modules outside settlement (wallet, so far) that
+// need to know which ERC-1155 token ids to check a wallet's balance for
+// without depending on this module's write surface. Backed by the single
+// shared PrismaSettlementRepository instance each process constructs -- a
+// live read, not a local copy. Same rationale as KycEligibilityReader in
+// identity/repository/kyc-eligibility-reader.ts.
+export interface PivTokenHoldingsReader {
+  listTokenHoldings(accountId: string): Promise<PivTokenHolding[]>;
+}
