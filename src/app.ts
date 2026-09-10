@@ -186,6 +186,7 @@ import type { LoginMethodUnlinker } from "./modules/auth/application/login-metho
 import { createWalletRouter } from "./modules/wallet/api/wallet.router.js";
 import { RegisterWalletService } from "./modules/wallet/application/register-wallet.service.js";
 import { GetWalletBalanceService, type WalletChainReader } from "./modules/wallet/application/get-wallet-balance.service.js";
+import { RequestWalletTransferService, type WalletTransferChainReader } from "./modules/wallet/application/request-wallet-transfer.service.js";
 import type { WalletRepository } from "./modules/wallet/repository/wallet.repository.js";
 import type { PivTokenHoldingsReader } from "./modules/settlement/repository/settlement.repository.js";
 import { createInvestorActivityRouter } from "./modules/investor-activity/api/investor-activity.router.js";
@@ -272,7 +273,7 @@ export interface AppDependencies {
       // anything.
       balances?: {
         pivTokenHoldingsReader: PivTokenHoldingsReader;
-        chainReader: WalletChainReader;
+        chainReader: WalletChainReader & WalletTransferChainReader;
       };
     };
     investorActivity?: {
@@ -540,6 +541,13 @@ export function createApp(dependencies: AppDependencies): Express {
           wallet.balances === undefined
             ? undefined
             : new GetWalletBalanceService(
+                wallet.repository,
+                wallet.balances.pivTokenHoldingsReader,
+                wallet.balances.chainReader,
+              ),
+          wallet.balances === undefined
+            ? undefined
+            : new RequestWalletTransferService(
                 wallet.repository,
                 wallet.balances.pivTokenHoldingsReader,
                 wallet.balances.chainReader,
