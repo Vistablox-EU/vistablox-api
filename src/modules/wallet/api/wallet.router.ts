@@ -3,16 +3,20 @@ import { Router, type RequestHandler } from "express";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { GetWalletBalanceService } from "../application/get-wallet-balance.service.js";
 import type { RegisterWalletService } from "../application/register-wallet.service.js";
+import type { RequestWalletTransferService } from "../application/request-wallet-transfer.service.js";
 import {
   getWalletBalanceResponseSchema,
   registerWalletBodySchema,
   registerWalletResponseSchema,
+  requestWalletTransferBodySchema,
+  requestWalletTransferResponseSchema,
 } from "./wallet.schemas.js";
 
 export function createWalletRouter(
   requireAuthentication: RequestHandler,
   registerWallet: RegisterWalletService,
   getBalance?: GetWalletBalanceService,
+  requestTransfer?: RequestWalletTransferService,
 ): Router {
   const router = Router();
   router.post("/", requireAuthentication, async (request, response) => {
@@ -31,6 +35,20 @@ export function createWalletRouter(
       const result = await getBalance.execute(context.accountId);
       response.setHeader("Cache-Control", "no-store");
       response.json(getWalletBalanceResponseSchema.parse(result));
+    });
+  }
+  if (requestTransfer !== undefined) {
+    router.post("/transfers", requireAuthentication, async (request, response) => {
+      const context = requireCustomerContext(response.locals.authContext);
+      const body = requestWalletTransferBodySchema.parse(request.body);
+      const result = await requestTransfer.execute({
+        accountId: context.accountId,
+        pivId: body.piv_id,
+        toWalletAddress: body.to_wallet_address,
+        amount: body.amount,
+      });
+      response.setHeader("Cache-Control", "no-store");
+      response.json(requestWalletTransferResponseSchema.parse(result));
     });
   }
   return router;

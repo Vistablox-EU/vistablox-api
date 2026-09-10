@@ -1,4 +1,14 @@
-import { createPublicClient, createWalletClient, erc20Abi, http, getContract, type Address, type Hex, type Transport } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  encodeFunctionData,
+  erc20Abi,
+  http,
+  getContract,
+  type Address,
+  type Hex,
+  type Transport,
+} from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
 
@@ -88,11 +98,13 @@ export interface ChainReaderConfig {
  */
 export class ChainReader {
   public readonly config: ChainReaderConfig;
+  public readonly chainId: number;
   private readonly publicClient: ReturnType<typeof createPublicClient<Transport, OperatorChain>>;
 
   public constructor(config: ChainReaderConfig) {
     this.config = config;
     const chain = config.network === "base" ? base : baseSepolia;
+    this.chainId = chain.id;
     this.publicClient = createPublicClient({ chain, transport: http(config.rpcUrl) });
   }
 
@@ -109,6 +121,23 @@ export class ChainReader {
       address: this.config.eurcTokenAddress,
       abi: erc20Abi,
       client: this.publicClient,
+    });
+  }
+
+  // Pure calldata encoding -- no network call, nothing signed. The investor
+  // holder calls safeTransferFrom themselves (or their own wallet app does,
+  // on their signature); this only ever produces the `data` field for that
+  // call so it can be handed back to them to sign.
+  public encodeTransferCalldata(input: {
+    from: Address;
+    to: Address;
+    tokenId: bigint;
+    amount: bigint;
+  }): Hex {
+    return encodeFunctionData({
+      abi: vistaBloxPropertyAbi,
+      functionName: "safeTransferFrom",
+      args: [input.from, input.to, input.tokenId, input.amount, "0x"],
     });
   }
 }
