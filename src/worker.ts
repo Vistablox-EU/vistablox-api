@@ -16,6 +16,7 @@ import {
 import { TransitionCaseToPostIpoStructuringService } from "./modules/origination/application/post-ipo-structuring-handoff.service.js";
 import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
+import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
@@ -44,6 +45,7 @@ import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
+const dpopReplayRepository = new PrismaDpopReplayRepository(database);
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -237,6 +239,7 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
 // Reversal (undoing the KYC microservice split): identity's own scheduled
 // jobs, back in this worker alongside everything else -- these used to
 // live only in src/kyc-server.ts.
+await boss.createQueue("maintenance.dpop_replay_prune");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.kyc_stuck_session_expiry");
 await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
@@ -303,6 +306,13 @@ if (runOperatingDistributionSweep !== undefined) {
     ...RETRY_OPTIONS,
   });
 }
+// Hourly is generous relative to the replay window itself (a couple of
+// minutes) -- rows only need pruning before the table grows unbounded, not
+// the instant they expire.
+await boss.schedule("maintenance.dpop_replay_prune", "0 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
 await boss.schedule("maintenance.kyc_renewal", "0 9 * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
@@ -475,6 +485,12 @@ await boss.work("case_timers.post_ipo_structuring_handoff", async (jobs) => {
       throw error;
     }
   }
+});
+await boss.work("maintenance.dpop_replay_prune", async () => {
+  await runJob("maintenance.dpop_replay_prune", async () => {
+    const acted = await dpopReplayRepository.pruneExpired(new Date());
+    return { checked: acted, acted };
+  });
 });
 await boss.work("maintenance.kyc_renewal", async () => {
   await runJob("maintenance.kyc_renewal", (traceId) => runKycRenewalTimer.execute(traceId));

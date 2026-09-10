@@ -1,7 +1,7 @@
-import pino, { type Logger } from "pino";
+import pino, { type DestinationStream, type Logger, type LoggerOptions } from "pino";
 
-export function createLogger(level: string): Logger {
-  return pino({
+export function createLogger(level: string, destination?: DestinationStream): Logger {
+  const options: LoggerOptions = {
     level,
     base: null,
     redact: {
@@ -11,6 +11,7 @@ export function createLogger(level: string): Logger {
         "req.headers['x-csrf-token']",
         "req.headers['x-internal-signature']",
         "res.headers['set-cookie']",
+        "res.headers['set-auth-token']",
         "password",
         "token",
         "access_token",
@@ -18,5 +19,6 @@ export function createLogger(level: string): Logger {
       ],
       censor: "[REDACTED]",
     },
-  });
+  };
+  return destination === undefined ? pino(options) : pino(options, destination);
 }

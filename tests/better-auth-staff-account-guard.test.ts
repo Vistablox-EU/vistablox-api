@@ -69,7 +69,7 @@ describe("Better Auth staff account guard", () => {
       },
       session: { id: "session_existing" },
     });
-    const resolver = new BetterAuthSessionResolver({ api: { getSession } } as never);
+    const resolver = new BetterAuthSessionResolver({ api: { getSession } } as never, {} as never);
 
     await expect(resolver.resolve({ cookie: "vb_session=opaque" })).resolves.toBeNull();
   });
@@ -85,9 +85,10 @@ describe("Better Auth staff account guard", () => {
       session: { id: "session_pending", authenticationLevel: "oauth_pending" },
     });
 
-    const protectedResolver = new BetterAuthSessionResolver({ api: { getSession } } as never);
+    const protectedResolver = new BetterAuthSessionResolver({ api: { getSession } } as never, {} as never);
     const recoveryResolver = new BetterAuthSessionResolver(
       { api: { getSession } } as never,
+      {} as never,
       { allowPendingOAuth: true },
     );
 
@@ -110,7 +111,7 @@ describe("Better Auth staff account guard", () => {
       },
       session: { id: "session_full", authenticationLevel: "oauth_passkey" },
     });
-    const resolver = new BetterAuthSessionResolver({ api: { getSession } } as never);
+    const resolver = new BetterAuthSessionResolver({ api: { getSession } } as never, {} as never);
 
     await expect(resolver.resolve({ cookie: "vb.session_token=opaque" }))
       .resolves.toMatchObject({

@@ -29,4 +29,21 @@ export class BetterAuthSessionRevoker implements SessionRevoker {
       headers: fromNodeHeaders(headers),
     });
   }
+
+  // Better Auth has no "revoke by arbitrary field" endpoint, so this lists
+  // the caller's own sessions (re-derived from headers, same as above) and
+  // revokes each match one at a time via the same /revoke-session endpoint
+  // revoke() uses -- same audit trail and session-mirror behavior per
+  // session, just driven from here instead of a single request.
+  public async revokeByDpopKey(jkt: string, headers: IncomingHttpHeaders): Promise<number> {
+    const nodeHeaders = fromNodeHeaders(headers);
+    const sessions = await this.auth.api.listSessions({ headers: nodeHeaders });
+    const matches = sessions.filter(
+      (session) => (session as Record<string, unknown>).dpopJkt === jkt,
+    );
+    for (const session of matches) {
+      await this.auth.api.revokeSession({ headers: nodeHeaders, body: { token: session.token } });
+    }
+    return matches.length;
+  }
 }

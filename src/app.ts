@@ -12,7 +12,10 @@ import { pinoHttp } from "pino-http";
 import type { DatabaseProbe } from "./infrastructure/database/database-probe.js";
 import type { EmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import type { AccountRepository } from "./modules/account/repository/account.repository.js";
-import { createRequireAuthentication } from "./modules/auth/api/require-authentication.js";
+import {
+  createRequireAuthentication,
+  type DpopEnforcementOptions,
+} from "./modules/auth/api/require-authentication.js";
 import { rejectDisabledAuthRoutes } from "./modules/auth/api/reject-disabled-auth.js";
 import { createRequireFreshAuthentication } from "./modules/auth/api/require-fresh-authentication.js";
 import {
@@ -77,6 +80,7 @@ import { createCustomerSessionRouter } from "./modules/auth/api/customer-session
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
+  RevokeDeviceSessionsService,
   RevokeOwnSessionService,
 } from "./modules/auth/application/customer-session.service.js";
 import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
@@ -228,6 +232,12 @@ export interface AppDependencies {
     accounts: AccountRepository;
     sessions: SessionResolver;
     oauthBootstrapSessions?: SessionResolver;
+    // Device binding (DPoP): shared across both requireAuthentication
+    // instances below (main and OAuth-bootstrap) since it's a property of
+    // the session, not of which resolver found it. Undefined leaves DPoP
+    // fully off -- bound sessions can't exist without the plugin/hook side
+    // ever setting dpopJkt, so there's nothing for this to enforce.
+    dpop?: DpopEnforcementOptions;
     originationRepository: OriginationRepository;
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
@@ -416,11 +426,13 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.protectedApi.sessions,
       dependencies.protectedApi.accounts,
       baselineRateLimiter,
+      dependencies.protectedApi.dpop,
     );
     const requireOAuthBootstrapAuthentication = createRequireAuthentication(
       dependencies.protectedApi.oauthBootstrapSessions ?? dependencies.protectedApi.sessions,
       dependencies.protectedApi.accounts,
       baselineRateLimiter,
+      dependencies.protectedApi.dpop,
     );
     const requireAdminOperations = createRequireAdminOperations(
       dependencies.protectedApi.accounts,
@@ -601,6 +613,7 @@ export function createApp(dependencies: AppDependencies): Express {
           new ListOwnSessionsService(customerSessions.repository),
           new RevokeOwnSessionService(customerSessions.repository, customerSessions.revoker),
           new RevokeAllOwnSessionsService(customerSessions.revoker),
+          new RevokeDeviceSessionsService(customerSessions.revoker),
         ),
       );
     }

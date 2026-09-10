@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
+  RevokeDeviceSessionsService,
   RevokeOwnSessionService,
 } from "../src/modules/auth/application/customer-session.service.js";
 import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
@@ -27,7 +28,7 @@ function summary(overrides: Partial<CustomerSessionSummary> = {}): CustomerSessi
 }
 
 function fakeRevoker(overrides: Partial<SessionRevoker> = {}): SessionRevoker {
-  return { revoke: vi.fn(), revokeAll: vi.fn(), ...overrides };
+  return { revoke: vi.fn(), revokeAll: vi.fn(), revokeByDpopKey: vi.fn(), ...overrides };
 }
 
 describe("ListOwnSessionsService", () => {
@@ -90,5 +91,18 @@ describe("RevokeAllOwnSessionsService", () => {
     await service.execute(headers);
 
     expect(revokeAll).toHaveBeenCalledWith(headers);
+  });
+});
+
+describe("RevokeDeviceSessionsService", () => {
+  it("revokes every session bound to the given key and reports how many", async () => {
+    const revokeByDpopKey = vi.fn().mockResolvedValue(2);
+    const service = new RevokeDeviceSessionsService(fakeRevoker({ revokeByDpopKey }));
+    const headers = { authorization: "Bearer tok" };
+
+    const result = await service.execute("jkt_abc123", headers);
+
+    expect(revokeByDpopKey).toHaveBeenCalledWith("jkt_abc123", headers);
+    expect(result).toEqual({ revokedCount: 2 });
   });
 });

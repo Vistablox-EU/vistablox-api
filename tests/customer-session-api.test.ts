@@ -6,6 +6,7 @@ import { createCustomerSessionRouter } from "../src/modules/auth/api/customer-se
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
+  RevokeDeviceSessionsService,
   RevokeOwnSessionService,
 } from "../src/modules/auth/application/customer-session.service.js";
 import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
@@ -14,7 +15,7 @@ import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
 function fakeRevoker(overrides: Partial<SessionRevoker> = {}): SessionRevoker {
-  return { revoke: vi.fn(), revokeAll: vi.fn(), ...overrides };
+  return { revoke: vi.fn(), revokeAll: vi.fn(), revokeByDpopKey: vi.fn(), ...overrides };
 }
 
 function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker) {
@@ -35,6 +36,7 @@ function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker
       new ListOwnSessionsService(repository),
       new RevokeOwnSessionService(repository, revoker),
       new RevokeAllOwnSessionsService(revoker),
+      new RevokeDeviceSessionsService(revoker),
     ),
   );
   app.use(errorHandler);
@@ -123,5 +125,22 @@ describe("customer session API", () => {
 
     expect(response.status).toBe(204);
     expect(revokeAll).toHaveBeenCalledWith(expect.any(Object));
+  });
+
+  it("revokes every session bound to a device key and reports how many", async () => {
+    const revokeByDpopKey = vi.fn().mockResolvedValue(2);
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedSessionToken: vi.fn(),
+    };
+
+    const response = await request(
+      buildApp(repository, fakeRevoker({ revokeByDpopKey })),
+    ).post("/v1/auth/sessions/devices/jkt_abc123/revoke");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body).toEqual({ data: { revoked_count: 2 } });
+    expect(revokeByDpopKey).toHaveBeenCalledWith("jkt_abc123", expect.any(Object));
   });
 });
