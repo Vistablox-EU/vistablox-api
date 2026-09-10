@@ -15,7 +15,7 @@ export interface RecordSessionRevokedInput {
   reason: string;
 }
 
-// Populates account.sessions, the customer-facing mirror of Better Auth's
+// Populates auth.sessions, the customer-facing mirror of Better Auth's
 // own session table (SESSION_MODEL.md): richer display fields than Better
 // Auth's generic session carries, and a self-service revoke surface. Better
 // Auth's own session table remains the sole authority for whether a request

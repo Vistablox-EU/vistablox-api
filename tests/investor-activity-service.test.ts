@@ -5,19 +5,17 @@ import {
   decodeReservationCursor,
   ListInvestorCurrentPositionsService,
   ListInvestorReservationsService,
-} from "../src/modules/investor-profile/application/list-investor-activity.service.js";
+} from "../src/modules/investor-activity/application/list-investor-activity.service.js";
 import type {
+  InvestorActivityRepository,
   InvestorPositionRecord,
-  InvestorProfileRepository,
   InvestorReservationRecord,
-} from "../src/modules/investor-profile/repository/investor-profile.repository.js";
+} from "../src/modules/investor-activity/repository/investor-activity.repository.js";
 
 function repository(
-  overrides: Partial<InvestorProfileRepository> = {},
-): InvestorProfileRepository {
+  overrides: Partial<InvestorActivityRepository> = {},
+): InvestorActivityRepository {
   return {
-    get: vi.fn().mockResolvedValue(null),
-    registerWallet: vi.fn(),
     listReservations: vi.fn().mockResolvedValue([]),
     listCurrentPositions: vi.fn().mockResolvedValue([]),
     ...overrides,

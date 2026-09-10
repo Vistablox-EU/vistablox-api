@@ -18,16 +18,14 @@ import {
   startKycSessionResponseSchema,
 } from "./kyc.schemas.js";
 
-// Reversal (undoing the KYC microservice split): calls the concrete
-// application services directly, in-process -- no more gateway/signed
-// internal HTTP call. This router's own job is otherwise unchanged: enforce
-// the customer session, validate the request shape, translate to/from the
-// same response schemas. Security-critical, unchanged by this move: every
+// Calls the concrete application services directly, in-process. This
+// router's own job: enforce the customer session, validate the request
+// shape, translate to/from the response schemas. Security-critical: every
 // accountId below comes from requireCustomerContext(response.locals.authContext)
-// -- the verified session -- never from client-supplied input. That's the
-// one thing that must never be copied from kyc-internal.router.ts's own
-// account_id-from-query-param shape, which is only safe there because its
-// caller had already resolved the id from a session before making the call.
+// -- the verified session -- never from client-supplied input. Contrast
+// kyc-operations.router.ts's account_id-from-path-param shape, which is
+// only safe there because that route is staff-only and already
+// WebAuthn-gated.
 export function createKycRouter(
   requireAuthentication: RequestHandler,
   getStatus: GetKycStatusService,
@@ -124,7 +122,7 @@ export function createDiditWebhookRouter(
 }
 
 function requireCustomerContext(
-  context: { accountId: string; population: string } | undefined,
+  context: Express.Locals["authContext"],
 ): { accountId: string } {
   if (context === undefined) {
     throw new AppError({

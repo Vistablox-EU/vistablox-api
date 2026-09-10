@@ -3,11 +3,13 @@ import { ulid } from "ulid";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import type {
   PivPendingEscrowResolution,
+  PivTokenHolding,
+  PivTokenHoldingsReader,
   RecordEscrowMintedPositionInput,
   SettlementRepository,
 } from "./settlement.repository.js";
 
-export class PrismaSettlementRepository implements SettlementRepository {
+export class PrismaSettlementRepository implements SettlementRepository, PivTokenHoldingsReader {
   public constructor(private readonly database: DatabaseClient) {}
 
   public async findPivsWithPassedIpoDeadline(now: Date): Promise<PivPendingEscrowResolution[]> {
@@ -38,6 +40,18 @@ export class PrismaSettlementRepository implements SettlementRepository {
       select: { id: true },
     });
     return existing !== null;
+  }
+
+  public async listTokenHoldings(accountId: string): Promise<PivTokenHolding[]> {
+    const positions = await this.database.positionLedger.findMany({
+      where: { accountId, piv: { tokenId: { not: null } } },
+      select: { piv: { select: { id: true, tokenId: true } } },
+      distinct: ["pivId"],
+    });
+    return positions.map((position) => ({
+      pivId: position.piv.id,
+      tokenId: position.piv.tokenId!.toFixed(0),
+    }));
   }
 
   public async recordEscrowMintedPosition(

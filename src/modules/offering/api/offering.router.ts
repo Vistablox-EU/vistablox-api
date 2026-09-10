@@ -127,7 +127,7 @@ function contentDispositionFileName(value: string): string {
 }
 
 function requireCustomerContext(
-  context: { accountId: string; population: string } | undefined,
+  context: Express.Locals["authContext"],
 ): { accountId: string } {
   if (context === undefined) {
     throw new AppError({

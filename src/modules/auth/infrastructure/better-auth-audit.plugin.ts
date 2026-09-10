@@ -12,7 +12,7 @@ export interface BetterAuthAuditPluginOptions {
   identifierHashKey: string;
   onError?: (error: unknown) => void;
   clock?: () => Date;
-  // Optional: mirrors session create/revoke into account.sessions
+  // Optional: mirrors session create/revoke into auth.sessions
   // (SESSION_MODEL.md) alongside the audit trail this plugin already writes.
   sessionMirror?: SessionMirror;
   sessionIdleMinutes?: number;

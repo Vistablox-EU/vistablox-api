@@ -54,7 +54,7 @@ export function createCustomerSessionRouter(
 }
 
 function requireAuthContext(
-  context: { accountId: string; providerSessionId: string } | undefined,
+  context: Express.Locals["authContext"],
 ): { accountId: string; providerSessionId: string } {
   if (context === undefined) {
     throw new AppError({

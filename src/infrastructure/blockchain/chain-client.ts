@@ -1,4 +1,4 @@
-import { createPublicClient, createWalletClient, http, getContract, type Address, type Hex, type Transport } from "viem";
+import { createPublicClient, createWalletClient, erc20Abi, http, getContract, type Address, type Hex, type Transport } from "viem";
 import { privateKeyToAccount, type PrivateKeyAccount } from "viem/accounts";
 import { base, baseSepolia } from "viem/chains";
 
@@ -68,4 +68,51 @@ export class ChainClients {
 
 export function createChainClients(config: ChainSettlementConfig): ChainClients {
   return new ChainClients(config);
+}
+
+export interface ChainReaderConfig {
+  network: "base" | "base-sepolia";
+  rpcUrl: string;
+  propertyContractAddress: Address;
+  eurcTokenAddress: Address;
+}
+
+/**
+ * Read-only counterpart to ChainClients, for processes (the API server) that
+ * have no business holding the operator private key at all. Investor
+ * wallets are self-custodied (AD-240): this backend can read balances an
+ * investor's wallet already holds, but must never be able to sign or
+ * broadcast a transaction on their behalf. Everything here resolves to an
+ * `eth_call` against publicClient -- there is no wallet account anywhere in
+ * this class, so that's a structural guarantee, not just a convention.
+ */
+export class ChainReader {
+  public readonly config: ChainReaderConfig;
+  private readonly publicClient: ReturnType<typeof createPublicClient<Transport, OperatorChain>>;
+
+  public constructor(config: ChainReaderConfig) {
+    this.config = config;
+    const chain = config.network === "base" ? base : baseSepolia;
+    this.publicClient = createPublicClient({ chain, transport: http(config.rpcUrl) });
+  }
+
+  public get property() {
+    return getContract({
+      address: this.config.propertyContractAddress,
+      abi: vistaBloxPropertyAbi,
+      client: this.publicClient,
+    });
+  }
+
+  public get eurc() {
+    return getContract({
+      address: this.config.eurcTokenAddress,
+      abi: erc20Abi,
+      client: this.publicClient,
+    });
+  }
+}
+
+export function createChainReader(config: ChainReaderConfig): ChainReader {
+  return new ChainReader(config);
 }
