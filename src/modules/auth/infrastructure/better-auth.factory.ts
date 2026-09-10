@@ -8,7 +8,21 @@ import type { Pool } from "pg";
 import type { AuthAuditSink } from "../application/auth-audit-sink.js";
 import type { SessionMirror } from "../application/session-mirror.js";
 import type { LoginMethodType } from "../../account/repository/account.repository.js";
+import {
+  DPOP_WWW_AUTHENTICATE,
+  DpopKeyMismatchError,
+  DpopProofMissingError,
+  DpopReplayError,
+  buildHtu,
+  dpopErrorResponseFields,
+  isDpopVerificationError,
+  verifyDpopProof,
+  type DpopProofClaims,
+  type DpopVerificationError,
+} from "../application/dpop-proof-verifier.js";
+import type { DpopReplayRepository } from "../repository/dpop-replay.repository.js";
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
+import { createBetterAuthDpopPlugin } from "./better-auth-dpop.plugin.js";
 import { createBetterAuthStaffAccountGuardPlugin } from "./better-auth-staff-account-guard.plugin.js";
 import { createBetterAuthRegistrationAccountGuardPlugin } from "./better-auth-registration-account-guard.plugin.js";
 
@@ -48,6 +62,15 @@ export interface BetterAuthFactoryOptions {
   allowPopulationInput?: boolean;
   authAuditSink?: AuthAuditSink;
   sessionMirror?: SessionMirror;
+  // Device binding (DPoP): when set, a valid proof presented at session
+  // creation binds the new session to it. Undefined leaves every new
+  // session unbound (dpopJkt null), same as today.
+  dpop?: {
+    baseUrl: string;
+    replayRepository: DpopReplayRepository;
+    replayWindowSeconds?: number;
+    phase1CutoverAt?: Date;
+  };
 }
 
 export function createBetterAuth(options: BetterAuthFactoryOptions) {
@@ -120,6 +143,15 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           defaultValue: "unassured",
           input: false,
         },
+        // Device binding (DPoP-style proof of possession): the RFC 7638
+        // thumbprint of the EC key a bound customer session's proofs must
+        // sign with. Null means unbound -- Phase 1 enforces the proof only
+        // when this is set, never requires it.
+        dpopJkt: {
+          type: "string",
+          required: false,
+          input: false,
+        },
       },
     },
     account: {
@@ -178,15 +210,19 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       },
       session: {
         create: {
-          before: async (session, context) => ({
-            data: {
-              ...session,
-              authenticationLevel: await resolveAuthenticationLevel(
-                session.userId,
-                context,
-              ),
-            },
-          }),
+          before: async (session, context) => {
+            const dpopJkt = await tryBindDpopAtCreation(context, options.dpop);
+            return {
+              data: {
+                ...session,
+                authenticationLevel: await resolveAuthenticationLevel(
+                  session.userId,
+                  context,
+                ),
+                ...(dpopJkt === null ? {} : { dpopJkt }),
+              },
+            };
+          },
         },
       },
     },
@@ -198,6 +234,13 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       // itself, sent as a bearer token via the Authorization header instead
       // of a cookie, now covers that case directly.
       bearer(),
+      // Device binding (DPoP): must come after bearer() -- bearer turns
+      // Authorization into the session cookie context first, so a session
+      // is resolvable by the time this runs. Only the passkey verify-*
+      // ceremonies (below) enforce inline instead of through this plugin,
+      // since only they need "pending session" context this plugin doesn't
+      // have.
+      ...(options.dpop === undefined ? [] : [createBetterAuthDpopPlugin(options.dpop)]),
       passkey({
         rpID: rpId,
         rpName: "VistaBlox",
@@ -224,6 +267,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               ctx,
               user.id,
               pendingBootstrap?.customerIdentityVerified === true,
+              options.dpop,
             );
             if (context === null || context === undefined) {
               const existing = await ctx.context.adapter.findMany({
@@ -280,6 +324,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               ctx,
               credential.userId,
               false,
+              options.dpop,
             );
             if (priorSessionToken !== null) {
               await ctx.context.internalAdapter.deleteSession(priorSessionToken);
@@ -376,6 +421,57 @@ function toAuthUserSnapshot(user: {
   };
 }
 
+// Minimal structural subset of GenericEndpointContext (from @better-auth/core,
+// a transitive dependency we don't import types from directly) -- headers
+// and request are both genuinely optional there too: absent for internal
+// auth.api.*({ headers }) calls (no request) and, in principle, for a call
+// with neither. Real HTTP calls (sign-in, passkey verify) carry both.
+interface DpopCreationContext {
+  headers?: Headers | undefined;
+  request?: Request | undefined;
+}
+
+/**
+ * Verifies a DPoP proof presented at session creation and returns its jkt to
+ * bind, or null if there's nothing to bind (no dpop config, no proof, an
+ * internal non-HTTP call, or the proof doesn't verify). A verification
+ * failure here never blocks sign-in -- Phase 1 only ever binds when
+ * presented with something valid, it doesn't require it.
+ */
+async function tryBindDpopAtCreation(
+  context: DpopCreationContext | null,
+  dpop: BetterAuthFactoryOptions["dpop"],
+): Promise<string | null> {
+  if (dpop === undefined || context?.headers === undefined || context.request === undefined) {
+    return null;
+  }
+  const header = context.headers.get("dpop");
+  if (header === null) return null;
+
+  const authHeader = context.headers.get("authorization");
+  const bearerToken =
+    authHeader !== null && authHeader.slice(0, 7).toLowerCase() === "bearer "
+      ? authHeader.slice(7)
+      : undefined;
+
+  try {
+    const claims = await verifyDpopProof({
+      header,
+      method: context.request.method,
+      url: buildHtu(dpop.baseUrl, new URL(context.request.url).pathname),
+      bearerToken,
+    });
+    const accepted = await dpop.replayRepository.recordProof(
+      claims.jkt,
+      claims.jti,
+      new Date(Date.now() + (dpop.replayWindowSeconds ?? 120) * 1000),
+    );
+    return accepted ? claims.jkt : null;
+  } catch {
+    return null;
+  }
+}
+
 export type VistaBloxAuth = ReturnType<typeof createBetterAuth>;
 
 interface PasskeyBootstrapValue {
@@ -446,6 +542,7 @@ async function assertPasskeyCeremonyAuthorized(
   ctx: Parameters<typeof getSessionFromCtx>[0],
   passkeyUserId: string,
   customerIdentityVerifiedByBootstrap: boolean,
+  dpop: BetterAuthFactoryOptions["dpop"],
 ): Promise<string | null> {
   const user = await ctx.context.internalAdapter.findUserById(passkeyUserId);
   if (isStaffAuthUser(user) || customerIdentityVerifiedByBootstrap) return null;
@@ -458,7 +555,75 @@ async function assertPasskeyCeremonyAuthorized(
   ) {
     throw oauthPasskeyRequired();
   }
+
+  const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
+  if (typeof boundJkt === "string") {
+    await assertDpopKeyMatchesPendingSession(ctx, boundJkt, dpop);
+  }
+
   return current.session.token;
+}
+
+/**
+ * The passkey ceremony that upgrades a pending OAuth session must be
+ * confirmed by the same device key the session is bound to -- otherwise a
+ * different key (e.g. someone who intercepted the bearer token mid-OAuth)
+ * could complete the upgrade the legitimate device started. Error codes stay
+ * precise on purpose: DPOP_KEY_MISMATCH is the one code with client-side
+ * behavior (delete the stored token, drop to sign-in), so it must mean
+ * exactly "the proof verified but its key isn't this session's key" --
+ * never a stand-in for a missing/malformed/replayed proof.
+ */
+async function assertDpopKeyMatchesPendingSession(
+  ctx: DpopCreationContext,
+  boundJkt: string,
+  dpop: BetterAuthFactoryOptions["dpop"],
+): Promise<void> {
+  const header = ctx.headers?.get("dpop") ?? undefined;
+  const authHeader = ctx.headers?.get("authorization") ?? null;
+  const bearerToken =
+    authHeader !== null && authHeader.slice(0, 7).toLowerCase() === "bearer "
+      ? authHeader.slice(7)
+      : undefined;
+
+  if (dpop === undefined || ctx.request === undefined) {
+    throw dpopApiError(new DpopProofMissingError());
+  }
+
+  let claims: DpopProofClaims;
+  try {
+    claims = await verifyDpopProof({
+      header,
+      method: ctx.request.method,
+      url: buildHtu(dpop.baseUrl, new URL(ctx.request.url).pathname),
+      bearerToken,
+    });
+  } catch (error) {
+    if (isDpopVerificationError(error)) throw dpopApiError(error);
+    throw error;
+  }
+
+  if (claims.jkt !== boundJkt) {
+    throw dpopApiError(new DpopKeyMismatchError());
+  }
+
+  const accepted = await dpop.replayRepository.recordProof(
+    claims.jkt,
+    claims.jti,
+    new Date(Date.now() + (dpop.replayWindowSeconds ?? 120) * 1000),
+  );
+  if (!accepted) {
+    throw dpopApiError(new DpopReplayError());
+  }
+}
+
+function dpopApiError(error: DpopVerificationError): APIError {
+  const { code, title, detail } = dpopErrorResponseFields(error);
+  return new APIError(
+    "UNAUTHORIZED",
+    { code, message: `${title}: ${detail}` },
+    { "WWW-Authenticate": DPOP_WWW_AUTHENTICATE },
+  );
 }
 
 function oauthPasskeyRequired(): APIError {

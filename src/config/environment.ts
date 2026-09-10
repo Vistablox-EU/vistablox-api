@@ -13,6 +13,16 @@ const environmentSchema = z
     }),
     BETTER_AUTH_URL: z.url().default("http://localhost:3000"),
     BETTER_AUTH_SECRET: z.string().min(32),
+    // Device binding (DPoP) is off entirely when unset. Set once, at the
+    // actual phase-1 deploy moment, and never move it afterward -- it's the
+    // one-time historical line between "this session predates proof-of-
+    // possession and may bind to the first valid proof it sees" and "this
+    // session was created after mobile could already send one, so seeing it
+    // unbound now is an anomaly, not a migration case" (AD-device-binding).
+    DPOP_PHASE1_CUTOVER_AT: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.coerce.date().optional(),
+    ),
     WEBAUTHN_RP_NAME: z.string().min(1).default("VistaBlox"),
     WEBAUTHN_RP_ID: z.preprocess(
       (value) => (value === "" ? undefined : value),

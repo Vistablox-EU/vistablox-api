@@ -63,3 +63,16 @@ export class RevokeAllOwnSessionsService {
     await this.revoker.revokeAll(headers);
   }
 }
+
+// Device binding (DPoP) "Remove this phone": ends every one of the caller's
+// own sessions bound to a given key, not just the current one -- the point
+// is removing a specific physical device's access, which may span more than
+// one still-live session for that key.
+export class RevokeDeviceSessionsService {
+  public constructor(private readonly revoker: SessionRevoker) {}
+
+  public async execute(jkt: string, headers: IncomingHttpHeaders): Promise<{ revokedCount: number }> {
+    const revokedCount = await this.revoker.revokeByDpopKey(jkt, headers);
+    return { revokedCount };
+  }
+}
