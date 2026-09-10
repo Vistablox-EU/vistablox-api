@@ -4,15 +4,22 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import type {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
+  RevokeDeviceSessionsService,
   RevokeOwnSessionService,
 } from "../application/customer-session.service.js";
-import { listOwnSessionsResponseSchema, sessionIdParamsSchema } from "./customer-session.schemas.js";
+import {
+  dpopKeyParamsSchema,
+  listOwnSessionsResponseSchema,
+  revokeDeviceResponseSchema,
+  sessionIdParamsSchema,
+} from "./customer-session.schemas.js";
 
 export function createCustomerSessionRouter(
   requireAuthentication: RequestHandler,
   listOwnSessions: ListOwnSessionsService,
   revokeOwnSession: RevokeOwnSessionService,
   revokeAllOwnSessions: RevokeAllOwnSessionsService,
+  revokeDeviceSessions?: RevokeDeviceSessionsService,
 ): Router {
   const router = Router();
 
@@ -49,6 +56,18 @@ export function createCustomerSessionRouter(
     await revokeOwnSession.execute(context.accountId, params.session_id, request.headers);
     response.status(204).end();
   });
+
+  if (revokeDeviceSessions !== undefined) {
+    router.post("/devices/:jkt/revoke", requireAuthentication, async (request, response) => {
+      requireAuthContext(response.locals.authContext);
+      const params = dpopKeyParamsSchema.parse(request.params);
+      const result = await revokeDeviceSessions.execute(params.jkt, request.headers);
+      response.setHeader("Cache-Control", "no-store");
+      response.json(
+        revokeDeviceResponseSchema.parse({ data: { revoked_count: result.revokedCount } }),
+      );
+    });
+  }
 
   return router;
 }

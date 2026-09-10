@@ -242,3 +242,18 @@ model AccountRecoveryCode {
   @@map("account_recovery_codes")
   @@schema("auth")
 }
+
+// Replay protection for DPoP device-binding proofs: one row per (jkt, jti)
+// pair actually seen, pruned once past expiresAt by a scheduled job. Reads
+// (recordProof's INSERT ... ON CONFLICT) go through raw SQL for atomicity --
+// this model exists for the typed prune query, not the hot insert path.
+model DpopReplay {
+  jkt       String
+  jti       String
+  expiresAt DateTime @map("expires_at") @db.Timestamptz(6)
+
+  @@id([jkt, jti])
+  @@index([expiresAt], map: "idx_dpop_replays_expires_at")
+  @@map("dpop_replays")
+  @@schema("auth")
+}

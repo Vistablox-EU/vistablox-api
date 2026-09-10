@@ -53,6 +53,7 @@ import { IdentityDisplayProfileProvider } from "./infrastructure/profile/identit
 import { PrismaProfileRepository } from "./modules/profile/repository/prisma-profile.repository.js";
 import { PrismaAccountPreferencesRepository } from "./modules/profile/repository/prisma-account-preferences.repository.js";
 import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
+import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { createChainReader } from "./infrastructure/blockchain/chain-client.js";
 import { ViemWalletChainReader } from "./infrastructure/blockchain/chain-wallet-reader.js";
@@ -173,12 +174,20 @@ const appTrustedOrigins =
 const trustedOrigins = environment.APPLE_OAUTH_ENABLED
   ? [...new Set([...appTrustedOrigins, "https://appleid.apple.com"])]
   : appTrustedOrigins;
+const dpopReplayRepository = new PrismaDpopReplayRepository(database);
 const auth = createBetterAuth({
   database: authDatabase,
   baseURL: environment.BETTER_AUTH_URL,
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
   trustedOrigins,
+  dpop: {
+    baseUrl: environment.BETTER_AUTH_URL,
+    replayRepository: dpopReplayRepository,
+    ...(environment.DPOP_PHASE1_CUTOVER_AT === undefined
+      ? {}
+      : { phase1CutoverAt: environment.DPOP_PHASE1_CUTOVER_AT }),
+  },
   webauthn: {
     rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
     origins: [
@@ -319,7 +328,7 @@ const coinbaseCdpClient =
 // it, or vice versa).
 const reservationFundingRailEnabled =
   environment.RESERVATION_FUNDING_RAIL_ENABLED && coinbaseCdpClient !== undefined;
-const betterAuthSessionResolver = new BetterAuthSessionResolver(auth);
+const betterAuthSessionResolver = new BetterAuthSessionResolver(auth, authDatabase);
 // Unconditional -- identity's own services are already a required
 // dependency for /v1/kyc itself (getKycDisplayProfile above), so there's no
 // "unavailable at construction time" state left to model here, only a
@@ -401,9 +410,16 @@ const app = createApp({
   protectedApi: {
     accounts: accountRepository,
     sessions: betterAuthSessionResolver,
-    oauthBootstrapSessions: new BetterAuthSessionResolver(auth, {
+    oauthBootstrapSessions: new BetterAuthSessionResolver(auth, authDatabase, {
       allowPendingOAuth: true,
     }),
+    dpop: {
+      baseUrl: environment.BETTER_AUTH_URL,
+      replayRepository: dpopReplayRepository,
+      ...(environment.DPOP_PHASE1_CUTOVER_AT === undefined
+        ? {}
+        : { phase1CutoverAt: environment.DPOP_PHASE1_CUTOVER_AT }),
+    },
     originationRepository,
     offeringOperations: { repository: offeringRepository },
     staffWebAuthnRepository,
