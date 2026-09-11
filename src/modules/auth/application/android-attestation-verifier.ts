@@ -231,18 +231,19 @@ export async function verifyAndroidKeyAttestation(input: AndroidKeyAttestationIn
     throw new AndroidAttestationInvalidError("key is usable without authentication while on-body");
   }
 
-  // unlockedDeviceRequired (tag 509) on Keymaster 4.0 (attestationVersion
-  // == 3, i.e. Android 9 -- squarely inside minSdk 28) is a documented
-  // platform quirk: Keystore enforces it, but attests it in the
-  // SOFTWARE-enforced list, not the hardware one, unlike every later
-  // version. Requiring the hardware list unconditionally would reject
-  // every real Android 9 phone outright. From Keymaster 4.1 / KeyMint
-  // (attestationVersion >= 4) onward it's back to hardware-enforced only.
-  const unlockedDeviceRequired =
-    keyDescription.attestationVersion === 3
-      ? tee.unlockedDeviceRequired || keyDescription.softwareEnforced.unlockedDeviceRequired
-      : tee.unlockedDeviceRequired;
-  if (!unlockedDeviceRequired) {
+  // unlockedDeviceRequired (tag 509) was *intended* to be hardware-enforced,
+  // but AOSP's own KeyMint Tag.aidl documents that support for that was
+  // "never enabled by Keystore" and is deprecated as a concept -- on real
+  // devices (Keymaster 4.0 through current KeyMint) it's Keystore-enforced
+  // and attested in the SOFTWARE-enforced list, not the hardware one, at
+  // every attestationVersion, not just 3. Requiring the hardware list would
+  // reject essentially every real Android phone, this PR's own Xiaomi test
+  // device included (KeyMint 2.0, attestationVersion 200). Accepting it
+  // from Keystore is fine here specifically because the RootOfTrust check
+  // below (deviceLocked + Verified boot) already establishes hardware trust
+  // in the platform enforcing it -- unlike userAuthType (biometric), which
+  // Tag.aidl says "must be hardware-enforced" and stays hardware-only.
+  if (!tee.unlockedDeviceRequired && !keyDescription.softwareEnforced.unlockedDeviceRequired) {
     throw new AndroidAttestationInvalidError("key does not require the device to be unlocked");
   }
 
