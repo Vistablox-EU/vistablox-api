@@ -571,12 +571,19 @@ describe("verifyAndroidKeyAttestation: authentication requirements", () => {
     await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
   });
 
-  it("rejects a key that does not require the device to be unlocked", async () => {
+  it("rejects a key that does not require the device to be unlocked (absent from both lists)", async () => {
     const chain = await buildChain({ userAuthType: AUTH_TYPE_FINGERPRINT_ONLY, unlockedDeviceRequired: false });
     await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
   });
 
-  it("accepts unlockedDeviceRequired attested in softwareEnforced when attestationVersion is exactly 3 (Keymaster 4.0 / Android 9 quirk)", async () => {
+  // AOSP's KeyMint Tag.aidl: UNLOCKED_DEVICE_REQUIRED "was originally
+  // intended to be hardware-enforced," but hardware enforcement "was never
+  // enabled by Keystore" and is deprecated as a concept -- on every real
+  // device (Keymaster 4.0 through current KeyMint) it's Keystore-enforced
+  // and attested in the software-enforced list, at every attestationVersion,
+  // not just 3. Requiring the hardware list would reject essentially every
+  // real Android phone.
+  it("accepts unlockedDeviceRequired attested only in softwareEnforced at attestationVersion 3 (Keymaster 4.0)", async () => {
     const chain = await buildChain({
       userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
       attestationVersion: 3,
@@ -586,22 +593,42 @@ describe("verifyAndroidKeyAttestation: authentication requirements", () => {
     await expect(verify(chain)).resolves.toBeUndefined();
   });
 
-  it("rejects unlockedDeviceRequired attested only in softwareEnforced when attestationVersion is 4 or above (the quirk is 4.0-only)", async () => {
+  it("accepts unlockedDeviceRequired attested only in softwareEnforced at attestationVersion 4 (Keymaster 4.1)", async () => {
     const chain = await buildChain({
       userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
       attestationVersion: 4,
       keymasterVersion: 4,
       unlockedDeviceRequiredInSoftwareList: true,
     });
-    await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+    await expect(verify(chain)).resolves.toBeUndefined();
   });
 
-  it("rejects unlockedDeviceRequired attested only in softwareEnforced for a KeyMint version (300) too", async () => {
+  it("accepts unlockedDeviceRequired attested only in softwareEnforced for a KeyMint version (200 -- this PR's own Xiaomi test device)", async () => {
+    const chain = await buildChain({
+      userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
+      attestationVersion: 200,
+      keymasterVersion: 200,
+      unlockedDeviceRequiredInSoftwareList: true,
+    });
+    await expect(verify(chain)).resolves.toBeUndefined();
+  });
+
+  it("accepts unlockedDeviceRequired attested only in softwareEnforced for a KeyMint version (300) too", async () => {
     const chain = await buildChain({
       userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
       attestationVersion: 300,
       keymasterVersion: 300,
       unlockedDeviceRequiredInSoftwareList: true,
+    });
+    await expect(verify(chain)).resolves.toBeUndefined();
+  });
+
+  it("rejects a KeyMint chain (attestationVersion 300) with unlockedDeviceRequired in neither list", async () => {
+    const chain = await buildChain({
+      userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
+      attestationVersion: 300,
+      keymasterVersion: 300,
+      unlockedDeviceRequired: false,
     });
     await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
   });
