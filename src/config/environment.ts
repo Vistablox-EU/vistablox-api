@@ -24,10 +24,12 @@ const environmentSchema = z
       z.coerce.date().optional(),
     ),
     WEBAUTHN_RP_NAME: z.string().min(1).default("VistaBlox"),
-    WEBAUTHN_RP_ID: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.string().min(1).optional(),
-    ),
+    // Pinned separately from BETTER_AUTH_URL on purpose (AD-device-binding
+    // follow-up): every enrolled passkey (customer and staff) is bound to
+    // this exact value, so moving BETTER_AUTH_URL must never silently
+    // change it. Validated below against BETTER_AUTH_URL's hostname when
+    // set -- see the .refine() near the bottom of this schema.
+    WEBAUTHN_RP_ID: optionalHostname(),
     WEBAUTHN_ORIGIN: z.preprocess(
       (value) => (value === "" ? undefined : value),
       z.url().optional(),
@@ -314,6 +316,24 @@ const environmentSchema = z
       message: "All on-chain settlement settings must be configured together",
       path: ["CHAIN_NETWORK"],
     },
+  )
+  .refine(
+    (environment) => {
+      if (environment.WEBAUTHN_RP_ID === undefined) return true;
+      const authHostname = new URL(environment.BETTER_AUTH_URL).hostname.toLowerCase();
+      return (
+        authHostname === environment.WEBAUTHN_RP_ID ||
+        authHostname.endsWith(`.${environment.WEBAUTHN_RP_ID}`)
+      );
+    },
+    {
+      // The API serves the WebAuthn .well-known association files
+      // (apple-app-site-association, assetlinks.json) itself, at
+      // BETTER_AUTH_URL's own host -- that only works if this host is the
+      // rpId or a subdomain of it.
+      message: "BETTER_AUTH_URL's hostname must equal WEBAUTHN_RP_ID or be a subdomain of it",
+      path: ["WEBAUTHN_RP_ID"],
+    },
   );
 
 export type Environment = z.infer<typeof environmentSchema>;
@@ -340,6 +360,22 @@ function optionalEthAddress() {
     z
       .string()
       .regex(/^0x[0-9a-fA-F]{40}$/, "must be a 0x-prefixed 20-byte address")
+      .optional(),
+  );
+}
+
+function optionalHostname() {
+  return z.preprocess(
+    emptyStringToUndefined,
+    z
+      .string()
+      // A bare lowercase DNS hostname: no scheme, no port, no path, no
+      // trailing dot. Each label 1-63 chars, alphanumeric plus hyphens,
+      // not starting or ending with one, at least one label.
+      .regex(
+        /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/,
+        "must be a bare lowercase hostname (no scheme, port, path, or trailing dot)",
+      )
       .optional(),
   );
 }
