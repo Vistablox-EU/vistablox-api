@@ -41,7 +41,7 @@ function toAppError(error: unknown): AppError {
 }
 
 const BASE_URL = "https://api.vistablox.io";
-const PATH = "/v1/auth/devices/enrol/verify";
+const PATH = "/v1/auth/mobile/enrol/verify";
 
 async function keypair(): Promise<{ privateKey: CryptoKey; publicJwk: JWK }> {
   const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
@@ -118,7 +118,7 @@ function appWithMiddlewareThenCeremony(
   return app;
 }
 
-// This is the exact chain the real /v1/auth/devices/enrol/verify and
+// This is the exact chain the real /v1/auth/mobile/enrol/verify and
 // .../login/verify routes run: requireDpopOnly(ForVerify) as Express
 // middleware, then -- inside the handler, via auth.api.enrolVerify/
 // loginVerify -- the better-auth ceremony's own DPoP check

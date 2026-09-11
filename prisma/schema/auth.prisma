@@ -125,7 +125,6 @@ model Session {
   betterAuthUserId       String    @map("better_auth_user_id")
   betterAuthSessionId    String?   @map("better_auth_session_id")
   betterAuthSessionToken String?   @unique @map("better_auth_session_token")
-  providerGrantRef       String?   @map("provider_grant_ref")
   authMethodAtLogin      String    @map("auth_method_at_login")
   createdAt              DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   lastSeenAt             DateTime  @default(now()) @map("last_seen_at") @db.Timestamptz(6)

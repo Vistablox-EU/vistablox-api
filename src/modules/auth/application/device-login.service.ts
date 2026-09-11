@@ -1,7 +1,17 @@
-import { DeviceChallengeExpiredError, DeviceLoginFailedError } from "./device-auth-errors.js";
+import {
+  DeviceChallengeExpiredError,
+  DeviceLoginFailedError,
+  MobilePlatformUnsupportedError,
+} from "./device-auth-errors.js";
 import { isDeviceAuthJwsVerificationError, verifyDeviceAuthJws } from "./device-auth-jws-verifier.js";
 import type { Device, DeviceRepository } from "../repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../repository/device-challenge.repository.js";
+import {
+  ANDROID_ONLY_MOBILE_PLATFORM_POLICY,
+  isMobilePlatform,
+  isMobilePlatformSupported,
+  type MobilePlatformPolicy,
+} from "../domain/mobile-platform.policy.js";
 
 const LOGIN_PURPOSE = "login";
 
@@ -10,6 +20,7 @@ export class LoginDeviceService {
     private readonly challengeRepository: DeviceChallengeRepository,
     private readonly deviceRepository: DeviceRepository,
     private readonly clock: () => Date = () => new Date(),
+    private readonly mobilePlatformPolicy: MobilePlatformPolicy = ANDROID_ONLY_MOBILE_PLATFORM_POLICY,
   ) {}
 
   // Re-attestation (attestation_required) isn't implemented in this PR --
@@ -28,6 +39,12 @@ export class LoginDeviceService {
     // undifferentiated, to avoid account/device enumeration).
     if (device === null || device.status !== "active" || device.dpopJkt !== input.dpopJkt) {
       throw new DeviceLoginFailedError();
+    }
+    if (
+      !isMobilePlatform(device.platform) ||
+      !isMobilePlatformSupported(device.platform, this.mobilePlatformPolicy)
+    ) {
+      throw new MobilePlatformUnsupportedError(device.platform);
     }
 
     const consumed = await this.challengeRepository.consume({
