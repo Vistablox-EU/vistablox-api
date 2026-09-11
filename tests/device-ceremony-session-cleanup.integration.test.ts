@@ -139,7 +139,11 @@ describe.skipIf(databaseUrl === undefined)("L2 failure after session creation le
       .setProtectedHeader({ alg: "ES256", typ: "vistablox-device-auth+jwt", kid: deviceBioJkt })
       .sign(devicePrivateKey);
     const authContext = await auth.$context;
-    const lookup = vi.spyOn(authContext.internalAdapter, "findUserById").mockResolvedValueOnce(null);
+    // Null for the whole request, not just once: in the real factory the
+    // session.create.before hooks (staff-account guard, authentication-level
+    // resolver) look the user up before the plugin's own lookup does, and
+    // both accept a null user for a customer device session.
+    const lookup = vi.spyOn(authContext.internalAdapter, "findUserById").mockResolvedValue(null);
 
     const response = await request(testApp)
       .post("/v1/auth/mobile/login/verify")
