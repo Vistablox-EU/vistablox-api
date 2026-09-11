@@ -35,7 +35,9 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
   const suffix = randomUUID();
   const email = `device-auth-login-verify-${suffix}@example.test`;
   const accountId = `acct_${suffix}`;
-  const deviceId = `device_${suffix}`;
+  // Assigned by PrismaDeviceRepository.create in beforeAll (it generates its
+  // own device_<ulid> id), not chosen by the test.
+  let deviceId = "";
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
   const deviceChallengeRepository = new PrismaDeviceChallengeRepository(database);
@@ -46,6 +48,9 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
   let betterAuthUserId = "";
   let deviceBioJkt = "";
   let devicePrivateKey: webcrypto.CryptoKey;
+  // The seeded device's own DPoP key: LoginDeviceService only accepts L2
+  // from the DPoP key the device is bound to (device.dpopJkt).
+  let deviceDpopKeyPair: { privateKey: webcrypto.CryptoKey; publicJwk: JWK };
   let testApp: express.Express;
 
   beforeAll(async () => {
@@ -84,10 +89,11 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
     devicePrivateKey = keyPair.privateKey;
     const publicJwk = await exportJWK(keyPair.publicKey);
     deviceBioJkt = await calculateJwkThumbprint(publicJwk, "sha256");
-    await deviceRepository.create({
+    deviceDpopKeyPair = await generateDpopKeyPair();
+    const seededDevice = await deviceRepository.create({
       accountId,
       betterAuthUserId,
-      dpopJkt: "seeded-device-dpop-jkt",
+      dpopJkt: await calculateJwkThumbprint(deviceDpopKeyPair.publicJwk, "sha256"),
       bioJkt: deviceBioJkt,
       biometricPublicJwk: publicJwk as unknown as Record<string, unknown>,
       platform: "android",
@@ -96,6 +102,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
       appVersion: undefined,
       attestationMetadata: {},
     });
+    deviceId = seededDevice.deviceId;
 
     testApp = express();
     testApp.use(express.json());
@@ -122,7 +129,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
     if (betterAuthUserId !== "") {
       await database.device.deleteMany({ where: { accountId } });
       await database.account.deleteMany({ where: { id: accountId } });
-      await authPool.query('DELETE FROM "auth_session" WHERE "user_id" = $1', [betterAuthUserId]);
+      await authPool.query('DELETE FROM "auth_session" WHERE "userId" = $1', [betterAuthUserId]);
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
     }
     await Promise.all([database.$disconnect(), authPool.end()]);
@@ -181,7 +188,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
   });
 
   it("succeeds for a real seeded device with a real challenge and a real device-auth JWS: 200, device_id/session fields, set-auth-token header", async () => {
-    const dpopKeyPair = await generateDpopKeyPair();
+    const dpopKeyPair = deviceDpopKeyPair;
 
     const challengeResponse = await request(testApp)
       .post("/v1/auth/devices/login/challenge")
