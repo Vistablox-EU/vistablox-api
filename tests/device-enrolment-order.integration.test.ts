@@ -127,6 +127,33 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
     ).resolves.toBe(true);
   });
 
+  it("still answers 409 for an account with an active device when the challenge is consumed or expired", async () => {
+    const consumedChallenge = `order-db-409-consumed-${suffix}`;
+    await issue(consumedChallenge, dpopWithDevice);
+    await challenges.consume({
+      challenge: consumedChallenge,
+      purpose: ENROL,
+      dpopJkt: dpopWithDevice,
+      deviceId: undefined,
+      now: new Date(),
+    });
+    const expiredChallenge = `order-db-409-expired-${suffix}`;
+    await challenges.issue({
+      challenge: expiredChallenge,
+      purpose: ENROL,
+      dpopJkt: dpopWithDevice,
+      deviceId: undefined,
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+
+    await expect(
+      service.execute(enrolInput(accountWithDevice, 0, consumedChallenge, dpopWithDevice)),
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
+    await expect(
+      service.execute(enrolInput(accountWithDevice, 0, expiredChallenge, dpopWithDevice)),
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
+  });
+
   it("answers 400 for an already-consumed challenge when the account has no device, and creates no device", async () => {
     const challenge = `order-db-400-${suffix}`;
     await issue(challenge, dpopWithoutDevice);

@@ -721,6 +721,25 @@ describe("EnrolDeviceService: the active-device check runs before the challenge 
     ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
   });
 
+  it("answers 409, not 400, when the account has an active device and the challenge has expired", async () => {
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(activeDevice("account-4"));
+    await challenges.issue({
+      challenge: "order-challenge-4",
+      purpose: ENROL,
+      dpopJkt: "dpop-order-4",
+      deviceId: undefined,
+      expiresAt: new Date(Date.now() - 1_000),
+    });
+    const service = new EnrolDeviceService(challenges, devices, androidConfig());
+
+    await expect(
+      service.execute(enrolInput("account-4", "order-challenge-4", "dpop-order-4")),
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
+    expect(challenges.consumeCallCount).toBe(0);
+  });
+
   it("reaches the client as 409 DEVICE_ALREADY_ENROLLED and 400 DEVICE_CHALLENGE_EXPIRED", () => {
     expect(toApiError(new DeviceAlreadyEnrolledError())).toMatchObject({
       statusCode: 409,
