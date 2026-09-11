@@ -25,6 +25,7 @@ import {
 } from "../src/modules/auth/application/device-auth-errors.js";
 import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/device-auth-jws-verifier.js";
 import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
+import { toApiError } from "../src/modules/auth/infrastructure/better-auth-device-auth.plugin.js";
 import type { Device, DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
 
@@ -603,5 +604,131 @@ describe("EnrolDeviceService.rollback", () => {
     await service.rollback("device_orphaned");
 
     expect(devices.devices.find((d) => d.deviceId === "device_orphaned")).toBeUndefined();
+  });
+});
+
+// The mobile app relies on this order when it re-sends E2: an account that
+// already has an active device gets 409 DEVICE_ALREADY_ENROLLED without the
+// challenge being used up, and a 400 for a used challenge means no device
+// row was created.
+describe("EnrolDeviceService: the active-device check runs before the challenge is consumed", () => {
+  const ENROL = "enrol-device";
+
+  function activeDevice(accountId: string): Device {
+    return {
+      deviceId: "device_active",
+      accountId,
+      betterAuthUserId: "user-1",
+      dpopJkt: "active-device-jkt",
+      bioJkt: "active-device-bio-jkt",
+      biometricPublicJwk: {},
+      platform: "android",
+      status: "active",
+      createdAt: new Date(),
+      lastSeenAt: new Date(),
+    };
+  }
+
+  function enrolInput(accountId: string, challenge: string, dpopJkt: string) {
+    return {
+      accountId,
+      betterAuthUserId: "user-1",
+      dpopJkt,
+      challenge,
+      jws: "not-reached",
+      attestation: {
+        platform: "android",
+        keyAttestationChain: [],
+        integrityToken: undefined,
+        model: undefined,
+        osVersion: undefined,
+        appVersion: undefined,
+      },
+    };
+  }
+
+  async function issue(challenges: FakeChallengeRepository, challenge: string, dpopJkt: string): Promise<void> {
+    await challenges.issue({
+      challenge,
+      purpose: ENROL,
+      dpopJkt,
+      deviceId: undefined,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+  }
+
+  it("answers 409 for an account with an active device, and the valid challenge stays usable", async () => {
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(activeDevice("account-1"));
+    await issue(challenges, "order-challenge-1", "dpop-order-1");
+    const service = new EnrolDeviceService(challenges, devices, androidConfig());
+
+    await expect(
+      service.execute(enrolInput("account-1", "order-challenge-1", "dpop-order-1")),
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
+
+    expect(challenges.issued.get("order-challenge-1")?.consumed).toBe(false);
+    await expect(
+      challenges.consume({
+        challenge: "order-challenge-1",
+        purpose: ENROL,
+        dpopJkt: "dpop-order-1",
+        deviceId: undefined,
+        now: new Date(),
+      }),
+    ).resolves.toBe(true);
+    expect(devices.createCallCount).toBe(0);
+  });
+
+  it("answers 400 for an already-consumed challenge when the account has no device, and creates no device", async () => {
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    await issue(challenges, "order-challenge-2", "dpop-order-2");
+    await challenges.consume({
+      challenge: "order-challenge-2",
+      purpose: ENROL,
+      dpopJkt: "dpop-order-2",
+      deviceId: undefined,
+      now: new Date(),
+    });
+    const service = new EnrolDeviceService(challenges, devices, androidConfig());
+
+    await expect(
+      service.execute(enrolInput("account-2", "order-challenge-2", "dpop-order-2")),
+    ).rejects.toBeInstanceOf(DeviceChallengeExpiredError);
+
+    expect(devices.createCallCount).toBe(0);
+    expect(devices.devices).toHaveLength(0);
+  });
+
+  it("answers 409, not 400, when the account has an active device and the challenge was already consumed", async () => {
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(activeDevice("account-3"));
+    await issue(challenges, "order-challenge-3", "dpop-order-3");
+    await challenges.consume({
+      challenge: "order-challenge-3",
+      purpose: ENROL,
+      dpopJkt: "dpop-order-3",
+      deviceId: undefined,
+      now: new Date(),
+    });
+    const service = new EnrolDeviceService(challenges, devices, androidConfig());
+
+    await expect(
+      service.execute(enrolInput("account-3", "order-challenge-3", "dpop-order-3")),
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
+  });
+
+  it("reaches the client as 409 DEVICE_ALREADY_ENROLLED and 400 DEVICE_CHALLENGE_EXPIRED", () => {
+    expect(toApiError(new DeviceAlreadyEnrolledError())).toMatchObject({
+      statusCode: 409,
+      body: { code: "DEVICE_ALREADY_ENROLLED" },
+    });
+    expect(toApiError(new DeviceChallengeExpiredError())).toMatchObject({
+      statusCode: 400,
+      body: { code: "DEVICE_CHALLENGE_EXPIRED" },
+    });
   });
 });
