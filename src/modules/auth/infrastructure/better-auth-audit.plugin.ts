@@ -244,6 +244,7 @@ export function createBetterAuthAuditPlugin(
                 context,
                 options.identifierHashKey,
                 options.findDeviceOwner,
+                options.onError,
               );
               const traceId = readTraceId(context);
               const eventId = readEventId(context);
@@ -278,6 +279,7 @@ async function resolveFailedIdentity(
   context: unknown,
   hashKey: string,
   findDeviceOwner: ((deviceId: string) => Promise<string | null>) | undefined,
+  onLookupError: ((error: unknown) => void) | undefined,
 ): Promise<{ betterAuthUserId: string | null; resourceId: string; deviceId?: string }> {
   const auditContext = context as AuditContext & {
     context: {
@@ -303,7 +305,16 @@ async function resolveFailedIdentity(
   if (auditContext.path === "/device/login/verify") {
     const deviceId = readBodyString(auditContext.body, "device_id");
     if (deviceId === null) return { betterAuthUserId: null, resourceId: "login_unknown" };
-    const ownerId = findDeviceOwner === undefined ? null : await findDeviceOwner(deviceId);
+    // The owner lookup only enriches the event: if it fails, the failure is
+    // still recorded, against the keyed hash, and the lookup error reported.
+    let ownerId: string | null = null;
+    if (findDeviceOwner !== undefined) {
+      try {
+        ownerId = await findDeviceOwner(deviceId);
+      } catch (error) {
+        onLookupError?.(error);
+      }
+    }
     return ownerId === null
       ? {
           betterAuthUserId: null,

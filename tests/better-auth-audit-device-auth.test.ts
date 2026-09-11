@@ -238,6 +238,40 @@ describe("audit plugin: device enrolment (E2) and device login (L2)", () => {
     expectNoCeremonyMaterial(events, ["device_does_not_exist"]);
   });
 
+  it("still records a failed device login, against the keyed hash, when the device-owner lookup throws", async () => {
+    const events: AuthAuditEvent[] = [];
+    const lookupError = new Error("device lookup failed");
+    const onError = vi.fn();
+    const plugin = createBetterAuthAuditPlugin({
+      sink: { record: vi.fn(async (event: AuthAuditEvent) => void events.push(event)) },
+      identifierHashKey: HASH_KEY,
+      clock: () => new Date("2026-09-11T12:00:00.000Z"),
+      onError,
+      findDeviceOwner: vi.fn().mockRejectedValue(lookupError),
+    });
+
+    await runAfterHook(plugin, {
+      path: "/device/login/verify",
+      headers,
+      body: loginBody("device_01"),
+      context: {
+        returned: APIError.from("UNAUTHORIZED", { code: "DEVICE_LOGIN_FAILED", message: "Device login failed." }),
+        session: null,
+      },
+    });
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      action: "authentication.login_failed",
+      betterAuthUserId: null,
+      resourceType: "login_attempt",
+      resourceId: `login_device_${createHmac("sha256", HASH_KEY).update("device_01").digest("hex")}`,
+      changes: { failure_code: "DEVICE_LOGIN_FAILED", purpose: "login" },
+    });
+    expect(events[0]?.changes).not.toHaveProperty("device_id");
+    expect(onError).toHaveBeenCalledWith(lookupError);
+  });
+
   it("records a failed enrolment against the pending session's user, without attestation material", async () => {
     const { plugin, events } = build();
 
