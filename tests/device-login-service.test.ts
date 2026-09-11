@@ -35,6 +35,10 @@ class FakeDeviceRepository implements DeviceRepository {
     if (device !== undefined) device.lastSeenAt = at;
     this.touchedAt = at;
   }
+
+  public async delete(deviceId: string): Promise<void> {
+    this.devices = this.devices.filter((d) => d.deviceId !== deviceId);
+  }
 }
 
 interface FakeChallengeEntry {

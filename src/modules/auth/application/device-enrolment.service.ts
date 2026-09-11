@@ -118,6 +118,22 @@ export class EnrolDeviceService {
     });
   }
 
+  /**
+   * Compensation for a failed enrolment: execute() and the
+   * internalAdapter session-creation call the caller makes right after it
+   * succeeds use different DB clients (Prisma vs better-auth's own pg
+   * Pool), so there's no single transaction spanning both. If anything
+   * after execute() succeeds fails -- session creation, setting the
+   * session cookie, deleting the prior pending session -- the caller must
+   * call this before rethrowing, or the device row is left behind, active,
+   * blocking every retry via the one-active-device-per-account constraint
+   * (confirmed live on staging before this existed: a real enrolment
+   * crashed at session creation and orphaned exactly this way).
+   */
+  public async rollback(deviceId: string): Promise<void> {
+    await this.deviceRepository.delete(deviceId);
+  }
+
   private async verifyPlayIntegrity(input: EnrolDeviceInput, bioJkt: string): Promise<void> {
     if (this.android.policy !== "disabled" && this.android.playIntegrityDecoder === undefined) {
       throw new AndroidAttestationInvalidError(

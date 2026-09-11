@@ -88,6 +88,13 @@ export class PrismaDeviceRepository implements DeviceRepository {
       data: { lastSeenAt: at },
     });
   }
+
+  public async delete(deviceId: string): Promise<void> {
+    // deleteMany, not delete: a no-op on an id that's already gone must not
+    // throw (P2025) -- this is compensation logic, called from a catch
+    // block that's about to rethrow the real error either way.
+    await this.database.device.deleteMany({ where: { deviceId } });
+  }
 }
 
 // meta.target's shape depends on whether Prisma recognizes the violated

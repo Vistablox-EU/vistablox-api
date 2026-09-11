@@ -98,3 +98,27 @@ describe("PrismaDeviceRepository.create", () => {
     await expect(repository.create(CREATE_INPUT)).rejects.toBe(error);
   });
 });
+
+// Compensation for a failed enrolment (EnrolDeviceService.rollback calls
+// into this): deleteMany, not delete, so a call on an id that's already
+// gone is a no-op rather than a P2025 throw -- this runs from a catch
+// block that's about to rethrow the real error either way.
+describe("PrismaDeviceRepository.delete", () => {
+  it("deletes the device by id via deleteMany", async () => {
+    const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
+    const database = { device: { create: vi.fn(), deleteMany } } as unknown as DatabaseClient;
+    const repository = new PrismaDeviceRepository(database);
+
+    await repository.delete("device_orphaned");
+
+    expect(deleteMany).toHaveBeenCalledWith({ where: { deviceId: "device_orphaned" } });
+  });
+
+  it("does not throw when the device is already gone", async () => {
+    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
+    const database = { device: { create: vi.fn(), deleteMany } } as unknown as DatabaseClient;
+    const repository = new PrismaDeviceRepository(database);
+
+    await expect(repository.delete("device_does_not_exist")).resolves.toBeUndefined();
+  });
+});
