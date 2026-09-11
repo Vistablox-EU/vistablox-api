@@ -79,7 +79,11 @@ interface KeyDescriptionOptions {
   noAuthRequired?: boolean;
   authTimeout?: number;
   allowWhileOnBody?: boolean;
+  /** Places tag 506 in softwareEnforced instead of teeEnforced. */
+  allowWhileOnBodyInSoftwareList?: boolean;
   unlockedDeviceRequired?: boolean;
+  /** Places tag 509 in softwareEnforced instead of teeEnforced -- the Keymaster 4.0 (attestationVersion 3) quirk. */
+  unlockedDeviceRequiredInSoftwareList?: boolean;
   origin?: number;
   purpose?: number[];
   algorithm?: number;
@@ -95,6 +99,7 @@ interface KeyDescriptionOptions {
 
 function buildKeyDescription(options: KeyDescriptionOptions = {}): ArrayBuffer {
   const teeEntries: asn1js.Constructed[] = [];
+  const softwareEntries: asn1js.Constructed[] = [];
   teeEntries.push(
     taggedNode(1, new asn1js.Set({ value: (options.purpose ?? [KM_PURPOSE_SIGN]).map((p) => new asn1js.Integer({ value: p })) })),
   );
@@ -113,10 +118,14 @@ function buildKeyDescription(options: KeyDescriptionOptions = {}): ArrayBuffer {
     teeEntries.push(taggedNode(505, new asn1js.Integer({ value: options.authTimeout })));
   }
   if (options.allowWhileOnBody === true) {
-    teeEntries.push(taggedNode(506, new asn1js.Boolean({ value: true })));
+    (options.allowWhileOnBodyInSoftwareList ? softwareEntries : teeEntries).push(
+      taggedNode(506, new asn1js.Boolean({ value: true })),
+    );
   }
   if (options.unlockedDeviceRequired !== false) {
-    teeEntries.push(taggedNode(509, new asn1js.Boolean({ value: true })));
+    (options.unlockedDeviceRequiredInSoftwareList ? softwareEntries : teeEntries).push(
+      taggedNode(509, new asn1js.Boolean({ value: true })),
+    );
   }
   teeEntries.push(taggedNode(702, new asn1js.Integer({ value: options.origin ?? KM_ORIGIN_GENERATED })));
   if (!options.omitRootOfTrust) {
@@ -141,7 +150,7 @@ function buildKeyDescription(options: KeyDescriptionOptions = {}): ArrayBuffer {
     );
   }
   const teeEnforced = new asn1js.Sequence({ value: teeEntries });
-  const softwareEnforced = new asn1js.Sequence({ value: [] });
+  const softwareEnforced = new asn1js.Sequence({ value: softwareEntries });
   const level = options.securityLevel ?? 1; // TrustedEnvironment
 
   return new asn1js.Sequence({
@@ -548,13 +557,52 @@ describe("verifyAndroidKeyAttestation: authentication requirements", () => {
     await expect(verify(chain)).resolves.toBeUndefined();
   });
 
-  it("rejects a key usable without authentication while on-body", async () => {
+  it("rejects a key usable without authentication while on-body (teeEnforced)", async () => {
     const chain = await buildChain({ userAuthType: AUTH_TYPE_FINGERPRINT_ONLY, allowWhileOnBody: true });
+    await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+  });
+
+  it("rejects a key usable without authentication while on-body, attested in softwareEnforced instead of teeEnforced", async () => {
+    const chain = await buildChain({
+      userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
+      allowWhileOnBody: true,
+      allowWhileOnBodyInSoftwareList: true,
+    });
     await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
   });
 
   it("rejects a key that does not require the device to be unlocked", async () => {
     const chain = await buildChain({ userAuthType: AUTH_TYPE_FINGERPRINT_ONLY, unlockedDeviceRequired: false });
+    await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+  });
+
+  it("accepts unlockedDeviceRequired attested in softwareEnforced when attestationVersion is exactly 3 (Keymaster 4.0 / Android 9 quirk)", async () => {
+    const chain = await buildChain({
+      userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
+      attestationVersion: 3,
+      keymasterVersion: 3,
+      unlockedDeviceRequiredInSoftwareList: true,
+    });
+    await expect(verify(chain)).resolves.toBeUndefined();
+  });
+
+  it("rejects unlockedDeviceRequired attested only in softwareEnforced when attestationVersion is 4 or above (the quirk is 4.0-only)", async () => {
+    const chain = await buildChain({
+      userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
+      attestationVersion: 4,
+      keymasterVersion: 4,
+      unlockedDeviceRequiredInSoftwareList: true,
+    });
+    await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+  });
+
+  it("rejects unlockedDeviceRequired attested only in softwareEnforced for a KeyMint version (300) too", async () => {
+    const chain = await buildChain({
+      userAuthType: AUTH_TYPE_FINGERPRINT_ONLY,
+      attestationVersion: 300,
+      keymasterVersion: 300,
+      unlockedDeviceRequiredInSoftwareList: true,
+    });
     await expect(verify(chain)).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
   });
 });

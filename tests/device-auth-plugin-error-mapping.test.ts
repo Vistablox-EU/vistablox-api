@@ -8,7 +8,6 @@ import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
   DeviceLoginFailedError,
-  DevicePairingNotImplementedError,
 } from "../src/modules/auth/application/device-auth-errors.js";
 import {
   DeviceChallengePurposeMismatchError,
@@ -42,11 +41,6 @@ describe("better-auth-device-auth.plugin's toApiError mapping (contract 3.6)", (
     },
     { error: new DeviceAlreadyEnrolledError(), status: 409, code: "DEVICE_ALREADY_ENROLLED" },
     { error: new DeviceLoginFailedError(), status: 401, code: "DEVICE_LOGIN_FAILED" },
-    {
-      error: new DevicePairingNotImplementedError(),
-      status: 501,
-      code: "device.pairing_not_implemented",
-    },
   ];
 
   for (const { error, status, code } of cases) {

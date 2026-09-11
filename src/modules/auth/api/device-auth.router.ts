@@ -125,6 +125,18 @@ export function createDeviceAuthRouter(
   requireDpopOnly: RequestHandler,
   issueChallenge: IssueDeviceChallengeService,
   auth: VistaBloxAuth,
+  // Used on /enrol/verify and /login/verify instead of requireDpopOnly --
+  // verifies the proof and sets response.locals.dpopJkt the same way, but
+  // must NOT also record (jkt, jti): the better-auth ceremony these routes
+  // call into (auth.api.enrolVerify/loginVerify) does its own full
+  // verify-and-record of this identical request's proof moments later, and
+  // the two can't dedupe each other (see require-dpop-only.ts's
+  // recordReplays doc comment for why -- the router builds a new Request
+  // object for the ceremony, so its WeakMap cache never sees this
+  // middleware's). Recording here too would make the ceremony's own record
+  // always lose as a replay of this one -- confirmed live (DPOP_REPLAY on
+  // every real E2/L2 call) before this parameter existed.
+  requireDpopOnlyForVerify: RequestHandler,
   // Applied after requireDpopOnly (so a DPoP-keyed limiter -- see
   // rate-limit.ts's dpopKeyRateLimitSubject -- can read response.locals
   // .dpopJkt) to all four routes: challenge issuance writes a fresh,
@@ -153,7 +165,7 @@ export function createDeviceAuthRouter(
     );
   });
 
-  router.post("/enrol/verify", requireDpopOnly, ...deviceAuthRateLimiters, async (request, response) => {
+  router.post("/enrol/verify", requireDpopOnlyForVerify, ...deviceAuthRateLimiters, async (request, response) => {
     const body = enrolVerifyRequestSchema.parse(request.body);
     try {
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).enrolVerify({
@@ -207,7 +219,7 @@ export function createDeviceAuthRouter(
     );
   });
 
-  router.post("/login/verify", requireDpopOnly, ...deviceAuthRateLimiters, async (request, response) => {
+  router.post("/login/verify", requireDpopOnlyForVerify, ...deviceAuthRateLimiters, async (request, response) => {
     const body = loginVerifyRequestSchema.parse(request.body);
     try {
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).loginVerify({

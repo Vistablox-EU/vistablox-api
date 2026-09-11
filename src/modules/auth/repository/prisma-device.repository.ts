@@ -2,10 +2,7 @@ import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { Prisma } from "../../../generated/prisma/client.js";
-import {
-  DeviceAlreadyEnrolledError,
-  DevicePairingNotImplementedError,
-} from "../application/device-auth-errors.js";
+import { DeviceAlreadyEnrolledError } from "../application/device-auth-errors.js";
 import type { Device, DeviceRepository } from "./device.repository.js";
 
 // This table's two unique constraints (dpop_jkt, and the partial
@@ -52,13 +49,16 @@ export class PrismaDeviceRepository implements DeviceRepository {
       });
       return toDevice(created);
     } catch (error) {
-      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
-        if (constraintMatches(error, ONE_ACTIVE_DEVICE_PER_ACCOUNT_CONSTRAINT)) {
-          throw new DevicePairingNotImplementedError();
-        }
-        if (constraintMatches(error, "dpop_jkt")) {
-          throw new DeviceAlreadyEnrolledError();
-        }
+      if (
+        error instanceof Prisma.PrismaClientKnownRequestError &&
+        error.code === "P2002" &&
+        (constraintMatches(error, ONE_ACTIVE_DEVICE_PER_ACCOUNT_CONSTRAINT) ||
+          constraintMatches(error, "dpop_jkt"))
+      ) {
+        // Contract 3.6: DEVICE_ALREADY_ENROLLED (409) for both -- see that
+        // error class's own doc comment for why this table's two unique
+        // constraints share one code/status.
+        throw new DeviceAlreadyEnrolledError();
       }
       throw error;
     }

@@ -9,7 +9,6 @@ import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
   DeviceLoginFailedError,
-  DevicePairingNotImplementedError,
 } from "../application/device-auth-errors.js";
 import {
   DeviceChallengePurposeMismatchError,
@@ -81,7 +80,8 @@ export function createBetterAuthDeviceAuthPlugin(
           const level = (current?.session as Record<string, unknown> | undefined)
             ?.authenticationLevel;
           if (current === null || level !== "oauth_pending") {
-            throw APIError.from("UNAUTHORIZED", {
+            // Contract 3.6: DEVICE_JWS_INVALID is 400.
+            throw APIError.from("BAD_REQUEST", {
               code: "DEVICE_JWS_INVALID",
               message: "A pending Google/Apple sign-in session is required before enrolling a device.",
             });
@@ -100,7 +100,8 @@ export function createBetterAuthDeviceAuthPlugin(
           // generic DPoP plugin hook does not also do this for this path.
           const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
           if (typeof boundJkt !== "string") {
-            throw APIError.from("UNAUTHORIZED", {
+            // Contract 3.6: DEVICE_JWS_INVALID is 400.
+            throw APIError.from("BAD_REQUEST", {
               code: "DEVICE_JWS_INVALID",
               message: "This session is not yet bound to a device key.",
             });
@@ -174,7 +175,14 @@ export function createBetterAuthDeviceAuthPlugin(
             request: ctx.request,
             path: ctx.path,
           };
-          const dpopClaims = await requireDpopProofForSessionCreation(dpopContext, options.dpop);
+          // Contract 3.5: L2's auth is "none" -- a stale Authorization
+          // header must never be a reason to fail (there's no session yet
+          // for a bearer token to belong to).
+          const dpopClaims = await requireDpopProofForSessionCreation(
+            dpopContext,
+            options.dpop,
+            true,
+          );
 
           try {
             const device = await options.loginDevice.execute({
@@ -293,9 +301,6 @@ export function toApiError(error: unknown): APIError {
   }
   if (error instanceof DeviceLoginFailedError) {
     return APIError.from("UNAUTHORIZED", { code: error.code, message: error.message });
-  }
-  if (error instanceof DevicePairingNotImplementedError) {
-    return APIError.from("NOT_IMPLEMENTED", { code: error.code, message: error.message });
   }
   throw error;
 }

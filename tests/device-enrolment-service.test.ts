@@ -21,7 +21,6 @@ import {
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
-  DevicePairingNotImplementedError,
 } from "../src/modules/auth/application/device-auth-errors.js";
 import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/device-auth-jws-verifier.js";
 import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
@@ -390,7 +389,7 @@ describe("EnrolDeviceService", () => {
           appVersion: undefined,
         },
       }),
-    ).rejects.toBeInstanceOf(DevicePairingNotImplementedError);
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
     expect(challenges.consumeCallCount).toBe(0);
   });
 

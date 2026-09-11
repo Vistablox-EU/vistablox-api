@@ -6,11 +6,7 @@ import {
   verifyAndroidKeyAttestation,
   verifyPlayIntegrityToken,
 } from "./android-attestation-verifier.js";
-import {
-  DeviceAlreadyEnrolledError,
-  DeviceChallengeExpiredError,
-  DevicePairingNotImplementedError,
-} from "./device-auth-errors.js";
+import { DeviceAlreadyEnrolledError, DeviceChallengeExpiredError } from "./device-auth-errors.js";
 import { verifyDeviceAuthJws } from "./device-auth-jws-verifier.js";
 import type { Device, DeviceRepository } from "../repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../repository/device-challenge.repository.js";
@@ -52,13 +48,16 @@ export class EnrolDeviceService {
 
   public async execute(input: EnrolDeviceInput): Promise<Device> {
     // Checked before the challenge is consumed: pairing isn't built yet in
-    // this PR, and a doomed request shouldn't burn a single-use challenge
-    // to find that out.
+    // this PR (see DeviceAlreadyEnrolledError's own doc comment), and a
+    // doomed request shouldn't burn a single-use challenge to find that
+    // out. Still racy on its own (check-then-insert) -- the partial unique
+    // index this table has closes the gap at the database; see
+    // PrismaDeviceRepository.create's P2002 handling for the raced case.
     const existingActiveDevice = await this.deviceRepository.findActiveDeviceForAccount(
       input.accountId,
     );
     if (existingActiveDevice !== null) {
-      throw new DevicePairingNotImplementedError();
+      throw new DeviceAlreadyEnrolledError();
     }
 
     const consumed = await this.challengeRepository.consume({

@@ -1,10 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { Prisma } from "../src/generated/prisma/client.js";
-import {
-  DeviceAlreadyEnrolledError,
-  DevicePairingNotImplementedError,
-} from "../src/modules/auth/application/device-auth-errors.js";
+import { DeviceAlreadyEnrolledError } from "../src/modules/auth/application/device-auth-errors.js";
 import { PrismaDeviceRepository } from "../src/modules/auth/repository/prisma-device.repository.js";
 import type { DatabaseClient } from "../src/infrastructure/database/prisma.js";
 
@@ -61,14 +58,14 @@ describe("PrismaDeviceRepository.create", () => {
     expect(device.deviceId).toBe("device_1");
   });
 
-  it("maps a P2002 on the one-active-device-per-account partial index to DevicePairingNotImplementedError", async () => {
+  it("maps a P2002 on the one-active-device-per-account partial index to DeviceAlreadyEnrolledError (contract 3.6: 409)", async () => {
     const database = fakeDatabase(() => {
       throw p2002("devices_one_active_per_account");
     });
     const repository = new PrismaDeviceRepository(database);
 
     await expect(repository.create(CREATE_INPUT)).rejects.toBeInstanceOf(
-      DevicePairingNotImplementedError,
+      DeviceAlreadyEnrolledError,
     );
   });
 

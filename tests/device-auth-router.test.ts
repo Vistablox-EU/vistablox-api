@@ -38,6 +38,7 @@ function appFor(
       dpopOnly,
       issueChallenge,
       auth as unknown as VistaBloxAuth,
+      dpopOnly,
       challengeRateLimiters,
     ),
   );

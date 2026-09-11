@@ -43,21 +43,26 @@ export interface DpopCreationContext {
 }
 
 // These four endpoints each do their own full, explicit DPoP verification
-// (assertDpopKeyMatchesPendingSession / requireDpopProofForSessionCreation,
-// below) as part of a "resolve or upgrade this specific pending session"
-// ceremony -- better-auth-dpop.plugin.ts's generic before-hook must not
-// ALSO verify+record for these paths. Two independent reasons, found
-// together during the #54 security review:
-//   1. Both would try to record the identical (jkt, jti) for the same
-//      request; the second one always loses as a replay of the first
-//      (DPOP_REPLAY on every real client).
-//   2. The generic hook's own "session unbound -> auto-bind whatever key
-//      shows up" behavior is deliberately permissive (correct for ordinary
-//      Phase 1 traffic), but wrong here: a stolen oauth_pending bearer
-//      token plus an attacker's own arbitrary DPoP key would auto-bind
-//      before the ceremony's own explicit check ever runs. These paths
-//      must reject an unbound (or mismatched) pending session outright,
-//      not silently bind to whatever key happens to show up.
+// (assertDpopKeyMatchesPendingSession / requireDpopProofForSessionCreation /
+// resolvePendingSessionDpopKey, below) as part of a "resolve or upgrade
+// this specific pending session" ceremony -- better-auth-dpop.plugin.ts's
+// generic before-hook must not ALSO verify+record for these paths, or both
+// would try to record the identical (jkt, jti) for the same request, and
+// the second one always loses as a replay of the first (DPOP_REPLAY on
+// every real client -- found, and re-found in a second form, during the
+// #54 security review).
+//
+// What each path does with an UNBOUND pending session differs, though:
+// /device/enrol/verify rejects one outright (a stolen oauth_pending bearer
+// token plus an attacker's own arbitrary DPoP key must not be enough to
+// enrol a device on someone else's account). The passkey verify-* paths
+// instead apply resolvePendingSessionDpopKey's own decision (bound -> must
+// match; unbound + a proof presented + post-cutover -> reject; unbound +
+// pre-cutover (or no cutover configured) -> opportunistic bind-on-first-
+// sight; no proof presented at all -> pass through), matching what the
+// generic hook itself did for ordinary traffic before this path started
+// skipping it -- Phase 1 passkey sign-in stays exactly as permissive as it
+// always was, just without the double-record bug.
 export function isSessionUpgradeCeremonyPath(path: string | undefined): boolean {
   return (
     path === "/passkey/verify-authentication" ||
@@ -167,20 +172,31 @@ export async function assertDpopKeyMatchesPendingSession(
  * upcoming internalAdapter.createSession call fires session.create.before
  * for this identical request, and it must not re-verify-and-record the
  * same (jkt, jti) a second time (see dpopClaimsByRequest's own comment).
+ *
+ * `ignoreAuthorizationHeader`: true for L2 (login/verify, contract "auth:
+ * none" -- a stale Authorization header must never be a reason to fail,
+ * same as require-dpop-only.ts for C1/E1/L1) since there's no session yet
+ * for a bearer token to legitimately belong to. Left false (the default)
+ * for the passkey unbound-session case this function also serves (via
+ * resolvePendingSessionDpopKey) -- there, an Authorization header carries
+ * the pending session's own real bearer/cookie, and the proof's ath claim
+ * is meant to be checked against it.
  */
 export async function requireDpopProofForSessionCreation(
   ctx: DpopCreationContext,
   dpop: DpopSessionCreationOptions | undefined,
+  ignoreAuthorizationHeader = false,
 ): Promise<DpopProofClaims> {
-  return verifyAndCacheDpopProof(ctx, dpop);
+  return verifyAndCacheDpopProof(ctx, dpop, ignoreAuthorizationHeader);
 }
 
 async function verifyAndCacheDpopProof(
   ctx: DpopCreationContext,
   dpop: DpopSessionCreationOptions | undefined,
+  ignoreAuthorizationHeader = false,
 ): Promise<DpopProofClaims> {
   const header = ctx.headers?.get("dpop") ?? undefined;
-  const authHeader = ctx.headers?.get("authorization") ?? null;
+  const authHeader = ignoreAuthorizationHeader ? null : (ctx.headers?.get("authorization") ?? null);
   const bearerToken =
     authHeader !== null && authHeader.slice(0, 7).toLowerCase() === "bearer "
       ? authHeader.slice(7)
@@ -222,6 +238,64 @@ async function verifyAndCacheDpopProof(
   }
 
   return claims;
+}
+
+/**
+ * The passkey ceremony's DPoP decision for a pending session that may or
+ * may not already be bound -- restoring, for these paths specifically, the
+ * exact decision better-auth-dpop.plugin.ts's generic hook used to make
+ * for ordinary traffic (decideDpopForSession in dpop-proof-verifier.ts),
+ * now routed through the cache-aware verify-and-record primitives above so
+ * it can't double-record against tryBindDpopAtCreation's own lookup for
+ * the same request (session.create.before, firing right after this
+ * ceremony creates/rotates the session):
+ *
+ * - Bound: the proof must verify and match exactly (assertDpopKeyMatches
+ *   PendingSession) -- DPOP_KEY_MISMATCH on any other outcome.
+ * - Unbound, no `dpop` header presented at all: nothing to check, passes.
+ * - Unbound, a header IS presented, but it fails to verify: NOT an error --
+ *   there's nothing yet to compare it against, so this is treated the same
+ *   as no proof at all (matches decideDpopForSession's own `catch { return
+ *   pass }`). Only a mismatch against an *already-bound* key (the branch
+ *   above) is a hard rejection.
+ * - Unbound, a header verifies, post-cutover (phase1CutoverAt is set and
+ *   this session predates it): DPOP_KEY_MISMATCH -- an unbound session
+ *   presenting a proof after cutover is an anomaly, not a migration case.
+ * - Unbound, a header verifies, pre-cutover (or no cutover configured):
+ *   the claims are cached (by requireDpopProofForSessionCreation) for
+ *   tryBindDpopAtCreation to pick up and bind automatically -- the
+ *   original opportunistic "bind on first sight" Phase 1 behavior.
+ */
+export async function resolvePendingSessionDpopKey(
+  ctx: DpopCreationContext,
+  boundJkt: string | null,
+  sessionCreatedAt: Date,
+  dpop: DpopSessionCreationOptions | undefined,
+): Promise<void> {
+  if (dpop === undefined) return;
+
+  if (boundJkt !== null) {
+    await assertDpopKeyMatchesPendingSession(ctx, boundJkt, dpop);
+    return;
+  }
+
+  if ((ctx.headers?.get("dpop") ?? null) === null) return;
+
+  try {
+    // Result intentionally unused here: requireDpopProofForSessionCreation's
+    // only job in this branch is to verify+record+cache the proof (for
+    // tryBindDpopAtCreation to bind with, below) -- the jkt itself isn't
+    // needed by this function's own caller.
+    await requireDpopProofForSessionCreation(ctx, dpop);
+  } catch {
+    return;
+  }
+
+  const isPreCutover =
+    dpop.phase1CutoverAt === undefined || sessionCreatedAt < dpop.phase1CutoverAt;
+  if (!isPreCutover) {
+    throw dpopApiError(new DpopKeyMismatchError(), dpop, ctx);
+  }
 }
 
 function dpopApiError(

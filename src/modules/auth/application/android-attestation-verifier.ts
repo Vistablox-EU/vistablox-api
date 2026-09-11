@@ -227,11 +227,22 @@ export async function verifyAndroidKeyAttestation(input: AndroidKeyAttestationIn
     throw new AndroidAttestationInvalidError("key does not require authentication on every use");
   }
 
-  if (tee.allowWhileOnBody) {
+  if (tee.allowWhileOnBody || keyDescription.softwareEnforced.allowWhileOnBody) {
     throw new AndroidAttestationInvalidError("key is usable without authentication while on-body");
   }
 
-  if (!tee.unlockedDeviceRequired) {
+  // unlockedDeviceRequired (tag 509) on Keymaster 4.0 (attestationVersion
+  // == 3, i.e. Android 9 -- squarely inside minSdk 28) is a documented
+  // platform quirk: Keystore enforces it, but attests it in the
+  // SOFTWARE-enforced list, not the hardware one, unlike every later
+  // version. Requiring the hardware list unconditionally would reject
+  // every real Android 9 phone outright. From Keymaster 4.1 / KeyMint
+  // (attestationVersion >= 4) onward it's back to hardware-enforced only.
+  const unlockedDeviceRequired =
+    keyDescription.attestationVersion === 3
+      ? tee.unlockedDeviceRequired || keyDescription.softwareEnforced.unlockedDeviceRequired
+      : tee.unlockedDeviceRequired;
+  if (!unlockedDeviceRequired) {
     throw new AndroidAttestationInvalidError("key does not require the device to be unlocked");
   }
 

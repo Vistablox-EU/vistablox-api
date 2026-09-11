@@ -18,6 +18,7 @@ import { createBetterAuthDpopPlugin } from "./better-auth-dpop.plugin.js";
 import {
   assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
+  resolvePendingSessionDpopKey,
   tryBindDpopAtCreation,
   type DpopCreationContext,
 } from "./dpop-session-creation.js";
@@ -482,7 +483,12 @@ function toAuthUserSnapshot(user: {
 // from the other without a circular dependency (`npm run architecture`
 // catches it), so the shared logic moved to its own module instead.
 export type { DpopCreationContext } from "./dpop-session-creation.js";
-export { tryBindDpopAtCreation, assertDpopKeyMatchesPendingSession, requireDpopProofForSessionCreation } from "./dpop-session-creation.js";
+export {
+  tryBindDpopAtCreation,
+  assertDpopKeyMatchesPendingSession,
+  requireDpopProofForSessionCreation,
+  resolvePendingSessionDpopKey,
+} from "./dpop-session-creation.js";
 
 export type VistaBloxAuth = ReturnType<typeof createBetterAuth>;
 
@@ -557,23 +563,37 @@ async function assertPasskeyCeremonyAuthorized(
   dpop: BetterAuthFactoryOptions["dpop"],
 ): Promise<string | null> {
   const user = await ctx.context.internalAdapter.findUserById(passkeyUserId);
-  if (isStaffAuthUser(user) || customerIdentityVerifiedByBootstrap) return null;
+  // Staff and a verified recovery bootstrap don't need an existing
+  // oauth_pending/oauth_passkey session to proceed -- but "no session
+  // required" is not the same as "any session's key goes unchecked": if
+  // one of these requests DOES carry a session already bound to a DPoP
+  // key, that key must still match (below), the same as it would for an
+  // ordinary customer.
+  const skipLevelGate = isStaffAuthUser(user) || customerIdentityVerifiedByBootstrap;
 
   const current = await getSessionFromCtx(ctx);
-  const level = (current?.session as Record<string, unknown> | undefined)?.authenticationLevel;
-  if (
-    current?.user.id !== passkeyUserId ||
-    (level !== "oauth_pending" && level !== "oauth_passkey")
-  ) {
-    throw oauthPasskeyRequired();
+
+  if (!skipLevelGate) {
+    const level = (current?.session as Record<string, unknown> | undefined)?.authenticationLevel;
+    if (
+      current?.user.id !== passkeyUserId ||
+      (level !== "oauth_pending" && level !== "oauth_passkey")
+    ) {
+      throw oauthPasskeyRequired();
+    }
   }
 
-  const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
-  if (typeof boundJkt === "string") {
-    await assertDpopKeyMatchesPendingSession(ctx, boundJkt, dpop);
+  if (current !== null && current.user.id === passkeyUserId) {
+    const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
+    await resolvePendingSessionDpopKey(
+      ctx,
+      typeof boundJkt === "string" ? boundJkt : null,
+      current.session.createdAt,
+      dpop,
+    );
   }
 
-  return current.session.token;
+  return skipLevelGate ? null : (current?.session.token ?? null);
 }
 
 function oauthPasskeyRequired(): APIError {
