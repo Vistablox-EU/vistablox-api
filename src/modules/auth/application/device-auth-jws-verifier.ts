@@ -80,6 +80,13 @@ export async function verifyDeviceAuthJws(input: {
   expectedPurpose: string;
   expectedChallenge: string;
   expectedDeviceId: string | undefined;
+  /**
+   * Login only: accept a JWS with no `device_id` claim at all, because the
+   * device is already fixed by the request's DPoP key and by the challenge
+   * it was issued for. A `device_id` claim that is present must still equal
+   * `expectedDeviceId`.
+   */
+  deviceIdClaimOptional?: boolean;
   /** Required for every purpose except `enrol-device`. */
   storedPublicJwk: JWK | undefined;
   /**
@@ -170,7 +177,11 @@ export async function verifyDeviceAuthJws(input: {
     throw new DeviceJwsInvalidError("iat outside the allowed window");
   }
   if (input.expectedDeviceId !== undefined) {
-    if (typeof payload.device_id !== "string" || payload.device_id !== input.expectedDeviceId) {
+    const claimOmittedAndAllowed = payload.device_id === undefined && input.deviceIdClaimOptional === true;
+    if (
+      !claimOmittedAndAllowed &&
+      (typeof payload.device_id !== "string" || payload.device_id !== input.expectedDeviceId)
+    ) {
       throw new DeviceJwsInvalidError("device_id mismatch");
     }
   }

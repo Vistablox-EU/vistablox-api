@@ -225,7 +225,13 @@ const enrolDeviceService = new EnrolDeviceService(
   androidAttestationConfig,
 );
 const loginDeviceService = new LoginDeviceService(deviceChallengeRepository, deviceRepository);
-const issueDeviceChallengeService = new IssueDeviceChallengeService(deviceChallengeRepository);
+// With deviceRepository, L1 can find the device from the request's DPoP key
+// when no device_id is sent (contract 3.1).
+const issueDeviceChallengeService = new IssueDeviceChallengeService(
+  deviceChallengeRepository,
+  () => new Date(),
+  deviceRepository,
+);
 
 const auth = createBetterAuth({
   database: authDatabase,

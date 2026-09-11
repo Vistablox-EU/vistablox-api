@@ -39,8 +39,10 @@ const enrolVerifyBodySchema = z.object({
   attestation: mobileAttestationSchema,
 });
 
+// device_id is optional (contract 3.1): LoginDeviceService resolves the
+// device from the request's DPoP key and checks a sent device_id against it.
 const loginVerifyBodySchema = z.object({
-  device_id: z.string().min(1),
+  device_id: z.string().min(1).optional(),
   challenge: z.string().min(1),
   jws: z.string().min(1),
 });
