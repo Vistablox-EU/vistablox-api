@@ -15,6 +15,15 @@ const GENERATE_OPTIONS_PATHS = new Set([
   "/passkey/generate-authenticate-options",
 ]);
 const VERIFY_PATHS = new Set(["/passkey/verify-registration", "/passkey/verify-authentication"]);
+const BEARER_SCHEME = "bearer ";
+
+function tryDecodeBearerToken(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
 
 /**
  * A cookie-free path for the passkey challenge, mirroring bearer()'s own
@@ -37,18 +46,63 @@ export function createBetterAuthPasskeyChallengeHeaderPlugin(): BetterAuthPlugin
         {
           matcher: (context) => VERIFY_PATHS.has(context.path ?? ""),
           handler: createAuthMiddleware(async (ctx) => {
-            const headerValue =
+            const existingHeaders = ctx.request?.headers ?? ctx.headers;
+            if (existingHeaders === undefined) return;
+
+            // better-auth's before-hook merge (dispatch.mjs runBeforeHooks)
+            // calls every matching hook with the SAME original, unmodified
+            // context -- hooks never see each other's contributions -- then
+            // .set()s each hook's entire returned Cookie header onto a
+            // shared accumulator, one header key at a time. Cookie is a
+            // singular header, so whichever hook's returned Cookie value
+            // gets merged last wins outright, discarding any other hook's
+            // cookie. bearer() (registered earlier in the plugins array)
+            // independently injects the session cookie derived from
+            // Authorization the same way this hook injects the passkey
+            // challenge cookie; if this hook only ever set its own cookie,
+            // its result would silently erase bearer's, and verify-* would
+            // see no session (OAUTH_REQUIRED_BEFORE_PASSKEY). So this hook
+            // re-derives and re-injects the session cookie too, onto the
+            // SAME headers object as the passkey cookie, producing the one
+            // complete Cookie value both need. setRequestCookie parses,
+            // updates, and re-serializes whatever Cookie is already on the
+            // headers object it's given, so calling it twice here correctly
+            // combines both rather than the second call clobbering the
+            // first the way two separate hooks' results do.
+            const headers = new Headers({ ...Object.fromEntries(existingHeaders.entries()) });
+            let changed = false;
+
+            const authHeader = existingHeaders.get("authorization");
+            if (authHeader !== null && authHeader.slice(0, 7).toLowerCase() === BEARER_SCHEME) {
+              const rawToken = authHeader.slice(7).trim();
+              // Contract: the mobile client always sends the set-auth-token
+              // value byte for byte, already in "value.signature" form --
+              // the only shape this needs to handle, since that's also the
+              // only form ctx.getSignedCookie re-verifies when the session
+              // is actually resolved later. No HMAC/signing work belongs in
+              // this hook; an invalid or tampered value still ends up with
+              // no session, just via that later verification instead of an
+              // upfront check here.
+              if (rawToken.includes(".")) {
+                const decodedToken = rawToken.includes("%")
+                  ? tryDecodeBearerToken(rawToken)
+                  : rawToken;
+                setRequestCookie(headers, ctx.context.authCookies.sessionToken.name, decodedToken);
+                changed = true;
+              }
+            }
+
+            const challengeHeaderValue =
               ctx.request?.headers.get("x-passkey-challenge") ??
               ctx.headers?.get("x-passkey-challenge") ??
               null;
-            if (headerValue === null) return;
+            if (challengeHeaderValue !== null) {
+              const webAuthnCookie = ctx.context.createAuthCookie(WEBAUTHN_CHALLENGE_COOKIE);
+              setRequestCookie(headers, webAuthnCookie.name, challengeHeaderValue);
+              changed = true;
+            }
 
-            const webAuthnCookie = ctx.context.createAuthCookie(WEBAUTHN_CHALLENGE_COOKIE);
-            const existingHeaders = ctx.request?.headers ?? ctx.headers;
-            const headers = new Headers(
-              existingHeaders === undefined ? {} : Object.fromEntries(existingHeaders.entries()),
-            );
-            setRequestCookie(headers, webAuthnCookie.name, headerValue);
+            if (!changed) return;
             return { context: { headers } };
           }),
         },
