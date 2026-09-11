@@ -26,12 +26,17 @@ async function signBearerToken(value: string): Promise<string> {
  * doc comment for the full mechanism). Unlike the hook-level tests in
  * better-auth-passkey-challenge-header-plugin.test.ts, this dispatches a
  * stub endpoint through better-auth's OWN exported dispatchAuthEndpoint --
- * the real runBeforeHooks merge, the real bearer() plugin, both in the same
- * plugins-array order the factory uses -- so it fails if that order
- * changes, if a later hook starts returning its own Cookie, or if a
- * better-auth upgrade changes how before-hook results are merged. No
- * database and no WebAuthn ceremony needed: the stub endpoint just reports
- * back the Cookie header it was handed, which is all this bug class is
+ * the real runBeforeHooks merge, the real bearer() plugin -- so it fails if
+ * a better-auth upgrade changes how before-hook results are merged, or if
+ * this plugin's own handler regresses to only writing its own cookie again.
+ * It does NOT read the factory's actual plugin list or registration order
+ * (options.plugins below is hard-coded to just these two, not built the way
+ * createBetterAuth does) -- it can't catch the factory reordering plugins,
+ * or some other plugin starting to also write Cookie. Making that true
+ * would mean extracting the factory's plugin-list construction into
+ * something this test and createBetterAuth both call. No database and no
+ * WebAuthn ceremony needed either way: the stub endpoint just reports back
+ * the Cookie header it was handed, which is what this bug class is
  * actually about.
  */
 describe("real before-hook dispatch: bearer + passkey-challenge cookie merge", () => {
