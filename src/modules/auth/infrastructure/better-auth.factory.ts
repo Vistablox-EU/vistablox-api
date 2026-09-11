@@ -17,6 +17,7 @@ import {
   dpopErrorResponseFields,
   isDpopVerificationError,
   verifyDpopProof,
+  type DpopLogger,
   type DpopProofClaims,
   type DpopVerificationError,
 } from "../application/dpop-proof-verifier.js";
@@ -70,6 +71,7 @@ export interface BetterAuthFactoryOptions {
     replayRepository: DpopReplayRepository;
     replayWindowSeconds?: number;
     phase1CutoverAt?: Date;
+    logger?: DpopLogger;
   };
 }
 
@@ -212,6 +214,9 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         create: {
           before: async (session, context) => {
             const dpopJkt = await tryBindDpopAtCreation(context, options.dpop);
+            if (dpopJkt !== null) {
+              options.dpop?.logger?.bound({ sessionId: session.id, jkt: dpopJkt });
+            }
             return {
               data: {
                 ...session,
@@ -429,6 +434,7 @@ function toAuthUserSnapshot(user: {
 interface DpopCreationContext {
   headers?: Headers | undefined;
   request?: Request | undefined;
+  path?: string | undefined;
 }
 
 /**
@@ -587,7 +593,7 @@ async function assertDpopKeyMatchesPendingSession(
       : undefined;
 
   if (dpop === undefined || ctx.request === undefined) {
-    throw dpopApiError(new DpopProofMissingError());
+    throw dpopApiError(new DpopProofMissingError(), dpop, ctx);
   }
 
   let claims: DpopProofClaims;
@@ -599,12 +605,12 @@ async function assertDpopKeyMatchesPendingSession(
       bearerToken,
     });
   } catch (error) {
-    if (isDpopVerificationError(error)) throw dpopApiError(error);
+    if (isDpopVerificationError(error)) throw dpopApiError(error, dpop, ctx);
     throw error;
   }
 
   if (claims.jkt !== boundJkt) {
-    throw dpopApiError(new DpopKeyMismatchError());
+    throw dpopApiError(new DpopKeyMismatchError(), dpop, ctx);
   }
 
   const accepted = await dpop.replayRepository.recordProof(
@@ -613,12 +619,17 @@ async function assertDpopKeyMatchesPendingSession(
     new Date(Date.now() + (dpop.replayWindowSeconds ?? 120) * 1000),
   );
   if (!accepted) {
-    throw dpopApiError(new DpopReplayError());
+    throw dpopApiError(new DpopReplayError(), dpop, ctx);
   }
 }
 
-function dpopApiError(error: DpopVerificationError): APIError {
+function dpopApiError(
+  error: DpopVerificationError,
+  dpop: BetterAuthFactoryOptions["dpop"],
+  ctx: DpopCreationContext,
+): APIError {
   const { code, title, detail } = dpopErrorResponseFields(error);
+  dpop?.logger?.rejected({ code, path: ctx.path ?? "unknown" });
   return new APIError(
     "UNAUTHORIZED",
     { code, message: `${title}: ${detail}` },

@@ -7,7 +7,7 @@ import {
   decideDpopForSession,
   dpopErrorResponseFields,
   isDpopVerificationError,
-  type DpopVerificationError,
+  type DpopLogger,
 } from "../application/dpop-proof-verifier.js";
 import type { DpopReplayRepository } from "../repository/dpop-replay.repository.js";
 
@@ -16,6 +16,7 @@ export interface BetterAuthDpopPluginOptions {
   replayRepository: DpopReplayRepository;
   replayWindowSeconds?: number;
   phase1CutoverAt?: Date;
+  logger?: DpopLogger;
 }
 
 /**
@@ -78,9 +79,18 @@ export function createBetterAuthDpopPlugin(options: BetterAuthDpopPluginOptions)
                 await ctx.context.internalAdapter.updateSession(sessionRecord.token, {
                   dpopJkt: decision.jkt,
                 });
+                options.logger?.bound({ sessionId: current.session.id, jkt: decision.jkt });
               }
             } catch (error) {
-              if (isDpopVerificationError(error)) throw dpopApiError(error);
+              if (isDpopVerificationError(error)) {
+                const fields = dpopErrorResponseFields(error);
+                options.logger?.rejected({ code: fields.code, path: ctx.path ?? url });
+                throw new APIError(
+                  "UNAUTHORIZED",
+                  { code: fields.code, message: `${fields.title}: ${fields.detail}` },
+                  { "WWW-Authenticate": DPOP_WWW_AUTHENTICATE },
+                );
+              }
               throw error;
             }
           }),
@@ -88,13 +98,4 @@ export function createBetterAuthDpopPlugin(options: BetterAuthDpopPluginOptions)
       ],
     },
   };
-}
-
-function dpopApiError(error: DpopVerificationError): APIError {
-  const { code, title, detail } = dpopErrorResponseFields(error);
-  return new APIError(
-    "UNAUTHORIZED",
-    { code, message: `${title}: ${detail}` },
-    { "WWW-Authenticate": DPOP_WWW_AUTHENTICATE },
-  );
 }

@@ -209,6 +209,29 @@ describe("require authentication: bound session DPoP enforcement", () => {
     expect(response.status).toBe(401);
     expect(response.body.code).toBe("DPOP_PROOF_MISSING");
   });
+
+  it("logs a rejection with the code and path, and never the proof/token", async () => {
+    const { publicJwk } = await keypair();
+    const { calculateJwkThumbprint } = await import("jose");
+    const jkt = await calculateJwkThumbprint(publicJwk, "sha256");
+    const rejected = vi.fn();
+
+    const app = buildApp({
+      identity: boundIdentity(jkt),
+      dpop: {
+        baseUrl: BASE_URL,
+        replayRepository: buildReplayRepository(),
+        logger: { bound: vi.fn(), rejected },
+      },
+    });
+
+    const response = await request(app).get(ROUTE).set("Authorization", `Bearer ${BEARER_TOKEN}`);
+
+    expect(response.status).toBe(401);
+    expect(rejected).toHaveBeenCalledWith({ code: "DPOP_PROOF_MISSING", path: ROUTE });
+    const loggedArgs = JSON.stringify(rejected.mock.calls);
+    expect(loggedArgs).not.toContain(BEARER_TOKEN);
+  });
 });
 
 describe("require authentication: unbound session bind-on-first-sight", () => {
@@ -223,12 +246,13 @@ describe("require authentication: unbound session bind-on-first-sight", () => {
     expect(response.status).toBe(200);
   });
 
-  it("binds a pre-cutover unbound session on a valid proof", async () => {
+  it("binds a pre-cutover unbound session on a valid proof, and logs the bind", async () => {
     const { privateKey, publicJwk } = await keypair();
     const { calculateJwkThumbprint } = await import("jose");
     const jkt = await calculateJwkThumbprint(publicJwk, "sha256");
     const proof = await buildProof({ privateKey, publicJwk });
     const bindDpopKey = vi.fn().mockResolvedValue(undefined);
+    const bound = vi.fn();
 
     const app = buildApp({
       identity: unboundIdentity(new Date("2020-01-01T00:00:00.000Z")),
@@ -236,6 +260,7 @@ describe("require authentication: unbound session bind-on-first-sight", () => {
         baseUrl: BASE_URL,
         replayRepository: buildReplayRepository(),
         phase1CutoverAt: new Date("2026-01-01T00:00:00.000Z"),
+        logger: { bound, rejected: vi.fn() },
       },
       bindDpopKey,
     });
@@ -247,6 +272,7 @@ describe("require authentication: unbound session bind-on-first-sight", () => {
 
     expect(response.status).toBe(200);
     expect(bindDpopKey).toHaveBeenCalledWith("session_01", jkt);
+    expect(bound).toHaveBeenCalledWith({ sessionId: "session_01", jkt });
   });
 
   it("binds when no cutover is configured at all (treats every unbound session as pre-cutover)", async () => {
