@@ -8,6 +8,8 @@ declare global {
       traceId?: string;
       logger?: Logger;
       authContext?: AuthContext;
+      /** Set by requireDpopOnly for the "none (DPoP only)" endpoints (C1/E1/L1). */
+      dpopJkt?: string;
     }
   }
 }

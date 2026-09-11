@@ -257,3 +257,53 @@ model DpopReplay {
   @@map("dpop_replays")
   @@schema("auth")
 }
+
+// A device-key-enrolled phone (device-bound biometric auth, step 1:
+// single-device enrolment/login only -- no owner_address/owner_status/
+// hold_until/push_token yet, those land with the Safe/pairing/push work).
+// dpopJkt is unique: one device owns exactly one DPoP key, and that key is
+// how requireAuthentication resolves which device a /v1 request belongs to.
+model Device {
+  deviceId             String   @id @map("device_id")
+  accountId            String   @map("account_id")
+  // Denormalized from Account.betterAuthUserId: better-auth's own
+  // internalAdapter.createSession takes its userId, not our accountId, and
+  // login (L2) has no session context to derive one from otherwise -- it's
+  // 1:1 with accountId for a customer, so this avoids a join on every login.
+  betterAuthUserId     String   @map("better_auth_user_id")
+  dpopJkt              String   @unique @map("dpop_jkt")
+  bioJkt               String   @map("bio_jkt")
+  biometricPublicJwk   Json     @map("biometric_public_jwk")
+  platform             String
+  model                String?
+  osVersion            String?  @map("os_version")
+  appVersion           String?  @map("app_version")
+  attestationMetadata  Json     @map("attestation_metadata")
+  status               String   @default("active")
+  createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  lastSeenAt           DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@index([accountId], map: "idx_devices_account")
+  @@map("devices")
+  @@schema("auth")
+}
+
+// Single-use challenges for the device-auth JWS ceremony (enrol/login).
+// Consumed atomically (consumedAt set only once, via a conditional update),
+// same discipline as DpopReplay's insert-once but for a value the server
+// issues rather than one the client picks.
+model DeviceChallenge {
+  challenge  String    @id
+  purpose    String
+  dpopJkt    String    @map("dpop_jkt")
+  deviceId   String?   @map("device_id")
+  expiresAt  DateTime  @map("expires_at") @db.Timestamptz(6)
+  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  @@index([expiresAt], map: "idx_device_challenges_expires_at")
+  @@map("device_challenges")
+  @@schema("auth")
+}

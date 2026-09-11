@@ -16,6 +16,13 @@ import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
 import { PrismaAccountRepository } from "./modules/account/repository/prisma-account.repository.js";
 import { createBetterAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
+import { PrismaDeviceRepository } from "./modules/auth/repository/prisma-device.repository.js";
+import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prisma-device-challenge.repository.js";
+import { EnrolDeviceService } from "./modules/auth/application/device-enrolment.service.js";
+import { LoginDeviceService } from "./modules/auth/application/device-login.service.js";
+import { IssueDeviceChallengeService } from "./modules/auth/application/device-challenge-issuance.service.js";
+import { HttpAndroidAttestationRevocationList } from "./modules/auth/infrastructure/http-android-attestation-revocation-list.js";
+import { GooglePlayIntegrityDecoder } from "./modules/auth/infrastructure/google-play-integrity.decoder.js";
 import { createAppleClientSecret } from "./modules/auth/infrastructure/apple-client-secret.js";
 import { BetterAuthStaffIdentityProvider } from "./modules/auth/infrastructure/better-auth-staff-identity.provider.js";
 import { BetterAuthStaffAccountAdministrator } from "./modules/auth/infrastructure/better-auth-staff-account-administrator.js";
@@ -190,6 +197,36 @@ const dpopLogger: DpopLogger = {
     logger.warn({ code, path }, "dpop proof rejected");
   },
 };
+// Device-key auth, step 1 (single-device enrolment/login only -- see
+// docs/plans/device-bound-auth-backend.md). Constructed here, not lazily,
+// because EnrolDeviceService/LoginDeviceService are options createBetterAuth
+// itself needs up front.
+const deviceRepository = new PrismaDeviceRepository(database);
+const deviceChallengeRepository = new PrismaDeviceChallengeRepository(database);
+const androidAttestationRevocationList = new HttpAndroidAttestationRevocationList();
+const playIntegrityDecoder =
+  environment.PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON === undefined ||
+  environment.PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER === undefined
+    ? undefined
+    : new GooglePlayIntegrityDecoder(
+        environment.PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON,
+        environment.PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER,
+      );
+const androidAttestationConfig = {
+  policy: environment.PLAY_INTEGRITY_POLICY,
+  pinnedRootCertificates: environment.ANDROID_ATTESTATION_ROOT_CERTIFICATES ?? [],
+  certDigestAllowlist: environment.ANDROID_ATTESTATION_CERT_DIGESTS ?? [],
+  revocationList: androidAttestationRevocationList,
+  playIntegrityDecoder,
+};
+const enrolDeviceService = new EnrolDeviceService(
+  deviceChallengeRepository,
+  deviceRepository,
+  androidAttestationConfig,
+);
+const loginDeviceService = new LoginDeviceService(deviceChallengeRepository, deviceRepository);
+const issueDeviceChallengeService = new IssueDeviceChallengeService(deviceChallengeRepository);
+
 const auth = createBetterAuth({
   database: authDatabase,
   baseURL: environment.BETTER_AUTH_URL,
@@ -203,6 +240,11 @@ const auth = createBetterAuth({
     ...(environment.DPOP_PHASE1_CUTOVER_AT === undefined
       ? {}
       : { phase1CutoverAt: environment.DPOP_PHASE1_CUTOVER_AT }),
+  },
+  deviceAuth: {
+    accounts: accountRepository,
+    enrolDevice: enrolDeviceService,
+    loginDevice: loginDeviceService,
   },
   webauthn: {
     rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
@@ -452,6 +494,28 @@ const app = createApp({
     },
     loginMethods: {
       unlinker: new BetterAuthLoginMethodUnlinker(auth),
+    },
+    deviceAuth: {
+      auth,
+      issueChallenge: issueDeviceChallengeService,
+      baseUrl: environment.BETTER_AUTH_URL,
+      // Step 1 only: device_auth on (this PR), everything past it still
+      // off -- Safe/pairing/signing/recovery-v2 land in later PRs, and
+      // customer passkey login stays the default until phase 3 cuts over.
+      // No env var yet: this is a rollout sequence, not an ops toggle, and
+      // hardcoding it here keeps that sequence visible in the diff of each
+      // follow-up PR rather than buried in a value nobody re-reads.
+      appConfig: {
+        minAppVersion: { ios: "0.0.0", android: "0.0.0" },
+        features: {
+          device_auth: true,
+          device_enrolment_required: false,
+          passkey_login: true,
+          signing_requests: false,
+          recovery_v2: false,
+          safe_account: false,
+        },
+      },
     },
     wallet: {
       repository: walletRepository,
