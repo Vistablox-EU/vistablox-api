@@ -45,4 +45,21 @@ describe("createLogger redaction", () => {
     expect(entry.res.headers["set-cookie"]).toBe("[REDACTED]");
     expect(lines[0]).not.toContain("secret");
   });
+
+  it("censors the passkey challenge relayed via header instead of a cookie", () => {
+    const { logger, lines } = captureLogger();
+
+    logger.info(
+      {
+        req: { headers: { "x-passkey-challenge": "challenge-token.signature" } },
+        res: { headers: { "set-passkey-challenge": "challenge-token.signature" } },
+      },
+      "request completed",
+    );
+
+    const entry = JSON.parse(lines[0] ?? "{}");
+    expect(entry.req.headers["x-passkey-challenge"]).toBe("[REDACTED]");
+    expect(entry.res.headers["set-passkey-challenge"]).toBe("[REDACTED]");
+    expect(lines[0]).not.toContain("challenge-token.signature");
+  });
 });
