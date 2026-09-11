@@ -529,6 +529,7 @@ const app = createApp({
           recovery_v2: false,
           safe_account: false,
         },
+        mobileAuthPlatforms: { android: true, ios: false },
       },
     },
     wallet: {

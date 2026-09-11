@@ -33,7 +33,7 @@ function appFor(
   const challenges = fakeChallengeRepository();
   const issueChallenge = new IssueDeviceChallengeService(challenges);
   app.use(
-    "/v1/auth/devices",
+    "/v1/auth/mobile",
     createDeviceAuthRouter(
       dpopOnly,
       issueChallenge,
@@ -54,6 +54,7 @@ function appFor(
         recovery_v2: false,
         safe_account: false,
       },
+      mobileAuthPlatforms: { android: true, ios: false },
     }),
   );
   app.use(errorHandler);
@@ -66,10 +67,19 @@ describe("GET /v1/app/config", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data.features.device_auth).toBe(true);
+    expect(response.body.data.mobile_auth_platforms).toEqual({ android: true, ios: false });
+  });
+
+  it("does not keep the retired device-auth namespace mounted", async () => {
+    const response = await request(appFor({ api: {} }))
+      .post("/v1/auth/devices/login/challenge")
+      .send({ device_id: "device_1" });
+
+    expect(response.status).toBe(404);
   });
 });
 
-describe("POST /v1/auth/devices/enrol/verify", () => {
+describe("POST /v1/auth/mobile/enrol/verify", () => {
   it("forwards to auth.api.enrolVerify with a request bound to this /v1 URL (DPoP htu binding)", async () => {
     const enrolVerify = vi.fn().mockResolvedValue({
       response: {
@@ -82,7 +92,7 @@ describe("POST /v1/auth/devices/enrol/verify", () => {
     });
 
     const response = await request(appFor({ api: { enrolVerify } }))
-      .post("/v1/auth/devices/enrol/verify")
+      .post("/v1/auth/mobile/enrol/verify")
       .send({
         challenge: "the-challenge",
         jws: "the-jws",
@@ -105,7 +115,7 @@ describe("POST /v1/auth/devices/enrol/verify", () => {
     // DPOP_PROOF_MISSING -- the DPoP proof binds to this /v1 URL, not
     // better-auth's internal /api/auth mount.
     expect(call.request).toBeInstanceOf(Request);
-    expect(new URL(call.request.url).pathname).toBe("/v1/auth/devices/enrol/verify");
+    expect(new URL(call.request.url).pathname).toBe("/v1/auth/mobile/enrol/verify");
     expect(call.request.method).toBe("POST");
   });
 
@@ -115,7 +125,7 @@ describe("POST /v1/auth/devices/enrol/verify", () => {
     );
 
     const response = await request(appFor({ api: { enrolVerify } }))
-      .post("/v1/auth/devices/enrol/verify")
+      .post("/v1/auth/mobile/enrol/verify")
       .send({
         challenge: "the-challenge",
         jws: "the-jws",
@@ -127,7 +137,7 @@ describe("POST /v1/auth/devices/enrol/verify", () => {
   });
 });
 
-describe("POST /v1/auth/devices/login/verify", () => {
+describe("POST /v1/auth/mobile/login/verify", () => {
   it("forwards to auth.api.loginVerify with a request bound to this /v1 URL", async () => {
     const loginVerify = vi.fn().mockResolvedValue({
       response: {
@@ -139,7 +149,7 @@ describe("POST /v1/auth/devices/login/verify", () => {
     });
 
     const response = await request(appFor({ api: { loginVerify } }))
-      .post("/v1/auth/devices/login/verify")
+      .post("/v1/auth/mobile/login/verify")
       .send({ device_id: "device_1", challenge: "the-challenge", jws: "the-jws" });
 
     expect(response.status).toBe(200);
@@ -150,7 +160,7 @@ describe("POST /v1/auth/devices/login/verify", () => {
     expect(response.headers["set-auth-token"]).toBe("the-session-token");
 
     const call = loginVerify.mock.calls[0]![0] as { request: Request };
-    expect(new URL(call.request.url).pathname).toBe("/v1/auth/devices/login/verify");
+    expect(new URL(call.request.url).pathname).toBe("/v1/auth/mobile/login/verify");
     expect(call.request.method).toBe("POST");
   });
 
@@ -160,7 +170,7 @@ describe("POST /v1/auth/devices/login/verify", () => {
     );
 
     const response = await request(appFor({ api: { loginVerify } }))
-      .post("/v1/auth/devices/login/verify")
+      .post("/v1/auth/mobile/login/verify")
       .send({ device_id: "device_1", challenge: "the-challenge", jws: "the-jws" });
 
     expect(response.status).toBe(401);
@@ -184,8 +194,8 @@ describe("device-auth rate limiting", () => {
   it("applies the supplied rate limiters to /enrol/challenge and /login/challenge", async () => {
     const app = appFor({ api: {} }, [rejectAfterFirstCall()]);
 
-    const first = await request(app).post("/v1/auth/devices/enrol/challenge");
-    const second = await request(app).post("/v1/auth/devices/login/challenge").send({
+    const first = await request(app).post("/v1/auth/mobile/enrol/challenge");
+    const second = await request(app).post("/v1/auth/mobile/login/challenge").send({
       device_id: "device_1",
     });
 
@@ -210,14 +220,14 @@ describe("device-auth rate limiting", () => {
     const app = appFor({ api: { enrolVerify, loginVerify } }, [rejectAfterFirstCall()]);
 
     const first = await request(app)
-      .post("/v1/auth/devices/enrol/verify")
+      .post("/v1/auth/mobile/enrol/verify")
       .send({
         challenge: "the-challenge",
         jws: "the-jws",
         attestation: { platform: "android", key_attestation_chain: ["cert1"], integrity_token: undefined },
       });
     const second = await request(app)
-      .post("/v1/auth/devices/login/verify")
+      .post("/v1/auth/mobile/login/verify")
       .send({ device_id: "device_1", challenge: "the-challenge", jws: "the-jws" });
 
     expect(first.status).toBe(200);

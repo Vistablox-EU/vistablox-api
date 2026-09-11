@@ -286,11 +286,8 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     },
     plugins: [
       expo(),
-      // Native mobile no longer goes through a separate OIDC bearer-token
-      // subsystem (removed -- confirmed nothing ever authenticated through
-      // it, oidc_model_instances had zero rows in production): the session
-      // itself, sent as a bearer token via the Authorization header instead
-      // of a cookie, now covers that case directly.
+      // Native mobile uses the Better Auth session itself, sent as a bearer
+      // token via the Authorization header instead of a cookie.
       bearer(),
       // Device binding (DPoP): must come after bearer() -- bearer turns
       // Authorization into the session cookie context first, so a session
