@@ -71,6 +71,12 @@ const environmentSchema = z
     // UNRECOGNIZED_VERSION (sideloaded builds) once the account exists;
     // "strict" is the eventual production policy. Refused in production
     // below except as "strict" -- see the .refine() near the bottom.
+    // The deployment tier, kept separate from NODE_ENV because staging
+    // deliberately runs NODE_ENV=production (secure cookies, production
+    // builds; see the Dockerfile), so NODE_ENV alone can't tell staging from
+    // production. Unset means production: a real production deploy stays
+    // protected without anyone having to remember to set it.
+    APP_ENV: z.preprocess(emptyStringToUndefined, z.enum(["staging", "production"]).optional()),
     PLAY_INTEGRITY_POLICY: z.enum(["disabled", "relaxed", "strict"]).default("disabled"),
     PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER: optionalNonEmptyString(),
     // Base64-encoded service account JSON, decode-only role, used to verify
@@ -371,7 +377,11 @@ const environmentSchema = z
   )
   .refine(
     (environment) =>
-      environment.NODE_ENV !== "production" || environment.PLAY_INTEGRITY_POLICY === "strict",
+      // A production build is a production deployment unless APP_ENV says
+      // staging (staging runs NODE_ENV=production too).
+      environment.NODE_ENV !== "production" ||
+      environment.APP_ENV === "staging" ||
+      environment.PLAY_INTEGRITY_POLICY === "strict",
     {
       message: "PLAY_INTEGRITY_POLICY must be \"strict\" in production -- \"disabled\" and \"relaxed\" exist for staging only",
       path: ["PLAY_INTEGRITY_POLICY"],
