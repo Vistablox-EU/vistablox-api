@@ -18,6 +18,13 @@
   - **ETH reserve per wallet: yes** (§10.3a);
   - **Play Integrity: standard for login, strict for signing**;
   - **staging on Coolify only for now** (no production work).
+- **r7, 2026-09-11, Damir directly:**
+  - **Safe7579 dropped: confirmed** (native Safe modules only);
+  - **Safe deployment: option (a)**, a sponsored UserOp signed by the enrolling device (no VistaBlox deployer key);
+  - **no waiting period after pairing** a new phone (0 h);
+  - **no on-chain limits guard** (the wallet enforces no limits);
+  - **device integrity is enough for the defensive actions** (removing a phone, cancelling a recovery);
+  - the maildev ufw rule: later; the DMARC/SPF switch: after the 14-day report window (≈ 2026-09-25).
 
 **Hard rule:** no production changes (DNS, accounts, secrets, deploys) without Damir's explicit go-ahead. Claude cannot create accounts or enter credentials, so account creation is Damir's to do. After a go-ahead, I can make DNS changes (Cloudflare) and Coolify config changes.
 
@@ -77,6 +84,7 @@ This plan supports the backend plan (`vistablox-api` `docs/plans/device-bound-au
 
 ### 2.3 DNS (Cloudflare)
 - **Reporting is already running:** DMARC is `p=quarantine` with `rua=mailto:damir@vistablox.io`, so the observation window is effectively in progress.
+- **Timing (Damir, r7):** after the 14-day report window, ≈ 2026-09-25.
 - Once Damir confirms the reports show only legitimate, aligned sources (the mail server's DKIM `mail`, plus any Zoho or Google usage), two steps follow, **each after an explicit go-ahead**:
   1. Root SPF: `v=spf1 mx -all`.
   2. DMARC: `v=DMARC1; p=reject; sp=reject; adkim=r; aspf=r; pct=100; rua=mailto:damir@vistablox.io; fo=1`.
@@ -94,7 +102,7 @@ Postmaster Tools (Google) and SNDS/JMRP (Microsoft), low and steady volume, clea
 - The recovery email wording is exactly as the brief specifies.
 
 ### 2.6 Recovery-email testing on staging via maildev (**decided, r6**)
-- **Damir runs, once:**
+- **Damir runs, once (deferred to later, r7):**
   ```
   sudo ufw route allow proto tcp from 192.168.1.0/24 to any port 1080 comment 'maildev web UI, LAN only'
   ```
@@ -146,6 +154,7 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
   | `deviceRecognitionVerdict` | `MEETS_DEVICE_INTEGRITY` | **`MEETS_STRONG_INTEGRITY`** | `MEETS_DEVICE_INTEGRITY` for both. The strong check is logged, so we learn whether test phones pass it. |
 
   - `PLAY_INTEGRITY_POLICY=strict|relaxed`, and the API refuses `relaxed` in production.
+  - **Defensive actions** (removing a phone, cancelling a recovery) need only device integrity (Damir, r7), so a victim on an older phone can always stop an attack. Strong integrity applies to moving money and adding a phone.
   - **Strong integrity** needs hardware-backed boot attestation and a recent security patch. Some older phones will fail at signing (not at login). The app explains this plainly.
 - **Key attestation:**
   - the `ANDROID_ATTESTATION_CERT_DIGESTS` allowlist;
@@ -192,7 +201,6 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
 | `EMAIL_RECOVERY_RELAYER_URL` | app + backend | no | §10.4 |
 | `SAFE_*` / module addresses | API + app | no | pinned, bytecode-verified |
 | `ETH_RESERVE_FUNDER_*` | API | **yes (staging: Sepolia test key only)** | §10.3a. Funds VistaBlox's own reserve wallet, never a user wallet key. |
-| `SAFE_DEPLOYER_KEY` | API | **yes** | **only if** deployment option (b) is chosen. Not needed under the recommended (a). |
 
 **CDP key handling (decided):** the key lives only in the API's Coolify secrets. The server relays every UserOp and gets `paymasterAndData` from CDP. **The app ships no CDP key.**
 
@@ -202,7 +210,7 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
 
 | When | DevOps | Damir |
 |---|---|---|
-| **Now** | Plans as PRs (§6). The maildev LAN rule (Damir runs it). Pin the mail images + hardening + the acceptance test mail (after a go-ahead). | Run the ufw command. Review the DMARC reports and give the SPF/DMARC go-ahead. Decide Safe7579 and the deployment mechanism (§11). Create the CDP account (a payment method is required even for the free tier). |
+| **Now** | Plans as PRs (§6). The maildev LAN rule (Damir runs it). Pin the mail images + hardening + the acceptance test mail (after a go-ahead). | Review the DMARC reports; the SPF/DMARC go-ahead comes after the 14-day window (≈ 2026-09-25). The ufw command: later. Create the CDP account (a payment method is required even for the free tier). |
 | **Base Sepolia milestones** | CDP Node RPC + CDP bundler/paymaster (Sepolia), the sponsorship policy draft, the address registry + extcodehash CI, a synthetic UserOp probe, the event watcher, the ZK Email relayer on Sepolia, the ETH reserve from the Sepolia faucet. **Measure real gas per operation.** | Review the measured costs and the internal-review checklist (§10.6). |
 | **Later** | FCM / Play Integrity accounts, then staging secrets. Apple items once enrolment exists. | Create the Play Console / Firebase / Apple accounts. |
 | **Deferred** | Production hosting, production secrets, mainnet. | A go-ahead after dev testing. |
@@ -218,7 +226,7 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
 5. **Play Integrity:** strong integrity at signing excludes some older phones.
 6. **Rotating keys:** Google attestation roots, and email providers' DKIM keys in the ZK Email registry.
 7. **Single provider (CDP)** for RPC, bundler and paymaster. An outage stops sponsored transactions. The public fallback + ETH reserve keep self-paid actions possible. Funds are never at risk.
-8. **Server-side limits are bypassable via the fallback by design.** The on-chain limits guard is an open item.
+8. **Server-side limits are bypassable via the fallback by design.** Damir decided (r7) against an on-chain limits guard: the wallet enforces no limits. VistaBlox's limits and holds apply only on the relayed path; the fallback path is intentionally unrestricted, like any self-custodial wallet.
 9. **The ETH reserve is free ETH,** which invites farming. Fund it only after KYC approval, once per account, with a small amount (§10.3a).
 
 ---
@@ -228,7 +236,7 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
 **The model (final backend/mobile plans):**
 - a Safe with **ERC-4337 via `Safe4337Module` v0.3.0** (EntryPoint **v0.7** pinned), **threshold 1, ≤ 2 owners**;
 - owners are device P-256 keys via Safe's passkey signer, verified through the P-256 precompile at `0x100`;
-- **native Safe modules, no Safe7579** (⚠ confirm with Damir, §11);
+- **native Safe modules, no Safe7579** (confirmed by Damir, r7);
 - `SafeEmailRecoveryModule`: the user's mailbox as guardian, a 7-day delay, cancellable from any device;
 - the public-bundler fallback after 7 days of VistaBlox being unreachable;
 - after recovery: *view immediately, move money after 7 days*.
@@ -301,14 +309,14 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
   - `SafeEmailRecoveryModule` + `UserOverrideableDKIMRegistry`.
   - **No custom contracts. No Safe7579.**
 - **Registry:** `docs/chain-addresses.md` + `SAFE_*` per network, with a CI `extcodehash` check against the canonical artifacts. The app refuses unknown modules, and the CDP allowlist is generated from the registry.
-- **Eager deployment at the first enrolment, mechanism open (§11):**
-  - **(a), recommended:** a **sponsored UserOp with `initCode`, signed by the enrolling device**, so there's no VistaBlox key and no ETH. Technical consequences (from mobile-dev):
+- **Eager deployment at the first enrolment: option (a), decided by Damir (r7):**
+  - **(a), chosen:** a **sponsored UserOp with `initCode`, signed by the enrolling device**, so there's no VistaBlox key and no ETH. Technical consequences (from mobile-dev):
     - **Device 1's owner must be `SafeWebAuthnSharedSigner`**, configured with the P-256 key during setup. A per-device signer proxy doesn't exist yet at first-UserOp validation, and ERC-7562 forbids calling undeployed code there.
     - **Later devices** get a per-device `SafeWebAuthnSignerProxy`: the add-owner UserOp batches `createSigner(x,y)` + `addOwnerWithThreshold` via `MultiSendCallOnly`.
     - **Re-adding device 1 after a biometric change:** deploy a new proxy + `swapOwner(sharedSigner → newProxy)`. The shared signer holds one key per Safe.
     - **Still one biometric prompt at enrolment:** a new step, **E1b**, sends the public key and returns the proposed deployment `user_op` with CDP `paymasterAndData`. One owner assertion over its `op_hash` (`vb_purpose: "enrol-device"`, `vb_challenge` = E1's challenge) proves possession of the key, a live biometric and deployment approval together.
-  - **(b):** a direct factory call from a **VistaBlox deployer key** + an ETH float. No user signature, but a VistaBlox key and an ETH treasury. *Not recommended.*
-  - If Damir picks (a), auth-dev and mobile-dev fold E1b, device 1's `owner_address` = the shared signer, and the `createSigner` batching into section 3.
+  - **(b), rejected:** a direct factory call from a VistaBlox deployer key + an ETH float. It would put a VistaBlox key and an ETH treasury in the deployment path.
+  - auth-dev and mobile-dev fold E1b, device 1's `owner_address` = the shared signer, and the `createSigner` batching into section 3.
 - **P-256 signing:**
   - one WebAuthn-shaped owner assertion per on-chain action, via the audited Safe passkey signer, with no custom validator;
   - the verifier checks the challenge and flags, not the origin, so origin rests on App Attest / Play Integrity and the hardware biometric gate.
@@ -346,14 +354,18 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
 
 ---
 
-## 11. Open questions for Damir
+## 11. Decisions and open questions
 
-**Need a decision:**
-1. **Confirm dropping Safe7579** (native Safe modules only), since the r2 wording said "ERC-4337 + ERC-7579". *Recommended: yes.*
-2. **Safe deployment mechanism:** (a) a sponsored UserOp signed by the device (no VistaBlox key; one prompt via E1b) or (b) a VistaBlox deployer key. *Recommended: (a).*
-3. **The DMARC/SPF switch:** once the reports look clean, a go-ahead to set `p=reject; sp=reject` and SPF `-all` (§2.3).
-4. **Pairing hold** (from the backend/mobile plans): 0 h vs 24 h after pairing a new device.
-5. **The on-chain limits guard** (from the backend/mobile plans): build an owner-controlled Safe guard, so limits also hold on the fallback path?
+**Decided by Damir (r7):**
+- Safe7579 dropped; native Safe modules only.
+- Safe deployment: option (a), a sponsored UserOp signed by the enrolling device (no VistaBlox key).
+- No waiting period after pairing a new phone (0 h).
+- No on-chain limits guard.
+- Device integrity is enough for removing a phone and cancelling a recovery; strong integrity for moving money and adding a phone.
+
+**Scheduled:**
+- DMARC `p=reject; sp=reject` + SPF `-all`: after the 14-day report window (≈ 2026-09-25), with Damir's go-ahead.
+- The maildev LAN ufw rule: later (Damir runs it).
 
 **Later (with data or when relevant):**
 - sponsorship caps (after Sepolia gas measurement);
