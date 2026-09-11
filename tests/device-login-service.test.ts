@@ -192,6 +192,62 @@ describe("LoginDeviceService", () => {
     expect(challenges.consumeCallCount).toBe(0);
   });
 
+  it("refuses login for an iOS device while the platform policy is Android-only, before consuming the challenge", async () => {
+    const { publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({
+        deviceId: "device_ios",
+        dpopJkt: "dpop-jkt-ios",
+        bioJkt,
+        biometricPublicJwk: publicJwk as Record<string, unknown>,
+        platform: "ios",
+      }),
+    );
+    const challenges = new FakeChallengeRepository();
+    const service = new LoginDeviceService(challenges, devices);
+
+    await expect(
+      service.execute({ deviceId: "device_ios", dpopJkt: "dpop-jkt-ios", challenge: "irrelevant", jws: "irrelevant" }),
+    ).rejects.toMatchObject({ code: "MOBILE_PLATFORM_NOT_SUPPORTED" });
+    expect(challenges.consumeCallCount).toBe(0);
+  });
+
+  it("accepts an iOS device once the injected policy includes iOS", async () => {
+    const { privateKey, publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({
+        deviceId: "device_ios_ok",
+        dpopJkt: "dpop-jkt-ios-ok",
+        bioJkt,
+        biometricPublicJwk: publicJwk as Record<string, unknown>,
+        platform: "ios",
+      }),
+    );
+    const challenges = new FakeChallengeRepository();
+    await challenges.issue({
+      challenge: "login-challenge-ios",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-ios-ok",
+      deviceId: "device_ios_ok",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const jws = await buildLoginJws({ privateKey, bioJkt, challenge: "login-challenge-ios", deviceId: "device_ios_ok" });
+    const service = new LoginDeviceService(challenges, devices, () => new Date(), {
+      supportedPlatforms: ["android", "ios"],
+    });
+
+    const result = await service.execute({
+      deviceId: "device_ios_ok",
+      dpopJkt: "dpop-jkt-ios-ok",
+      challenge: "login-challenge-ios",
+      jws,
+    });
+
+    expect(result.deviceId).toBe("device_ios_ok");
+  });
+
   it("rejects a revoked (non-active) device", async () => {
     const { publicJwk, bioJkt } = await makeDeviceKeyPair();
     const devices = new FakeDeviceRepository();

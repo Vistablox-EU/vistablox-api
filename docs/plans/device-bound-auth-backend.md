@@ -17,7 +17,7 @@ Each decision below is reflected in the section named; nothing here is still ope
 7. **On-chain broadcast**: confirmed as already designed — T3 requires `signed_tx`, the server verifies and broadcasts, never signs or holds a key. No change needed; already reflected in section 3.4 (T3) and the Threat model.
 8. **Wallet key custody**: short term, mobile's wrap-key-survives-biometric-change approach is accepted, with the invalidated-key-blocks-signing and server-controls-broadcast compensating controls already in this plan; seed phrases are explicitly rejected. Long term, evaluate an ERC-4337 smart-contract wallet with a device-hardware P-256 signer and time-locked-rotation recovery. *Reflected in: new "Wallet key custody: long-term evaluation" section.*
 9. **Recovery link host**: `api.vistablox.io`, confirmed. *Reflected in: section 3.4 (unchanged, was already the recommended default) and Open Questions (removed).*
-10. **Devices without Google Play Services**: blocked at launch (key-attestation-only as a later option, not now), via `DEVICE_UNSUPPORTED` (section 3.5, settled with mobile-dev). *Reflected in: Threat model.*
+10. **Devices without Google Play Services**: blocked at launch (key-attestation-only as a later option, not now). The app blocks them itself. The server has no dedicated code for this case: while Play Integrity is enforced, enrolment without an integrity token fails with `ATTESTATION_INVALID` (section 3.4; `DEVICE_UNSUPPORTED` was dropped in #63). *Reflected in: Threat model.*
 11. **GDPR Art. 9**: an explicit `consent_version` is required before the Didit session is created in RC2, RE1, and P6 (settled with mobile-dev — a string, not a boolean, per Art. 9's evidentiary requirement), and the DPO must separately confirm Didit's contract covers retaining the original KYC portrait for later face matching. *Reflected in: "GDPR consent and DPO confirmation" section.*
 12. **Push**: content-free via FCM/APNs, confirmed; security events (new device paired/enrolled, re-enrolment, device revoked, recovery started/completed/cancelled) additionally go out by email; no SMS for now. *Reflected in: Observability section.*
 13. **SMTP**: DevOps-owned, blocks Phase 3; must ship with SPF, DKIM, and DMARC `p=reject` because recovery emails are a phishing template. *Reflected in: the 5f finding, updated.*
@@ -175,7 +175,7 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
   - `attestation_object` is sent at the first enrolment of an install (`attestKey(keyId, binding)`); `assertion` after that.
   - The App Attest key is a third key, separate from both Secure Enclave keys.
   - Secure Enclave access-control flags aren't attested; App Attest proves that a genuine app set them.
-- **No Google Play services:** there's no integrity token, so the server answers `DEVICE_UNSUPPORTED`. The app blocks such devices at launch anyway.
+- **No Google Play services:** there's no integrity token. While `PLAY_INTEGRITY_POLICY` requires one, enrolment without it fails with `ATTESTATION_INVALID`. The app blocks such devices at launch anyway.
 
 ### 3.5 Endpoints
 
@@ -276,7 +276,7 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | `RATE_LIMITED` | 429 | Too many attempts. | Disable the action for `retry_after_s`, with a countdown. |
 | `ACCOUNT_RESTRICTED` | 403 | Account frozen or closed. | Restriction screen; no retry. |
 | `STAFF_PASSKEY_REQUIRED` | 403 | A staff or partner account (existing staff-account guard), at Google/Apple sign-in or on any session-creating endpoint. | "This account can't use the VistaBlox app." Drop the token; start screen; no retry. |
-| `DEVICE_UNSUPPORTED` | 400 | No Google Play services, so no integrity verdict. | The "This device isn't supported" screen (section 5.0). |
+| `MOBILE_PLATFORM_NOT_SUPPORTED` | 400 | The server doesn't accept this mobile platform yet (today iOS, until App Attest ships; see C1's `mobile_auth_platforms`). Returned by E2, and by L2 for a device of that platform. | The "This device isn't supported" screen (section 5.0); no retry. |
 | `CONSENT_REQUIRED` | 400 | RC2 or RE1 without the current `consent_version`. | Show the consent screen (section 5.14), then retry. |
 | `DEVICE_CHALLENGE_EXPIRED` | 400 | Challenge TTL passed. | Fetch a new challenge and re-prompt once; then show an error. |
 | `DEVICE_CHALLENGE_REPLAYED` | 400 | Challenge already consumed. | As expired; log telemetry. |
@@ -292,7 +292,7 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | `STRONG_INTEGRITY_REQUIRED` | 403 | Android, production: the phone passes device integrity but not the strong integrity that moving money and adding a phone require. | "This phone can't approve payments because its security updates are too old. You can still see everything. To approve, update the phone's software, or use your other device." No retry. |
 | `DEVICE_KEY_NOT_HARDWARE_BACKED` | 400 | Software key. | As `ATTESTATION_INVALID`. |
 | `DEVICE_LIMIT_REACHED` | 409 | Already 2 active devices (a tablet counts). | Explain; remove a device on the other phone first. |
-| `DEVICE_ALREADY_ENROLLED` | 409 | This jkt is already an active device. | Go to device login. |
+| `DEVICE_ALREADY_ENROLLED` | 409 | The account already has an active device, or this DPoP key already belongs to one. | Show the reset screen; no automatic retry. |
 | `DEVICE_LOGIN_FAILED` | 401 | Generic: unknown device, bad signature or kid mismatch. | If the local bio key is invalidated → section 5.9. Otherwise retry once with a new challenge, then offer "Sign in with Google/Apple". |
 | `DEVICE_REVOKED` | 403 | This device was removed. | Wipe the bio key, `device_id` and token (keep the DPoP key); start screen. |
 | `DEVICE_NOT_FOUND` | 404 | Target device unknown. | Refresh the device list. |
@@ -500,7 +500,7 @@ Round 2's section 3 rewrite covers: the owner-assertion signing mechanism (3.3, 
 | Recovery | Deepfake/injected face during the recovery KYC re-check | Native in-app capture only (no web link), active liveness with injection detection in the Didit workflow, App Attest/Play Integrity on the recovering device |
 | Recovery | KYC-credit exhaustion / inbox-flooding a victim | Didit session created only at RC2, after the email link is used, not at RC1 |
 | Recovery | Weak/auto-approved match lets an impersonator through | Auto-approve only on a strong face-match score; anything weaker goes to `manual_review`, the existing dual-review staff flow |
-| Enrollment/login | Devices without Google Play Services (e.g. Huawei) can't produce a Play Integrity verdict | **Decided: blocked at launch.** Enrolment is rejected with `DEVICE_UNSUPPORTED` (section 3.5, settled) rather than a generic attestation failure. Key-attestation-only enrolment with stricter limits is a later option, not built now. |
+| Enrollment/login | Devices without Google Play Services (e.g. Huawei) can't produce a Play Integrity verdict | **Decided: blocked at launch.** The app blocks these devices at launch. While Play Integrity is enforced, an enrolment without an integrity token fails with `ATTESTATION_INVALID` (`DEVICE_UNSUPPORTED` was dropped in #63). Key-attestation-only enrolment with stricter limits is a later option, not built now. |
 | Enrollment | A device with only weak (Class 2) biometric hardware attempts enrolment | Android: the key-attestation extension's reported user-auth class is checked, not just presence of *some* biometric; iOS: relies on App Attest proving the genuine app set `.biometryCurrentSet`, same platform asymmetry as elsewhere in this plan. Rejected outright — round 2 removed the fallback class this device class would otherwise have used. |
 | All device-bound flows | A better-auth/library upgrade silently changes how signed claims are merged or verified | Direct-dispatch regression tests (the `dispatchAuthEndpoint` pattern from #49) for any new before/after hook this introduces, not just handler-level unit tests |
 

@@ -21,6 +21,10 @@ import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prism
 import { EnrolDeviceService } from "./modules/auth/application/device-enrolment.service.js";
 import { LoginDeviceService } from "./modules/auth/application/device-login.service.js";
 import { IssueDeviceChallengeService } from "./modules/auth/application/device-challenge-issuance.service.js";
+import {
+  ANDROID_ONLY_MOBILE_PLATFORM_POLICY,
+  mobileAuthPlatformFlags,
+} from "./modules/auth/domain/mobile-platform.policy.js";
 import { HttpAndroidAttestationRevocationList } from "./modules/auth/infrastructure/http-android-attestation-revocation-list.js";
 import { GooglePlayIntegrityDecoder } from "./modules/auth/infrastructure/google-play-integrity.decoder.js";
 import { createAppleClientSecret } from "./modules/auth/infrastructure/apple-client-secret.js";
@@ -219,12 +223,22 @@ const androidAttestationConfig = {
   revocationList: androidAttestationRevocationList,
   playIntegrityDecoder,
 };
+// One platform policy for enrolment, login and C1's mobile_auth_platforms,
+// so what the app is told and what the server enforces can't drift apart.
+const mobilePlatformPolicy = ANDROID_ONLY_MOBILE_PLATFORM_POLICY;
 const enrolDeviceService = new EnrolDeviceService(
   deviceChallengeRepository,
   deviceRepository,
   androidAttestationConfig,
+  () => new Date(),
+  mobilePlatformPolicy,
 );
-const loginDeviceService = new LoginDeviceService(deviceChallengeRepository, deviceRepository);
+const loginDeviceService = new LoginDeviceService(
+  deviceChallengeRepository,
+  deviceRepository,
+  () => new Date(),
+  mobilePlatformPolicy,
+);
 const issueDeviceChallengeService = new IssueDeviceChallengeService(deviceChallengeRepository);
 
 const auth = createBetterAuth({
@@ -515,7 +529,7 @@ const app = createApp({
           recovery_v2: false,
           safe_account: false,
         },
-        mobileAuthPlatforms: { android: true, ios: false },
+        mobileAuthPlatforms: mobileAuthPlatformFlags(mobilePlatformPolicy),
       },
     },
     wallet: {
