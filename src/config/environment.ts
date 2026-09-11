@@ -386,6 +386,24 @@ const environmentSchema = z
       message: "PLAY_INTEGRITY_POLICY must be \"strict\" in production -- \"disabled\" and \"relaxed\" exist for staging only",
       path: ["PLAY_INTEGRITY_POLICY"],
     },
+  )
+  .refine(
+    (environment) =>
+      (environment.ANDROID_ATTESTATION_CERT_DIGESTS ?? []).every(
+        (digest) => normalizeHexDigest(digest).length === 64,
+      ),
+    {
+      // Mirrors android-attestation-verifier.ts's own normalizeCertDigest
+      // (strip non-hex, lowercase) -- a typo'd or truncated entry here would
+      // otherwise surface much later as a silent, hard-to-diagnose
+      // enrolment rejection instead of failing loudly at boot. Unset/empty
+      // stays allowed, same as today: enrolment already refuses outright
+      // with no digests configured (no fallback), so there's nothing extra
+      // to catch here in that case.
+      message:
+        "ANDROID_ATTESTATION_CERT_DIGESTS: each entry must be a 64-character SHA-256 hex digest (colons and case are ignored)",
+      path: ["ANDROID_ATTESTATION_CERT_DIGESTS"],
+    },
   );
 
 export type Environment = z.infer<typeof environmentSchema>;
@@ -396,6 +414,15 @@ export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Enviro
 
 function emptyStringToUndefined(value: unknown): unknown {
   return value === "" ? undefined : value;
+}
+
+// Same rule as android-attestation-verifier.ts's normalizeCertDigest, kept
+// as its own small copy rather than an import from src/modules/auth --
+// config-loading runs before nearly everything else at boot and shouldn't
+// pull in that module's own dependencies (x509/asn1 parsing, the
+// reflect-metadata polyfill) just to validate a string shape.
+function normalizeHexDigest(value: string): string {
+  return value.replace(/[^0-9a-fA-F]/g, "").toLowerCase();
 }
 
 function optionalNonEmptyString() {

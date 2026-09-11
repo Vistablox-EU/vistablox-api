@@ -66,3 +66,66 @@ describe("PLAY_INTEGRITY_POLICY vs. the deployment tier", () => {
     expect(() => loadEnvironment({ ...base, NODE_ENV: "production", APP_ENV: "prod" })).toThrow();
   });
 });
+
+// Mirrors android-attestation-verifier.ts's own normalizeCertDigest rule
+// (strip non-hex, lowercase, must land on 64 chars) -- catching a typo'd or
+// truncated digest here means it fails loudly at boot instead of surfacing
+// much later as a silent, hard-to-diagnose enrolment rejection.
+describe("ANDROID_ATTESTATION_CERT_DIGESTS", () => {
+  const SIXTY_FOUR_HEX = "aa".repeat(32);
+
+  it("accepts a plain 64-character hex digest", () => {
+    const result = loadEnvironment({ ...base, ANDROID_ATTESTATION_CERT_DIGESTS: SIXTY_FOUR_HEX });
+    expect(result.ANDROID_ATTESTATION_CERT_DIGESTS).toEqual([SIXTY_FOUR_HEX]);
+  });
+
+  it("accepts a colon-separated, uppercase digest (openssl/keytool's own format)", () => {
+    const colonSeparatedUppercase = SIXTY_FOUR_HEX.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
+    expect(() =>
+      loadEnvironment({ ...base, ANDROID_ATTESTATION_CERT_DIGESTS: colonSeparatedUppercase }),
+    ).not.toThrow();
+  });
+
+  it("accepts multiple comma-separated digests, each independently valid", () => {
+    const other = "bb".repeat(32);
+    const result = loadEnvironment({
+      ...base,
+      ANDROID_ATTESTATION_CERT_DIGESTS: `${SIXTY_FOUR_HEX},${other}`,
+    });
+    expect(result.ANDROID_ATTESTATION_CERT_DIGESTS).toEqual([SIXTY_FOUR_HEX, other]);
+  });
+
+  it("accepts unset/empty, same as today -- enrolment itself refuses with no digests configured", () => {
+    expect(() =>
+      loadEnvironment({ ...base, ANDROID_ATTESTATION_CERT_DIGESTS: "" }),
+    ).not.toThrow();
+  });
+
+  it("rejects a digest one character short of 64", () => {
+    expect(() =>
+      loadEnvironment({ ...base, ANDROID_ATTESTATION_CERT_DIGESTS: SIXTY_FOUR_HEX.slice(0, 63) }),
+    ).toThrow(/ANDROID_ATTESTATION_CERT_DIGESTS/);
+  });
+
+  it("rejects a digest one character over 64", () => {
+    expect(() =>
+      loadEnvironment({ ...base, ANDROID_ATTESTATION_CERT_DIGESTS: `${SIXTY_FOUR_HEX}a` }),
+    ).toThrow(/ANDROID_ATTESTATION_CERT_DIGESTS/);
+  });
+
+  it("rejects non-hex garbage even at the right length", () => {
+    const garbage = "z".repeat(64);
+    expect(() =>
+      loadEnvironment({ ...base, ANDROID_ATTESTATION_CERT_DIGESTS: garbage }),
+    ).toThrow(/ANDROID_ATTESTATION_CERT_DIGESTS/);
+  });
+
+  it("rejects the set when just one of several entries is malformed", () => {
+    expect(() =>
+      loadEnvironment({
+        ...base,
+        ANDROID_ATTESTATION_CERT_DIGESTS: `${SIXTY_FOUR_HEX},not-a-digest`,
+      }),
+    ).toThrow(/ANDROID_ATTESTATION_CERT_DIGESTS/);
+  });
+});
