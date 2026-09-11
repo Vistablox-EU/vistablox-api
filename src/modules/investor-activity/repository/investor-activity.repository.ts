@@ -77,7 +77,7 @@ export interface InvestorReservationRecord {
 export interface InvestorPositionRecord {
   positionId: string;
   // Null for a position that originated directly from an AD-256 IPO escrow
-  // contribution rather than the Stripe/reconfirmation reservation flow.
+  // contribution rather than the onramp/reconfirmation reservation flow.
   reservationId: string | null;
   offeringId: string | null;
   pivId: string;

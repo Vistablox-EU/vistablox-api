@@ -193,7 +193,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
         {
           id: `money_old_${suffix}`,
           reservationId: reservationIds[0]!,
-          provider: "stripe_onramp",
+          provider: "coinbase_cdp",
           providerReference: `private_provider_ref_${suffix}`,
           capitalState: "eurc_reserved",
           amountEur: "3000.00",

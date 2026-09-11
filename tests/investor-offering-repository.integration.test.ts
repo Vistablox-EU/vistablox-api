@@ -208,7 +208,7 @@ describe.skipIf(databaseUrl === undefined)(
           {
             id: `money_funded_old_${suffix}`,
             reservationId: reservationIds.funded,
-            provider: "stripe_onramp",
+            provider: "coinbase_cdp",
             capitalState: "eurc_purchase_pending",
             amountEur: "100000.00",
             recordedAt: new Date("2026-08-30T10:00:00.000Z"),
@@ -224,7 +224,7 @@ describe.skipIf(databaseUrl === undefined)(
           {
             id: `money_pending_${suffix}`,
             reservationId: reservationIds.pending,
-            provider: "stripe_onramp",
+            provider: "coinbase_cdp",
             capitalState: "eurc_purchase_pending",
             amountEur: "25000.00",
           },

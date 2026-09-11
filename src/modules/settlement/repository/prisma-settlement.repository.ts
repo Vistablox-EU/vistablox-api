@@ -62,7 +62,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
         data: {
           id: `position_${ulid()}`,
           // No reservationId: this position originated directly from an
-          // on-chain escrow contribution (AD-256), not the Stripe/
+          // on-chain escrow contribution (AD-256), not the onramp/
           // reconfirmation reservation flow (AD-146/AD-214).
           pivId: input.pivId,
           accountId: input.accountId,

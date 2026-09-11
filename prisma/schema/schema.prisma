@@ -603,7 +603,7 @@ model PositionLedger {
   id                    String    @id @map("position_id")
   // Nullable: a position originated directly from an AD-256 IPO escrow
   // contribution has no Reservation at all -- that model belongs to the
-  // separate Stripe/reconfirmation purchase flow (AD-146/AD-214), which an
+  // separate onramp/reconfirmation purchase flow (AD-146/AD-214), which an
   // on-chain escrow contribution bypasses entirely. Still required (and
   // still the norm) for every position that *did* originate that way.
   reservationId         String?   @map("reservation_id")
