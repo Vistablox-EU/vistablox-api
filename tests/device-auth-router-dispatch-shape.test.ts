@@ -3,7 +3,7 @@ import { APIError, createAuthEndpoint, dispatchAuthEndpoint } from "better-auth/
 import { describe, expect, it } from "vitest";
 
 const PATH = "/device/login/verify";
-const URL = "http://internal/v1/auth/devices/login/verify";
+const URL = "http://internal/v1/auth/mobile/login/verify";
 
 /**
  * device-auth.router.ts calls auth.api.enrolVerify/loginVerify with a real

@@ -23,7 +23,7 @@ import { requestContext } from "../src/shared/http/request-context.js";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const BASE_URL = "http://localhost:3000";
 
-// The real /v1/auth/devices/login/verify router mounted on a real Express
+// The real /v1/auth/mobile/login/verify router mounted on a real Express
 // app, backed by a real createBetterAuth instance and a real Postgres
 // database -- no stubbed auth.api. This is the exact gap that let #58's
 // asResponse bug (every E2/L2 call returning a 500, confirmed live on
@@ -31,11 +31,13 @@ const BASE_URL = "http://localhost:3000";
 // never exercises better-auth's real dispatch shape (a raw fetch Response,
 // not { response, headers }, whenever a real Request is passed without
 // asResponse: false -- see device-auth.router.ts's own comment on that).
-describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, no stubbed auth.api", () => {
+describe.skipIf(databaseUrl === undefined)("real /v1/auth/mobile/login/verify, no stubbed auth.api", () => {
   const suffix = randomUUID();
   const email = `device-auth-login-verify-${suffix}@example.test`;
   const accountId = `acct_${suffix}`;
-  const deviceId = `device_${suffix}`;
+  // Assigned by PrismaDeviceRepository.create in beforeAll (it generates its
+  // own device_<ulid> id), not chosen by the test.
+  let deviceId = "";
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
   const deviceChallengeRepository = new PrismaDeviceChallengeRepository(database);
@@ -46,6 +48,9 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
   let betterAuthUserId = "";
   let deviceBioJkt = "";
   let devicePrivateKey: webcrypto.CryptoKey;
+  // The seeded device's own DPoP key: LoginDeviceService only accepts L2
+  // from the DPoP key the device is bound to (device.dpopJkt).
+  let deviceDpopKeyPair: { privateKey: webcrypto.CryptoKey; publicJwk: JWK };
   let testApp: express.Express;
 
   beforeAll(async () => {
@@ -84,10 +89,11 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
     devicePrivateKey = keyPair.privateKey;
     const publicJwk = await exportJWK(keyPair.publicKey);
     deviceBioJkt = await calculateJwkThumbprint(publicJwk, "sha256");
-    await deviceRepository.create({
+    deviceDpopKeyPair = await generateDpopKeyPair();
+    const seededDevice = await deviceRepository.create({
       accountId,
       betterAuthUserId,
-      dpopJkt: "seeded-device-dpop-jkt",
+      dpopJkt: await calculateJwkThumbprint(deviceDpopKeyPair.publicJwk, "sha256"),
       bioJkt: deviceBioJkt,
       biometricPublicJwk: publicJwk as unknown as Record<string, unknown>,
       platform: "android",
@@ -96,6 +102,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
       appVersion: undefined,
       attestationMetadata: {},
     });
+    deviceId = seededDevice.deviceId;
 
     testApp = express();
     testApp.use(express.json());
@@ -107,7 +114,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
       recordReplays: false,
     });
     testApp.use(
-      "/v1/auth/devices",
+      "/v1/auth/mobile",
       createDeviceAuthRouter(
         requireDpopOnly,
         new IssueDeviceChallengeService(deviceChallengeRepository),
@@ -122,7 +129,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
     if (betterAuthUserId !== "") {
       await database.device.deleteMany({ where: { accountId } });
       await database.account.deleteMany({ where: { id: accountId } });
-      await authPool.query('DELETE FROM "auth_session" WHERE "user_id" = $1', [betterAuthUserId]);
+      await authPool.query('DELETE FROM "auth_session" WHERE "userId" = $1', [betterAuthUserId]);
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
     }
     await Promise.all([database.$disconnect(), authPool.end()]);
@@ -167,11 +174,11 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
 
   it("returns a non-500 4xx (DEVICE_LOGIN_FAILED) for an unknown device, not the asResponse crash", async () => {
     const dpopKeyPair = await generateDpopKeyPair();
-    const dpopProof = await buildDpopProof(dpopKeyPair, "/v1/auth/devices/login/verify");
+    const dpopProof = await buildDpopProof(dpopKeyPair, "/v1/auth/mobile/login/verify");
     const jws = await buildLoginJws({ challenge: "irrelevant-challenge", deviceId: "device_does_not_exist" });
 
     const response = await request(testApp)
-      .post("/v1/auth/devices/login/verify")
+      .post("/v1/auth/mobile/login/verify")
       .set("dpop", dpopProof)
       .send({ device_id: "device_does_not_exist", challenge: "irrelevant-challenge", jws });
 
@@ -181,19 +188,19 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
   });
 
   it("succeeds for a real seeded device with a real challenge and a real device-auth JWS: 200, device_id/session fields, set-auth-token header", async () => {
-    const dpopKeyPair = await generateDpopKeyPair();
+    const dpopKeyPair = deviceDpopKeyPair;
 
     const challengeResponse = await request(testApp)
-      .post("/v1/auth/devices/login/challenge")
-      .set("dpop", await buildDpopProof(dpopKeyPair, "/v1/auth/devices/login/challenge"))
+      .post("/v1/auth/mobile/login/challenge")
+      .set("dpop", await buildDpopProof(dpopKeyPair, "/v1/auth/mobile/login/challenge"))
       .send({ device_id: deviceId });
     expect(challengeResponse.status).toBe(200);
     const challenge: string = challengeResponse.body.data.challenge;
 
     const jws = await buildLoginJws({ challenge, deviceId });
     const verifyResponse = await request(testApp)
-      .post("/v1/auth/devices/login/verify")
-      .set("dpop", await buildDpopProof(dpopKeyPair, "/v1/auth/devices/login/verify"))
+      .post("/v1/auth/mobile/login/verify")
+      .set("dpop", await buildDpopProof(dpopKeyPair, "/v1/auth/mobile/login/verify"))
       .send({ device_id: deviceId, challenge, jws });
 
     expect(verifyResponse.status).toBe(200);
@@ -207,10 +214,10 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
 
   it("rejects the identical DPoP proof presented twice with a non-500 DPOP_REPLAY, not the asResponse crash", async () => {
     const dpopKeyPair = await generateDpopKeyPair();
-    const proof = await buildDpopProof(dpopKeyPair, "/v1/auth/devices/login/challenge");
+    const proof = await buildDpopProof(dpopKeyPair, "/v1/auth/mobile/login/challenge");
 
     const challengeResponse = await request(testApp)
-      .post("/v1/auth/devices/login/challenge")
+      .post("/v1/auth/mobile/login/challenge")
       .set("dpop", proof)
       .send({ device_id: deviceId });
     expect(challengeResponse.status).toBe(200);
@@ -218,7 +225,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/devices/login/verify, 
     // Same exact proof, reused for a second, unrelated request -- must be
     // rejected as a replay, not accepted a second time.
     const replayedResponse = await request(testApp)
-      .post("/v1/auth/devices/login/challenge")
+      .post("/v1/auth/mobile/login/challenge")
       .set("dpop", proof)
       .send({ device_id: deviceId });
 

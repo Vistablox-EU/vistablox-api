@@ -11,7 +11,7 @@ import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
 const BASE_URL = "https://api.vistablox.io";
-const PATH = "/v1/auth/devices/enrol/challenge";
+const PATH = "/v1/auth/mobile/enrol/challenge";
 
 async function keypair(): Promise<{ privateKey: CryptoKey; publicJwk: JWK }> {
   const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });

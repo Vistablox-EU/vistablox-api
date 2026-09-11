@@ -6,10 +6,20 @@ import {
   verifyAndroidKeyAttestation,
   verifyPlayIntegrityToken,
 } from "./android-attestation-verifier.js";
-import { DeviceAlreadyEnrolledError, DeviceChallengeExpiredError } from "./device-auth-errors.js";
+import {
+  DeviceAlreadyEnrolledError,
+  DeviceChallengeExpiredError,
+  MobilePlatformUnsupportedError,
+} from "./device-auth-errors.js";
 import { verifyDeviceAuthJws } from "./device-auth-jws-verifier.js";
 import type { Device, DeviceRepository } from "../repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../repository/device-challenge.repository.js";
+import {
+  ANDROID_ONLY_MOBILE_PLATFORM_POLICY,
+  isMobilePlatform,
+  isMobilePlatformSupported,
+  type MobilePlatformPolicy,
+} from "../domain/mobile-platform.policy.js";
 
 const ENROL_PURPOSE = "enrol-device";
 
@@ -44,9 +54,17 @@ export class EnrolDeviceService {
     private readonly deviceRepository: DeviceRepository,
     private readonly android: AndroidAttestationConfig,
     private readonly clock: () => Date = () => new Date(),
+    private readonly mobilePlatformPolicy: MobilePlatformPolicy = ANDROID_ONLY_MOBILE_PLATFORM_POLICY,
   ) {}
 
   public async execute(input: EnrolDeviceInput): Promise<Device> {
+    if (
+      !isMobilePlatform(input.attestation.platform) ||
+      !isMobilePlatformSupported(input.attestation.platform, this.mobilePlatformPolicy)
+    ) {
+      throw new MobilePlatformUnsupportedError(input.attestation.platform);
+    }
+
     // Checked before the challenge is consumed: pairing isn't built yet in
     // this PR (see DeviceAlreadyEnrolledError's own doc comment), and a
     // doomed request shouldn't burn a single-use challenge to find that
@@ -87,9 +105,7 @@ export class EnrolDeviceService {
     }
 
     if (input.attestation.platform !== "android") {
-      throw new AndroidAttestationInvalidError(
-        `platform "${input.attestation.platform}" is not yet supported`,
-      );
+      throw new MobilePlatformUnsupportedError(input.attestation.platform);
     }
     await verifyAndroidKeyAttestation({
       certificateChain: input.attestation.keyAttestationChain,

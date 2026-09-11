@@ -21,6 +21,7 @@ import {
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
+  MobilePlatformUnsupportedError,
 } from "../src/modules/auth/application/device-auth-errors.js";
 import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/device-auth-jws-verifier.js";
 import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
@@ -530,7 +531,7 @@ describe("EnrolDeviceService", () => {
           appVersion: undefined,
         },
       }),
-    ).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+    ).rejects.toBeInstanceOf(MobilePlatformUnsupportedError);
   });
 
   it("rejects when Play Integrity policy requires a decoder but none is configured", async () => {

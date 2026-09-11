@@ -592,7 +592,7 @@ export function createApp(dependencies: AppDependencies): Express {
       });
       app.use("/v1/app", createAppConfigRouter(requireDpopOnly, deviceAuth.appConfig));
       app.use(
-        "/v1/auth/devices",
+        "/v1/auth/mobile",
         createDeviceAuthRouter(
           requireDpopOnly,
           deviceAuth.issueChallenge,
