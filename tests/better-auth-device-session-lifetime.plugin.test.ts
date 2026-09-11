@@ -3,7 +3,11 @@ import { memoryAdapter } from "better-auth/adapters/memory";
 import { bearer } from "better-auth/plugins";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { createBetterAuthDeviceSessionLifetimePlugin } from "../src/modules/auth/infrastructure/better-auth-device-session-lifetime.plugin.js";
+import {
+  createBetterAuthDeviceSessionLifetimePlugin,
+  createDeviceSessionLifetime,
+  isDeviceSessionLookupWrapped,
+} from "../src/modules/auth/infrastructure/better-auth-device-session-lifetime.plugin.js";
 
 // A real better-auth instance (in-memory database, same session settings
 // as better-auth.factory.ts: expiresIn 30 min, updateAge 5 min, bearer
@@ -296,5 +300,55 @@ describe("device session lifetime plugin: no refresh write for device sessions",
 
     await harness.getSession(webToken);
     expect(updateSession).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("device session lifetime: attached before any request", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("enforces the limits on a direct findSession call once attached, with no request having run", async () => {
+    const db: Record<string, Row[]> = { user: [], session: [], account: [], verification: [] };
+    const lifetime = createDeviceSessionLifetime();
+    const auth = betterAuth({
+      database: memoryAdapter(db),
+      baseURL: "http://localhost:3000",
+      secret: "unit-test-secret-that-is-at-least-32-characters-long",
+      emailAndPassword: { enabled: false },
+      session: {
+        expiresIn: 30 * 60,
+        updateAge: 5 * 60,
+        additionalFields: { authenticationLevel: { type: "string", required: false, input: false } },
+      },
+      plugins: [bearer(), lifetime.plugin],
+    });
+    const context = await auth.$context;
+    expect(isDeviceSessionLookupWrapped(context.internalAdapter)).toBe(false);
+
+    lifetime.attach(context.internalAdapter);
+    lifetime.attach(context.internalAdapter);
+
+    expect(isDeviceSessionLookupWrapped(context.internalAdapter)).toBe(true);
+    const user = await context.internalAdapter.createUser(
+      { name: "Attach Test", email: "attach@example.test", emailVerified: true },
+      { method: "internal" },
+    );
+    const created = await context.internalAdapter.createSession(
+      user.id,
+      false,
+      { authenticationLevel: "device_biometric", expiresAt: at(30 * MINUTE) },
+      true,
+    );
+    vi.setSystemTime(at(12 * MINUTE));
+    const found = (await context.internalAdapter.findSession(created.token)) as {
+      session: { expiresAt: Date };
+    } | null;
+    expect(found?.session.expiresAt.getTime()).toBeLessThan(at(12 * MINUTE).getTime());
   });
 });

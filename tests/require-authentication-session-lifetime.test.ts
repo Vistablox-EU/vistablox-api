@@ -139,4 +139,17 @@ describe("requireAuthentication: device session time limits", () => {
     expect(response.status).toBe(403);
     expect(recordActivity).not.toHaveBeenCalled();
   });
+
+  it("still serves a fully authenticated request when the activity write fails", async () => {
+    const recordActivity = vi.fn().mockRejectedValue(new Error("auth_session unavailable"));
+    const sessions: SessionResolver = {
+      resolve: vi.fn().mockResolvedValue(unboundIdentity),
+      recordActivity,
+    };
+
+    const response = await request(buildApp(sessions)).get("/protected");
+
+    expect(response.status).toBe(200);
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+  });
 });

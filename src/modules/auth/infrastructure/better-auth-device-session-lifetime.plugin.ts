@@ -21,6 +21,19 @@ interface StoredSession {
 
 type FindSession = (token: string, ...rest: unknown[]) => Promise<unknown>;
 
+const DEVICE_SESSION_LOOKUP_MARKER = Symbol("vistablox.deviceSessionLookup");
+
+export interface DeviceSessionLifetime {
+  plugin: BetterAuthPlugin;
+  /**
+   * Wraps this internalAdapter's findSession so every lookup enforces the
+   * device-session limits. Idempotent. The factory calls it as soon as
+   * auth.$context resolves; the plugin's global before hook calls it too, as
+   * a backstop.
+   */
+  attach(internalAdapter: unknown): void;
+}
+
 /**
  * Enforces the device-session time limits (contract 3.6/3.7: idle 5 min,
  * absolute 30 min from creation, no silent renewal) on better-auth's own
@@ -64,9 +77,9 @@ type FindSession = (token: string, ...rest: unknown[]) => Promise<unknown>;
  * The limits are computed from `createdAt` and `updatedAt`, never from
  * `expiresAt`.
  */
-export function createBetterAuthDeviceSessionLifetimePlugin(
+export function createDeviceSessionLifetime(
   options: BetterAuthDeviceSessionLifetimePluginOptions = {},
-): BetterAuthPlugin {
+): DeviceSessionLifetime {
   const clock = options.clock ?? (() => new Date());
   const wrappedAdapters = new WeakSet<object>();
 
@@ -102,12 +115,14 @@ export function createBetterAuthDeviceSessionLifetimePlugin(
     const target = adapter as { findSession?: FindSession };
     const original = target.findSession;
     if (typeof original !== "function") return;
-    target.findSession = async (token, ...rest) =>
+    const wrapped: FindSession = async (token, ...rest) =>
       applyDeviceSessionLimits(await original.call(adapter, token, ...rest));
+    Object.defineProperty(wrapped, DEVICE_SESSION_LOOKUP_MARKER, { value: true });
+    target.findSession = wrapped;
     wrappedAdapters.add(adapter);
   };
 
-  return {
+  const plugin: BetterAuthPlugin = {
     id: "vistablox-device-session-lifetime",
     init() {
       return {
@@ -168,6 +183,24 @@ export function createBetterAuthDeviceSessionLifetimePlugin(
       ],
     },
   };
+  return { plugin, attach: wrapFindSession };
+}
+
+/** The plugin alone, for callers that don't attach it themselves (tests). */
+export function createBetterAuthDeviceSessionLifetimePlugin(
+  options: BetterAuthDeviceSessionLifetimePluginOptions = {},
+): BetterAuthPlugin {
+  return createDeviceSessionLifetime(options).plugin;
+}
+
+/** Whether this internalAdapter's findSession already enforces the device-session limits. */
+export function isDeviceSessionLookupWrapped(internalAdapter: unknown): boolean {
+  if (typeof internalAdapter !== "object" || internalAdapter === null) return false;
+  const findSession = (internalAdapter as { findSession?: unknown }).findSession;
+  return (
+    typeof findSession === "function" &&
+    (findSession as unknown as Record<symbol, unknown>)[DEVICE_SESSION_LOOKUP_MARKER] === true
+  );
 }
 
 function readStoredSession(context: unknown): StoredSession | null {

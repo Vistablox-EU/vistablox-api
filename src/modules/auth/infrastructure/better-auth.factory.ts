@@ -32,7 +32,7 @@ export const AUTHENTICATION_LEVELS = [
 export type AuthenticationLevel = (typeof AUTHENTICATION_LEVELS)[number];
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 import { createBetterAuthDeviceAuthPlugin } from "./better-auth-device-auth.plugin.js";
-import { createBetterAuthDeviceSessionLifetimePlugin } from "./better-auth-device-session-lifetime.plugin.js";
+import { createDeviceSessionLifetime } from "./better-auth-device-session-lifetime.plugin.js";
 import { deviceSessionAbsoluteExpiresAt } from "../domain/device-session-lifetime.js";
 import { createBetterAuthDpopPlugin } from "./better-auth-dpop.plugin.js";
 import {
@@ -140,6 +140,9 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           }),
         }),
   };
+  // Time limits for device_biometric sessions (contract 3.6/3.7). No other
+  // session is affected.
+  const deviceSessionLifetime = createDeviceSessionLifetime();
   const auth = betterAuth({
     appName: "VistaBlox",
     baseURL: options.baseURL,
@@ -289,6 +292,10 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       // Native mobile uses the Better Auth session itself, sent as a bearer
       // token via the Authorization header instead of a cookie.
       bearer(),
+      // Device-session time limits: before the DPoP plugin, whose before
+      // hook already reads the session. Registered unconditionally: it only
+      // acts on rows the device-auth plugin created.
+      deviceSessionLifetime.plugin,
       // Device binding (DPoP): must come after bearer() -- bearer turns
       // Authorization into the session cookie context first, so a session
       // is resolvable by the time this runs. Only the passkey verify-*
@@ -310,10 +317,6 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               dpop: options.dpop,
             }),
           ]),
-      // Time limits for device_biometric sessions (contract 3.6/3.7). No
-      // other session is affected. Registered unconditionally: it only acts
-      // on rows the device-auth plugin created.
-      createBetterAuthDeviceSessionLifetimePlugin(),
       // Cookie-free passkey challenge relay (mirrors bearer()'s own
       // token-as-header trick) -- lets the challenge @better-auth/passkey's
       // generate-*-options sets survive to verify-* for a client with no
@@ -465,6 +468,15 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       },
     },
   });
+  // Wrap findSession as soon as the context exists, so even the first
+  // request after boot is covered. Every request awaits this same context
+  // promise after this line, and promise reactions run in registration
+  // order. The plugin's before hook remains as an idempotent backstop. A
+  // context that fails to build fails every request on its own.
+  void auth.$context.then(
+    (context) => deviceSessionLifetime.attach(context.internalAdapter),
+    () => undefined,
+  );
   return auth;
 
   async function resolveAuthenticationLevel(
