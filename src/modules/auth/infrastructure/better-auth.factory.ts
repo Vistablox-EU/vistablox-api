@@ -76,20 +76,32 @@ export interface BetterAuthFactoryOptions {
   };
 }
 
+/**
+ * Lets the admin frontend (a separate subdomain, not a separate origin in
+ * the eTLD+1 sense) read the same session cookie as this API -- only
+ * meaningful once the API's own host actually looks like
+ * "api.vistablox.io" (three-plus labels); on "localhost" (one label) there
+ * is no shared parent domain to scope a cookie to, so this returns
+ * undefined there. Assumes a single level of subdomain nesting under the
+ * shared root, matching the one real deployment shape today -- revisit if
+ * that ever changes.
+ *
+ * Derived from BETTER_AUTH_URL's own host, not rpId: the two are
+ * independently configured (AD-device-binding follow-up -- rpId is pinned
+ * separately so moving BETTER_AUTH_URL can never silently change it), and
+ * cookie scoping is a property of where this API actually serves requests
+ * from, not of the WebAuthn relying-party identity.
+ */
+export function deriveCrossSubDomainCookieDomain(baseURL: string): string | undefined {
+  const hostnameLabels = new URL(baseURL).hostname.split(".");
+  return hostnameLabels.length >= 3 ? `.${hostnameLabels.slice(1).join(".")}` : undefined;
+}
+
 export function createBetterAuth(options: BetterAuthFactoryOptions) {
   const defaultOrigin = new URL(options.baseURL).origin;
   const rpId = options.webauthn?.rpId ?? new URL(defaultOrigin).hostname;
   const origins = options.webauthn?.origins ?? [defaultOrigin];
-  // Lets the admin frontend (a separate subdomain, not a separate origin in
-  // the eTLD+1 sense) read the same session cookie as this API -- only
-  // meaningful once rpId actually looks like "api.vistablox.io" (three-plus
-  // labels); on "localhost" (one label) there is no shared parent domain to
-  // scope a cookie to, so this stays off there. Assumes a single level of
-  // subdomain nesting under the shared root, matching the one real
-  // deployment shape today -- revisit the derivation if that ever changes.
-  const hostnameLabels = rpId.split(".");
-  const crossSubDomainCookieDomain =
-    hostnameLabels.length >= 3 ? `.${hostnameLabels.slice(1).join(".")}` : undefined;
+  const crossSubDomainCookieDomain = deriveCrossSubDomainCookieDomain(defaultOrigin);
   const apple = options.apple;
   const socialProviders = {
     ...(options.google === undefined ? {} : { google: options.google }),
