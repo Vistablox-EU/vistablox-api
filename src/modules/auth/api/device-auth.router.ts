@@ -54,6 +54,7 @@ interface DeviceAuthApi {
       };
     };
     request: Request;
+    asResponse: false;
     returnHeaders: true;
   }): Promise<{
     response: {
@@ -68,6 +69,7 @@ interface DeviceAuthApi {
     headers: Headers;
     body: { device_id: string; challenge: string; jws: string };
     request: Request;
+    asResponse: false;
     returnHeaders: true;
   }): Promise<{
     response: {
@@ -180,6 +182,14 @@ export function createDeviceAuthRouter(
           },
         },
         request: requestForDpopBinding(request),
+        // Without this, better-auth's dispatch sees a real Request object
+        // (isRequestLike) and defaults shouldReturnResponse to true,
+        // returning a fetch Response instead of { response, headers } --
+        // destructuring `.response` off a Response is always undefined, so
+        // this crashed with a 500 on EVERY call, success or failure, until
+        // this was added. Confirmed against better-auth's own dispatch.mjs
+        // directly, not guessed.
+        asResponse: false,
         returnHeaders: true,
       });
       relaySetAuthToken(response, headers);
@@ -230,6 +240,8 @@ export function createDeviceAuthRouter(
           jws: body.jws,
         },
         request: requestForDpopBinding(request),
+        // See the identical comment on enrolVerify's call above.
+        asResponse: false,
         returnHeaders: true,
       });
       relaySetAuthToken(response, headers);
