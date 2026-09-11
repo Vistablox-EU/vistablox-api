@@ -266,6 +266,14 @@ describe("verifyAndroidKeyAttestation", () => {
       AndroidAttestationInvalidError,
     );
   });
+
+  it("accepts an allowlist digest formatted with colons and uppercase, as openssl/keytool print it", async () => {
+    const chain = await buildChain({ userAuthType: AUTH_TYPE_FINGERPRINT_ONLY });
+    const colonSeparatedUppercase = CERT_DIGEST_HEX.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
+    await expect(
+      verify(chain, { certDigestAllowlist: [colonSeparatedUppercase] }),
+    ).resolves.toBeUndefined();
+  });
 });
 
 describe("verifyPlayIntegrityToken", () => {
@@ -398,5 +406,20 @@ describe("verifyPlayIntegrityToken", () => {
         decoder: decoderReturning({ requestHash, certificateSha256Digests: ["bb".repeat(32)] }),
       }),
     ).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+  });
+
+  it("accepts an allowlist digest formatted with colons and uppercase", async () => {
+    const requestHash = computeDeviceBinding(CHALLENGE, "bio");
+    const colonSeparatedUppercase = CERT_DIGEST_HEX.toUpperCase().replace(/(.{2})(?=.)/g, "$1:");
+    await expect(
+      verifyPlayIntegrityToken({
+        policy: "relaxed",
+        token: "token",
+        challenge: CHALLENGE,
+        bioJkt: "bio",
+        certDigestAllowlist: [colonSeparatedUppercase],
+        decoder: decoderReturning({ requestHash }),
+      }),
+    ).resolves.toBeUndefined();
   });
 });

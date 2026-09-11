@@ -158,8 +158,8 @@ export async function verifyAndroidKeyAttestation(input: AndroidKeyAttestationIn
     throw new AndroidAttestationInvalidError("no attestationApplicationId present");
   }
   const signingCertDigests = parseAttestationApplicationId(applicationId);
-  const allowlist = new Set(input.certDigestAllowlist.map((digest) => digest.toLowerCase()));
-  const matches = signingCertDigests.some((digest) => allowlist.has(digest.toLowerCase()));
+  const allowlist = new Set(input.certDigestAllowlist.map(normalizeCertDigest));
+  const matches = signingCertDigests.some((digest) => allowlist.has(normalizeCertDigest(digest)));
   if (!matches) {
     throw new AndroidAttestationInvalidError("app signing certificate is not on the allowlist");
   }
@@ -213,13 +213,26 @@ export async function verifyPlayIntegrityToken(input: {
   if (!verdict.deviceRecognitionVerdicts.includes("MEETS_DEVICE_INTEGRITY")) {
     throw new AndroidAttestationInvalidError("Play Integrity device recognition verdict is too weak");
   }
-  const allowlist = new Set(input.certDigestAllowlist.map((digest) => digest.toLowerCase()));
-  const matches = verdict.certificateSha256Digests.some((digest) => allowlist.has(digest.toLowerCase()));
+  const allowlist = new Set(input.certDigestAllowlist.map(normalizeCertDigest));
+  const matches = verdict.certificateSha256Digests.some((digest) =>
+    allowlist.has(normalizeCertDigest(digest)),
+  );
   if (!matches) {
     throw new AndroidAttestationInvalidError(
       "Play Integrity certificate digest is not on the allowlist",
     );
   }
+}
+
+// Config and API-supplied digests both land here: a human-typed
+// ANDROID_ATTESTATION_CERT_DIGESTS value commonly carries the colons
+// `openssl`/Android tooling print fingerprints with (confirmed against
+// staging -- the value had to be hand-stripped of colons to match), while a
+// digest parsed from a certificate or a Play Integrity verdict never does.
+// Stripping every non-hex character before comparing makes both sides
+// tolerant of that formatting difference instead of silently never matching.
+function normalizeCertDigest(value: string): string {
+  return value.replace(/[^0-9a-fA-F]/g, "").toLowerCase();
 }
 
 function parseCertificate(base64Der: string): X509Certificate {

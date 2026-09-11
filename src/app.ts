@@ -210,6 +210,7 @@ import {
   BASELINE_RATE_LIMIT,
   TIGHTENED_RATE_LIMIT,
   createRateLimiter,
+  dpopKeyRateLimitSubject,
 } from "./shared/http/rate-limit.js";
 import type { RateLimitStore } from "./infrastructure/rate-limit/rate-limit-store.js";
 
@@ -377,6 +378,13 @@ export function createApp(dependencies: AppDependencies): Express {
     dependencies.rateLimitStore === undefined
       ? undefined
       : createRateLimiter(dependencies.rateLimitStore, TIGHTENED_RATE_LIMIT);
+  // Device-auth challenge issuance (E1/L1) has no account yet, so the default
+  // subject falls back to IP alone -- a second limiter keyed on the DPoP key
+  // itself closes the gap a fresh keypair per call would otherwise leave.
+  const deviceAuthDpopKeyRateLimiter =
+    dependencies.rateLimitStore === undefined
+      ? undefined
+      : createRateLimiter(dependencies.rateLimitStore, TIGHTENED_RATE_LIMIT, dpopKeyRateLimitSubject);
 
   app.disable("x-powered-by");
   app.use(requestContext);
@@ -556,7 +564,10 @@ export function createApp(dependencies: AppDependencies): Express {
       app.use("/v1/app", createAppConfigRouter(requireDpopOnly, deviceAuth.appConfig));
       app.use(
         "/v1/auth/devices",
-        createDeviceAuthRouter(requireDpopOnly, deviceAuth.issueChallenge, deviceAuth.auth),
+        createDeviceAuthRouter(requireDpopOnly, deviceAuth.issueChallenge, deviceAuth.auth, [
+          ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
+          ...(deviceAuthDpopKeyRateLimiter === undefined ? [] : [deviceAuthDpopKeyRateLimiter]),
+        ]),
       );
     }
     if (dependencies.protectedApi.wallet !== undefined) {
