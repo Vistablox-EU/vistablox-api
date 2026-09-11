@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to a PR cancels that PR's still-running CI; runs on main are
+# never cancelled, so every merged commit keeps its own result.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: typecheck, architecture, tests (with Postgres 18)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    # A throwaway Postgres 18 that lives only for this job, local to the
+    # runner. It is never a real environment, so applying migrations to it
+    # is the same as applying them to a local test database (README
+    # "Testing", AD-257).
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: vistablox
+          POSTGRES_PASSWORD: vistablox
+          POSTGRES_DB: vistablox_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U vistablox -d vistablox_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    # Dummy, non-secret values only. The integration suites read
+    # TEST_DATABASE_URL; prisma.config.ts migrates through
+    # DIRECT_DATABASE_URL. Nothing the tests import calls loadEnvironment()
+    # at import time, so no DIDIT_*/SMTP_* placeholders are needed.
+    env:
+      TEST_DATABASE_URL: postgresql://vistablox:vistablox@localhost:5432/vistablox_test
+      DATABASE_URL: postgresql://vistablox:vistablox@localhost:5432/vistablox_test
+      DIRECT_DATABASE_URL: postgresql://vistablox:vistablox@localhost:5432/vistablox_test
+      BETTER_AUTH_SECRET: ci-only-dummy-secret-not-used-anywhere-real-0123456789
+      VITEST_JSON_REPORT: vitest-report.json
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+
+      - name: Apply migrations to the throwaway test database
+        run: npx prisma migrate deploy
+
+      # The three steps below are exactly `npm run check`, split so the test
+      # step can also write a JSON report for the skip guard.
+      - run: npm run typecheck
+
+      - run: npm run architecture
+
+      - name: Tests (unit + DB integration)
+        run: npm test -- --reporter=default --reporter=json --outputFile.json="$VITEST_JSON_REPORT"
+
+      # Integration suites skip themselves when TEST_DATABASE_URL is unset
+      # instead of failing, so a broken env would turn them into a silent
+      # green. Fail if any suite other than the MinIO one (gated on
+      # TEST_MINIO_*, no MinIO service here) skipped a test.
+      - name: Fail if DB integration tests were skipped
+        if: ${{ !cancelled() }}
+        run: |
+          node <<'EOF'
+          const fs = require("node:fs");
+          const path = process.env.VITEST_JSON_REPORT;
+          if (!fs.existsSync(path)) {
+            console.log(`::error::No vitest JSON report at ${path}; the test step did not finish.`);
+            process.exit(1);
+          }
+          const report = JSON.parse(fs.readFileSync(path, "utf8"));
+          const allowedToSkip = ["minio-disclosure-document-store.integration.test.ts"];
+          const unexpected = [];
+          let allowed = 0;
+          let integrationRan = 0;
+          for (const file of report.testResults) {
+            const name = file.name.split("/").pop();
+            for (const test of file.assertionResults) {
+              const skipped = test.status !== "passed" && test.status !== "failed";
+              if (!skipped && name.endsWith(".integration.test.ts")) integrationRan += 1;
+              if (!skipped) continue;
+              if (allowedToSkip.includes(name)) allowed += 1;
+              else unexpected.push(`${name}: ${test.fullName}`);
+            }
+          }
+          const summary = [
+            `Tests: ${report.numTotalTests} total, ${report.numPassedTests} passed, ${report.numFailedTests} failed, ${report.numPendingTests + report.numTodoTests} skipped`,
+            `DB integration tests executed: ${integrationRan}`,
+            `Skipped (allowed, MinIO not configured): ${allowed}`,
+            `Skipped (unexpected): ${unexpected.length}`,
+          ];
+          console.log(summary.join("\n"));
+          if (process.env.GITHUB_STEP_SUMMARY) {
+            fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary.map((line) => `- ${line}`).join("\n") + "\n");
+          }
+          if (unexpected.length > 0 || integrationRan === 0) {
+            for (const entry of unexpected) console.log(`::error::Skipped: ${entry}`);
+            if (integrationRan === 0) console.log("::error::No DB integration test executed.");
+            process.exit(1);
+          }
+          EOF
