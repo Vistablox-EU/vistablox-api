@@ -4,6 +4,7 @@ import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import type {
+  RecordSessionActivityInput,
   RecordSessionCreatedInput,
   RecordSessionRevokedInput,
   SessionMirror,
@@ -59,6 +60,13 @@ export class PrismaSessionMirror implements SessionMirror {
         revokedAt: input.revokedAt,
         revocationReason: input.reason,
       },
+    });
+  }
+
+  public async recordActivity(input: RecordSessionActivityInput): Promise<void> {
+    await this.database.session.updateMany({
+      where: { betterAuthSessionId: input.betterAuthSessionId, revokedAt: null },
+      data: { lastSeenAt: input.seenAt, idleExpiresAt: input.idleExpiresAt },
     });
   }
 

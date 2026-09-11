@@ -6,6 +6,10 @@ import { createAuthMiddleware, isAPIError } from "better-auth/api";
 import type { AuthAuditEvent, AuthAuditSink } from "../application/auth-audit-sink.js";
 import type { SessionMirror } from "../application/session-mirror.js";
 import type { LoginMethodType } from "../../account/repository/account.repository.js";
+import {
+  DEVICE_SESSION_IDLE_TIMEOUT_MS,
+  deviceSessionAbsoluteExpiresAt,
+} from "../domain/device-session-lifetime.js";
 
 export interface BetterAuthAuditPluginOptions {
   sink: AuthAuditSink;
@@ -45,11 +49,20 @@ export function createBetterAuthAuditPlugin(
     }
   };
   const mirrorCreated = async (
-    session: { id: string; userId: string; token: string; createdAt: Date },
+    session: {
+      id: string;
+      userId: string;
+      token: string;
+      createdAt: Date;
+      authenticationLevel?: unknown;
+    },
     context: AuditContext | null,
     authMethod: string | null,
   ): Promise<void> => {
     if (options.sessionMirror === undefined) return;
+    // Device sessions have their own limits (idle 5 min, absolute 30 min,
+    // contract 3.6/3.7); every other session keeps the configured web policy.
+    const isDeviceSession = session.authenticationLevel === "device_biometric";
     try {
       await options.sessionMirror.recordCreated({
         betterAuthUserId: session.userId,
@@ -58,8 +71,12 @@ export function createBetterAuthAuditPlugin(
         authMethodAtLogin: authMethod,
         userAgent: context?.headers?.get("user-agent") ?? null,
         createdAt: session.createdAt,
-        idleExpiresAt: new Date(session.createdAt.getTime() + idleMinutes * 60_000),
-        absoluteExpiresAt: new Date(session.createdAt.getTime() + absoluteHours * 60 * 60_000),
+        idleExpiresAt: isDeviceSession
+          ? new Date(session.createdAt.getTime() + DEVICE_SESSION_IDLE_TIMEOUT_MS)
+          : new Date(session.createdAt.getTime() + idleMinutes * 60_000),
+        absoluteExpiresAt: isDeviceSession
+          ? deviceSessionAbsoluteExpiresAt(session.createdAt)
+          : new Date(session.createdAt.getTime() + absoluteHours * 60 * 60_000),
       });
     } catch (error) {
       options.onError?.(error);

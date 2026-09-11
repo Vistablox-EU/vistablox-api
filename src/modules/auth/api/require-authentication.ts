@@ -83,6 +83,11 @@ export function createRequireAuthentication(
         });
       }
 
+      // Session time limits (contract 3.6/3.7): this request counts as
+      // activity only here, after the DPoP proof and the account checks
+      // above have passed.
+      await sessions.recordActivity?.(identity);
+
       response.locals.authContext = {
         accountId: account.accountId,
         providerSessionId: identity.providerSessionId,
