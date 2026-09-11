@@ -13,6 +13,7 @@ import {
   dpopErrorResponseFields,
   isDpopVerificationError,
   verifyDpopProof,
+  type DpopLogger,
   type DpopProofClaims,
 } from "../application/dpop-proof-verifier.js";
 
@@ -32,6 +33,7 @@ export interface DpopEnforcementOptions {
   // treats every unbound session as pre-cutover (safe only before phase 1
   // has actually shipped to mobile).
   phase1CutoverAt?: Date;
+  logger?: DpopLogger;
 }
 
 export function createRequireAuthentication(
@@ -111,9 +113,15 @@ function readBearerToken(request: Parameters<RequestHandler>[0]): string | undef
     : undefined;
 }
 
-function throwDpop401(response: Parameters<RequestHandler>[1], error: Parameters<typeof dpopErrorResponseFields>[0]): never {
+function throwDpop401(
+  request: Parameters<RequestHandler>[0],
+  response: Parameters<RequestHandler>[1],
+  dpop: DpopEnforcementOptions | undefined,
+  error: Parameters<typeof dpopErrorResponseFields>[0],
+): never {
   response.setHeader("WWW-Authenticate", DPOP_WWW_AUTHENTICATE);
   const { code, title, detail } = dpopErrorResponseFields(error);
+  dpop?.logger?.rejected({ code, path: request.path });
   throw new AppError({ code, title, status: 401, detail });
 }
 
@@ -149,7 +157,7 @@ async function enforceBoundSessionProof(
     }
   } catch (error) {
     if (isDpopVerificationError(error)) {
-      throwDpop401(response, error);
+      throwDpop401(request, response, dpop, error);
     }
     throw error;
   }
@@ -191,13 +199,14 @@ async function maybeBindUnboundSession(
   const isPreCutover =
     dpop.phase1CutoverAt === undefined || identity.sessionCreatedAt < dpop.phase1CutoverAt;
   if (!isPreCutover) {
-    throwDpop401(response, new DpopKeyMismatchError());
+    throwDpop401(request, response, dpop, new DpopKeyMismatchError());
   }
 
   const accepted = await recordProof(dpop, claims);
   if (!accepted) return; // replayed -- best effort, don't bind
 
   await sessions.bindDpopKey?.(identity.providerSessionId, claims.jkt);
+  dpop.logger?.bound({ sessionId: identity.providerSessionId, jkt: claims.jkt });
 }
 
 function recordProof(dpop: DpopEnforcementOptions, claims: DpopProofClaims): Promise<boolean> {

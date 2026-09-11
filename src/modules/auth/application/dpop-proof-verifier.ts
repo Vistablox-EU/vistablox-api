@@ -45,6 +45,22 @@ export interface DpopProofClaims {
   jti: string;
 }
 
+// Observability: a jkt is a public key thumbprint, not a secret, but a
+// truncated form is still enough to correlate log lines for one device
+// without the full value showing up verbatim in every entry. Never pass a
+// proof, a bearer token, or an ath value to a DpopLogger call -- callers
+// only ever get jkt/code/path/sessionId here, by construction.
+export function jktFingerprint(jkt: string): string {
+  return jkt.slice(0, 12);
+}
+
+export interface DpopLogger {
+  /** A session was bound (or newly bound on first sight) to a key. */
+  bound(input: { sessionId: string; jkt: string }): void;
+  /** A DPoP proof was rejected: missing, invalid, replayed, or a key mismatch. */
+  rejected(input: { code: string; path: string }): void;
+}
+
 export const DPOP_WWW_AUTHENTICATE = 'DPoP error="invalid_dpop_proof"';
 
 export type DpopVerificationError =

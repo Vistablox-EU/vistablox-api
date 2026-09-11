@@ -54,6 +54,7 @@ import { PrismaProfileRepository } from "./modules/profile/repository/prisma-pro
 import { PrismaAccountPreferencesRepository } from "./modules/profile/repository/prisma-account-preferences.repository.js";
 import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
 import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
+import { jktFingerprint, type DpopLogger } from "./modules/auth/application/dpop-proof-verifier.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { createChainReader } from "./infrastructure/blockchain/chain-client.js";
 import { ViemWalletChainReader } from "./infrastructure/blockchain/chain-wallet-reader.js";
@@ -175,6 +176,20 @@ const trustedOrigins = environment.APPLE_OAUTH_ENABLED
   ? [...new Set([...appTrustedOrigins, "https://appleid.apple.com"])]
   : appTrustedOrigins;
 const dpopReplayRepository = new PrismaDpopReplayRepository(database);
+// Never passed a proof, a bearer token, or an ath value -- DpopLogger's own
+// call shape only ever carries a session id, a jkt (truncated here before
+// it reaches the log line), a rejection code, and a path.
+const dpopLogger: DpopLogger = {
+  bound: ({ sessionId, jkt }) => {
+    logger.info(
+      { session_id: sessionId, jkt_fingerprint: jktFingerprint(jkt) },
+      "dpop session bound",
+    );
+  },
+  rejected: ({ code, path }) => {
+    logger.warn({ code, path }, "dpop proof rejected");
+  },
+};
 const auth = createBetterAuth({
   database: authDatabase,
   baseURL: environment.BETTER_AUTH_URL,
@@ -184,6 +199,7 @@ const auth = createBetterAuth({
   dpop: {
     baseUrl: environment.BETTER_AUTH_URL,
     replayRepository: dpopReplayRepository,
+    logger: dpopLogger,
     ...(environment.DPOP_PHASE1_CUTOVER_AT === undefined
       ? {}
       : { phase1CutoverAt: environment.DPOP_PHASE1_CUTOVER_AT }),
@@ -416,6 +432,7 @@ const app = createApp({
     dpop: {
       baseUrl: environment.BETTER_AUTH_URL,
       replayRepository: dpopReplayRepository,
+      logger: dpopLogger,
       ...(environment.DPOP_PHASE1_CUTOVER_AT === undefined
         ? {}
         : { phase1CutoverAt: environment.DPOP_PHASE1_CUTOVER_AT }),
