@@ -61,6 +61,18 @@ services:
       # somehow missing, same reasoning as DPOP_PHASE1_CUTOVER_AT above.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-api.vistablox.io}
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
+      # The images set NODE_ENV=production (see the Dockerfile), so APP_ENV is
+      # what marks this deployment as staging. Staging-only settings, such as
+      # PLAY_INTEGRITY_POLICY=disabled, are accepted here and nowhere else.
+      APP_ENV: staging
+      # Device-key auth (Android). "disabled" until a Play Console / Cloud
+      # project exists; Android key attestation is enforced regardless, and
+      # enrolment needs both ANDROID_ATTESTATION_* values set.
+      PLAY_INTEGRITY_POLICY: ${PLAY_INTEGRITY_POLICY:-disabled}
+      PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER: ${PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER:-}
+      PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON: ${PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON:-}
+      ANDROID_ATTESTATION_CERT_DIGESTS: ${ANDROID_ATTESTATION_CERT_DIGESTS:-}
+      ANDROID_ATTESTATION_ROOT_CERTIFICATES: ${ANDROID_ATTESTATION_ROOT_CERTIFICATES:-}
       PASSKEY_APPLE_TEAM_ID: ${PASSKEY_APPLE_TEAM_ID:-}
       PASSKEY_ANDROID_ORIGINS: ${PASSKEY_ANDROID_ORIGINS:-}
       PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS: ${PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS:-}
