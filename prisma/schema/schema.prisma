@@ -58,6 +58,7 @@ model Account {
   preferences                    AccountPreferences?
   closureRequests                AccountClosureRequest[] @relation("ClosureRequestSubject")
   resolvedClosureRequests        AccountClosureRequest[] @relation("ClosureRequestResolver")
+  devices                        Device[]
 
   @@map("accounts")
   @@schema("account")

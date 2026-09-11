@@ -29,6 +29,7 @@ export class BetterAuthSessionResolver implements SessionResolver {
     const accepted =
       authenticationLevel === "oauth_passkey" ||
       authenticationLevel === "staff_passkey" ||
+      authenticationLevel === "device_biometric" ||
       (this.options.allowPendingOAuth === true && authenticationLevel === "oauth_pending");
     if (!accepted) return null;
 

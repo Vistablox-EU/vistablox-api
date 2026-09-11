@@ -78,6 +78,14 @@ import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-we
 import type { SessionResolver } from "./modules/auth/application/session-resolver.js";
 import { createCustomerSessionRouter } from "./modules/auth/api/customer-session.router.js";
 import {
+  createAppConfigRouter,
+  createDeviceAuthRouter,
+  type AppConfig,
+} from "./modules/auth/api/device-auth.router.js";
+import { createRequireDpopOnly } from "./modules/auth/api/require-dpop-only.js";
+import type { IssueDeviceChallengeService } from "./modules/auth/application/device-challenge-issuance.service.js";
+import type { VistaBloxAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
+import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
   RevokeDeviceSessionsService,
@@ -344,6 +352,17 @@ export interface AppDependencies {
       repository: CustomerSessionRepository;
       revoker: SessionRevoker;
     };
+    // Device-key auth, step 1: single-device enrolment/login only (see
+    // docs/plans/device-bound-auth-backend.md). `auth` is the same
+    // VistaBloxAuth instance createBetterAuth returned with a `deviceAuth`
+    // option set -- E2/L2 forward to its enrolVerify/loginVerify plugin
+    // endpoints via auth.api.*, not a second HTTP hop.
+    deviceAuth?: {
+      auth: VistaBloxAuth;
+      issueChallenge: IssueDeviceChallengeService;
+      baseUrl: string;
+      appConfig: AppConfig;
+    };
   };
 }
 
@@ -529,6 +548,15 @@ export function createApp(dependencies: AppDependencies): Express {
           requireAuthentication,
           new UnlinkLoginMethodService(loginMethods.unlinker),
         ),
+      );
+    }
+    if (dependencies.protectedApi.deviceAuth !== undefined) {
+      const deviceAuth = dependencies.protectedApi.deviceAuth;
+      const requireDpopOnly = createRequireDpopOnly({ baseUrl: deviceAuth.baseUrl });
+      app.use("/v1/app", createAppConfigRouter(requireDpopOnly, deviceAuth.appConfig));
+      app.use(
+        "/v1/auth/devices",
+        createDeviceAuthRouter(requireDpopOnly, deviceAuth.issueChallenge, deviceAuth.auth),
       );
     }
     if (dependencies.protectedApi.wallet !== undefined) {

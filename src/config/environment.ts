@@ -62,6 +62,40 @@ const environmentSchema = z
       (value) => (value === "" ? undefined : value),
       z.url().optional(),
     ),
+    // Device-key auth: Android key attestation + Play Integrity policy.
+    // "disabled" is an interim value for staging while there's no Play
+    // Console/Cloud project yet -- it skips the Play Integrity token check
+    // only; Android key attestation (chain, attestationChallenge match,
+    // hardware-backed, cert-digest allowlist, revocation list) is always
+    // enforced regardless of this value. "relaxed" additionally accepts
+    // UNRECOGNIZED_VERSION (sideloaded builds) once the account exists;
+    // "strict" is the eventual production policy. Refused in production
+    // below except as "strict" -- see the .refine() near the bottom.
+    PLAY_INTEGRITY_POLICY: z.enum(["disabled", "relaxed", "strict"]).default("disabled"),
+    PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER: optionalNonEmptyString(),
+    // Base64-encoded service account JSON, decode-only role, used to verify
+    // (never mint) Play Integrity tokens.
+    PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON: optionalNonEmptyString(),
+    // The Android app-signing-cert allowlist for key attestation's leaf
+    // certificate -- comma-separated SHA-256 digests, same shape as
+    // PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS but kept as its own variable
+    // since passkeys (and that variable) are going away.
+    ANDROID_ATTESTATION_CERT_DIGESTS: z.preprocess(
+      emptyStringToUndefined,
+      z.string().transform((value) => value.split(",").map((item) => item.trim()).filter(Boolean)).optional(),
+    ),
+    // Google's published hardware-attestation root certificates
+    // (source.android.com/docs/security/features/keystore/attestation),
+    // base64 DER, comma-separated. Deliberately a config value, not a
+    // hardcoded constant, so the set can be updated without a code deploy
+    // if/when Google rotates it -- but there is no safe fallback if this is
+    // left empty: verifyAndroidKeyAttestation refuses every chain outright
+    // rather than silently accepting an unpinned one, so this must be set
+    // before device enrolment can work anywhere, including staging.
+    ANDROID_ATTESTATION_ROOT_CERTIFICATES: z.preprocess(
+      emptyStringToUndefined,
+      z.string().transform((value) => value.split(",").map((item) => item.trim()).filter(Boolean)).optional(),
+    ),
     AUTH_TRUSTED_ORIGINS: z
       .string()
       .default("http://localhost:3000")
@@ -333,6 +367,14 @@ const environmentSchema = z
       // rpId or a subdomain of it.
       message: "BETTER_AUTH_URL's hostname must equal WEBAUTHN_RP_ID or be a subdomain of it",
       path: ["WEBAUTHN_RP_ID"],
+    },
+  )
+  .refine(
+    (environment) =>
+      environment.NODE_ENV !== "production" || environment.PLAY_INTEGRITY_POLICY === "strict",
+    {
+      message: "PLAY_INTEGRITY_POLICY must be \"strict\" in production -- \"disabled\" and \"relaxed\" exist for staging only",
+      path: ["PLAY_INTEGRITY_POLICY"],
     },
   );
 
