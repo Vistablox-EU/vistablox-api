@@ -64,9 +64,11 @@ export class EnrolDeviceService {
     const consumed = await this.challengeRepository.consume({
       challenge: input.challenge,
       purpose: ENROL_PURPOSE,
+      dpopJkt: input.dpopJkt,
+      deviceId: undefined,
       now: this.clock(),
     });
-    if (consumed === null) {
+    if (!consumed) {
       throw new DeviceChallengeExpiredError();
     }
 
@@ -76,6 +78,7 @@ export class EnrolDeviceService {
       expectedChallenge: input.challenge,
       expectedDeviceId: undefined,
       storedPublicJwk: undefined,
+      expectedDpopJkt: input.dpopJkt,
       now: this.clock(),
     });
 

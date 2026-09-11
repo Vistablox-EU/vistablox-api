@@ -68,20 +68,24 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
   public async consume(input: {
     challenge: string;
     purpose: string;
+    dpopJkt: string;
+    deviceId: string | undefined;
     now: Date;
-  }): Promise<{ deviceId: string | undefined } | null> {
+  }): Promise<boolean> {
     this.consumeCallCount++;
     const entry = this.issued.get(input.challenge);
     if (
       entry === undefined ||
       entry.purpose !== input.purpose ||
+      entry.dpopJkt !== input.dpopJkt ||
+      entry.deviceId !== input.deviceId ||
       entry.consumed ||
       entry.expiresAt <= input.now
     ) {
-      return null;
+      return false;
     }
     entry.consumed = true;
-    return { deviceId: entry.deviceId };
+    return true;
   }
 
   public async pruneExpired(): Promise<number> {

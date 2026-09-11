@@ -125,17 +125,20 @@ export function createDeviceAuthRouter(
   requireDpopOnly: RequestHandler,
   issueChallenge: IssueDeviceChallengeService,
   auth: VistaBloxAuth,
-  // Challenge issuance writes a fresh, unauthenticated device_challenges row
-  // on every call -- unlike verify, which is gated by a single-use challenge
-  // it has to already hold. Applied after requireDpopOnly so a DPoP-keyed
-  // limiter (see rate-limit.ts's dpopKeyRateLimitSubject) can read
-  // response.locals.dpopJkt; empty by default so a caller with no
-  // rateLimitStore configured (e.g. most tests) gets no-op middleware.
-  challengeRateLimiters: RequestHandler[] = [],
+  // Applied after requireDpopOnly (so a DPoP-keyed limiter -- see
+  // rate-limit.ts's dpopKeyRateLimitSubject -- can read response.locals
+  // .dpopJkt) to all four routes: challenge issuance writes a fresh,
+  // unauthenticated device_challenges row on every call with no other
+  // gate, and verify is worth limiting too even though it's gated by
+  // holding a single-use challenge (brute-forcing a JWS/attestation
+  // shouldn't be free just because it fails). Empty by default so a
+  // caller with no rateLimitStore configured (e.g. most tests) gets
+  // no-op middleware.
+  deviceAuthRateLimiters: RequestHandler[] = [],
 ): Router {
   const router = Router();
 
-  router.post("/enrol/challenge", requireDpopOnly, ...challengeRateLimiters, async (_request, response) => {
+  router.post("/enrol/challenge", requireDpopOnly, ...deviceAuthRateLimiters, async (_request, response) => {
     const dpopJkt = requireDpopJkt(response);
     const { challenge, expiresAt } = await issueChallenge.execute({
       purpose: "enrol-device",
@@ -150,7 +153,7 @@ export function createDeviceAuthRouter(
     );
   });
 
-  router.post("/enrol/verify", requireDpopOnly, async (request, response) => {
+  router.post("/enrol/verify", requireDpopOnly, ...deviceAuthRateLimiters, async (request, response) => {
     const body = enrolVerifyRequestSchema.parse(request.body);
     try {
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).enrolVerify({
@@ -183,7 +186,7 @@ export function createDeviceAuthRouter(
     }
   });
 
-  router.post("/login/challenge", requireDpopOnly, ...challengeRateLimiters, async (request, response) => {
+  router.post("/login/challenge", requireDpopOnly, ...deviceAuthRateLimiters, async (request, response) => {
     const dpopJkt = requireDpopJkt(response);
     const body = loginChallengeRequestSchema.parse(request.body);
     const { challenge, expiresAt } = await issueChallenge.execute({
@@ -204,7 +207,7 @@ export function createDeviceAuthRouter(
     );
   });
 
-  router.post("/login/verify", requireDpopOnly, async (request, response) => {
+  router.post("/login/verify", requireDpopOnly, ...deviceAuthRateLimiters, async (request, response) => {
     const body = loginVerifyRequestSchema.parse(request.body);
     try {
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).loginVerify({

@@ -11,10 +11,15 @@ import {
   DeviceLoginFailedError,
   DevicePairingNotImplementedError,
 } from "../application/device-auth-errors.js";
-import { DeviceChallengePurposeMismatchError, DeviceJwsInvalidError } from "../application/device-auth-jws-verifier.js";
+import {
+  DeviceChallengePurposeMismatchError,
+  DeviceJwsDpopMismatchError,
+  DeviceJwsInvalidError,
+} from "../application/device-auth-jws-verifier.js";
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
 import {
+  assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
   type DpopCreationContext,
   type DpopSessionCreationOptions,
@@ -71,7 +76,6 @@ export function createBetterAuthDeviceAuthPlugin(
             request: ctx.request,
             path: ctx.path,
           };
-          const dpopClaims = await requireDpopProofForSessionCreation(dpopContext, options.dpop);
 
           const current = await getSessionFromCtx(ctx);
           const level = (current?.session as Record<string, unknown> | undefined)
@@ -83,6 +87,26 @@ export function createBetterAuthDeviceAuthPlugin(
             });
           }
 
+          // The pending session must ALREADY be bound to this exact DPoP key
+          // -- not merely presenting *a* valid proof. An unbound session
+          // (Phase 1 allows sign-in without a DPoP proof) must be refused
+          // outright here, not silently bound to whatever key shows up:
+          // otherwise a stolen oauth_pending bearer token plus an
+          // attacker's own DPoP key would be enough to enrol a device on
+          // someone else's account. assertDpopKeyMatchesPendingSession also
+          // does the actual verify+record (once, cached for the
+          // session.create.before hook this same request is about to fire)
+          // -- see isSessionUpgradeCeremonyPath's own comment for why the
+          // generic DPoP plugin hook does not also do this for this path.
+          const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
+          if (typeof boundJkt !== "string") {
+            throw APIError.from("UNAUTHORIZED", {
+              code: "DEVICE_JWS_INVALID",
+              message: "This session is not yet bound to a device key.",
+            });
+          }
+          await assertDpopKeyMatchesPendingSession(dpopContext, boundJkt, options.dpop);
+
           const account = await options.accounts.findByBetterAuthUserId(current.user.id);
           if (account === null) {
             throw APIError.from("INTERNAL_SERVER_ERROR", {
@@ -90,12 +114,15 @@ export function createBetterAuthDeviceAuthPlugin(
               message: "The authenticated identity is not linked to a VistaBlox account.",
             });
           }
+          if (account.status !== "active") {
+            throw accountRestricted();
+          }
 
           try {
             const device = await options.enrolDevice.execute({
               accountId: account.accountId,
               betterAuthUserId: current.user.id,
-              dpopJkt: dpopClaims.jkt,
+              dpopJkt: boundJkt,
               challenge: ctx.body.challenge,
               jws: ctx.body.jws,
               attestation: {
@@ -121,6 +148,10 @@ export function createBetterAuthDeviceAuthPlugin(
               });
             }
             await setSessionCookie(ctx, { session, user: current.user });
+            // The pending session's job is done -- mirrors the passkey
+            // ceremony's own priorSessionToken/deleteSession pattern (E2
+            // "rotates" per the wire contract, section 3.1).
+            await ctx.context.internalAdapter.deleteSession(current.session.token);
 
             return ctx.json({
               device_id: device.deviceId,
@@ -129,6 +160,7 @@ export function createBetterAuthDeviceAuthPlugin(
               authentication_level: "device_biometric" as const,
             });
           } catch (error) {
+            logAttestationRejection(ctx, error);
             throw toApiError(error);
           }
         },
@@ -151,6 +183,15 @@ export function createBetterAuthDeviceAuthPlugin(
               challenge: ctx.body.challenge,
               jws: ctx.body.jws,
             });
+
+            // A closed/suspended account otherwise keeps its devices fully
+            // able to log in -- device status and account status are
+            // separate, and closing/restricting an account today doesn't
+            // touch its devices at all.
+            const account = await options.accounts.findByBetterAuthUserId(device.betterAuthUserId);
+            if (account === null || account.status !== "active") {
+              throw accountRestricted();
+            }
 
             const session = await ctx.context.internalAdapter.createSession(
               device.betterAuthUserId,
@@ -176,6 +217,7 @@ export function createBetterAuthDeviceAuthPlugin(
               authentication_level: "device_biometric" as const,
             });
           } catch (error) {
+            logAttestationRejection(ctx, error);
             throw toApiError(error);
           }
         },
@@ -184,16 +226,72 @@ export function createBetterAuthDeviceAuthPlugin(
   };
 }
 
-function toApiError(error: unknown): APIError {
+// Contract error code ACCOUNT_RESTRICTED (403) -- "Account frozen or
+// closed", section 3.6. A closed/suspended account's devices otherwise stay
+// fully able to enrol/log in: device status is entirely separate from
+// account status, and closing an account today doesn't touch its devices.
+export function accountRestricted(): APIError {
+  return APIError.from("FORBIDDEN", {
+    code: "ACCOUNT_RESTRICTED",
+    message: "This account can't be used right now.",
+  });
+}
+
+// Structural, not better-auth's own Logger type: this file doesn't need
+// the rest of that type's surface, just .warn, and staying structural
+// avoids depending on an internal type this codebase doesn't otherwise
+// import from.
+interface MinimalContextLogger {
+  context: { logger?: { warn?: (message: string, data?: Record<string, unknown>) => void } };
+  path?: string;
+}
+
+// The client-facing message never carries an AndroidAttestationInvalidError's
+// specific reason (see toApiError below) -- it's still worth keeping
+// somewhere, so a real rejection has more to go on in the logs than "it
+// failed". Only Android-attestation errors carry a reason (their
+// constructor's whole argument); every other device-auth error's message
+// is already the safe, generic one (see each class's own doc comment).
+export function logAttestationRejection(ctx: MinimalContextLogger, error: unknown): void {
+  if (isAndroidAttestationError(error)) {
+    ctx.context.logger?.warn?.("device-auth attestation rejected", {
+      code: error.code,
+      reason: error.message,
+      path: ctx.path ?? "unknown",
+    });
+  }
+}
+
+// HTTP status per contract section 3.6 -- not a blanket 401. Attacker-
+// reachable detail is still kept out of the response either way: every one
+// of these error classes' own .message is written to be safe to return
+// as-is (see each class's own doc comment), never the verifier's specific
+// internal rejection reason (that's logged server-side only -- see
+// AndroidAttestationInvalidError's construction sites, which never surface
+// their `reason` argument to the client).
+export function toApiError(error: unknown): APIError {
   if (error instanceof APIError) return error;
   if (
     error instanceof DeviceChallengeExpiredError ||
-    error instanceof DeviceAlreadyEnrolledError ||
-    error instanceof DeviceLoginFailedError ||
-    error instanceof DeviceJwsInvalidError ||
     error instanceof DeviceChallengePurposeMismatchError ||
-    isAndroidAttestationError(error)
+    error instanceof DeviceJwsInvalidError ||
+    error instanceof DeviceJwsDpopMismatchError
   ) {
+    return APIError.from("BAD_REQUEST", { code: error.code, message: error.message });
+  }
+  if (isAndroidAttestationError(error)) {
+    // Never the verifier's specific internal reason (error.message) -- it's
+    // an oracle a forger could use to iterate towards a chain that passes.
+    // The caller logs the real reason server-side before calling this.
+    return APIError.from("BAD_REQUEST", {
+      code: error.code,
+      message: "This device can't be used for VistaBlox.",
+    });
+  }
+  if (error instanceof DeviceAlreadyEnrolledError) {
+    return APIError.from("CONFLICT", { code: error.code, message: error.message });
+  }
+  if (error instanceof DeviceLoginFailedError) {
     return APIError.from("UNAUTHORIZED", { code: error.code, message: error.message });
   }
   if (error instanceof DevicePairingNotImplementedError) {

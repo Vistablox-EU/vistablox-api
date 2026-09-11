@@ -10,6 +10,7 @@ import {
   type DpopLogger,
 } from "../application/dpop-proof-verifier.js";
 import type { DpopReplayRepository } from "../repository/dpop-replay.repository.js";
+import { isSessionUpgradeCeremonyPath } from "./dpop-session-creation.js";
 
 export interface BetterAuthDpopPluginOptions {
   baseUrl: string;
@@ -43,6 +44,11 @@ export function createBetterAuthDpopPlugin(options: BetterAuthDpopPluginOptions)
           // enforcement for those.
           matcher: (context) => context.request !== undefined,
           handler: createAuthMiddleware(async (ctx) => {
+            // See isSessionUpgradeCeremonyPath's own comment: these paths do
+            // their own full, explicit DPoP verification and must not also
+            // be verified/recorded/bound here.
+            if (isSessionUpgradeCeremonyPath(ctx.path)) return;
+
             const current = await getSessionFromCtx(ctx);
             if (current === null) return;
 

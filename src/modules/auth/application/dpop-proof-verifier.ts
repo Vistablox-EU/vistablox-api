@@ -136,8 +136,17 @@ export async function verifyDpopProof(input: {
 
   let protectedHeader: { typ?: unknown; alg?: unknown; jwk?: unknown };
   try {
-    protectedHeader = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
-  } catch {
+    const parsed: unknown = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
+    // JSON.parse("null")/("42")/("\"x\"") all succeed with no exception --
+    // a base64url-encoded "null" header would otherwise reach `.typ` below
+    // on a null value and throw an uncaught TypeError instead of the clean
+    // 400 every other malformed-header case gets.
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new DpopProofInvalidError("malformed protected header");
+    }
+    protectedHeader = parsed;
+  } catch (error) {
+    if (error instanceof DpopProofInvalidError) throw error;
     throw new DpopProofInvalidError("malformed protected header");
   }
 

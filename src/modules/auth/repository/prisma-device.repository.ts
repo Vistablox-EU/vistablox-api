@@ -1,8 +1,23 @@
 import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
-import type { Prisma } from "../../../generated/prisma/client.js";
+import { Prisma } from "../../../generated/prisma/client.js";
+import {
+  DeviceAlreadyEnrolledError,
+  DevicePairingNotImplementedError,
+} from "../application/device-auth-errors.js";
 import type { Device, DeviceRepository } from "./device.repository.js";
+
+// This table's two unique constraints (dpop_jkt, and the partial
+// one-active-device-per-account index from the
+// 20260911160000_device_one_active_per_account migration) both exist to
+// close a check-then-insert race EnrolDeviceService's own pre-checks can't
+// fully close on their own (findByDpopJkt / findActiveDeviceForAccount, then
+// this create() -- two concurrent enrolments can both pass those checks
+// before either has inserted). The partial index isn't modeled in
+// schema.prisma (Prisma's DSL has no syntax for one), so it surfaces here
+// by constraint name rather than target field name.
+const ONE_ACTIVE_DEVICE_PER_ACCOUNT_CONSTRAINT = "devices_one_active_per_account";
 
 export class PrismaDeviceRepository implements DeviceRepository {
   public constructor(private readonly database: DatabaseClient) {}
@@ -19,22 +34,34 @@ export class PrismaDeviceRepository implements DeviceRepository {
     appVersion: string | undefined;
     attestationMetadata: Record<string, unknown>;
   }): Promise<Device> {
-    const created = await this.database.device.create({
-      data: {
-        deviceId: `device_${ulid()}`,
-        accountId: input.accountId,
-        betterAuthUserId: input.betterAuthUserId,
-        dpopJkt: input.dpopJkt,
-        bioJkt: input.bioJkt,
-        biometricPublicJwk: input.biometricPublicJwk as Prisma.InputJsonValue,
-        platform: input.platform,
-        model: input.model ?? null,
-        osVersion: input.osVersion ?? null,
-        appVersion: input.appVersion ?? null,
-        attestationMetadata: input.attestationMetadata as Prisma.InputJsonValue,
-      },
-    });
-    return toDevice(created);
+    try {
+      const created = await this.database.device.create({
+        data: {
+          deviceId: `device_${ulid()}`,
+          accountId: input.accountId,
+          betterAuthUserId: input.betterAuthUserId,
+          dpopJkt: input.dpopJkt,
+          bioJkt: input.bioJkt,
+          biometricPublicJwk: input.biometricPublicJwk as Prisma.InputJsonValue,
+          platform: input.platform,
+          model: input.model ?? null,
+          osVersion: input.osVersion ?? null,
+          appVersion: input.appVersion ?? null,
+          attestationMetadata: input.attestationMetadata as Prisma.InputJsonValue,
+        },
+      });
+      return toDevice(created);
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+        if (constraintMatches(error, ONE_ACTIVE_DEVICE_PER_ACCOUNT_CONSTRAINT)) {
+          throw new DevicePairingNotImplementedError();
+        }
+        if (constraintMatches(error, "dpop_jkt")) {
+          throw new DeviceAlreadyEnrolledError();
+        }
+      }
+      throw error;
+    }
   }
 
   public async findByDeviceId(deviceId: string): Promise<Device | null> {
@@ -61,6 +88,25 @@ export class PrismaDeviceRepository implements DeviceRepository {
       data: { lastSeenAt: at },
     });
   }
+}
+
+// meta.target's shape depends on whether Prisma recognizes the violated
+// constraint from schema.prisma: a string[] of field names for one it
+// knows (dpop_jkt), or just the constraint name as a bare string for one
+// it doesn't (the hand-written partial index) -- checking both, plus the
+// underlying Postgres error message as a fallback, covers either case
+// without depending on exactly which one a given Prisma/driver version
+// picks.
+function constraintMatches(
+  error: Prisma.PrismaClientKnownRequestError,
+  constraintOrFieldName: string,
+): boolean {
+  const target = error.meta?.target;
+  if (typeof target === "string" && target.includes(constraintOrFieldName)) return true;
+  if (Array.isArray(target) && target.some((field) => String(field).includes(constraintOrFieldName))) {
+    return true;
+  }
+  return error.message.includes(constraintOrFieldName);
 }
 
 interface PrismaDeviceRow {

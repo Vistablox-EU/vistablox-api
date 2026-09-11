@@ -42,6 +42,31 @@ export interface DpopCreationContext {
   path?: string | undefined;
 }
 
+// These four endpoints each do their own full, explicit DPoP verification
+// (assertDpopKeyMatchesPendingSession / requireDpopProofForSessionCreation,
+// below) as part of a "resolve or upgrade this specific pending session"
+// ceremony -- better-auth-dpop.plugin.ts's generic before-hook must not
+// ALSO verify+record for these paths. Two independent reasons, found
+// together during the #54 security review:
+//   1. Both would try to record the identical (jkt, jti) for the same
+//      request; the second one always loses as a replay of the first
+//      (DPOP_REPLAY on every real client).
+//   2. The generic hook's own "session unbound -> auto-bind whatever key
+//      shows up" behavior is deliberately permissive (correct for ordinary
+//      Phase 1 traffic), but wrong here: a stolen oauth_pending bearer
+//      token plus an attacker's own arbitrary DPoP key would auto-bind
+//      before the ceremony's own explicit check ever runs. These paths
+//      must reject an unbound (or mismatched) pending session outright,
+//      not silently bind to whatever key happens to show up.
+export function isSessionUpgradeCeremonyPath(path: string | undefined): boolean {
+  return (
+    path === "/passkey/verify-authentication" ||
+    path === "/passkey/verify-registration" ||
+    path === "/device/enrol/verify" ||
+    path === "/device/login/verify"
+  );
+}
+
 // The passkey verify-* ceremonies (and now the device-auth enrol/login
 // endpoints) verify -- and replay-record -- the request's DPoP proof once
 // already, in assertDpopKeyMatchesPendingSession/

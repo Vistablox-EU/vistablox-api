@@ -560,7 +560,21 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     if (dependencies.protectedApi.deviceAuth !== undefined) {
       const deviceAuth = dependencies.protectedApi.deviceAuth;
-      const requireDpopOnly = createRequireDpopOnly({ baseUrl: deviceAuth.baseUrl });
+      // device-auth's own DPoP-bound session creation (requireDpopProofFor
+      // SessionCreation, inside the plugin) already depends on dpop being
+      // configured -- if it weren't, E2/L2 would be broken outright, not
+      // just missing replay protection here. Failing loudly at wiring time
+      // beats silently skipping (jkt, jti) replay recording on this path.
+      if (dependencies.protectedApi.dpop === undefined) {
+        throw new Error("protectedApi.deviceAuth requires protectedApi.dpop to also be configured");
+      }
+      const requireDpopOnly = createRequireDpopOnly({
+        baseUrl: deviceAuth.baseUrl,
+        replayRepository: dependencies.protectedApi.dpop.replayRepository,
+        ...(dependencies.protectedApi.dpop.replayWindowSeconds === undefined
+          ? {}
+          : { replayWindowSeconds: dependencies.protectedApi.dpop.replayWindowSeconds }),
+      });
       app.use("/v1/app", createAppConfigRouter(requireDpopOnly, deviceAuth.appConfig));
       app.use(
         "/v1/auth/devices",

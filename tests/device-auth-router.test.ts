@@ -108,9 +108,9 @@ describe("POST /v1/auth/devices/enrol/verify", () => {
     expect(call.request.method).toBe("POST");
   });
 
-  it("maps a rejected APIError to the /v1 problem+json envelope", async () => {
+  it("maps a rejected APIError to the /v1 problem+json envelope, faithfully relaying whatever status the plugin set (contract 3.6: DEVICE_CHALLENGE_EXPIRED is 400, not 401)", async () => {
     const enrolVerify = vi.fn().mockRejectedValue(
-      new APIError("UNAUTHORIZED", { code: "DEVICE_CHALLENGE_EXPIRED", message: "expired" }),
+      new APIError("BAD_REQUEST", { code: "DEVICE_CHALLENGE_EXPIRED", message: "expired" }),
     );
 
     const response = await request(appFor({ api: { enrolVerify } }))
@@ -121,7 +121,7 @@ describe("POST /v1/auth/devices/enrol/verify", () => {
         attestation: { platform: "android", key_attestation_chain: ["cert1"], integrity_token: undefined },
       });
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(400);
     expect(response.body.code).toBe("DEVICE_CHALLENGE_EXPIRED");
   });
 });
@@ -167,8 +167,8 @@ describe("POST /v1/auth/devices/login/verify", () => {
   });
 });
 
-describe("challenge-issuance rate limiting", () => {
-  const rejectAfterFirstCall: RequestHandler = (() => {
+describe("device-auth rate limiting", () => {
+  function rejectAfterFirstCall(): RequestHandler {
     let calls = 0;
     return (_request, response, next) => {
       calls++;
@@ -178,10 +178,10 @@ describe("challenge-issuance rate limiting", () => {
       }
       next();
     };
-  })();
+  }
 
   it("applies the supplied rate limiters to /enrol/challenge and /login/challenge", async () => {
-    const app = appFor({ api: {} }, [rejectAfterFirstCall]);
+    const app = appFor({ api: {} }, [rejectAfterFirstCall()]);
 
     const first = await request(app).post("/v1/auth/devices/enrol/challenge");
     const second = await request(app).post("/v1/auth/devices/login/challenge").send({
@@ -193,7 +193,7 @@ describe("challenge-issuance rate limiting", () => {
     expect(second.body.code).toBe("rate_limit.exceeded");
   });
 
-  it("does not apply the challenge rate limiters to /enrol/verify or /login/verify", async () => {
+  it("also applies the supplied rate limiters to /enrol/verify and /login/verify", async () => {
     const enrolVerify = vi.fn().mockResolvedValue({
       response: {
         device_id: "device_1",
@@ -203,23 +203,25 @@ describe("challenge-issuance rate limiting", () => {
       },
       headers: new Headers(),
     });
-    // A limiter that rejects every call, past or not -- if it were wired
-    // onto /enrol/verify too, this request would 429 instead of reaching
-    // enrolVerify.
-    const rejectAlways: RequestHandler = (_request, response) => {
-      response.status(429).json({ code: "rate_limit.exceeded" });
-    };
-    const app = appFor({ api: { enrolVerify } }, [rejectAlways]);
+    const loginVerify = vi.fn();
+    // Fresh limiter instance (its own call counter) per app -- verifying
+    // /login/verify inherits the limiter too, independent of /enrol/verify's.
+    const app = appFor({ api: { enrolVerify, loginVerify } }, [rejectAfterFirstCall()]);
 
-    const response = await request(app)
+    const first = await request(app)
       .post("/v1/auth/devices/enrol/verify")
       .send({
         challenge: "the-challenge",
         jws: "the-jws",
         attestation: { platform: "android", key_attestation_chain: ["cert1"], integrity_token: undefined },
       });
+    const second = await request(app)
+      .post("/v1/auth/devices/login/verify")
+      .send({ device_id: "device_1", challenge: "the-challenge", jws: "the-jws" });
 
-    expect(response.status).toBe(200);
+    expect(first.status).toBe(200);
     expect(enrolVerify).toHaveBeenCalledTimes(1);
+    expect(second.status).toBe(429);
+    expect(loginVerify).not.toHaveBeenCalled();
   });
 });

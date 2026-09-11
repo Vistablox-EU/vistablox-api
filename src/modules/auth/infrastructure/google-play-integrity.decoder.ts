@@ -6,6 +6,16 @@ const TOKEN_URL = "https://oauth2.googleapis.com/token";
 const JWT_BEARER_GRANT = "urn:ietf:params:oauth:grant-type:jwt-bearer";
 const PLAY_INTEGRITY_SCOPE = "https://www.googleapis.com/auth/playintegrity";
 
+// Google's API returns certificateSha256Digest as base64 (Node's "base64"
+// decoder also accepts the base64url variant, so either form Google
+// actually uses works here) -- verifyPlayIntegrityToken compares against
+// ANDROID_ATTESTATION_CERT_DIGESTS, which is hex, the same allowlist
+// key-attestation uses. Passed through unconverted, this comparison could
+// never match.
+export function base64DigestToHex(base64Digest: string): string {
+  return Buffer.from(base64Digest, "base64").toString("hex");
+}
+
 interface ServiceAccountKey {
   client_email: string;
   private_key: string;
@@ -66,7 +76,9 @@ export class GooglePlayIntegrityDecoder implements PlayIntegrityVerdictDecoder {
       requestHash: payload?.requestDetails?.requestHash,
       appRecognitionVerdict: payload?.appIntegrity?.appRecognitionVerdict ?? "UNKNOWN",
       deviceRecognitionVerdicts: payload?.deviceIntegrity?.deviceRecognitionVerdict ?? [],
-      certificateSha256Digests: payload?.appIntegrity?.certificateSha256Digest ?? [],
+      certificateSha256Digests: (payload?.appIntegrity?.certificateSha256Digest ?? []).map(
+        base64DigestToHex,
+      ),
     };
   }
 
