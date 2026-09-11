@@ -156,6 +156,7 @@ export function createBetterAuthAuditPlugin(
                         trace_id: traceId,
                         authentication_method: method,
                         provider_session_id: session.id,
+                        ...verifiedDeviceIdChange(context),
                       },
                       occurredAt: session.createdAt,
                     });
@@ -230,8 +231,29 @@ async function resolveFailedIdentity(
       internalAdapter: {
         findUserByEmail(email: string): Promise<{ user: { id: string } } | null>;
       };
+      session?: unknown;
     };
   };
+  // E2: the pending Google/Apple session the enrolment ran under, when the
+  // ceremony got far enough to read it (getSessionFromCtx caches it on
+  // ctx.context.session).
+  if (auditContext.path === "/device/enrol/verify") {
+    const userId = readSessionUserId(auditContext.context.session);
+    return userId === null
+      ? { betterAuthUserId: null, resourceId: "login_unknown" }
+      : { betterAuthUserId: userId, resourceId: userId };
+  }
+  // L2 has no session yet, and a failed device_id is unverified client
+  // input: record only a keyed hash of it, like a failed email above.
+  if (auditContext.path === "/device/login/verify") {
+    const deviceId = readBodyString(auditContext.body, "device_id");
+    return deviceId === null
+      ? { betterAuthUserId: null, resourceId: "login_unknown" }
+      : {
+          betterAuthUserId: null,
+          resourceId: `login_device_${createHmac("sha256", hashKey).update(deviceId).digest("hex")}`,
+        };
+  }
   const email = readBodyString(auditContext.body, "email")?.trim().toLowerCase();
   if (email !== null && email !== undefined) {
     const found = await auditContext.context.internalAdapter.findUserByEmail(email);
@@ -251,8 +273,32 @@ function isLoginPath(path: string | undefined): boolean {
     path === "/passkey/verify-authentication" ||
     path === "/passkey/verify-registration" ||
     path === "/sign-in/social" ||
-    path?.startsWith("/callback/") === true
+    path?.startsWith("/callback/") === true ||
+    isDeviceAuthPath(path)
   );
+}
+
+// The device-auth plugin's E2 (enrolment) and L2 (device login) endpoints.
+// Both create a device_biometric session, so they're recorded like every
+// other login path: login_succeeded on success, login_failed on failure.
+function isDeviceAuthPath(path: string | undefined): boolean {
+  return path === "/device/enrol/verify" || path === "/device/login/verify";
+}
+
+// L2 only: by the time its session is created, the body's device_id has
+// matched a real device and the JWS verified against that device's key.
+// E2's body carries no device_id. Nothing else from either body (JWS,
+// challenge, attestation) is ever recorded.
+function verifiedDeviceIdChange(context: AuditContext | null): { device_id?: string | null } {
+  return context?.path === "/device/login/verify"
+    ? { device_id: readBodyString(context.body, "device_id") }
+    : {};
+}
+
+function readSessionUserId(session: unknown): string | null {
+  if (typeof session !== "object" || session === null) return null;
+  const user = (session as { user?: unknown }).user;
+  return readObjectString(user, "id");
 }
 
 // Mirrors isLoginPath above, minus the passkey paths: "/sign-in/social" also
@@ -269,6 +315,7 @@ function resolveLoginMethod(
   session?: Record<string, unknown>,
 ): string | null {
   const path = context?.path;
+  if (isDeviceAuthPath(path)) return "device_biometric";
   if (path === "/passkey/verify-authentication" || path === "/passkey/verify-registration") {
     return session?.authenticationLevel === "staff_passkey"
       ? "staff_passkey"
@@ -299,6 +346,8 @@ function sessionRevocationReason(path: string | undefined): string {
   if (path === "/revoke-sessions") return "self_revoke_all";
   if (path === "/revoke-other-sessions") return "self_revoke_others";
   if (path === "/get-session") return "expired";
+  // E2 replaces the pending Google/Apple session with the new device session.
+  if (path === "/device/enrol/verify") return "rotated";
   return "internal";
 }
 
