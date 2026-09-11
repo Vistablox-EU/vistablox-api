@@ -1,4 +1,5 @@
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import { CHALLENGE_REPLAY_WINDOW_MS } from "../domain/device-challenge-replay.js";
 import type { DeviceChallengeRepository } from "./device-challenge.repository.js";
 
 export class PrismaDeviceChallengeRepository implements DeviceChallengeRepository {
@@ -43,9 +44,29 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
     return rows.length > 0;
   }
 
+  public async wasConsumedSince(input: {
+    challenge: string;
+    purpose: string;
+    dpopJkt: string;
+    deviceId: string | undefined;
+    since: Date;
+  }): Promise<boolean> {
+    const found = await this.database.deviceChallenge.findFirst({
+      where: {
+        challenge: input.challenge,
+        purpose: input.purpose,
+        dpopJkt: input.dpopJkt,
+        deviceId: input.deviceId ?? null,
+        consumedAt: { gte: input.since },
+      },
+      select: { challenge: true },
+    });
+    return found !== null;
+  }
+
   public async pruneExpired(now: Date): Promise<number> {
     const result = await this.database.deviceChallenge.deleteMany({
-      where: { expiresAt: { lt: now } },
+      where: { expiresAt: { lt: new Date(now.getTime() - CHALLENGE_REPLAY_WINDOW_MS) } },
     });
     return result.count;
   }

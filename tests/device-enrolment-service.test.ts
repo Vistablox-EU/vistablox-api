@@ -21,6 +21,7 @@ import {
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
+  DeviceChallengeReplayedError,
   MobilePlatformUnsupportedError,
 } from "../src/modules/auth/application/device-auth-errors.js";
 import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/device-auth-jws-verifier.js";
@@ -95,6 +96,7 @@ interface FakeChallengeEntry {
   deviceId: string | undefined;
   expiresAt: Date;
   consumed: boolean;
+  consumedAt?: Date;
 }
 
 class FakeChallengeRepository implements DeviceChallengeRepository {
@@ -137,7 +139,26 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       return false;
     }
     entry.consumed = true;
+    entry.consumedAt = input.now;
     return true;
+  }
+
+  public async wasConsumedSince(input: {
+    challenge: string;
+    purpose: string;
+    dpopJkt: string;
+    deviceId: string | undefined;
+    since: Date;
+  }): Promise<boolean> {
+    const entry = this.issued.get(input.challenge);
+    return (
+      entry !== undefined &&
+      entry.purpose === input.purpose &&
+      entry.dpopJkt === input.dpopJkt &&
+      entry.deviceId === input.deviceId &&
+      entry.consumedAt !== undefined &&
+      entry.consumedAt.getTime() >= input.since.getTime()
+    );
   }
 
   public async pruneExpired(): Promise<number> {
@@ -603,5 +624,179 @@ describe("EnrolDeviceService.rollback", () => {
     await service.rollback("device_orphaned");
 
     expect(devices.devices.find((d) => d.deviceId === "device_orphaned")).toBeUndefined();
+  });
+});
+
+// DEVICE_CHALLENGE_REPLAYED vs DEVICE_CHALLENGE_EXPIRED on E2. The
+// invariant (domain/device-challenge-replay.ts): EXPIRED only when no
+// enrolment that consumed the challenge can still register a device.
+describe("EnrolDeviceService: replayed vs expired challenges", () => {
+  function enrolInput(challenge: string, dpopJkt: string, jws: string, chain: string[]) {
+    return {
+      accountId: "account-replay",
+      betterAuthUserId: "user-1",
+      dpopJkt,
+      challenge,
+      jws,
+      attestation: {
+        platform: "android",
+        keyAttestationChain: chain,
+        integrityToken: undefined,
+        model: undefined,
+        osVersion: undefined,
+        appVersion: undefined,
+      },
+    };
+  }
+
+  it("answers REPLAYED to a replay while the first enrolment is still running, and the first still registers", async () => {
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    const challenge = "replay-in-flight";
+    await challenges.issue({
+      challenge,
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-1",
+      deviceId: undefined,
+      expiresAt: new Date(Date.now() + 300_000),
+    });
+    const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-replay-1" });
+    const chain = await buildAndroidAttestationChain(challenge, publicKey);
+    let reachAttestation!: () => void;
+    const attestationReached = new Promise<void>((resolve) => {
+      reachAttestation = resolve;
+    });
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    // The first enrolment pauses inside attestation (after consuming the
+    // challenge, before inserting its device row).
+    const pausingRevocationList: AndroidAttestationRevocationList = {
+      isRevoked: async () => {
+        reachAttestation();
+        await released;
+        return false;
+      },
+    };
+    const service = new EnrolDeviceService(challenges, devices, {
+      ...androidConfig({ pinnedRootCertificates: [chain.rootBase64] }),
+      revocationList: pausingRevocationList,
+    });
+    const input = enrolInput(challenge, "dpop-replay-1", jws, [chain.leafBase64, chain.rootBase64]);
+
+    const first = service.execute(input);
+    await attestationReached;
+    await expect(service.execute(input)).rejects.toBeInstanceOf(DeviceChallengeReplayedError);
+
+    release();
+    await expect(first).resolves.toMatchObject({ accountId: "account-replay" });
+    expect(devices.createCallCount).toBe(1);
+  });
+
+  it("converges: a challenge whose enrolment registered nothing answers REPLAYED for 120 s, then EXPIRED", async () => {
+    const t0 = Date.now();
+    let now = t0;
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    await challenges.issue({
+      challenge: "replay-converges",
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-2",
+      deviceId: undefined,
+      expiresAt: new Date(t0 + 300_000),
+    });
+    // The first enrolment consumed the challenge at t0 and then failed.
+    await challenges.consume({
+      challenge: "replay-converges",
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-2",
+      deviceId: undefined,
+      now: new Date(t0),
+    });
+    const service = new EnrolDeviceService(challenges, devices, androidConfig(), () => new Date(now));
+    const replay = enrolInput("replay-converges", "dpop-replay-2", "not-reached", []);
+
+    now = t0 + 120_000;
+    await expect(service.execute(replay)).rejects.toBeInstanceOf(DeviceChallengeReplayedError);
+
+    now = t0 + 120_001;
+    await expect(service.execute(replay)).rejects.toBeInstanceOf(DeviceChallengeExpiredError);
+    expect(devices.createCallCount).toBe(0);
+  });
+
+  it("after the window, a replay of a challenge whose enrolment did register answers 409, never EXPIRED", async () => {
+    const t0 = Date.now();
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    await challenges.issue({
+      challenge: "replay-registered",
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-3",
+      deviceId: undefined,
+      expiresAt: new Date(t0 + 300_000),
+    });
+    await challenges.consume({
+      challenge: "replay-registered",
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-3",
+      deviceId: undefined,
+      now: new Date(t0),
+    });
+    await devices.create({
+      accountId: "account-replay",
+      betterAuthUserId: "user-1",
+      dpopJkt: "dpop-replay-3",
+      bioJkt: "bio",
+      biometricPublicJwk: {},
+      platform: "android",
+      model: undefined,
+      osVersion: undefined,
+      appVersion: undefined,
+      attestationMetadata: {},
+    });
+    const service = new EnrolDeviceService(challenges, devices, androidConfig(), () => new Date(t0 + 600_000));
+
+    await expect(
+      service.execute(enrolInput("replay-registered", "dpop-replay-3", "not-reached", [])),
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
+  });
+
+  it("registers nothing when it reaches its device insert 60 s or more after consuming its challenge", async () => {
+    let now = Date.now();
+    const challenges = new FakeChallengeRepository();
+    const devices = new FakeDeviceRepository();
+    const challenge = "replay-deadline";
+    await challenges.issue({
+      challenge,
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-4",
+      deviceId: undefined,
+      expiresAt: new Date(now + 300_000),
+    });
+    const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-replay-4" });
+    const chain = await buildAndroidAttestationChain(challenge, publicKey);
+    let advanced = false;
+    // Attestation takes 60 s (the revocation list is slow).
+    const slowRevocationList: AndroidAttestationRevocationList = {
+      isRevoked: async () => {
+        if (!advanced) {
+          advanced = true;
+          now += 60_000;
+        }
+        return false;
+      },
+    };
+    const service = new EnrolDeviceService(
+      challenges,
+      devices,
+      { ...androidConfig({ pinnedRootCertificates: [chain.rootBase64] }), revocationList: slowRevocationList },
+      () => new Date(now),
+    );
+
+    await expect(
+      service.execute(enrolInput(challenge, "dpop-replay-4", jws, [chain.leafBase64, chain.rootBase64])),
+    ).rejects.toBeInstanceOf(DeviceChallengeExpiredError);
+    expect(devices.createCallCount).toBe(0);
   });
 });

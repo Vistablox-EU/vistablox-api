@@ -19,6 +19,7 @@ function fakeChallengeRepository(): DeviceChallengeRepository {
   return {
     issue: vi.fn().mockResolvedValue(undefined),
     consume: vi.fn().mockResolvedValue(null),
+    wasConsumedSince: vi.fn().mockResolvedValue(false),
     pruneExpired: vi.fn().mockResolvedValue(0),
   };
 }

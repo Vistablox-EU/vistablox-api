@@ -9,8 +9,10 @@ import {
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
+  DeviceChallengeReplayedError,
   MobilePlatformUnsupportedError,
 } from "./device-auth-errors.js";
+import { isPastEnrolmentInsertDeadline, replayWindowStart } from "../domain/device-challenge-replay.js";
 import { verifyDeviceAuthJws } from "./device-auth-jws-verifier.js";
 import type { Device, DeviceRepository } from "../repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../repository/device-challenge.repository.js";
@@ -58,6 +60,9 @@ export class EnrolDeviceService {
   ) {}
 
   public async execute(input: EnrolDeviceInput): Promise<Device> {
+    // Taken before the active-device check below: the replay decision is
+    // measured from here (see domain/device-challenge-replay.ts).
+    const startedAt = this.clock();
     if (
       !isMobilePlatform(input.attestation.platform) ||
       !isMobilePlatformSupported(input.attestation.platform, this.mobilePlatformPolicy)
@@ -78,15 +83,25 @@ export class EnrolDeviceService {
       throw new DeviceAlreadyEnrolledError();
     }
 
+    const consumedAt = this.clock();
     const consumed = await this.challengeRepository.consume({
       challenge: input.challenge,
       purpose: ENROL_PURPOSE,
       dpopJkt: input.dpopJkt,
       deviceId: undefined,
-      now: this.clock(),
+      now: consumedAt,
     });
     if (!consumed) {
-      throw new DeviceChallengeExpiredError();
+      // REPLAYED while an enrolment that used this challenge may still
+      // register a device; EXPIRED only once none can.
+      const recentlyUsed = await this.challengeRepository.wasConsumedSince({
+        challenge: input.challenge,
+        purpose: ENROL_PURPOSE,
+        dpopJkt: input.dpopJkt,
+        deviceId: undefined,
+        since: replayWindowStart(startedAt),
+      });
+      throw recentlyUsed ? new DeviceChallengeReplayedError() : new DeviceChallengeExpiredError();
     }
 
     const claims = await verifyDeviceAuthJws({
@@ -117,6 +132,13 @@ export class EnrolDeviceService {
       now: this.clock(),
     });
     await this.verifyPlayIntegrity(input, claims.bioJkt);
+
+    // Never register a device later than the deadline after consuming the
+    // challenge: this is what lets a replay after the window truthfully
+    // answer DEVICE_CHALLENGE_EXPIRED. Nothing is registered here either.
+    if (isPastEnrolmentInsertDeadline(consumedAt, this.clock())) {
+      throw new DeviceChallengeExpiredError();
+    }
 
     return this.deviceRepository.create({
       accountId: input.accountId,

@@ -47,6 +47,7 @@ interface FakeChallengeEntry {
   deviceId: string | undefined;
   expiresAt: Date;
   consumed: boolean;
+  consumedAt?: Date;
 }
 
 class FakeChallengeRepository implements DeviceChallengeRepository {
@@ -89,7 +90,26 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       return false;
     }
     entry.consumed = true;
+    entry.consumedAt = input.now;
     return true;
+  }
+
+  public async wasConsumedSince(input: {
+    challenge: string;
+    purpose: string;
+    dpopJkt: string;
+    deviceId: string | undefined;
+    since: Date;
+  }): Promise<boolean> {
+    const entry = this.issued.get(input.challenge);
+    return (
+      entry !== undefined &&
+      entry.purpose === input.purpose &&
+      entry.dpopJkt === input.dpopJkt &&
+      entry.deviceId === input.deviceId &&
+      entry.consumedAt !== undefined &&
+      entry.consumedAt.getTime() >= input.since.getTime()
+    );
   }
 
   public async pruneExpired(): Promise<number> {
@@ -246,6 +266,39 @@ describe("LoginDeviceService", () => {
     });
 
     expect(result.deviceId).toBe("device_ios_ok");
+  });
+
+  it("answers DEVICE_CHALLENGE_REPLAYED for a challenge used moments ago, and DEVICE_CHALLENGE_EXPIRED once the window has passed", async () => {
+    let now = Date.now();
+    const clock = () => new Date(now);
+    const { publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({ deviceId: "device_replay", dpopJkt: "dpop-jkt-replay", bioJkt, biometricPublicJwk: publicJwk as Record<string, unknown> }),
+    );
+    const challenges = new FakeChallengeRepository();
+    await challenges.issue({
+      challenge: "login-replay",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-replay",
+      deviceId: "device_replay",
+      expiresAt: new Date(now + 120_000),
+    });
+    await challenges.consume({
+      challenge: "login-replay",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-replay",
+      deviceId: "device_replay",
+      now: new Date(now),
+    });
+    const service = new LoginDeviceService(challenges, devices, clock);
+    const replay = { deviceId: "device_replay", dpopJkt: "dpop-jkt-replay", challenge: "login-replay", jws: "irrelevant" };
+
+    now += 120_000;
+    await expect(service.execute(replay)).rejects.toMatchObject({ code: "DEVICE_CHALLENGE_REPLAYED" });
+
+    now += 1;
+    await expect(service.execute(replay)).rejects.toMatchObject({ code: "DEVICE_CHALLENGE_EXPIRED" });
   });
 
   it("rejects a revoked (non-active) device", async () => {

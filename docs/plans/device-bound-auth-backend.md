@@ -278,8 +278,8 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | `STAFF_PASSKEY_REQUIRED` | 403 | A staff or partner account (existing staff-account guard), at Google/Apple sign-in or on any session-creating endpoint. | "This account can't use the VistaBlox app." Drop the token; start screen; no retry. |
 | `MOBILE_PLATFORM_NOT_SUPPORTED` | 400 | The server doesn't accept this mobile platform yet (today iOS, until App Attest ships; see C1's `mobile_auth_platforms`). Returned by E2, and by L2 for a device of that platform. | The "This device isn't supported" screen (section 5.0); no retry. |
 | `CONSENT_REQUIRED` | 400 | RC2 or RE1 without the current `consent_version`. | Show the consent screen (section 5.14), then retry. |
-| `DEVICE_CHALLENGE_EXPIRED` | 400 | Challenge TTL passed. | Fetch a new challenge and re-prompt once; then show an error. |
-| `DEVICE_CHALLENGE_REPLAYED` | 400 | Challenge already consumed. | As expired; log telemetry. |
+| `DEVICE_CHALLENGE_EXPIRED` | 400 | The challenge is unknown, its TTL passed unused, or it was used more than 120 s before this request. On E2 this means no enrolment can still register a device with it. | Fetch a new challenge and re-prompt once; then show an error. |
+| `DEVICE_CHALLENGE_REPLAYED` | 400 | The challenge was used less than 120 s before this request; the request that used it may still be completing. | Don't discard a pending key on this code. After 120 s the same challenge answers `DEVICE_CHALLENGE_EXPIRED` if nothing was registered with it. On L2, fetch a new challenge and retry once. |
 | `DEVICE_CHALLENGE_PURPOSE_MISMATCH` | 400 | Wrong namespace. | No retry; report the bug. |
 | `DEVICE_JWS_INVALID` | 400 | Malformed JWS, or wrong typ/alg/iat. | No retry; report. |
 | `OWNER_ASSERTION_INVALID` | 400 | Malformed assertion, wrong `vb_` fields, or a bad signature. | No retry. If the local key is invalidated → section 5.9. Otherwise report. |
