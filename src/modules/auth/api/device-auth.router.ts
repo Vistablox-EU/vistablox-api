@@ -4,6 +4,7 @@ import { APIError } from "better-auth/api";
 
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { IssueDeviceChallengeService } from "../application/device-challenge-issuance.service.js";
+import type { MobileAttestation } from "../application/mobile-attestation.schemas.js";
 import type { VistaBloxAuth } from "../infrastructure/better-auth.factory.js";
 import {
   appConfigResponseSchema,
@@ -31,6 +32,7 @@ export interface AppConfigFeatures {
 export interface AppConfig {
   minAppVersion: { ios: string; android: string };
   features: AppConfigFeatures;
+  mobileAuthPlatforms: { android: boolean; ios: boolean };
 }
 
 // The device-auth plugin's endpoints, added to createBetterAuth's plugins
@@ -47,11 +49,7 @@ interface DeviceAuthApi {
     body: {
       challenge: string;
       jws: string;
-      attestation: {
-        platform: string;
-        key_attestation_chain: string[];
-        integrity_token: string | undefined;
-      };
+      attestation: MobileAttestation;
     };
     request: Request;
     asResponse: false;
@@ -105,7 +103,11 @@ export function createAppConfigRouter(
   router.get("/config", requireDpopOnly, (_request, response) => {
     response.json(
       appConfigResponseSchema.parse({
-        data: { min_app_version: appConfig.minAppVersion, features: appConfig.features },
+        data: {
+          min_app_version: appConfig.minAppVersion,
+          features: appConfig.features,
+          mobile_auth_platforms: appConfig.mobileAuthPlatforms,
+        },
       }),
     );
   });
@@ -113,7 +115,7 @@ export function createAppConfigRouter(
 }
 
 /**
- * `/v1/auth/devices/*` (E1, E2, L1, L2). E1b and the owner-assertion path
+ * `/v1/auth/mobile/*` (E1, E2, L1, L2). E1b and the owner-assertion path
  * aren't implemented in this PR -- `safe_account` stays `false`, so
  * `E2` only ever takes the JWS path (see the plan's "explicitly out of
  * scope" section). E2/L2 are thin: they forward to the device-auth
@@ -172,15 +174,7 @@ export function createDeviceAuthRouter(
     try {
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).enrolVerify({
         headers: fromNodeHeaders(request.headers),
-        body: {
-          challenge: body.challenge,
-          jws: body.jws,
-          attestation: {
-            platform: body.attestation.platform,
-            key_attestation_chain: body.attestation.key_attestation_chain,
-            integrity_token: body.attestation.integrity_token,
-          },
-        },
+        body: { challenge: body.challenge, jws: body.jws, attestation: body.attestation },
         request: requestForDpopBinding(request),
         // Without this, better-auth's dispatch sees a real Request object
         // (isRequestLike) and defaults shouldReturnResponse to true,

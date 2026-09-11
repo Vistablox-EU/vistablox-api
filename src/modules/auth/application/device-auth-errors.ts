@@ -28,11 +28,11 @@ export class DeviceAlreadyEnrolledError extends Error {
   }
 }
 
-export class DeviceUnsupportedError extends Error {
-  public readonly code = "DEVICE_UNSUPPORTED" as const;
-  public constructor() {
-    super("This device can't produce a Play Integrity verdict and isn't supported.");
-    this.name = "DeviceUnsupportedError";
+export class MobilePlatformUnsupportedError extends Error {
+  public readonly code = "MOBILE_PLATFORM_NOT_SUPPORTED" as const;
+  public constructor(platform: string) {
+    super(`Mobile platform "${platform}" is not supported yet.`);
+    this.name = "MobilePlatformUnsupportedError";
   }
 }
 

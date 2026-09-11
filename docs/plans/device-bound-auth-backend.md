@@ -185,17 +185,17 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
 
 | # | Method and path | Auth | Request | Response `data` |
 |---|---|---|---|---|
-| C1 | `GET /v1/app/config` | none | — | `{ min_app_version: { ios, android }, features: { device_auth, device_enrolment_required, passkey_login, signing_requests, recovery_v2, safe_account } }`. With `safe_account` off there's no Safe: every device, the first included, enrols through the JWS path, E1b isn't used, and `first_device` is ignored. |
+| C1 | `GET /v1/app/config` | none | — | `{ min_app_version: { ios, android }, features: { device_auth, device_enrolment_required, passkey_login, signing_requests, recovery_v2, safe_account }, mobile_auth_platforms: { android, ios } }`. The map advertises platform availability independently; Android is enabled first and iOS remains disabled until App Attest support ships. With `safe_account` off there's no Safe: every device, the first included, enrols through the JWS path, E1b isn't used, and `first_device` is ignored. |
 
 **Enrolment and login**
 
 | # | Method and path | Auth | Request | Response `data` |
 |---|---|---|---|---|
-| E1 | `POST /v1/auth/devices/enrol/challenge` | pending, recovery-pending, recovery-scoped or re-enrol session | `{}` | `{ challenge, expires_at, first_device }`. `first_device` is true when the account has no Safe yet. |
-| E1b | `POST /v1/auth/devices/enrol/account-op` | same as E1; first device only, and only while `safe_account` is on | `{ challenge, public_key: { x, y } }` | `{ user_op }`: the sponsored operation whose `initCode` deploys the Safe, with the shared signer configured with this key. The app decodes it before signing (section 4.6). |
-| E2 | `POST /v1/auth/devices/enrol/verify` | same as E1 | `{ challenge, jws, attestation }`; for the first device while `safe_account` is on, `{ challenge, public_key, assertion, attestation }` (purpose `enrol-device`, over E1b's operation) | `{ device_id, status: "active"\|"pending_approval", owner_address, safe_address, pairing?: { pairing_id, code, expires_at }, session_expires_at?, authentication_level }`, plus `set-auth-token` unless the status is `pending_approval`. It's `pending_approval` when the account already has another active device (a new phone, or this phone re-adding itself after a selfie); that device approves it (P1–P3). For a first device with `safe_account` on, the server verifies the attestation and the assertion, then submits the deployment operation (below). The rotated session is already `device_biometric`, so no L2 follows. |
-| L1 | `POST /v1/auth/devices/login/challenge` | none (DPoP only) | `{ device_id }` | `{ challenge, expires_at, attestation_required }` |
-| L2 | `POST /v1/auth/devices/login/verify` | none (DPoP only) | `{ device_id, challenge, jws, attestation? }` | `{ device_id, session_expires_at, authentication_level: "device_biometric", hold_until? }`, plus `set-auth-token` |
+| E1 | `POST /v1/auth/mobile/enrol/challenge` | pending, recovery-pending, recovery-scoped or re-enrol session | `{}` | `{ challenge, expires_at, first_device }`. `first_device` is true when the account has no Safe yet. |
+| E1b | `POST /v1/auth/mobile/enrol/account-op` | same as E1; first device only, and only while `safe_account` is on | `{ challenge, public_key: { x, y } }` | `{ user_op }`: the sponsored operation whose `initCode` deploys the Safe, with the shared signer configured with this key. The app decodes it before signing (section 4.6). |
+| E2 | `POST /v1/auth/mobile/enrol/verify` | same as E1 | `{ challenge, jws, attestation }`; for the first device while `safe_account` is on, `{ challenge, public_key, assertion, attestation }` (purpose `enrol-device`, over E1b's operation) | `{ device_id, status: "active"\|"pending_approval", owner_address, safe_address, pairing?: { pairing_id, code, expires_at }, session_expires_at?, authentication_level }`, plus `set-auth-token` unless the status is `pending_approval`. It's `pending_approval` when the account already has another active device (a new phone, or this phone re-adding itself after a selfie); that device approves it (P1–P3). For a first device with `safe_account` on, the server verifies the attestation and the assertion, then submits the deployment operation (below). The rotated session is already `device_biometric`, so no L2 follows. |
+| L1 | `POST /v1/auth/mobile/login/challenge` | none (DPoP only) | `{ device_id }` | `{ challenge, expires_at, attestation_required }` |
+| L2 | `POST /v1/auth/mobile/login/verify` | none (DPoP only) | `{ device_id, challenge, jws, attestation? }` | `{ device_id, session_expires_at, authentication_level: "device_biometric", hold_until? }`, plus `set-auth-token` |
 
 **Account and email backup**
 
@@ -210,27 +210,27 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
 
 | # | Method and path | Auth | Request | Response `data` |
 |---|---|---|---|---|
-| D1 | `GET /v1/auth/devices` | session | — | `[{ device_id, label, platform, model, os_version, status, owner_status: "owner"\|"pending"\|"none", owner_address, hold_until?, created_at, last_seen_at, is_current }]` |
-| D2 | `POST /v1/auth/devices/:device_id/manage-device/challenge` | session | `{}` | `{ challenge, expires_at, user_op }` (`removeOwner`) |
-| D3 | `POST /v1/auth/devices/:device_id/revoke` | session | `{ challenge, assertion, attestation }` (purpose `manage-device`) | `202 { status: "pending_onchain" }`. That device's sessions and pending requests end at once; the owner removal follows on-chain. Removing the last owner → `LAST_OWNER`. |
-| D4 | `PUT /v1/auth/devices/current/push-token` | session | `{ token, platform: "ios"\|"android" }` | `204`. `DELETE` on the same path removes it. |
+| D1 | `GET /v1/auth/mobile/devices` | session | — | `[{ device_id, label, platform, model, os_version, status, owner_status: "owner"\|"pending"\|"none", owner_address, hold_until?, created_at, last_seen_at, is_current }]` |
+| D2 | `POST /v1/auth/mobile/devices/:device_id/manage-device/challenge` | session | `{}` | `{ challenge, expires_at, user_op }` (`removeOwner`) |
+| D3 | `POST /v1/auth/mobile/devices/:device_id/revoke` | session | `{ challenge, assertion, attestation }` (purpose `manage-device`) | `202 { status: "pending_onchain" }`. That device's sessions and pending requests end at once; the owner removal follows on-chain. Removing the last owner → `LAST_OWNER`. |
+| D4 | `PUT /v1/auth/mobile/devices/current/push-token` | session | `{ token, platform: "ios"\|"android" }` | `204`. `DELETE` on the same path removes it. |
 
 **Re-enrolling this phone after a biometric change.** The DPoP key survived; the session comes from a fresh Google/Apple sign-in on this phone. The KYC selfie is required on every biometric change.
 
 | # | Method and path | Auth | Request | Response `data` |
 |---|---|---|---|---|
-| RE1 | `POST /v1/auth/devices/:device_id/reenrol/selfie` | pending session whose jkt matches this existing, non-revoked device | `{ consent_version }` | `{ selfie_id, didit_session_token }` |
-| RE2 | `GET /v1/auth/devices/:device_id/reenrol/selfie/:selfie_id` | same | — | `{ status: "awaiting_kyc"\|"in_review"\|"approved"\|"rejected", next_step?: "device_approval"\|"email_recovery" }`. On `approved` it rotates to a re-enrol session (`set-auth-token`), which E1 and E2 accept. E2 replaces the bio key on the same record. With another active device, `next_step` is `device_approval` (that device co-signs `swapOwner`, P1–P3). With none, it's `email_recovery`: the phone is active for viewing, and its new key becomes an owner through ER1–ER2. |
+| RE1 | `POST /v1/auth/mobile/devices/:device_id/reenrol/selfie` | pending session whose jkt matches this existing, non-revoked device | `{ consent_version }` | `{ selfie_id, didit_session_token }` |
+| RE2 | `GET /v1/auth/mobile/devices/:device_id/reenrol/selfie/:selfie_id` | same | — | `{ status: "awaiting_kyc"\|"in_review"\|"approved"\|"rejected", next_step?: "device_approval"\|"email_recovery" }`. On `approved` it rotates to a re-enrol session (`set-auth-token`), which E1 and E2 accept. E2 replaces the bio key on the same record. With another active device, `next_step` is `device_approval` (that device co-signs `swapOwner`, P1–P3). With none, it's `email_recovery`: the phone is active for viewing, and its new key becomes an owner through ER1–ER2. |
 
 **Adding a phone**
 
 | # | Method and path | Auth | Request | Response `data` |
 |---|---|---|---|---|
-| P1 | `GET /v1/auth/devices/pairings/:pairing_id` | approver session (same account) | — | `{ pairing_id, code, new_device: { platform, model, os_version, app_version, public_key: { x, y }, created_at, approx_location? }, replaces_owner_address?, expires_at }`. `replaces_owner_address` is present when a phone re-adds itself after a biometric change. |
-| P2 | `POST /v1/auth/devices/pairings/:pairing_id/challenge` | approver session | `{}` | `{ challenge, expires_at, user_op }`: a `MultiSendCallOnly` batch of `createSigner(x, y)` on `SafeWebAuthnSignerFactory` then `addOwnerWithThreshold`, or `swapOwner` for a re-add. When the first device re-adds itself, the owner swapped out is the shared signer. |
-| P3 | `POST /v1/auth/devices/pairings/:pairing_id/approve` | approver session | `{ challenge, assertion, attestation }` (purpose `approve-new-device`) | `202 { status: "pending_onchain" }` |
-| P4 | `POST /v1/auth/devices/pairings/:pairing_id/reject` | approver session | `{}` | `204` |
-| P5 | `GET /v1/auth/devices/pairings/:pairing_id/status` | the new device's pending or re-enrol session | — | `{ status: "pending"\|"pending_onchain"\|"active"\|"rejected"\|"expired" }`. On `active` (the owner has been added on-chain), the new device runs L1 and L2. |
+| P1 | `GET /v1/auth/mobile/pairings/:pairing_id` | approver session (same account) | — | `{ pairing_id, code, new_device: { platform, model, os_version, app_version, public_key: { x, y }, created_at, approx_location? }, replaces_owner_address?, expires_at }`. `replaces_owner_address` is present when a phone re-adds itself after a biometric change. |
+| P2 | `POST /v1/auth/mobile/pairings/:pairing_id/challenge` | approver session | `{}` | `{ challenge, expires_at, user_op }`: a `MultiSendCallOnly` batch of `createSigner(x, y)` on `SafeWebAuthnSignerFactory` then `addOwnerWithThreshold`, or `swapOwner` for a re-add. When the first device re-adds itself, the owner swapped out is the shared signer. |
+| P3 | `POST /v1/auth/mobile/pairings/:pairing_id/approve` | approver session | `{ challenge, assertion, attestation }` (purpose `approve-new-device`) | `202 { status: "pending_onchain" }` |
+| P4 | `POST /v1/auth/mobile/pairings/:pairing_id/reject` | approver session | `{}` | `204` |
+| P5 | `GET /v1/auth/mobile/pairings/:pairing_id/status` | the new device's pending or re-enrol session | — | `{ status: "pending"\|"pending_onchain"\|"active"\|"rejected"\|"expired" }`. On `active` (the owner has been added on-chain), the new device runs L1 and L2. |
 
 **Signing requests**
 

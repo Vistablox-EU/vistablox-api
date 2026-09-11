@@ -9,6 +9,7 @@ import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
   DeviceLoginFailedError,
+  MobilePlatformUnsupportedError,
 } from "../application/device-auth-errors.js";
 import {
   DeviceChallengePurposeMismatchError,
@@ -17,6 +18,7 @@ import {
 } from "../application/device-auth-jws-verifier.js";
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
+import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
 import {
   assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
@@ -31,16 +33,10 @@ export interface BetterAuthDeviceAuthPluginOptions {
   dpop: DpopSessionCreationOptions | undefined;
 }
 
-const androidAttestationSchema = z.object({
-  platform: z.literal("android"),
-  key_attestation_chain: z.array(z.string()),
-  integrity_token: z.string().optional(),
-});
-
 const enrolVerifyBodySchema = z.object({
   challenge: z.string().min(1),
   jws: z.string().min(1),
-  attestation: androidAttestationSchema,
+  attestation: mobileAttestationSchema,
 });
 
 const loginVerifyBodySchema = z.object({
@@ -128,8 +124,14 @@ export function createBetterAuthDeviceAuthPlugin(
               jws: ctx.body.jws,
               attestation: {
                 platform: ctx.body.attestation.platform,
-                keyAttestationChain: ctx.body.attestation.key_attestation_chain,
-                integrityToken: ctx.body.attestation.integrity_token,
+                keyAttestationChain:
+                  ctx.body.attestation.platform === "android"
+                    ? ctx.body.attestation.key_attestation_chain
+                    : [],
+                integrityToken:
+                  ctx.body.attestation.platform === "android"
+                    ? ctx.body.attestation.integrity_token
+                    : undefined,
                 model: undefined,
                 osVersion: undefined,
                 appVersion: undefined,
@@ -321,6 +323,12 @@ export function toApiError(error: unknown): APIError {
   }
   if (error instanceof DeviceLoginFailedError) {
     return APIError.from("UNAUTHORIZED", { code: error.code, message: error.message });
+  }
+  if (error instanceof MobilePlatformUnsupportedError) {
+    return APIError.from("BAD_REQUEST", {
+      code: error.code,
+      message: "This mobile platform is not supported yet.",
+    });
   }
   throw error;
 }

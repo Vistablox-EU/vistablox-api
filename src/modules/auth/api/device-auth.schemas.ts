@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
+
 export const appConfigResponseSchema = z.object({
   data: z.object({
     min_app_version: z.object({ ios: z.string(), android: z.string() }),
@@ -11,6 +13,7 @@ export const appConfigResponseSchema = z.object({
       recovery_v2: z.boolean(),
       safe_account: z.boolean(),
     }),
+    mobile_auth_platforms: z.object({ android: z.boolean(), ios: z.boolean() }),
   }),
 });
 
@@ -33,16 +36,10 @@ export const loginChallengeRequestSchema = z.object({
   device_id: z.string().min(1),
 });
 
-const androidAttestationRequestSchema = z.object({
-  platform: z.literal("android"),
-  key_attestation_chain: z.array(z.string()).min(1),
-  integrity_token: z.string().optional(),
-});
-
 export const enrolVerifyRequestSchema = z.object({
   challenge: z.string().min(1),
   jws: z.string().min(1),
-  attestation: androidAttestationRequestSchema,
+  attestation: mobileAttestationSchema,
 });
 
 export const enrolVerifyResponseSchema = z.object({
