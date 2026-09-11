@@ -6,10 +6,24 @@ export class DeviceChallengeExpiredError extends Error {
   }
 }
 
+/**
+ * Contract 3.6: DEVICE_ALREADY_ENROLLED (409). Two distinct triggers share
+ * this one code/status, both meaning "you can't enrol right now because
+ * there's already an active device in the way": this exact DPoP key is
+ * already an active device (findByDpopJkt, or a raced P2002 on its unique
+ * constraint), or the account already has a different active device
+ * (findActiveDeviceForAccount, or a raced P2002 on the one-active-device-
+ * per-account partial index) -- approving a *second* device needs the
+ * P1-P5 pairing endpoints, which this PR doesn't build (see the plan's
+ * "explicitly out of scope" section). The contract doesn't have a separate
+ * code for "pairing isn't built yet," and a client can't act differently
+ * on the two triggers anyway (both say "go to device login" or "use your
+ * other device"), so they aren't distinguished here.
+ */
 export class DeviceAlreadyEnrolledError extends Error {
   public readonly code = "DEVICE_ALREADY_ENROLLED" as const;
   public constructor() {
-    super("This DPoP key is already an active device.");
+    super("This account or DPoP key is already an active device.");
     this.name = "DeviceAlreadyEnrolledError";
   }
 }
@@ -30,22 +44,5 @@ export class DeviceLoginFailedError extends Error {
     // to avoid account/device enumeration.
     super("Device login failed.");
     this.name = "DeviceLoginFailedError";
-  }
-}
-
-/**
- * Contract-flagged scope gap, not a wire-contract error code: this account
- * already has an active device, and approving a second one needs the P1-P5
- * pairing endpoints, which this PR doesn't build (see the plan's "explicitly
- * out of scope" section). Mapped to 501 at the plugin boundary, not one of
- * the contract's own codes.
- */
-export class DevicePairingNotImplementedError extends Error {
-  public readonly code = "device.pairing_not_implemented" as const;
-  public constructor() {
-    super(
-      "This account already has an active device. Pairing a second device isn't built yet.",
-    );
-    this.name = "DevicePairingNotImplementedError";
   }
 }

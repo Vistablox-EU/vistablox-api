@@ -25,19 +25,22 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
   public async consume(input: {
     challenge: string;
     purpose: string;
+    dpopJkt: string;
+    deviceId: string | undefined;
     now: Date;
-  }): Promise<{ deviceId: string | undefined } | null> {
-    const rows = await this.database.$queryRaw<Array<{ device_id: string | null }>>`
+  }): Promise<boolean> {
+    const rows = await this.database.$queryRaw<Array<{ challenge: string }>>`
       UPDATE auth.device_challenges
       SET consumed_at = ${input.now}
       WHERE challenge = ${input.challenge}
         AND purpose = ${input.purpose}
+        AND dpop_jkt = ${input.dpopJkt}
+        AND device_id IS NOT DISTINCT FROM ${input.deviceId ?? null}
         AND consumed_at IS NULL
         AND expires_at > ${input.now}
-      RETURNING device_id
+      RETURNING challenge
     `;
-    if (rows.length === 0) return null;
-    return { deviceId: rows[0]!.device_id ?? undefined };
+    return rows.length > 0;
   }
 
   public async pruneExpired(now: Date): Promise<number> {

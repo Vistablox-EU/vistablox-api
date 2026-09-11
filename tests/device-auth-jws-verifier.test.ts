@@ -3,12 +3,14 @@ import { describe, expect, it } from "vitest";
 
 import {
   DeviceChallengePurposeMismatchError,
+  DeviceJwsDpopMismatchError,
   DeviceJwsInvalidError,
   verifyDeviceAuthJws,
 } from "../src/modules/auth/application/device-auth-jws-verifier.js";
 
 const CHALLENGE = "the-exact-challenge-string";
 const JWS_TYP = "vistablox-device-auth+jwt";
+const DPOP_JKT = "the-exact-dpop-jkt";
 
 async function keypair(): Promise<{ privateKey: CryptoKey; publicJwk: JWK }> {
   const { privateKey, publicKey } = await generateKeyPair("ES256", { extractable: true });
@@ -26,14 +28,22 @@ async function buildJws(options: {
   challenge?: string;
   iat?: number;
   deviceId?: string;
+  dpopJkt?: string | null;
   omitKid?: boolean;
 }): Promise<string> {
+  const purpose = options.purpose ?? "enrol-device";
   const payload: Record<string, unknown> = {
-    purpose: options.purpose ?? "enrol-device",
+    purpose,
     challenge: options.challenge ?? CHALLENGE,
     iat: options.iat ?? Math.floor(Date.now() / 1000),
   };
   if (options.deviceId !== undefined) payload.device_id = options.deviceId;
+  // dpopJkt: null explicitly omits the claim; undefined defaults it in for
+  // enrol-device (since every enrol-device test needs SOME dpop_jkt claim
+  // now, and most of them aren't testing that claim specifically).
+  if (options.dpopJkt !== null && (options.dpopJkt !== undefined || purpose === "enrol-device")) {
+    payload.dpop_jkt = options.dpopJkt ?? DPOP_JKT;
+  }
 
   const header: Record<string, unknown> = {
     alg: options.alg ?? "ES256",
@@ -60,6 +70,7 @@ describe("verifyDeviceAuthJws", () => {
         expectedChallenge: CHALLENGE,
         expectedDeviceId: undefined,
         storedPublicJwk: undefined,
+        expectedDpopJkt: DPOP_JKT,
       });
 
       expect(claims.bioJkt).toBe(kid);
@@ -81,6 +92,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -103,13 +115,73 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
   });
 
+  describe("enrol-device dpop_jkt binding", () => {
+    it("rejects an enrol-device JWS with no dpop_jkt claim at all", async () => {
+      const { privateKey, publicJwk } = await keypair();
+      const kid = await calculateJwkThumbprint(publicJwk, "sha256");
+      const jws = await buildJws({ privateKey, kid, jwk: publicJwk, purpose: "enrol-device", dpopJkt: null });
+
+      await expect(
+        verifyDeviceAuthJws({
+          jws,
+          expectedPurpose: "enrol-device",
+          expectedChallenge: CHALLENGE,
+          expectedDeviceId: undefined,
+          storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
+        }),
+      ).rejects.toBeInstanceOf(DeviceJwsDpopMismatchError);
+    });
+
+    it("rejects an enrol-device JWS whose dpop_jkt claim names a different key than this request's DPoP proof", async () => {
+      const { privateKey, publicJwk } = await keypair();
+      const kid = await calculateJwkThumbprint(publicJwk, "sha256");
+      const jws = await buildJws({
+        privateKey,
+        kid,
+        jwk: publicJwk,
+        purpose: "enrol-device",
+        dpopJkt: "a-different-dpop-jkt",
+      });
+
+      await expect(
+        verifyDeviceAuthJws({
+          jws,
+          expectedPurpose: "enrol-device",
+          expectedChallenge: CHALLENGE,
+          expectedDeviceId: undefined,
+          storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
+        }),
+      ).rejects.toBeInstanceOf(DeviceJwsDpopMismatchError);
+    });
+
+    it("accepts an enrol-device JWS whose dpop_jkt claim matches exactly", async () => {
+      const { privateKey, publicJwk } = await keypair();
+      const kid = await calculateJwkThumbprint(publicJwk, "sha256");
+      const jws = await buildJws({ privateKey, kid, jwk: publicJwk, purpose: "enrol-device", dpopJkt: DPOP_JKT });
+
+      await expect(
+        verifyDeviceAuthJws({
+          jws,
+          expectedPurpose: "enrol-device",
+          expectedChallenge: CHALLENGE,
+          expectedDeviceId: undefined,
+          storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
+        }),
+      ).resolves.toBeDefined();
+    });
+  });
+
   describe("non-enrol purposes (stored key)", () => {
-    it("accepts a well-formed login JWS verified against the stored public jwk", async () => {
+    it("accepts a well-formed login JWS verified against the stored public jwk (dpop_jkt claim is not required)", async () => {
       const { privateKey, publicJwk } = await keypair();
       const kid = await calculateJwkThumbprint(publicJwk, "sha256");
       const jws = await buildJws({
@@ -125,6 +197,7 @@ describe("verifyDeviceAuthJws", () => {
         expectedChallenge: CHALLENGE,
         expectedDeviceId: "device_abc",
         storedPublicJwk: publicJwk,
+        expectedDpopJkt: undefined,
       });
 
       expect(claims.bioJkt).toBe(kid);
@@ -144,6 +217,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: publicJwk,
+          expectedDpopJkt: undefined,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -160,6 +234,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: undefined,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -177,12 +252,32 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: claimedKey.publicJwk,
+          expectedDpopJkt: undefined,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
   });
 
   describe("header validation", () => {
+    it("rejects a JWS whose protected header base64url-decodes to JSON null, instead of throwing an uncaught TypeError", async () => {
+      // JSON.parse("null") succeeds with no exception -- reaching `.typ` on
+      // a null value afterward would throw uncaught (this endpoint is
+      // reachable pre-session, so an uncaught throw here means an
+      // unhandled-500-shaped crash) without the null/non-object guard.
+      const nullHeader = Buffer.from("null").toString("base64url");
+      const jws = `${nullHeader}.payload.signature`;
+      await expect(
+        verifyDeviceAuthJws({
+          jws,
+          expectedPurpose: "enrol-device",
+          expectedChallenge: CHALLENGE,
+          expectedDeviceId: undefined,
+          storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
+        }),
+      ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
+    });
+
     it("rejects a malformed JWS (not three parts)", async () => {
       await expect(
         verifyDeviceAuthJws({
@@ -191,6 +286,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: undefined,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -207,6 +303,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -224,6 +321,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -239,6 +337,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -254,6 +353,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -272,6 +372,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceChallengePurposeMismatchError);
     });
@@ -293,6 +394,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -314,6 +416,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -335,6 +438,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: undefined,
           storedPublicJwk: undefined,
+          expectedDpopJkt: DPOP_JKT,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });
@@ -356,6 +460,7 @@ describe("verifyDeviceAuthJws", () => {
           expectedChallenge: CHALLENGE,
           expectedDeviceId: "device_correct",
           storedPublicJwk: publicJwk,
+          expectedDpopJkt: undefined,
         }),
       ).rejects.toBeInstanceOf(DeviceJwsInvalidError);
     });

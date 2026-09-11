@@ -19,15 +19,26 @@ export class DeviceChallengePurposeMismatchError extends Error {
   }
 }
 
+export class DeviceJwsDpopMismatchError extends Error {
+  public readonly code = "DEVICE_JWS_INVALID" as const;
+  public constructor() {
+    super("The JWS's dpop_jkt claim does not match this request's DPoP proof.");
+    this.name = "DeviceJwsDpopMismatchError";
+  }
+}
+
 export type DeviceAuthJwsVerificationError =
   | DeviceJwsInvalidError
-  | DeviceChallengePurposeMismatchError;
+  | DeviceChallengePurposeMismatchError
+  | DeviceJwsDpopMismatchError;
 
 export function isDeviceAuthJwsVerificationError(
   error: unknown,
 ): error is DeviceAuthJwsVerificationError {
   return (
-    error instanceof DeviceJwsInvalidError || error instanceof DeviceChallengePurposeMismatchError
+    error instanceof DeviceJwsInvalidError ||
+    error instanceof DeviceChallengePurposeMismatchError ||
+    error instanceof DeviceJwsDpopMismatchError
   );
 }
 
@@ -71,6 +82,15 @@ export async function verifyDeviceAuthJws(input: {
   expectedDeviceId: string | undefined;
   /** Required for every purpose except `enrol-device`. */
   storedPublicJwk: JWK | undefined;
+  /**
+   * Required for `enrol-device` (contract 3.2): the JWS's own `dpop_jkt`
+   * claim must equal the DPoP proof presenting this request, so the client
+   * can't complete one device's enrolment challenge over a JWS that names
+   * a different DPoP key than the one actually authenticating the request.
+   * Ignored for every other purpose (the contract doesn't define this claim
+   * for them).
+   */
+  expectedDpopJkt: string | undefined;
   now?: Date;
 }): Promise<DeviceAuthJwsClaims> {
   const jws = input.jws.trim();
@@ -81,8 +101,17 @@ export async function verifyDeviceAuthJws(input: {
 
   let protectedHeader: { typ?: unknown; alg?: unknown; kid?: unknown; jwk?: unknown };
   try {
-    protectedHeader = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
-  } catch {
+    const parsed: unknown = JSON.parse(Buffer.from(parts[0]!, "base64url").toString("utf8"));
+    // JSON.parse("null")/("42")/("\"x\"") all succeed with no exception --
+    // a base64url-encoded "null" header would otherwise reach `.typ` below
+    // on a null value and throw an uncaught TypeError instead of the clean
+    // 400 every other malformed-header case gets.
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new DeviceJwsInvalidError("malformed protected header");
+    }
+    protectedHeader = parsed;
+  } catch (error) {
+    if (error instanceof DeviceJwsInvalidError) throw error;
     throw new DeviceJwsInvalidError("malformed protected header");
   }
 
@@ -143,6 +172,11 @@ export async function verifyDeviceAuthJws(input: {
   if (input.expectedDeviceId !== undefined) {
     if (typeof payload.device_id !== "string" || payload.device_id !== input.expectedDeviceId) {
       throw new DeviceJwsInvalidError("device_id mismatch");
+    }
+  }
+  if (isEnrolDevice) {
+    if (typeof payload.dpop_jkt !== "string" || payload.dpop_jkt !== input.expectedDpopJkt) {
+      throw new DeviceJwsDpopMismatchError();
     }
   }
 

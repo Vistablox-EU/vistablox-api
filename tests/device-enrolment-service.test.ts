@@ -2,7 +2,14 @@ import { webcrypto } from "node:crypto";
 
 import "reflect-metadata";
 import * as asn1js from "asn1js";
-import { Extension, X509CertificateGenerator, cryptoProvider } from "@peculiar/x509";
+import {
+  BasicConstraintsExtension,
+  Extension,
+  KeyUsageFlags,
+  KeyUsagesExtension,
+  X509CertificateGenerator,
+  cryptoProvider,
+} from "@peculiar/x509";
 import { SignJWT, calculateJwkThumbprint, exportJWK, type JWK } from "jose";
 import { describe, expect, it } from "vitest";
 
@@ -14,7 +21,6 @@ import {
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
-  DevicePairingNotImplementedError,
 } from "../src/modules/auth/application/device-auth-errors.js";
 import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/device-auth-jws-verifier.js";
 import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
@@ -109,20 +115,24 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
   public async consume(input: {
     challenge: string;
     purpose: string;
+    dpopJkt: string;
+    deviceId: string | undefined;
     now: Date;
-  }): Promise<{ deviceId: string | undefined } | null> {
+  }): Promise<boolean> {
     this.consumeCallCount++;
     const entry = this.issued.get(input.challenge);
     if (
       entry === undefined ||
       entry.purpose !== input.purpose ||
+      entry.dpopJkt !== input.dpopJkt ||
+      entry.deviceId !== input.deviceId ||
       entry.consumed ||
       entry.expiresAt <= input.now
     ) {
-      return null;
+      return false;
     }
     entry.consumed = true;
-    return { deviceId: entry.deviceId };
+    return true;
   }
 
   public async pruneExpired(): Promise<number> {
@@ -137,17 +147,42 @@ function taggedNode(tagNumber: number, inner: object) {
 }
 
 function buildAttestationApplicationId(certDigestHex: string): ArrayBuffer {
-  const packageInfos = new asn1js.Set({ value: [] });
+  const packageInfo = new asn1js.Sequence({
+    value: [
+      new asn1js.OctetString({ valueHex: Buffer.from("com.vistablox.app", "utf8") }),
+      new asn1js.Integer({ value: 1 }),
+    ],
+  });
+  const packageInfos = new asn1js.Set({ value: [packageInfo] });
   const signatureDigests = new asn1js.Set({
     value: [new asn1js.OctetString({ valueHex: Buffer.from(certDigestHex, "hex") })],
   });
   return new asn1js.Sequence({ value: [packageInfos, signatureDigests] }).toBER(false);
 }
 
+function buildRootOfTrust(): asn1js.Sequence {
+  return new asn1js.Sequence({
+    value: [
+      new asn1js.OctetString({ valueHex: new ArrayBuffer(32) }),
+      new asn1js.Boolean({ value: true }), // deviceLocked
+      new asn1js.Enumerated({ value: 0 }), // verifiedBootState: Verified
+      new asn1js.OctetString({ valueHex: new ArrayBuffer(32) }),
+    ],
+  });
+}
+
+/** A fully well-formed KeyDescription -- every check this PR's security review added. */
 function buildKeyDescription(challenge: string): ArrayBuffer {
   const teeEnforced = new asn1js.Sequence({
     value: [
-      taggedNode(504, new asn1js.Integer({ value: 0b10 })), // fingerprint only
+      taggedNode(1, new asn1js.Set({ value: [new asn1js.Integer({ value: 2 })] })), // purpose: SIGN
+      taggedNode(2, new asn1js.Integer({ value: 3 })), // algorithm: EC
+      taggedNode(5, new asn1js.Set({ value: [new asn1js.Integer({ value: 4 })] })), // digest: SHA-256
+      taggedNode(10, new asn1js.Integer({ value: 1 })), // ecCurve: P-256
+      taggedNode(504, new asn1js.Integer({ value: 0b10 })), // userAuthType: fingerprint only
+      taggedNode(509, new asn1js.Boolean({ value: true })), // unlockedDeviceRequired
+      taggedNode(702, new asn1js.Integer({ value: 0 })), // origin: GENERATED
+      taggedNode(704, buildRootOfTrust()),
       taggedNode(
         709,
         new asn1js.OctetString({ valueHex: buildAttestationApplicationId(CERT_DIGEST_HEX) }),
@@ -169,9 +204,14 @@ function buildKeyDescription(challenge: string): ArrayBuffer {
   }).toBER(false);
 }
 
-/** One valid Android key-attestation chain, bound to `challenge`. */
+/**
+ * One valid Android key-attestation chain, bound to `challenge` and to
+ * `leafPublicKey` -- the same key the enrolment JWS embeds, since the
+ * verifier now requires the attested key to match the JWS's own bio_jkt.
+ */
 async function buildAndroidAttestationChain(
   challenge: string,
+  leafPublicKey: webcrypto.CryptoKey,
 ): Promise<{ rootBase64: string; leafBase64: string }> {
   const rootKeys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
     "sign",
@@ -184,12 +224,12 @@ async function buildAndroidAttestationChain(
     notAfter: new Date("2035-01-01"),
     signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
     keys: rootKeys,
+    extensions: [
+      new BasicConstraintsExtension(true, undefined, true),
+      new KeyUsagesExtension(KeyUsageFlags.keyCertSign, true),
+    ],
   });
 
-  const leafKeys = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
-    "sign",
-    "verify",
-  ]);
   const leafCert = await X509CertificateGenerator.create({
     serialNumber: "02",
     subject: "CN=Test Leaf",
@@ -197,7 +237,7 @@ async function buildAndroidAttestationChain(
     notBefore: new Date("2020-01-01"),
     notAfter: new Date("2035-01-01"),
     signingAlgorithm: { name: "ECDSA", hash: "SHA-256" },
-    publicKey: leafKeys.publicKey,
+    publicKey: leafPublicKey,
     signingKey: rootKeys.privateKey,
     extensions: [new Extension(KEY_DESCRIPTION_OID, false, buildKeyDescription(challenge))],
   });
@@ -212,22 +252,38 @@ async function buildEnrolJws(options: {
   challenge: string;
   purpose?: string;
   iat?: number;
-}): Promise<{ jws: string; bioJkt: string; publicJwk: JWK }> {
-  const { privateKey, publicKey } = await webcrypto.subtle.generateKey(
-    { name: "ECDSA", namedCurve: "P-256" },
-    true,
-    ["sign", "verify"],
-  );
+  dpopJkt?: string;
+  publicKey?: webcrypto.CryptoKey;
+  privateKey?: webcrypto.CryptoKey;
+}): Promise<{ jws: string; bioJkt: string; publicJwk: JWK; publicKey: webcrypto.CryptoKey }> {
+  let privateKey: webcrypto.CryptoKey;
+  let publicKey: webcrypto.CryptoKey;
+  if (options.privateKey !== undefined && options.publicKey !== undefined) {
+    privateKey = options.privateKey;
+    publicKey = options.publicKey;
+  } else {
+    const generated = await webcrypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, true, [
+      "sign",
+      "verify",
+    ]);
+    privateKey = generated.privateKey;
+    publicKey = generated.publicKey;
+  }
   const publicJwk = await exportJWK(publicKey);
   const bioJkt = await calculateJwkThumbprint(publicJwk, "sha256");
-  const jws = await new SignJWT({
-    purpose: options.purpose ?? "enrol-device",
+  const purpose = options.purpose ?? "enrol-device";
+  const payload: Record<string, unknown> = {
+    purpose,
     challenge: options.challenge,
     iat: options.iat ?? Math.floor(Date.now() / 1000),
-  })
+  };
+  if (purpose === "enrol-device") {
+    payload.dpop_jkt = options.dpopJkt ?? "dpop-jkt-1";
+  }
+  const jws = await new SignJWT(payload)
     .setProtectedHeader({ alg: "ES256", typ: JWS_TYP, kid: bioJkt, jwk: publicJwk as Record<string, unknown> })
     .sign(privateKey);
-  return { jws, bioJkt, publicJwk };
+  return { jws, bioJkt, publicJwk, publicKey };
 }
 
 function androidConfig(
@@ -259,8 +315,8 @@ describe("EnrolDeviceService", () => {
       deviceId: undefined,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    const chain = await buildAndroidAttestationChain(challenge);
-    const { jws, bioJkt } = await buildEnrolJws({ challenge });
+    const { jws, bioJkt, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-jkt-1" });
+    const chain = await buildAndroidAttestationChain(challenge, publicKey);
 
     const service = new EnrolDeviceService(
       challenges,
@@ -333,7 +389,7 @@ describe("EnrolDeviceService", () => {
           appVersion: undefined,
         },
       }),
-    ).rejects.toBeInstanceOf(DevicePairingNotImplementedError);
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
     expect(challenges.consumeCallCount).toBe(0);
   });
 
@@ -418,7 +474,7 @@ describe("EnrolDeviceService", () => {
       deviceId: undefined,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    const { jws } = await buildEnrolJws({ challenge });
+    const { jws } = await buildEnrolJws({ challenge, dpopJkt: "reused-dpop-jkt" });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
 
     await expect(
@@ -451,7 +507,7 @@ describe("EnrolDeviceService", () => {
       deviceId: undefined,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    const { jws } = await buildEnrolJws({ challenge });
+    const { jws } = await buildEnrolJws({ challenge, dpopJkt: "dpop-jkt-6" });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
 
     await expect(
@@ -484,8 +540,8 @@ describe("EnrolDeviceService", () => {
       deviceId: undefined,
       expiresAt: new Date(Date.now() + 60_000),
     });
-    const chain = await buildAndroidAttestationChain(challenge);
-    const { jws } = await buildEnrolJws({ challenge });
+    const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-jkt-7" });
+    const chain = await buildAndroidAttestationChain(challenge, publicKey);
 
     const service = new EnrolDeviceService(
       challenges,

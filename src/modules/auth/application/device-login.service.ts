@@ -33,9 +33,11 @@ export class LoginDeviceService {
     const consumed = await this.challengeRepository.consume({
       challenge: input.challenge,
       purpose: LOGIN_PURPOSE,
+      dpopJkt: input.dpopJkt,
+      deviceId: input.deviceId,
       now: this.clock(),
     });
-    if (consumed === null) {
+    if (!consumed) {
       throw new DeviceChallengeExpiredError();
     }
 
@@ -46,6 +48,7 @@ export class LoginDeviceService {
         expectedChallenge: input.challenge,
         expectedDeviceId: input.deviceId,
         storedPublicJwk: device.biometricPublicJwk,
+        expectedDpopJkt: undefined,
         now: this.clock(),
       });
     } catch (error) {

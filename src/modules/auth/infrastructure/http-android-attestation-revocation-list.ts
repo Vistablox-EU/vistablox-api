@@ -3,6 +3,7 @@ import type { AndroidAttestationRevocationList } from "../application/android-at
 const REVOCATION_LIST_URL = "https://android.googleapis.com/attestation/status";
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 const FAIL_CLOSED_AFTER_MS = 72 * 60 * 60 * 1000;
+const FETCH_TIMEOUT_MS = 5_000;
 
 interface RevocationStatusResponse {
   entries: Record<string, unknown>;
@@ -18,6 +19,11 @@ interface RevocationStatusResponse {
 export class HttpAndroidAttestationRevocationList implements AndroidAttestationRevocationList {
   private revokedSerials: Set<string> | undefined;
   private fetchedAt: number | undefined;
+  // Concurrent enrolments hitting a stale cache at once must share one
+  // in-flight refresh rather than each firing their own fetch at Google's
+  // endpoint -- this is on the hot path of every enrolment/login
+  // attestation check, not a background job.
+  private refreshInFlight: Promise<void> | undefined;
 
   public async isRevoked(certificateSerialHex: string): Promise<boolean> {
     await this.refreshIfStale();
@@ -34,16 +40,29 @@ export class HttpAndroidAttestationRevocationList implements AndroidAttestationR
     if (this.fetchedAt !== undefined && Date.now() - this.fetchedAt < CACHE_TTL_MS) {
       return;
     }
+    if (this.refreshInFlight !== undefined) {
+      await this.refreshInFlight;
+      return;
+    }
+    this.refreshInFlight = this.refresh().finally(() => {
+      this.refreshInFlight = undefined;
+    });
+    await this.refreshInFlight;
+  }
+
+  private async refresh(): Promise<void> {
     try {
-      const response = await fetch(REVOCATION_LIST_URL);
+      const response = await fetch(REVOCATION_LIST_URL, {
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
       if (!response.ok) return;
       const body = (await response.json()) as RevocationStatusResponse;
       this.revokedSerials = new Set(Object.keys(body.entries).map((serial) => serial.toLowerCase()));
       this.fetchedAt = Date.now();
     } catch {
-      // Leave the existing cache (if any) in place -- refreshIfStale is
-      // re-tried on the next call, and isRevoked's own fail-closed check
-      // above catches the case where the cache never recovers.
+      // Leave the existing cache (if any) in place -- the next call retries
+      // (refreshInFlight is cleared in refreshIfStale's .finally above), and
+      // isRevoked's own fail-closed check catches a cache that never recovers.
     }
   }
 }

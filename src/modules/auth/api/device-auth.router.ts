@@ -125,17 +125,32 @@ export function createDeviceAuthRouter(
   requireDpopOnly: RequestHandler,
   issueChallenge: IssueDeviceChallengeService,
   auth: VistaBloxAuth,
-  // Challenge issuance writes a fresh, unauthenticated device_challenges row
-  // on every call -- unlike verify, which is gated by a single-use challenge
-  // it has to already hold. Applied after requireDpopOnly so a DPoP-keyed
-  // limiter (see rate-limit.ts's dpopKeyRateLimitSubject) can read
-  // response.locals.dpopJkt; empty by default so a caller with no
-  // rateLimitStore configured (e.g. most tests) gets no-op middleware.
-  challengeRateLimiters: RequestHandler[] = [],
+  // Used on /enrol/verify and /login/verify instead of requireDpopOnly --
+  // verifies the proof and sets response.locals.dpopJkt the same way, but
+  // must NOT also record (jkt, jti): the better-auth ceremony these routes
+  // call into (auth.api.enrolVerify/loginVerify) does its own full
+  // verify-and-record of this identical request's proof moments later, and
+  // the two can't dedupe each other (see require-dpop-only.ts's
+  // recordReplays doc comment for why -- the router builds a new Request
+  // object for the ceremony, so its WeakMap cache never sees this
+  // middleware's). Recording here too would make the ceremony's own record
+  // always lose as a replay of this one -- confirmed live (DPOP_REPLAY on
+  // every real E2/L2 call) before this parameter existed.
+  requireDpopOnlyForVerify: RequestHandler,
+  // Applied after requireDpopOnly (so a DPoP-keyed limiter -- see
+  // rate-limit.ts's dpopKeyRateLimitSubject -- can read response.locals
+  // .dpopJkt) to all four routes: challenge issuance writes a fresh,
+  // unauthenticated device_challenges row on every call with no other
+  // gate, and verify is worth limiting too even though it's gated by
+  // holding a single-use challenge (brute-forcing a JWS/attestation
+  // shouldn't be free just because it fails). Empty by default so a
+  // caller with no rateLimitStore configured (e.g. most tests) gets
+  // no-op middleware.
+  deviceAuthRateLimiters: RequestHandler[] = [],
 ): Router {
   const router = Router();
 
-  router.post("/enrol/challenge", requireDpopOnly, ...challengeRateLimiters, async (_request, response) => {
+  router.post("/enrol/challenge", requireDpopOnly, ...deviceAuthRateLimiters, async (_request, response) => {
     const dpopJkt = requireDpopJkt(response);
     const { challenge, expiresAt } = await issueChallenge.execute({
       purpose: "enrol-device",
@@ -150,7 +165,7 @@ export function createDeviceAuthRouter(
     );
   });
 
-  router.post("/enrol/verify", requireDpopOnly, async (request, response) => {
+  router.post("/enrol/verify", requireDpopOnlyForVerify, ...deviceAuthRateLimiters, async (request, response) => {
     const body = enrolVerifyRequestSchema.parse(request.body);
     try {
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).enrolVerify({
@@ -183,7 +198,7 @@ export function createDeviceAuthRouter(
     }
   });
 
-  router.post("/login/challenge", requireDpopOnly, ...challengeRateLimiters, async (request, response) => {
+  router.post("/login/challenge", requireDpopOnly, ...deviceAuthRateLimiters, async (request, response) => {
     const dpopJkt = requireDpopJkt(response);
     const body = loginChallengeRequestSchema.parse(request.body);
     const { challenge, expiresAt } = await issueChallenge.execute({
@@ -204,7 +219,7 @@ export function createDeviceAuthRouter(
     );
   });
 
-  router.post("/login/verify", requireDpopOnly, async (request, response) => {
+  router.post("/login/verify", requireDpopOnlyForVerify, ...deviceAuthRateLimiters, async (request, response) => {
     const body = loginVerifyRequestSchema.parse(request.body);
     try {
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).loginVerify({

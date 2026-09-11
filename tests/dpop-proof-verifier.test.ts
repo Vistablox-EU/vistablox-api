@@ -216,4 +216,16 @@ describe("verifyDpopProof", () => {
     });
     expect(result.jkt).toBeDefined();
   });
+
+  it("rejects a proof whose protected header base64url-decodes to JSON null, instead of throwing an uncaught TypeError", async () => {
+    // JSON.parse("null") succeeds with no exception -- reaching `.typ` on a
+    // null value afterward would throw uncaught (surfacing as an
+    // unhandled-500-shaped crash on this unauthenticated endpoint) without
+    // the null/non-object guard.
+    const nullHeader = Buffer.from("null").toString("base64url");
+    const proof = `${nullHeader}.payload.signature`;
+    await expect(
+      verifyDpopProof({ header: proof, method: HTM, url: HTU, bearerToken: BEARER_TOKEN }),
+    ).rejects.toBeInstanceOf(DpopProofInvalidError);
+  });
 });
