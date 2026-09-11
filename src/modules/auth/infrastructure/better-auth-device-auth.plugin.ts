@@ -136,30 +136,50 @@ export function createBetterAuthDeviceAuthPlugin(
               },
             });
 
-            // Just the userId: internalAdapter.createSession's 2nd param is
-            // dontRememberMe (a boolean), not a context -- the request
-            // context it needs comes from tryGetCurrentAuthEndpointContext's
-            // continuation-local lookup automatically, confirmed against
-            // internal-adapter.mjs directly rather than assumed.
-            const session = await ctx.context.internalAdapter.createSession(current.user.id);
-            if (session === null) {
-              throw APIError.from("INTERNAL_SERVER_ERROR", {
-                code: "device.session_creation_failed",
-                message: "Could not create a session for the enrolled device.",
-              });
-            }
-            await setSessionCookie(ctx, { session, user: current.user });
-            // The pending session's job is done -- mirrors the passkey
-            // ceremony's own priorSessionToken/deleteSession pattern (E2
-            // "rotates" per the wire contract, section 3.1).
-            await ctx.context.internalAdapter.deleteSession(current.session.token);
+            try {
+              // Just the userId: internalAdapter.createSession's 2nd param
+              // is dontRememberMe (a boolean), not a context -- the request
+              // context it needs comes from tryGetCurrentAuthEndpointContext's
+              // continuation-local lookup automatically, confirmed against
+              // internal-adapter.mjs directly rather than assumed.
+              const session = await ctx.context.internalAdapter.createSession(current.user.id);
+              if (session === null) {
+                throw APIError.from("INTERNAL_SERVER_ERROR", {
+                  code: "device.session_creation_failed",
+                  message: "Could not create a session for the enrolled device.",
+                });
+              }
+              await setSessionCookie(ctx, { session, user: current.user });
+              // The pending session's job is done -- mirrors the passkey
+              // ceremony's own priorSessionToken/deleteSession pattern (E2
+              // "rotates" per the wire contract, section 3.1).
+              await ctx.context.internalAdapter.deleteSession(current.session.token);
 
-            return ctx.json({
-              device_id: device.deviceId,
-              status: "active" as const,
-              session_expires_at: session.expiresAt.toISOString(),
-              authentication_level: "device_biometric" as const,
-            });
+              return ctx.json({
+                device_id: device.deviceId,
+                status: "active" as const,
+                session_expires_at: session.expiresAt.toISOString(),
+                authentication_level: "device_biometric" as const,
+              });
+            } catch (error) {
+              // The device row is already committed (Prisma) by this
+              // point; internalAdapter.createSession uses a different
+              // client (better-auth's own pg Pool), so this couldn't have
+              // been one transaction. Compensate rather than leave an
+              // orphaned active device blocking every retry via the
+              // one-active-device-per-account constraint -- confirmed
+              // live on staging: a real enrolment crashed exactly here and
+              // did exactly that, before this existed. Best-effort: if the
+              // rollback itself fails, still surface the original error,
+              // not the cleanup failure.
+              await options.enrolDevice.rollback(device.deviceId).catch((rollbackError: unknown) => {
+                ctx.context.logger?.warn?.("failed to roll back an orphaned device after a failed enrolment", {
+                  deviceId: device.deviceId,
+                  rollbackError,
+                });
+              });
+              throw error;
+            }
           } catch (error) {
             logAttestationRejection(ctx, error);
             throw toApiError(error);

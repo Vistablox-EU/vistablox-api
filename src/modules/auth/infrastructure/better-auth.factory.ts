@@ -12,6 +12,24 @@ import { type DpopLogger } from "../application/dpop-proof-verifier.js";
 import type { DpopReplayRepository } from "../repository/dpop-replay.repository.js";
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
+
+// Single source of truth for every value the code can write to
+// auth_session.authenticationLevel -- also the value this codebase's own
+// migration-vs-code guard test parses the latest migration's CHECK
+// constraint against (tests/auth-session-authentication-level-guard
+// .test.ts). #54 introduced "device_biometric" here without a matching
+// migration; the constraint rejected every real session-creation call
+// until 20260911170000_device_biometric_session_level caught up --
+// exporting this one array is what lets a test catch that class of bug
+// without needing a database.
+export const AUTHENTICATION_LEVELS = [
+  "unassured",
+  "oauth_pending",
+  "oauth_passkey",
+  "staff_passkey",
+  "device_biometric",
+] as const;
+export type AuthenticationLevel = (typeof AUTHENTICATION_LEVELS)[number];
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 import { createBetterAuthDeviceAuthPlugin } from "./better-auth-device-auth.plugin.js";
 import { createBetterAuthDpopPlugin } from "./better-auth-dpop.plugin.js";
@@ -159,7 +177,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       updateAge: 5 * 60,
       additionalFields: {
         authenticationLevel: {
-          type: ["unassured", "oauth_pending", "oauth_passkey", "staff_passkey", "device_biometric"],
+          type: [...AUTHENTICATION_LEVELS],
           required: true,
           defaultValue: "unassured",
           input: false,
@@ -448,9 +466,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         internalAdapter: { findUserById: (id: string) => Promise<unknown> };
       };
     } | null,
-  ): Promise<
-    "unassured" | "oauth_pending" | "oauth_passkey" | "staff_passkey" | "device_biometric"
-  > {
+  ): Promise<AuthenticationLevel> {
     const user = await authContextUser(userId, context);
     if (isStaffAuthUser(user) && isPasskeyVerificationPath(context?.path)) {
       return "staff_passkey";

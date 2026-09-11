@@ -82,6 +82,10 @@ class FakeDeviceRepository implements DeviceRepository {
     const device = this.devices.find((d) => d.deviceId === deviceId);
     if (device !== undefined) device.lastSeenAt = at;
   }
+
+  public async delete(deviceId: string): Promise<void> {
+    this.devices = this.devices.filter((d) => d.deviceId !== deviceId);
+  }
 }
 
 interface FakeChallengeEntry {
@@ -566,5 +570,37 @@ describe("EnrolDeviceService", () => {
         },
       }),
     ).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+  });
+});
+
+// Compensation for a failed enrolment: execute() (Prisma) and the
+// internalAdapter session-creation call the caller makes right after it
+// succeeds (better-auth's own pg Pool) use different DB clients, so
+// there's no single transaction spanning both. If session creation fails
+// after the device row already exists, the caller (better-auth-device-auth
+// .plugin.ts's enrolVerify) must call rollback() before rethrowing, or the
+// device is left behind, active, blocking every retry via the
+// one-active-device-per-account constraint -- confirmed live on staging: a
+// real enrolment crashed exactly this way before rollback() existed.
+describe("EnrolDeviceService.rollback", () => {
+  it("deletes the device row via the repository", async () => {
+    const devices = new FakeDeviceRepository();
+    devices.devices.push({
+      deviceId: "device_orphaned",
+      accountId: "account-1",
+      betterAuthUserId: "user-1",
+      dpopJkt: "dpop-jkt-1",
+      bioJkt: "bio-jkt-1",
+      biometricPublicJwk: {},
+      platform: "android",
+      status: "active",
+      createdAt: new Date(),
+      lastSeenAt: new Date(),
+    });
+    const service = new EnrolDeviceService(new FakeChallengeRepository(), devices, androidConfig());
+
+    await service.rollback("device_orphaned");
+
+    expect(devices.devices.find((d) => d.deviceId === "device_orphaned")).toBeUndefined();
   });
 });
