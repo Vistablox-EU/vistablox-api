@@ -22,6 +22,10 @@ export interface BetterAuthAuditPluginOptions {
     methodType: LoginMethodType;
     occurredAt: Date;
   }) => Promise<void>;
+  // Device login (L2) failures: the better-auth user that owns this device,
+  // or null if there's no such device -- lets a failed L2 with a real
+  // device_id be linked to its account, the way a failed email login is.
+  findDeviceOwner?: (deviceId: string) => Promise<string | null>;
 }
 
 interface AuditContext {
@@ -81,6 +85,39 @@ export function createBetterAuthAuditPlugin(
     }
   };
 
+  // E2/L2 success, recorded only once the endpoint has returned its success
+  // body: every step after session creation has completed. The session
+  // comes from ctx.context.newSession (set by setSessionCookie) and the
+  // device_id from the response body, so enrolment gets its new device_id
+  // too. Nothing from the request body (JWS, challenge, attestation) is used.
+  const recordDeviceCeremonySucceeded = async (context: unknown): Promise<void> => {
+    try {
+      const auditContext = context as AuditContext & {
+        context: { returned?: unknown; newSession?: unknown };
+      };
+      const newSession = readNewSession(auditContext.context.newSession);
+      if (newSession === null) return;
+      await record({
+        eventKey: `better_auth:login_succeeded:${newSession.sessionId}`,
+        action: "authentication.login_succeeded",
+        betterAuthUserId: newSession.userId,
+        attributeToSubject: true,
+        resourceType: "account",
+        resourceId: newSession.userId,
+        changes: {
+          trace_id: readTraceId(auditContext),
+          authentication_method: "device_biometric",
+          provider_session_id: newSession.sessionId,
+          device_id: readObjectString(auditContext.context.returned, "device_id"),
+          ...deviceCeremonyPurpose(auditContext.path),
+        },
+        occurredAt: clock(),
+      });
+    } catch (error) {
+      options.onError?.(error);
+    }
+  };
+
   return {
     id: "vistablox-auth-audit",
     init() {
@@ -128,7 +165,12 @@ export function createBetterAuthAuditPlugin(
                     },
                     occurredAt: session.createdAt,
                   });
-                  if (isLoginPath(context?.path)) {
+                  // E2/L2 still have work to do after their session row
+                  // exists (E2 deletes the pending session; L2 loads the
+                  // user and sets the cookie), and either can still fail.
+                  // Their login_succeeded is recorded by the after hook
+                  // below, once the ceremony has actually completed.
+                  if (isLoginPath(context?.path) && !isDeviceAuthPath(context?.path)) {
                     if (linkedMethod !== null && isSupportedLoginMethod(linkedMethod)) {
                       try {
                         await options.onLoginMethodUsed?.({
@@ -156,7 +198,6 @@ export function createBetterAuthAuditPlugin(
                         trace_id: traceId,
                         authentication_method: method,
                         provider_session_id: session.id,
-                        ...verifiedDeviceIdChange(context),
                       },
                       occurredAt: session.createdAt,
                     });
@@ -192,9 +233,18 @@ export function createBetterAuthAuditPlugin(
         {
           matcher: (context) => isLoginPath(context.path),
           handler: createAuthMiddleware(async (context) => {
-            if (!isAPIError(context.context.returned)) return;
+            if (!isAPIError(context.context.returned)) {
+              if (isDeviceAuthPath(context.path)) {
+                await recordDeviceCeremonySucceeded(context);
+              }
+              return;
+            }
             try {
-              const identity = await resolveFailedIdentity(context, options.identifierHashKey);
+              const identity = await resolveFailedIdentity(
+                context,
+                options.identifierHashKey,
+                options.findDeviceOwner,
+              );
               const traceId = readTraceId(context);
               const eventId = readEventId(context);
               await record({
@@ -209,6 +259,8 @@ export function createBetterAuthAuditPlugin(
                   trace_id: traceId,
                   authentication_method: resolveLoginMethod(context),
                   failure_code: readErrorCode(context.context.returned),
+                  ...deviceCeremonyPurpose(context.path),
+                  ...(identity.deviceId === undefined ? {} : { device_id: identity.deviceId }),
                 },
                 occurredAt: clock(),
               });
@@ -225,7 +277,8 @@ export function createBetterAuthAuditPlugin(
 async function resolveFailedIdentity(
   context: unknown,
   hashKey: string,
-): Promise<{ betterAuthUserId: string | null; resourceId: string }> {
+  findDeviceOwner: ((deviceId: string) => Promise<string | null>) | undefined,
+): Promise<{ betterAuthUserId: string | null; resourceId: string; deviceId?: string }> {
   const auditContext = context as AuditContext & {
     context: {
       internalAdapter: {
@@ -243,16 +296,20 @@ async function resolveFailedIdentity(
       ? { betterAuthUserId: null, resourceId: "login_unknown" }
       : { betterAuthUserId: userId, resourceId: userId };
   }
-  // L2 has no session yet, and a failed device_id is unverified client
-  // input: record only a keyed hash of it, like a failed email above.
+  // L2 has no session yet. A device_id that belongs to a real device links
+  // the failure to that device's account, the way a failed email login is
+  // linked to its user below. An unknown device_id is unverified client
+  // input: only a keyed hash of it is recorded.
   if (auditContext.path === "/device/login/verify") {
     const deviceId = readBodyString(auditContext.body, "device_id");
-    return deviceId === null
-      ? { betterAuthUserId: null, resourceId: "login_unknown" }
-      : {
+    if (deviceId === null) return { betterAuthUserId: null, resourceId: "login_unknown" };
+    const ownerId = findDeviceOwner === undefined ? null : await findDeviceOwner(deviceId);
+    return ownerId === null
+      ? {
           betterAuthUserId: null,
           resourceId: `login_device_${createHmac("sha256", hashKey).update(deviceId).digest("hex")}`,
-        };
+        }
+      : { betterAuthUserId: ownerId, resourceId: ownerId, deviceId };
   }
   const email = readBodyString(auditContext.body, "email")?.trim().toLowerCase();
   if (email !== null && email !== undefined) {
@@ -285,14 +342,19 @@ function isDeviceAuthPath(path: string | undefined): boolean {
   return path === "/device/enrol/verify" || path === "/device/login/verify";
 }
 
-// L2 only: by the time its session is created, the body's device_id has
-// matched a real device and the JWS verified against that device's key.
-// E2's body carries no device_id. Nothing else from either body (JWS,
-// challenge, attestation) is ever recorded.
-function verifiedDeviceIdChange(context: AuditContext | null): { device_id?: string | null } {
-  return context?.path === "/device/login/verify"
-    ? { device_id: readBodyString(context.body, "device_id") }
-    : {};
+// The device-auth JWS purpose each ceremony runs under (contract 3.2).
+function deviceCeremonyPurpose(path: string | undefined): { purpose?: string } {
+  if (path === "/device/enrol/verify") return { purpose: "enrol-device" };
+  if (path === "/device/login/verify") return { purpose: "login" };
+  return {};
+}
+
+function readNewSession(value: unknown): { sessionId: string; userId: string } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const session = (value as { session?: unknown }).session;
+  const sessionId = readObjectString(session, "id");
+  const userId = readObjectString(session, "userId");
+  return sessionId === null || userId === null ? null : { sessionId, userId };
 }
 
 function readSessionUserId(session: unknown): string | null {
