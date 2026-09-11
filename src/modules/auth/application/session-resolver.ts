@@ -14,6 +14,10 @@ export interface AuthenticatedIdentity {
   // When this session was created -- decides, for an unbound session, which
   // side of the phase-1 cutover it's on (see DPOP_PHASE1_CUTOVER_AT).
   sessionCreatedAt: Date;
+  // The session's authentication level (e.g. "device_biometric"), when the
+  // resolver knows it. Lets recordActivity skip sessions without an idle
+  // limit without touching the database.
+  authenticationLevel?: string;
 }
 
 export interface SessionResolver {

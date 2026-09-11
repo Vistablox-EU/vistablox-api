@@ -9,7 +9,11 @@ import {
   type SessionResolver,
 } from "../application/session-resolver.js";
 import type { SessionMirror } from "../application/session-mirror.js";
-import { evaluateDeviceSessionLifetime } from "../domain/device-session-lifetime.js";
+import {
+  DEVICE_SESSION_ABSOLUTE_LIFETIME_MS,
+  DEVICE_SESSION_IDLE_TIMEOUT_MS,
+  evaluateDeviceSessionLifetime,
+} from "../domain/device-session-lifetime.js";
 import {
   DEVICE_SESSION_AUTHENTICATION_LEVEL,
   REAUTH_REQUIRED_CODE,
@@ -71,6 +75,7 @@ export class BetterAuthSessionResolver implements SessionResolver {
       population: result.user.population === "staff_partner" ? "staff_partner" : "customer",
       dpopJkt: typeof dpopJkt === "string" ? dpopJkt : null,
       sessionCreatedAt: result.session.createdAt,
+      authenticationLevel,
     };
   }
 
@@ -83,15 +88,24 @@ export class BetterAuthSessionResolver implements SessionResolver {
 
   /**
    * Device sessions only: `updatedAt` is their last-activity time (see
-   * better-auth-device-session-lifetime.plugin.ts). The level predicate
-   * keeps every other session untouched. GREATEST keeps the value from
-   * moving backwards when two requests finish out of order.
+   * better-auth-device-session-lifetime.plugin.ts). Every other session is
+   * skipped without a query. The WHERE clause re-checks the level and both
+   * limits, so nothing is written to a session that has already expired.
+   * GREATEST keeps the value from moving backwards when two requests
+   * finish out of order.
    */
   public async recordActivity(identity: AuthenticatedIdentity): Promise<void> {
+    if (identity.authenticationLevel !== DEVICE_SESSION_AUTHENTICATION_LEVEL) return;
     const now = (this.options.clock ?? (() => new Date()))();
     const updated = await this.authPool.query(
-      'UPDATE "auth_session" SET "updatedAt" = GREATEST("updatedAt", $1) WHERE "id" = $2 AND "authenticationLevel" = $3',
-      [now, identity.providerSessionId, DEVICE_SESSION_AUTHENTICATION_LEVEL],
+      'UPDATE "auth_session" SET "updatedAt" = GREATEST("updatedAt", $1) WHERE "id" = $2 AND "authenticationLevel" = $3 AND "createdAt" > $4 AND "updatedAt" > $5',
+      [
+        now,
+        identity.providerSessionId,
+        DEVICE_SESSION_AUTHENTICATION_LEVEL,
+        new Date(now.getTime() - DEVICE_SESSION_ABSOLUTE_LIFETIME_MS),
+        new Date(now.getTime() - DEVICE_SESSION_IDLE_TIMEOUT_MS),
+      ],
     );
     const mirror = this.options.sessionMirror;
     if ((updated.rowCount ?? 0) === 0 || mirror?.recordActivity === undefined) return;

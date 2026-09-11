@@ -83,20 +83,28 @@ export function createRequireAuthentication(
         });
       }
 
-      // Session time limits (contract 3.6/3.7): this request counts as
-      // activity only here, after the DPoP proof and the account checks
-      // above have passed.
-      await sessions.recordActivity?.(identity);
-
       response.locals.authContext = {
         accountId: account.accountId,
         providerSessionId: identity.providerSessionId,
         population: identity.population,
       };
+
+      // Session time limits (contract 3.6/3.7): the request counts as
+      // activity only once it has passed the DPoP proof, the account checks
+      // and the rate limiter. A 429 is not activity.
+      const recordActivityThenContinue = (): void => {
+        (sessions.recordActivity?.(identity) ?? Promise.resolve()).then(() => next(), next);
+      };
       if (rateLimiter === undefined) {
-        next();
+        recordActivityThenContinue();
       } else {
-        rateLimiter(request, response, next);
+        rateLimiter(request, response, (limiterError?: unknown) => {
+          if (limiterError !== undefined && limiterError !== null) {
+            next(limiterError);
+            return;
+          }
+          recordActivityThenContinue();
+        });
       }
     } catch (error) {
       next(error);

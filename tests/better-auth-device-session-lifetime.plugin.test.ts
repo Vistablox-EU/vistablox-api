@@ -67,11 +67,25 @@ async function buildAuth() {
     Object.assign(row(token) as Row, patch);
   }
 
-  function getSession(token: string) {
-    return auth.api.getSession({ headers: new Headers({ authorization: `Bearer ${token}` }) });
+  function bearerHeaders(token: string): Headers {
+    return new Headers({ authorization: `Bearer ${token}` });
   }
 
-  return { createSession, row, setRow, getSession };
+  function getSession(token: string) {
+    return auth.api.getSession({ headers: bearerHeaders(token) });
+  }
+
+  // Two routes that read the session through getSessionFromCtx rather than
+  // the get-session endpoint.
+  function listSessions(token: string) {
+    return auth.api.listSessions({ headers: bearerHeaders(token) });
+  }
+
+  function updateUser(token: string) {
+    return auth.api.updateUser({ headers: bearerHeaders(token), body: { name: "Renamed" } });
+  }
+
+  return { context, createSession, row, setRow, getSession, listSessions, updateUser };
 }
 
 describe("device session lifetime plugin (real better-auth get-session)", () => {
@@ -184,5 +198,103 @@ describe("device session lifetime plugin (real better-auth get-session)", () => 
     const harness = await buildAuth();
 
     await expect(harness.getSession("unknown-session-token")).resolves.toBeNull();
+  });
+});
+
+describe("device session lifetime plugin: every session lookup, not just get-session", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("refuses a device session idle for 12 minutes on list-sessions, and ends it", async () => {
+    const harness = await buildAuth();
+    const token = await harness.createSession("device_biometric");
+
+    vi.setSystemTime(at(12 * MINUTE));
+    await expect(harness.listSessions(token)).rejects.toMatchObject({ statusCode: 401 });
+    expect(harness.row(token)).toBeUndefined();
+  });
+
+  it("refuses a device session idle for 12 minutes on update-user, and ends it", async () => {
+    const harness = await buildAuth();
+    const token = await harness.createSession("device_biometric");
+
+    vi.setSystemTime(at(12 * MINUTE));
+    await expect(harness.updateUser(token)).rejects.toMatchObject({ statusCode: 401 });
+    expect(harness.row(token)).toBeUndefined();
+  });
+
+  it("refuses a device session past its absolute limit on both routes, even with recent activity", async () => {
+    const harness = await buildAuth();
+    const first = await harness.createSession("device_biometric");
+    const second = await harness.createSession("device_biometric");
+
+    vi.setSystemTime(at(30 * MINUTE));
+    harness.setRow(first, { updatedAt: at(30 * MINUTE - 1_000) });
+    harness.setRow(second, { updatedAt: at(30 * MINUTE - 1_000) });
+    await expect(harness.listSessions(first)).rejects.toMatchObject({ statusCode: 401 });
+    await expect(harness.updateUser(second)).rejects.toMatchObject({ statusCode: 401 });
+  });
+
+  it("accepts a device session within both limits on both routes", async () => {
+    const harness = await buildAuth();
+    const token = await harness.createSession("device_biometric");
+
+    vi.setSystemTime(at(4 * MINUTE));
+    await expect(harness.listSessions(token)).resolves.toBeDefined();
+    await expect(harness.updateUser(token)).resolves.toBeDefined();
+    expect(harness.row(token)).toBeDefined();
+  });
+
+  it("leaves non-device sessions usable on both routes after 12 idle minutes", async () => {
+    const harness = await buildAuth();
+    const token = await harness.createSession("oauth_passkey");
+
+    vi.setSystemTime(at(12 * MINUTE));
+    await expect(harness.listSessions(token)).resolves.toBeDefined();
+    await expect(harness.updateUser(token)).resolves.toBeDefined();
+  });
+});
+
+describe("device session lifetime plugin: no refresh write for device sessions", () => {
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // The race: get-session reads the row, a concurrent authenticated request
+  // records newer activity, then get-session's refresh writes the row back
+  // with the value it read, undoing that activity. With no refresh write for
+  // device sessions there is nothing to overwrite. A non-device session in
+  // the same situation still refreshes, showing the write path exists.
+  it("never writes to a device session on a refresh-due lookup, while a non-device session still refreshes", async () => {
+    const harness = await buildAuth();
+    const deviceToken = await harness.createSession("device_biometric");
+    const webToken = await harness.createSession("oauth_passkey");
+    harness.setRow(deviceToken, { updatedAt: at(8 * MINUTE) });
+    const updateSession = vi.spyOn(harness.context.internalAdapter, "updateSession");
+
+    vi.setSystemTime(at(10 * MINUTE));
+    await harness.getSession(deviceToken);
+    await harness.listSessions(deviceToken);
+    expect(updateSession).not.toHaveBeenCalled();
+
+    // Newer activity recorded meanwhile survives the lookups untouched.
+    harness.setRow(deviceToken, { updatedAt: at(10 * MINUTE) });
+    await harness.getSession(deviceToken);
+    expect(harness.row(deviceToken)?.updatedAt).toEqual(at(10 * MINUTE));
+    expect(updateSession).not.toHaveBeenCalled();
+
+    await harness.getSession(webToken);
+    expect(updateSession).toHaveBeenCalledTimes(1);
   });
 });

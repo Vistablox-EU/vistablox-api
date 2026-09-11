@@ -1,4 +1,4 @@
-import express from "express";
+import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
@@ -10,6 +10,7 @@ import {
   type SessionResolver,
 } from "../src/modules/auth/application/session-resolver.js";
 import type { DpopReplayRepository } from "../src/modules/auth/repository/dpop-replay.repository.js";
+import { AppError } from "../src/shared/errors/app-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -32,7 +33,12 @@ function accounts(status = "active"): AccountRepository {
   } as unknown as AccountRepository;
 }
 
-function buildApp(sessions: SessionResolver, accountRepository = accounts(), withDpop = false) {
+function buildApp(
+  sessions: SessionResolver,
+  accountRepository = accounts(),
+  withDpop = false,
+  rateLimiter?: RequestHandler,
+) {
   const replayRepository: DpopReplayRepository = {
     recordProof: vi.fn().mockResolvedValue(true),
     pruneExpired: vi.fn().mockResolvedValue(0),
@@ -40,7 +46,7 @@ function buildApp(sessions: SessionResolver, accountRepository = accounts(), wit
   const requireAuthentication = createRequireAuthentication(
     sessions,
     accountRepository,
-    undefined,
+    rateLimiter,
     withDpop ? { baseUrl: "http://localhost:3000", replayRepository } : undefined,
   );
   const app = express();
@@ -49,6 +55,32 @@ function buildApp(sessions: SessionResolver, accountRepository = accounts(), wit
   app.use(errorHandler);
   return app;
 }
+
+describe("requireAuthentication: activity and the rate limiter", () => {
+  it("does not count a rate-limited (429) request as activity", async () => {
+    const recordActivity = vi.fn().mockResolvedValue(undefined);
+    const sessions: SessionResolver = { resolve: vi.fn().mockResolvedValue(unboundIdentity), recordActivity };
+    const limiter: RequestHandler = (_request, _response, next) => {
+      next(new AppError({ code: "rate_limit.exceeded", title: "Too many requests", status: 429, detail: "x" }));
+    };
+
+    const response = await request(buildApp(sessions, accounts(), false, limiter)).get("/protected");
+
+    expect(response.status).toBe(429);
+    expect(recordActivity).not.toHaveBeenCalled();
+  });
+
+  it("counts the request as activity once the rate limiter lets it through", async () => {
+    const recordActivity = vi.fn().mockResolvedValue(undefined);
+    const sessions: SessionResolver = { resolve: vi.fn().mockResolvedValue(unboundIdentity), recordActivity };
+    const limiter: RequestHandler = (_request, _response, next) => next();
+
+    const response = await request(buildApp(sessions, accounts(), false, limiter)).get("/protected");
+
+    expect(response.status).toBe(200);
+    expect(recordActivity).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("requireAuthentication: device session time limits", () => {
   it("answers 401 REAUTH_REQUIRED in the documented error envelope", async () => {

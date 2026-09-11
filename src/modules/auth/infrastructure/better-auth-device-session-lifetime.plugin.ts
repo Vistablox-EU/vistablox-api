@@ -1,5 +1,5 @@
 import type { BetterAuthPlugin } from "better-auth";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware, setShouldSkipSessionRefresh } from "better-auth/api";
 
 import { evaluateDeviceSessionLifetime } from "../domain/device-session-lifetime.js";
 
@@ -19,6 +19,8 @@ interface StoredSession {
   authenticationLevel: unknown;
 }
 
+type FindSession = (token: string, ...rest: unknown[]) => Promise<unknown>;
+
 /**
  * Enforces the device-session time limits (contract 3.6/3.7: idle 5 min,
  * absolute 30 min from creation, no silent renewal) on better-auth's own
@@ -28,40 +30,83 @@ interface StoredSession {
  *
  * `auth_session.updatedAt` is a device session's last-activity time: the
  * factory sets it to `createdAt` at creation, and only
- * BetterAuthSessionResolver.recordActivity moves it, after a /v1 request has
- * passed its DPoP and account checks.
+ * BetterAuthSessionResolver.recordActivity moves it (with GREATEST), after a
+ * /v1 request has passed its DPoP, account and rate-limit checks.
  *
- * Two hooks:
+ * Three pieces:
  *
- * - `session.update.before` stops the silent renewal. better-auth's
- *   get-session extends `expiresAt` (and sets `updatedAt`) once a session
- *   is older than `updateAge`. For a device session both fields keep their
- *   stored values, so the absolute limit never moves, and a request that
- *   only resolves the session (and might then fail DPoP) never counts as
- *   activity. get-session sets `ctx.context.session` right before that
- *   update, which is how the hook identifies the row; it is the only
- *   better-auth path that writes `expiresAt` to an existing session.
+ * - **Every session lookup.** Every better-auth route that reads a session
+ *   (get-session, and every route behind sessionMiddleware or
+ *   getSessionFromCtx: list-sessions, revoke-session, update-user,
+ *   link-social, ...) goes through `internalAdapter.findSession`. A global
+ *   before hook wraps that function once, on the shared adapter object.
+ *   (better-auth builds internalAdapter after every plugin's init(), so
+ *   init() can't replace it.) For a device session the wrapper:
+ *   - tells get-session to skip its silent refresh for this request, so
+ *     no refresh write happens at all, and a stale read can't be written
+ *     back over newer activity;
+ *   - reports a session past either limit as already expired (expiresAt
+ *     in the past). better-auth then ends it and treats the request as
+ *     unauthenticated, on every route.
  *
- * - An after hook on `/get-session` enforces both limits. It runs for the
- *   /v1 resolver's auth.api.getSession call and for better-auth's own
- *   /api/auth/get-session route. A session past either limit is deleted,
- *   and the call fails with REAUTH_REQUIRED instead of returning null, so
- *   the client can tell "sign in on this device again" apart from "this
- *   token is unknown". When better-auth has already expired the row itself
- *   (its `expiresAt` passed), get-session still left the row on
- *   `ctx.context.session`, so that case answers REAUTH_REQUIRED too. The
- *   limits are computed from `createdAt` and `updatedAt`, never from
- *   `expiresAt`, so even a renewal that slipped past the first hook could
- *   not lengthen a session.
+ * - **REAUTH_REQUIRED.** An after hook on `/get-session` (the /v1 resolver's
+ *   auth.api.getSession call, and better-auth's own /api/auth/get-session)
+ *   turns that into REAUTH_REQUIRED instead of an anonymous null. The
+ *   expired row is still on `ctx.context.session` there, so the client can
+ *   tell "sign in on this device again" apart from "unknown token". Other
+ *   routes answer their normal 401.
  *
- * Hooks that go through getSessionFromCtx (other better-auth routes, such
- * as sign-out) don't run this after hook. The /v1 API never uses those
- * routes for device sessions.
+ * - **Backstop.** `session.update.before` refuses any write of `expiresAt`
+ *   to a device session. It is unreachable while the refresh is skipped;
+ *   if it is ever reached, the request fails closed instead of extending
+ *   the session or rewriting its activity time.
+ *
+ * The limits are computed from `createdAt` and `updatedAt`, never from
+ * `expiresAt`.
  */
 export function createBetterAuthDeviceSessionLifetimePlugin(
   options: BetterAuthDeviceSessionLifetimePluginOptions = {},
 ): BetterAuthPlugin {
   const clock = options.clock ?? (() => new Date());
+  const wrappedAdapters = new WeakSet<object>();
+
+  const applyDeviceSessionLimits = async (found: unknown): Promise<unknown> => {
+    const current = readSessionRow(found);
+    if (current === null || current.authenticationLevel !== DEVICE_SESSION_AUTHENTICATION_LEVEL) {
+      return found;
+    }
+    try {
+      await setShouldSkipSessionRefresh(true);
+    } catch {
+      // Outside a request scope there is no get-session refresh to skip.
+    }
+    const now = clock();
+    const verdict = evaluateDeviceSessionLifetime({
+      createdAt: current.createdAt,
+      lastActivityAt: current.updatedAt,
+      now,
+    });
+    if (verdict.status === "active") return found;
+    const result = found as { session: Record<string, unknown> };
+    return {
+      ...result,
+      session: {
+        ...result.session,
+        expiresAt: new Date(Math.min(current.expiresAt.getTime(), now.getTime() - 1)),
+      },
+    };
+  };
+
+  const wrapFindSession = (adapter: unknown): void => {
+    if (typeof adapter !== "object" || adapter === null || wrappedAdapters.has(adapter)) return;
+    const target = adapter as { findSession?: FindSession };
+    const original = target.findSession;
+    if (typeof original !== "function") return;
+    target.findSession = async (token, ...rest) =>
+      applyDeviceSessionLimits(await original.call(adapter, token, ...rest));
+    wrappedAdapters.add(adapter);
+  };
+
   return {
     id: "vistablox-device-session-lifetime",
     init() {
@@ -76,9 +121,7 @@ export function createBetterAuthDeviceSessionLifetimePlugin(
                   if (current === null || current.authenticationLevel !== DEVICE_SESSION_AUTHENTICATION_LEVEL) {
                     return;
                   }
-                  return {
-                    data: { ...data, expiresAt: current.expiresAt, updatedAt: current.updatedAt },
-                  };
+                  return false;
                 },
               },
             },
@@ -87,6 +130,14 @@ export function createBetterAuthDeviceSessionLifetimePlugin(
       };
     },
     hooks: {
+      before: [
+        {
+          matcher: () => true,
+          handler: createAuthMiddleware(async (ctx) => {
+            wrapFindSession(ctx.context.internalAdapter);
+          }),
+        },
+      ],
       after: [
         {
           matcher: (context) => context.path === "/get-session",
@@ -121,7 +172,11 @@ export function createBetterAuthDeviceSessionLifetimePlugin(
 
 function readStoredSession(context: unknown): StoredSession | null {
   if (typeof context !== "object" || context === null) return null;
-  const found = (context as { context?: { session?: unknown } }).context?.session;
+  return readSessionRow((context as { context?: { session?: unknown } }).context?.session);
+}
+
+/** `found` is findSession's result: `{ session, user }` or null. */
+function readSessionRow(found: unknown): StoredSession | null {
   if (typeof found !== "object" || found === null) return null;
   const session = (found as { session?: unknown }).session;
   if (typeof session !== "object" || session === null) return null;

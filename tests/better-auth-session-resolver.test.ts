@@ -35,6 +35,7 @@ function identity(createdAt: Date): AuthenticatedIdentity {
     population: "customer",
     dpopJkt: "jkt_01",
     sessionCreatedAt: createdAt,
+    authenticationLevel: "device_biometric",
   };
 }
 
@@ -69,15 +70,37 @@ describe("BetterAuthSessionResolver: device session time limits", () => {
 
     await resolver.recordActivity(identity(new Date(NOW.getTime() - 10 * MINUTE)));
 
+    // GREATEST: never moves activity backwards. The last two conditions
+    // re-check both limits, so nothing is written to an expired session.
     expect(query).toHaveBeenCalledWith(
-      'UPDATE "auth_session" SET "updatedAt" = GREATEST("updatedAt", $1) WHERE "id" = $2 AND "authenticationLevel" = $3',
-      [NOW, "session_01", "device_biometric"],
+      'UPDATE "auth_session" SET "updatedAt" = GREATEST("updatedAt", $1) WHERE "id" = $2 AND "authenticationLevel" = $3 AND "createdAt" > $4 AND "updatedAt" > $5',
+      [
+        NOW,
+        "session_01",
+        "device_biometric",
+        new Date(NOW.getTime() - 30 * MINUTE),
+        new Date(NOW.getTime() - 5 * MINUTE),
+      ],
     );
     expect(sessionMirror.recordActivity).toHaveBeenCalledWith({
       betterAuthSessionId: "session_01",
       seenAt: NOW,
       idleExpiresAt: new Date(NOW.getTime() + 5 * MINUTE),
     });
+  });
+
+  it("sends no query at all for a session that isn't a device session", async () => {
+    const sessionMirror: SessionMirror = {
+      recordCreated: vi.fn(),
+      recordRevoked: vi.fn(),
+      recordActivity: vi.fn(),
+    };
+    const { resolver, query } = buildResolver({ sessionMirror });
+
+    await resolver.recordActivity({ ...identity(new Date(NOW.getTime() - MINUTE)), authenticationLevel: "oauth_passkey" });
+
+    expect(query).not.toHaveBeenCalled();
+    expect(sessionMirror.recordActivity).not.toHaveBeenCalled();
   });
 
   it("never gives the mirror an idle expiry past the absolute limit", async () => {
