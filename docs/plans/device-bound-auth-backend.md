@@ -162,7 +162,9 @@ Every action that changes the Safe is approved with **one** biometric signature.
 
 ### 3.4 Attestation blobs
 
-These are sent on `enrol/verify`, and on `login/verify` when `attestation_required` is true.
+These are sent on `enrol/verify`, on `login/verify` when `attestation_required` is true, and on every signing action (T3, D3, P3, ER5). For signing, Android sends an `integrity_token` and iOS an App Attest `assertion`, with `binding` built from that action's challenge.
+
+- **Integrity levels (Android, production):** login needs `MEETS_DEVICE_INTEGRITY`. Actions that move money or add a phone (T3, P3) need `MEETS_STRONG_INTEGRITY`; otherwise `STRONG_INTEGRITY_REQUIRED`. Defensive actions (D3 removing a phone, ER5 cancelling a recovery) need only device integrity, so a customer on an older phone can always stop an attack. Staging records the strong verdict but doesn't enforce it.
 
 - **Android:** `{ "platform": "android", "key_attestation_chain": ["<b64 DER leaf>", "..."], "integrity_token": "..." }`.
   - The biometric key is generated **after** the challenge is fetched, with `setAttestationChallenge(ASCII(challenge))`.
@@ -208,7 +210,7 @@ These are sent on `enrol/verify`, and on `login/verify` when `attestation_requir
 |---|---|---|---|---|
 | D1 | `GET /v1/auth/devices` | session | — | `[{ device_id, label, platform, model, os_version, status, owner_status: "owner"\|"pending"\|"none", owner_address, hold_until?, created_at, last_seen_at, is_current }]` |
 | D2 | `POST /v1/auth/devices/:device_id/manage-device/challenge` | session | `{}` | `{ challenge, expires_at, user_op }` (`removeOwner`) |
-| D3 | `POST /v1/auth/devices/:device_id/revoke` | session | `{ challenge, assertion }` (purpose `manage-device`) | `202 { status: "pending_onchain" }`. That device's sessions and pending requests end at once; the owner removal follows on-chain. Removing the last owner → `LAST_OWNER`. |
+| D3 | `POST /v1/auth/devices/:device_id/revoke` | session | `{ challenge, assertion, attestation }` (purpose `manage-device`) | `202 { status: "pending_onchain" }`. That device's sessions and pending requests end at once; the owner removal follows on-chain. Removing the last owner → `LAST_OWNER`. |
 | D4 | `PUT /v1/auth/devices/current/push-token` | session | `{ token, platform: "ios"\|"android" }` | `204`. `DELETE` on the same path removes it. |
 
 **Re-enrolling this phone after a biometric change.** The DPoP key survived; the session comes from a fresh Google/Apple sign-in on this phone. The KYC selfie is required on every biometric change.
@@ -224,7 +226,7 @@ These are sent on `enrol/verify`, and on `login/verify` when `attestation_requir
 |---|---|---|---|---|
 | P1 | `GET /v1/auth/devices/pairings/:pairing_id` | approver session (same account) | — | `{ pairing_id, code, new_device: { platform, model, os_version, app_version, public_key: { x, y }, created_at, approx_location? }, replaces_owner_address?, expires_at }`. `replaces_owner_address` is present when a phone re-adds itself after a biometric change. |
 | P2 | `POST /v1/auth/devices/pairings/:pairing_id/challenge` | approver session | `{}` | `{ challenge, expires_at, user_op }` (`addOwnerWithThreshold`, or `swapOwner` for a re-add) |
-| P3 | `POST /v1/auth/devices/pairings/:pairing_id/approve` | approver session | `{ challenge, assertion }` (purpose `approve-new-device`) | `202 { status: "pending_onchain" }` |
+| P3 | `POST /v1/auth/devices/pairings/:pairing_id/approve` | approver session | `{ challenge, assertion, attestation }` (purpose `approve-new-device`) | `202 { status: "pending_onchain" }` |
 | P4 | `POST /v1/auth/devices/pairings/:pairing_id/reject` | approver session | `{}` | `204` |
 | P5 | `GET /v1/auth/devices/pairings/:pairing_id/status` | the new device's pending or re-enrol session | — | `{ status: "pending"\|"pending_onchain"\|"active"\|"rejected"\|"expired" }`. On `active` (the owner has been added on-chain), the new device runs L1 and L2. |
 
@@ -234,7 +236,7 @@ These are sent on `enrol/verify`, and on `login/verify` when `attestation_requir
 |---|---|---|---|---|
 | T1 | `GET /v1/signing-requests?status=pending` / `GET /v1/signing-requests/:request_id` | session | — | `{ request_id, request_type, amount_minor, currency, destination: { kind, value, display_name }, created_by: { kind, label }, created_at, expires_at, status, user_op?: { chain_id, safe_address, entry_point, module, op, sponsored, fee? } }` |
 | T2 | `POST /v1/signing-requests/:request_id/challenge` | session | `{}` | `{ challenge, expires_at }` (the client requests it after the deliberate action, right before the biometric prompt) |
-| T3 | `POST /v1/signing-requests/:request_id/sign` | session | `{ challenge, assertion }` for on-chain types (purpose `tx`); `{ challenge, jws }` for off-chain types | `{ status: "submitted"\|"executed", user_op_hash? }` |
+| T3 | `POST /v1/signing-requests/:request_id/sign` | session | `{ challenge, assertion, attestation }` for on-chain types (purpose `tx`); `{ challenge, jws, attestation }` for off-chain types | `{ status: "submitted"\|"executed", user_op_hash? }` |
 
 **Path note:** one signing-requests resource covers every request type, so the app has a single inbox for pending actions. The backend dispatches by `request_type`.
 
@@ -258,7 +260,7 @@ These are sent on `enrol/verify`, and on `login/verify` when `attestation_requir
 | ER2 | `GET /v1/auth/email-recovery/:request_id` | same | — | `{ status: "awaiting_email"\|"pending"\|"executable"\|"executed"\|"cancelled"\|"expired", executable_at? }`. `pending` starts once the email has been proven on-chain; the 7-day delay runs from then. At `executable_at`, anyone can complete it, and the relayer does. |
 | ER3 | `GET /v1/auth/email-recovery?status=pending` | an enrolled device's session | — | `[{ request_id, started_at, new_device: { platform, model, approx_location? }, executable_at }]` |
 | ER4 | `POST /v1/auth/email-recovery/:request_id/cancel/challenge` | enrolled device | `{}` | `{ challenge, expires_at, user_op }` (`cancelRecovery`) |
-| ER5 | `POST /v1/auth/email-recovery/:request_id/cancel` | enrolled device | `{ challenge, assertion }` (purpose `cancel-recovery`) | `202 { status: "pending_onchain" }`. It also cancels the linked recovery case at once. |
+| ER5 | `POST /v1/auth/email-recovery/:request_id/cancel` | enrolled device | `{ challenge, assertion, attestation }` (purpose `cancel-recovery`) | `202 { status: "pending_onchain" }`. It also cancels the linked recovery case at once. |
 
 The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pending signing requests.
 
@@ -284,7 +286,8 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | `INSUFFICIENT_FEE_BALANCE` | 409 | A self-paid action, and the account doesn't hold enough Ether for the fee. | Show how much is needed in euros, and how to add it; nothing is submitted. |
 | `ATTESTATION_INVALID` | 400 | Chain, integrity verdict or App Attest failed, or the key isn't biometric-only. | "This device can't be used for VistaBlox." Delete the new bio key; no retry. |
 | `ATTESTATION_CHALLENGE_MISMATCH` | 400 | Wrong attested challenge or binding. | Delete the bio key and restart enrolment once; then treat as `ATTESTATION_INVALID`. |
-| `ATTESTATION_REQUIRED` | 400 | Re-attestation was requested but missing. | Restart login with attestation. |
+| `ATTESTATION_REQUIRED` | 400 | Attestation was required (login re-attestation, or any signing action) but missing. | Fetch it and retry once. |
+| `STRONG_INTEGRITY_REQUIRED` | 403 | Android, production: the phone passes device integrity but not the strong integrity that moving money and adding a phone require. | "This phone can't approve payments because its security updates are too old. You can still see everything. To approve, update the phone's software, or use your other device." No retry. |
 | `DEVICE_KEY_NOT_HARDWARE_BACKED` | 400 | Software key. | As `ATTESTATION_INVALID`. |
 | `DEVICE_LIMIT_REACHED` | 409 | Already 2 active devices (a tablet counts). | Explain; remove a device on the other phone first. |
 | `DEVICE_ALREADY_ENROLLED` | 409 | This jkt is already an active device. | Go to device login. |
@@ -370,7 +373,7 @@ No conflicts with anything already named in this plan — adopting these verbati
 
 **Attestation root and revocation handling** (Android key attestation, at enrollment): pin all currently published Google hardware attestation roots — including the newer Remote Key Provisioning root — as an updatable set, not a code constant that needs a deploy to rotate. Check the revocation list at `https://android.googleapis.com/attestation/status` (egress from the container), cache it for ≤24h, and **fail closed** — reject enrollment — if the cached list is stale beyond 72h, rather than silently trusting an unchecked chain. Same fail-closed instinct as the DPoP replay-pruning job, applied to a different kind of staleness.
 
-**Signing strictness — decided by Damir**: `MEETS_DEVICE_INTEGRITY` for login, `MEETS_STRONG_INTEGRITY` for signing, in production. Staging stays at device integrity throughout (broader device support for testing) but logs the strong verdict anyway, so the stricter policy can be validated against real staging traffic before it's ever enforced there.
+**Signing strictness — decided by Damir, refined by mobile-dev, now settled in section 3.4**: `MEETS_DEVICE_INTEGRITY` for login; `MEETS_STRONG_INTEGRITY` (production) for actions that move money or add a phone (`T3`, `P3`) — anything short of that returns `STRONG_INTEGRITY_REQUIRED`; **defensive actions exempted** — removing a device (`D3`) and cancelling a recovery (`ER5`) need only device integrity, so a customer on an older phone can always stop an attack rather than being blocked from defending their own account. Staging logs the strong verdict without enforcing it, so the stricter policy can be validated against real traffic before it's ever enforced there. **The defensive-action exemption is mobile-dev's own refinement, not literally Damir's wording** — flagged to him as still open, not assumed settled just because it's a sensible reading.
 
 ## Recovery link hosting (backend-owned pieces)
 
@@ -450,7 +453,7 @@ An explicit `consent_version` is required before the Didit session is created in
 
 ## Contract additions — settled
 
-**Round 1's five additions and round 2's full redesign are both settled and pasted into section 3, verified byte-identical against mobile-dev's file** (222 lines, `## 3. Shared wire contract...` through the `iat` tolerance row, sha256 `9e46b480849fc4a27830c58366729753928ebcc0806c05c83c99c44af19235d1` — superseding an earlier 218-line/`57a0bda9…` version after Damir's direct paymaster decision added `SPONSORSHIP_REFUSED`/`INSUFFICIENT_FEE_BALANCE` and unified the `user_op` shape). Before pasting either version, I independently re-read mobile-dev's file directly rather than trusting an "it's written" message at face value — an earlier such message turned out to describe a write that had actually failed, and reading the file caught it before I acted on content that wasn't really there.
+**Round 1's five additions and round 2's full redesign are both settled and pasted into section 3, verified byte-identical against mobile-dev's file** (225 lines, `## 3. Shared wire contract...` through the `iat` tolerance row, sha256 `ca44c03b81549fad8ba54e8f4ab92fc1fb04396efb53fdc9efde52104bd1b63e` — the latest of three revisions, after the base owner-assertion redesign (218 lines/`57a0bda9…`), Damir's paymaster decision (222 lines/`9e46b480…`), and Damir's Play Integrity policy, which added per-action attestation and the defensive-action exemption). Before pasting any of the three versions, I independently re-read mobile-dev's file directly rather than trusting an "it's written" message at face value — an earlier such message turned out to describe a write that had actually failed, and reading the file caught it before I acted on content that wasn't really there.
 
 Round 2's section 3 rewrite covers: the owner-assertion signing mechanism (3.3, matching "Wallet architecture" above), `addOwnerWithThreshold`/`swapOwner`/`removeOwner` semantics, the `/v1/auth/email-recovery` endpoint group (`ER1`–`ER5`, replacing the old-device kill-switch portion of `RC4`/`RC5`), the wallet/guardian extension to the existing wallet endpoint (`W1`/`W2`), and new error codes (`OWNER_ASSERTION_INVALID`, `OP_HASH_MISMATCH`, `LAST_OWNER`, `REENROL_SELFIE_REQUIRED`, `EMAIL_RECOVERY_NOT_SET_UP`, `EMAIL_RECOVERY_PENDING`). One item is deliberately **not** resolved in section 3 itself: whether a newly-paired or re-added device gets a 24h hold (this plan's original round-2 position) or none at all (mobile-dev's proposal, in service of Damir's "one simple story" framing) — both positions are recorded, unforced, in "Open questions" below, and section 3 ships with mobile's proposed default rather than blocking on it.
 
