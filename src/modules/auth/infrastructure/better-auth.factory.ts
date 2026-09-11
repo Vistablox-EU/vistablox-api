@@ -215,9 +215,6 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         create: {
           before: async (session, context) => {
             const dpopJkt = await tryBindDpopAtCreation(context, options.dpop);
-            if (dpopJkt !== null) {
-              options.dpop?.logger?.bound({ sessionId: session.id, jkt: dpopJkt });
-            }
             return {
               data: {
                 ...session,
@@ -228,6 +225,17 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
                 ...(dpopJkt === null ? {} : { dpopJkt }),
               },
             };
+          },
+          // `session` in `before` above has no `id` yet -- with the Postgres
+          // storage this factory always uses (not secondary storage), the
+          // internal adapter only assigns one once adapter.create() actually
+          // runs, which is after before-hooks. Logging the bind here instead,
+          // once the real id exists, is what fixes it actually showing up.
+          after: async (session) => {
+            const dpopJkt = (session as Record<string, unknown>).dpopJkt;
+            if (typeof dpopJkt === "string") {
+              options.dpop?.logger?.bound({ sessionId: session.id, jkt: dpopJkt });
+            }
           },
         },
       },
@@ -438,24 +446,45 @@ function toAuthUserSnapshot(user: {
 // and request are both genuinely optional there too: absent for internal
 // auth.api.*({ headers }) calls (no request) and, in principle, for a call
 // with neither. Real HTTP calls (sign-in, passkey verify) carry both.
-interface DpopCreationContext {
+export interface DpopCreationContext {
   headers?: Headers | undefined;
   request?: Request | undefined;
   path?: string | undefined;
 }
+
+// The passkey verify-* ceremonies verify (and replay-record) the request's
+// DPoP proof once already, in assertDpopKeyMatchesPendingSession, before
+// internalAdapter.createSession runs and fires session.create.before for
+// the very same request. Re-verifying there and recording the identical
+// (jkt, jti) a second time would self-collide as a replay of itself --
+// discovered live on staging, the upgraded session silently landed unbound.
+// Keyed on the underlying Fetch Request object, the one thing guaranteed
+// stable and unique across every context wrapper for one HTTP call, so a
+// genuinely separate later request (a real replay) still gets its own
+// fresh verify-and-record.
+const dpopClaimsByRequest = new WeakMap<Request, DpopProofClaims>();
 
 /**
  * Verifies a DPoP proof presented at session creation and returns its jkt to
  * bind, or null if there's nothing to bind (no dpop config, no proof, an
  * internal non-HTTP call, or the proof doesn't verify). A verification
  * failure here never blocks sign-in -- Phase 1 only ever binds when
- * presented with something valid, it doesn't require it.
+ * presented with something valid, it doesn't require it -- but it's still
+ * logged as a warning rather than swallowed, so a session landing unbound
+ * has a reason attached in the logs instead of just an absent bind line.
  */
-async function tryBindDpopAtCreation(
+export async function tryBindDpopAtCreation(
   context: DpopCreationContext | null,
   dpop: BetterAuthFactoryOptions["dpop"],
 ): Promise<string | null> {
-  if (dpop === undefined || context?.headers === undefined || context.request === undefined) {
+  if (dpop === undefined) return null;
+
+  if (context?.request !== undefined) {
+    const alreadyVerified = dpopClaimsByRequest.get(context.request);
+    if (alreadyVerified !== undefined) return alreadyVerified.jkt;
+  }
+
+  if (context?.headers === undefined || context.request === undefined) {
     return null;
   }
   const header = context.headers.get("dpop");
@@ -479,8 +508,15 @@ async function tryBindDpopAtCreation(
       claims.jti,
       new Date(Date.now() + (dpop.replayWindowSeconds ?? 120) * 1000),
     );
-    return accepted ? claims.jkt : null;
-  } catch {
+    if (!accepted) {
+      dpop.logger?.rejected({ code: "DPOP_REPLAY", path: context.path ?? "unknown" });
+      return null;
+    }
+    return claims.jkt;
+  } catch (error) {
+    if (isDpopVerificationError(error)) {
+      dpop.logger?.rejected({ code: error.code, path: context.path ?? "unknown" });
+    }
     return null;
   }
 }
@@ -587,7 +623,7 @@ async function assertPasskeyCeremonyAuthorized(
  * exactly "the proof verified but its key isn't this session's key" --
  * never a stand-in for a missing/malformed/replayed proof.
  */
-async function assertDpopKeyMatchesPendingSession(
+export async function assertDpopKeyMatchesPendingSession(
   ctx: DpopCreationContext,
   boundJkt: string,
   dpop: BetterAuthFactoryOptions["dpop"],
@@ -627,6 +663,15 @@ async function assertDpopKeyMatchesPendingSession(
   );
   if (!accepted) {
     throw dpopApiError(new DpopReplayError(), dpop, ctx);
+  }
+
+  // This same request's session.create.before is about to run (the
+  // ceremony calls internalAdapter.createSession right after this
+  // succeeds) -- hand it the already-verified, already-recorded claims so
+  // it binds the new session without re-verifying and double-recording
+  // the identical (jkt, jti) against itself.
+  if (ctx.request !== undefined) {
+    dpopClaimsByRequest.set(ctx.request, claims);
   }
 }
 
