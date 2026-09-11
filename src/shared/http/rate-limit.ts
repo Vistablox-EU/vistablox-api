@@ -24,9 +24,13 @@ export const TIGHTENED_RATE_LIMIT: RateLimitTier = {
   windowSeconds: 60,
 };
 
-export function createRateLimiter(store: RateLimitStore, tier: RateLimitTier): RequestHandler {
+export function createRateLimiter(
+  store: RateLimitStore,
+  tier: RateLimitTier,
+  subject: (request: Request, response: Response) => string = rateLimitSubject,
+): RequestHandler {
   return (request, response, next) => {
-    const key = `rate_limit_hint:${tier.name}:${rateLimitSubject(request, response)}`;
+    const key = `rate_limit_hint:${tier.name}:${subject(request, response)}`;
 
     store
       .increment(key, tier.windowSeconds)
@@ -63,4 +67,18 @@ function rateLimitSubject(request: Request, response: Response): string {
   const accountId = response.locals.authContext?.accountId;
   if (accountId !== undefined) return `account:${accountId}`;
   return `ip:${request.ip ?? request.socket.remoteAddress ?? "unknown"}`;
+}
+
+// For the device-auth challenge-issuance routes (no account yet, so the
+// default subject above falls back to IP alone): a second, independent
+// limiter keyed on the DPoP key requireDpopOnly already verified and set on
+// response.locals.dpopJkt. Rotating IPs doesn't reset this one, and rotating
+// keys (trivial -- a fresh ES256 keypair per call) doesn't reset the IP one
+// -- an attacker has to evade both to keep issuing challenges past the
+// limit. Falls back to IP if dpopJkt is somehow unset (defensive only; the
+// route this is mounted on always runs requireDpopOnly first).
+export function dpopKeyRateLimitSubject(request: Request, response: Response): string {
+  const dpopJkt = response.locals.dpopJkt;
+  if (typeof dpopJkt === "string") return `dpop_jkt:${dpopJkt}`;
+  return rateLimitSubject(request, response);
 }

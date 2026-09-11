@@ -3,7 +3,11 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
 import type { RateLimitStore } from "../src/infrastructure/rate-limit/rate-limit-store.js";
-import { createRateLimiter, type RateLimitTier } from "../src/shared/http/rate-limit.js";
+import {
+  createRateLimiter,
+  dpopKeyRateLimitSubject,
+  type RateLimitTier,
+} from "../src/shared/http/rate-limit.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -107,5 +111,62 @@ describe("rate limit middleware", () => {
     const response = await request(app).get("/probe");
 
     expect(response.status).toBe(200);
+  });
+
+  it("keys by a custom subject function when one is supplied", async () => {
+    const store = counterStore();
+    const app = express();
+    app.use(requestContext);
+    app.use(createRateLimiter(store, tier, () => "custom:fixed-key"));
+    app.get("/probe", (_request, response) => response.json({ ok: true }));
+    app.use(errorHandler);
+
+    await request(app).get("/probe");
+
+    expect([...store.counts.keys()]).toEqual(["rate_limit_hint:test:custom:fixed-key"]);
+  });
+});
+
+describe("dpopKeyRateLimitSubject", () => {
+  function appWithDpopJkt(dpopJkt: string | undefined) {
+    const app = express();
+    app.use(requestContext);
+    app.use((_request, response, next) => {
+      if (dpopJkt !== undefined) response.locals.dpopJkt = dpopJkt;
+      next();
+    });
+    app.use(createRateLimiter(counterStoreCapturing(), tier, dpopKeyRateLimitSubject));
+    app.get("/probe", (_request, response) => response.json({ ok: true }));
+    app.use(errorHandler);
+    return app;
+  }
+
+  let capturedKeys: string[] = [];
+  function counterStoreCapturing(): RateLimitStore {
+    return {
+      increment: vi.fn(async (key: string) => {
+        capturedKeys.push(key);
+        return 1;
+      }),
+    };
+  }
+
+  it("keys two different DPoP jkts into isolated budgets, even from the same IP", async () => {
+    capturedKeys = [];
+    await request(appWithDpopJkt("jkt-a")).get("/probe");
+    await request(appWithDpopJkt("jkt-b")).get("/probe");
+
+    expect(capturedKeys).toEqual([
+      "rate_limit_hint:test:dpop_jkt:jkt-a",
+      "rate_limit_hint:test:dpop_jkt:jkt-b",
+    ]);
+  });
+
+  it("falls back to the default IP/account subject when dpopJkt is unset", async () => {
+    capturedKeys = [];
+    await request(appWithDpopJkt(undefined)).get("/probe");
+
+    expect(capturedKeys).toHaveLength(1);
+    expect(capturedKeys[0]).toMatch(/^rate_limit_hint:test:ip:/);
   });
 });

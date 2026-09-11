@@ -23,7 +23,10 @@ function fakeChallengeRepository(): DeviceChallengeRepository {
   };
 }
 
-function appFor(auth: { api: Record<string, unknown> }) {
+function appFor(
+  auth: { api: Record<string, unknown> },
+  challengeRateLimiters: RequestHandler[] = [],
+) {
   const app = express();
   app.use(express.json());
   app.use(requestContext);
@@ -31,7 +34,12 @@ function appFor(auth: { api: Record<string, unknown> }) {
   const issueChallenge = new IssueDeviceChallengeService(challenges);
   app.use(
     "/v1/auth/devices",
-    createDeviceAuthRouter(dpopOnly, issueChallenge, auth as unknown as VistaBloxAuth),
+    createDeviceAuthRouter(
+      dpopOnly,
+      issueChallenge,
+      auth as unknown as VistaBloxAuth,
+      challengeRateLimiters,
+    ),
   );
   app.use(
     "/v1/app",
@@ -156,5 +164,62 @@ describe("POST /v1/auth/devices/login/verify", () => {
 
     expect(response.status).toBe(401);
     expect(response.body.code).toBe("DEVICE_LOGIN_FAILED");
+  });
+});
+
+describe("challenge-issuance rate limiting", () => {
+  const rejectAfterFirstCall: RequestHandler = (() => {
+    let calls = 0;
+    return (_request, response, next) => {
+      calls++;
+      if (calls > 1) {
+        response.status(429).json({ code: "rate_limit.exceeded" });
+        return;
+      }
+      next();
+    };
+  })();
+
+  it("applies the supplied rate limiters to /enrol/challenge and /login/challenge", async () => {
+    const app = appFor({ api: {} }, [rejectAfterFirstCall]);
+
+    const first = await request(app).post("/v1/auth/devices/enrol/challenge");
+    const second = await request(app).post("/v1/auth/devices/login/challenge").send({
+      device_id: "device_1",
+    });
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(429);
+    expect(second.body.code).toBe("rate_limit.exceeded");
+  });
+
+  it("does not apply the challenge rate limiters to /enrol/verify or /login/verify", async () => {
+    const enrolVerify = vi.fn().mockResolvedValue({
+      response: {
+        device_id: "device_1",
+        status: "active",
+        session_expires_at: "2026-01-01T00:00:00.000Z",
+        authentication_level: "device_biometric",
+      },
+      headers: new Headers(),
+    });
+    // A limiter that rejects every call, past or not -- if it were wired
+    // onto /enrol/verify too, this request would 429 instead of reaching
+    // enrolVerify.
+    const rejectAlways: RequestHandler = (_request, response) => {
+      response.status(429).json({ code: "rate_limit.exceeded" });
+    };
+    const app = appFor({ api: { enrolVerify } }, [rejectAlways]);
+
+    const response = await request(app)
+      .post("/v1/auth/devices/enrol/verify")
+      .send({
+        challenge: "the-challenge",
+        jws: "the-jws",
+        attestation: { platform: "android", key_attestation_chain: ["cert1"], integrity_token: undefined },
+      });
+
+    expect(response.status).toBe(200);
+    expect(enrolVerify).toHaveBeenCalledTimes(1);
   });
 });
