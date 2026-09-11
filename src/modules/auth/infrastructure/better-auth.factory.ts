@@ -24,6 +24,7 @@ import {
 import type { DpopReplayRepository } from "../repository/dpop-replay.repository.js";
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 import { createBetterAuthDpopPlugin } from "./better-auth-dpop.plugin.js";
+import { createBetterAuthPasskeyChallengeHeaderPlugin } from "./better-auth-passkey-challenge-header.plugin.js";
 import { createBetterAuthStaffAccountGuardPlugin } from "./better-auth-staff-account-guard.plugin.js";
 import { createBetterAuthRegistrationAccountGuardPlugin } from "./better-auth-registration-account-guard.plugin.js";
 
@@ -246,6 +247,12 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       // since only they need "pending session" context this plugin doesn't
       // have.
       ...(options.dpop === undefined ? [] : [createBetterAuthDpopPlugin(options.dpop)]),
+      // Cookie-free passkey challenge relay (mirrors bearer()'s own
+      // token-as-header trick) -- lets the challenge @better-auth/passkey's
+      // generate-*-options sets survive to verify-* for a client with no
+      // cookie jar, without disturbing the existing cookie path for clients
+      // that still have one.
+      createBetterAuthPasskeyChallengeHeaderPlugin(),
       passkey({
         rpID: rpId,
         rpName: "VistaBlox",
