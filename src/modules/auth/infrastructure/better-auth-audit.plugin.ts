@@ -6,6 +6,7 @@ import { createAuthMiddleware, isAPIError } from "better-auth/api";
 import type { AuthAuditEvent, AuthAuditSink } from "../application/auth-audit-sink.js";
 import type { SessionMirror } from "../application/session-mirror.js";
 import type { LoginMethodType } from "../../account/repository/account.repository.js";
+import { isDiscardedCeremonySession } from "./device-ceremony-session.js";
 import { verifiedLoginDpopJkt } from "./device-login-audit-context.js";
 
 export interface BetterAuthAuditPluginOptions {
@@ -74,7 +75,7 @@ export function createBetterAuthAuditPlugin(
     }
   };
   const mirrorRevoked = async (
-    session: { id: string },
+    session: { id: string; token?: unknown },
     context: AuditContext | null,
   ): Promise<void> => {
     if (options.sessionMirror === undefined) return;
@@ -82,7 +83,7 @@ export function createBetterAuthAuditPlugin(
       await options.sessionMirror.recordRevoked({
         betterAuthSessionId: session.id,
         revokedAt: clock(),
-        reason: sessionRevocationReason(context?.path),
+        reason: revocationReason(session, context),
       });
     } catch (error) {
       options.onError?.(error);
@@ -221,7 +222,7 @@ export function createBetterAuthAuditPlugin(
                     resourceId: session.id,
                     changes: {
                       trace_id: readTraceId(context),
-                      reason: sessionRevocationReason(context?.path),
+                      reason: revocationReason(session, context),
                     },
                     occurredAt: clock(),
                   });
@@ -415,6 +416,17 @@ function resolveLinkedMethod(context: AuditContext | null): string | null {
 
 function isSupportedLoginMethod(value: string): value is LoginMethodType {
   return value === "passkey" || value === "google" || value === "apple";
+}
+
+// A session a failed E2/L2 created and then deleted again (see
+// better-auth-device-auth.plugin.ts's discardCeremonySession) is recorded
+// as "ceremony_failed", not by the path it was deleted on -- on E2's path
+// that would read "rotated", which is what a *successful* enrolment's
+// pending-session delete means.
+function revocationReason(session: { token?: unknown }, context: AuditContext | null): string {
+  const authContext = (context as { context?: unknown } | null)?.context;
+  if (isDiscardedCeremonySession(authContext, session.token)) return "ceremony_failed";
+  return sessionRevocationReason(context?.path);
 }
 
 function sessionRevocationReason(path: string | undefined): string {
