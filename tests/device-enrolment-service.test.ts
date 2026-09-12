@@ -143,7 +143,6 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    now: Date;
   }): Promise<boolean> {
     this.consumeCallCount++;
     const entry = this.issued.get(input.challenge);
@@ -153,7 +152,7 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       entry.dpopJkt !== input.dpopJkt ||
       entry.deviceId !== input.deviceId ||
       entry.consumed ||
-      entry.expiresAt <= input.now
+      entry.expiresAt <= this.clock()
     ) {
       return false;
     }
@@ -741,9 +740,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       challenge: "replay-converges",
       purpose: "enrol-device",
       dpopJkt: "dpop-replay-2",
-      deviceId: undefined,
-      now: new Date(t0),
-    });
+      deviceId: undefined,    });
     // This API instance's clock runs an hour ahead: it plays no part.
     const service = new EnrolDeviceService(challenges, devices, androidConfig(), () => new Date(t0 + 3_600_000));
     const replay = enrolInput("replay-converges", "dpop-replay-2", "not-reached", []);
@@ -771,9 +768,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       challenge: "replay-registered",
       purpose: "enrol-device",
       dpopJkt: "dpop-replay-3",
-      deviceId: undefined,
-      now: new Date(t0),
-    });
+      deviceId: undefined,    });
     await devices.create({
       accountId: "account-replay",
       betterAuthUserId: "user-1",
@@ -820,9 +815,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       challenge: "replay-late-row",
       purpose: "enrol-device",
       dpopJkt: "dpop-replay-5",
-      deviceId: undefined,
-      now: new Date(t0),
-    });
+      deviceId: undefined,    });
     devices.devices.push({
       deviceId: "device_late_row",
       accountId: "account-replay",
@@ -961,9 +954,7 @@ describe("EnrolDeviceService: the active-device check runs before the challenge 
         challenge: "order-challenge-1",
         purpose: ENROL,
         dpopJkt: "dpop-order-1",
-        deviceId: undefined,
-        now: new Date(),
-      }),
+        deviceId: undefined,      }),
     ).resolves.toBe(true);
     expect(devices.createCallCount).toBe(0);
   });
@@ -976,9 +967,7 @@ describe("EnrolDeviceService: the active-device check runs before the challenge 
       challenge: "order-challenge-2",
       purpose: ENROL,
       dpopJkt: "dpop-order-2",
-      deviceId: undefined,
-      now: new Date(),
-    });
+      deviceId: undefined,    });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
 
     await expect(
@@ -998,9 +987,7 @@ describe("EnrolDeviceService: the active-device check runs before the challenge 
       challenge: "order-challenge-3",
       purpose: ENROL,
       dpopJkt: "dpop-order-3",
-      deviceId: undefined,
-      now: new Date(),
-    });
+      deviceId: undefined,    });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
 
     await expect(

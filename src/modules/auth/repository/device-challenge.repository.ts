@@ -15,10 +15,9 @@ export interface DeviceChallengeRepository {
    * redeemed by a completely different one presenting an otherwise-valid
    * JWS.
    *
-   * `now` (the API clock that also set expires_at at issuance) decides
-   * expiry. The consumption time is recorded from the database's clock, which
-   * the replay window and the enrolment insert deadline are measured on
-   * (domain/device-challenge-replay.ts).
+   * Expiry is checked, and the consumption time recorded, on the database's
+   * clock, which the replay window and the enrolment insert deadline are
+   * measured on too (domain/device-challenge-replay.ts).
    *
    * A `false` result covers wrong purpose, wrong DPoP key, wrong device_id,
    * already consumed, expired and unknown alike; the caller then asks
@@ -30,7 +29,6 @@ export interface DeviceChallengeRepository {
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    now: Date;
   }): Promise<boolean>;
   /**
    * Whether this exact challenge (same purpose, DPoP key and device_id) was

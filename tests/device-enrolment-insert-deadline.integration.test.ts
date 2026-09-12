@@ -1,8 +1,10 @@
 import { randomUUID } from "node:crypto";
 
+import { PrismaPg } from "@prisma/adapter-pg";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { PrismaClient } from "../src/generated/prisma/client.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import {
   DeviceChallengeExpiredError,
@@ -78,7 +80,7 @@ describe.skipIf(databaseUrl === undefined)("E2 insert deadline and replay window
   async function issueAndConsume(scenario: Scenario, challenge: string): Promise<void> {
     await issue(scenario, challenge);
     await expect(
-      challenges.consume({ challenge, purpose: ENROL, dpopJkt: dpopJkt(scenario), deviceId: undefined, now: new Date() }),
+      challenges.consume({ challenge, purpose: ENROL, dpopJkt: dpopJkt(scenario), deviceId: undefined }),
     ).resolves.toBe(true);
   }
 
@@ -173,12 +175,41 @@ describe.skipIf(databaseUrl === undefined)("E2 insert deadline and replay window
     // ends a transaction left idle for 5 s (idle_in_transaction_session_timeout),
     // well before Prisma's own 10 s transaction timeout, so the insert that
     // follows fails and nothing is registered.
-    const stalling = new PrismaDeviceRepository(database, {
+    // Its own client, so the connection error Postgres raises when it ends
+    // the idle transaction can be captured.
+    const connectionErrors: Array<Error & { code?: string }> = [];
+    const stallingDatabase = new PrismaClient({
+      adapter: new PrismaPg(
+        { connectionString: databaseUrl ?? "" },
+        { onConnectionError: (error) => void connectionErrors.push(error) },
+      ),
+    });
+    const stalling = new PrismaDeviceRepository(stallingDatabase, {
       afterDeadlineCheck: () => new Promise<void>((resolve) => setTimeout(resolve, 6_000)),
     });
 
-    await expect(stalling.create(createInput("idle", challenge))).rejects.toThrow();
-    expect(await deviceCount("idle")).toBe(0);
+    try {
+      const started = Date.now();
+      const failure = await stalling.create(createInput("idle", challenge)).then(
+        () => null,
+        (error: unknown) => error,
+      );
+      const elapsed = Date.now() - started;
+
+      expect(failure).not.toBeNull();
+      // The cause is the 5 s idle-transaction timeout: Postgres reported
+      // 25P03 (idle_in_transaction_session_timeout), and the failure came
+      // after 5 s but well before Prisma's own 10 s transaction timeout.
+      const idleTimeoutReported =
+        connectionErrors.some((error) => error.code === "25P03") ||
+        /idle-in-transaction/i.test(String((failure as Error | null)?.message ?? ""));
+      expect(idleTimeoutReported).toBe(true);
+      expect(elapsed).toBeGreaterThanOrEqual(5_000);
+      expect(elapsed).toBeLessThan(9_000);
+      expect(await deviceCount("idle")).toBe(0);
+    } finally {
+      await stallingDatabase.$disconnect();
+    }
   }, 30_000);
 
   it("a prune started between the deadline check and the insert waits for the insert to commit", async () => {

@@ -79,7 +79,6 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    now: Date;
   }): Promise<boolean> {
     this.consumeCallCount++;
     const entry = this.issued.get(input.challenge);
@@ -89,7 +88,7 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       entry.dpopJkt !== input.dpopJkt ||
       entry.deviceId !== input.deviceId ||
       entry.consumed ||
-      entry.expiresAt <= input.now
+      entry.expiresAt <= this.clock()
     ) {
       return false;
     }
@@ -342,9 +341,7 @@ describe("LoginDeviceService", () => {
       challenge: "login-replay",
       purpose: "login",
       dpopJkt: "dpop-jkt-replay",
-      deviceId: "device_replay",
-      now: new Date(now),
-    });
+      deviceId: "device_replay",    });
     const service = new LoginDeviceService(challenges, devices, clock);
     const replay = { deviceId: "device_replay", dpopJkt: "dpop-jkt-replay", challenge: "login-replay", jws: "irrelevant" };
 
@@ -375,9 +372,7 @@ describe("LoginDeviceService", () => {
       challenge: "login-replay-no-id",
       purpose: "login",
       dpopJkt: "dpop-jkt-nobody-sent",
-      deviceId: "device_nobody_sent",
-      now: new Date(now),
-    });
+      deviceId: "device_nobody_sent",    });
     const service = new LoginDeviceService(challenges, devices, () => new Date(now + 1_000));
 
     await expect(
