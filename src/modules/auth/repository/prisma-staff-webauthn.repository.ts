@@ -38,7 +38,7 @@ export class PrismaStaffWebAuthnRepository implements StaffWebAuthnRepository {
         accountId,
         betterAuthSessionId: providerSessionId,
         status: "active",
-        authMethodAtLogin: "passkey",
+        authMethodAtLogin: "staff_passkey",
       },
       select: { id: true },
     });
