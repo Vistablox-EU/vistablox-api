@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { DeviceChallengeExpiredError, DeviceLoginFailedError } from "../src/modules/auth/application/device-auth-errors.js";
 import { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
+import { CHALLENGE_REPLAY_WINDOW_MS } from "../src/modules/auth/domain/device-challenge-replay.js";
 import type { Device, DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
 
@@ -54,6 +55,9 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
   public issued = new Map<string, FakeChallengeEntry>();
   public consumeCallCount = 0;
 
+  /** `clock` stands in for the database's clock: consumption time and the replay window. */
+  public constructor(private readonly clock: () => Date = () => new Date()) {}
+
   public async issue(input: {
     challenge: string;
     purpose: string;
@@ -90,16 +94,15 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       return false;
     }
     entry.consumed = true;
-    entry.consumedAt = input.now;
+    entry.consumedAt = this.clock();
     return true;
   }
 
-  public async wasConsumedSince(input: {
+  public async wasConsumedWithinReplayWindow(input: {
     challenge: string;
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    since: Date;
   }): Promise<boolean> {
     const entry = this.issued.get(input.challenge);
     return (
@@ -108,7 +111,7 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       entry.dpopJkt === input.dpopJkt &&
       entry.deviceId === input.deviceId &&
       entry.consumedAt !== undefined &&
-      entry.consumedAt.getTime() >= input.since.getTime()
+      entry.consumedAt.getTime() >= this.clock().getTime() - CHALLENGE_REPLAY_WINDOW_MS
     );
   }
 
@@ -327,7 +330,7 @@ describe("LoginDeviceService", () => {
     devices.devices.push(
       makeDevice({ deviceId: "device_replay", dpopJkt: "dpop-jkt-replay", bioJkt, biometricPublicJwk: publicJwk as Record<string, unknown> }),
     );
-    const challenges = new FakeChallengeRepository();
+    const challenges = new FakeChallengeRepository(clock);
     await challenges.issue({
       challenge: "login-replay",
       purpose: "login",

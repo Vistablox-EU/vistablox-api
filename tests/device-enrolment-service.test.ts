@@ -26,6 +26,10 @@ import {
 } from "../src/modules/auth/application/device-auth-errors.js";
 import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/device-auth-jws-verifier.js";
 import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
+import {
+  CHALLENGE_REPLAY_WINDOW_MS,
+  ENROLMENT_INSERT_DEADLINE_MS,
+} from "../src/modules/auth/domain/device-challenge-replay.js";
 import { toApiError } from "../src/modules/auth/infrastructure/better-auth-device-auth.plugin.js";
 import type { Device, DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
@@ -40,6 +44,13 @@ class FakeDeviceRepository implements DeviceRepository {
   public devices: Device[] = [];
   public createCallCount = 0;
 
+  /**
+   * With `challenges`, create() stands in for the database-enforced insert
+   * deadline: it registers a device only while its challenge was consumed
+   * less than 60 s ago on that fake's clock (the fake database clock).
+   */
+  public constructor(private readonly challenges?: FakeChallengeRepository) {}
+
   public async create(input: {
     accountId: string;
     betterAuthUserId: string;
@@ -51,8 +62,12 @@ class FakeDeviceRepository implements DeviceRepository {
     osVersion: string | undefined;
     appVersion: string | undefined;
     attestationMetadata: Record<string, unknown>;
+    consumedChallenge: { challenge: string; purpose: string; dpopJkt: string };
   }): Promise<Device> {
     this.createCallCount++;
+    if (this.challenges !== undefined && !this.challenges.isFreshForInsert(input.consumedChallenge)) {
+      throw new DeviceChallengeExpiredError();
+    }
     const device: Device = {
       deviceId: `device_${this.devices.length + 1}`,
       accountId: input.accountId,
@@ -104,6 +119,9 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
   public issued = new Map<string, FakeChallengeEntry>();
   public consumeCallCount = 0;
 
+  /** `clock` stands in for the database's clock: consumption time, replay window and insert deadline. */
+  public constructor(private readonly clock: () => Date = () => new Date()) {}
+
   public async issue(input: {
     challenge: string;
     purpose: string;
@@ -140,16 +158,15 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       return false;
     }
     entry.consumed = true;
-    entry.consumedAt = input.now;
+    entry.consumedAt = this.clock();
     return true;
   }
 
-  public async wasConsumedSince(input: {
+  public async wasConsumedWithinReplayWindow(input: {
     challenge: string;
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    since: Date;
   }): Promise<boolean> {
     const entry = this.issued.get(input.challenge);
     return (
@@ -158,7 +175,19 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       entry.dpopJkt === input.dpopJkt &&
       entry.deviceId === input.deviceId &&
       entry.consumedAt !== undefined &&
-      entry.consumedAt.getTime() >= input.since.getTime()
+      entry.consumedAt.getTime() >= this.clock().getTime() - CHALLENGE_REPLAY_WINDOW_MS
+    );
+  }
+
+  /** The database-side insert-deadline check PrismaDeviceRepository.create runs. */
+  public isFreshForInsert(consumed: { challenge: string; purpose: string; dpopJkt: string }): boolean {
+    const entry = this.issued.get(consumed.challenge);
+    return (
+      entry !== undefined &&
+      entry.purpose === consumed.purpose &&
+      entry.dpopJkt === consumed.dpopJkt &&
+      entry.consumedAt !== undefined &&
+      entry.consumedAt.getTime() > this.clock().getTime() - ENROLMENT_INSERT_DEADLINE_MS
     );
   }
 
@@ -652,7 +681,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
 
   it("answers REPLAYED to a replay while the first enrolment is still running, and the first still registers", async () => {
     const challenges = new FakeChallengeRepository();
-    const devices = new FakeDeviceRepository();
+    const devices = new FakeDeviceRepository(challenges);
     const challenge = "replay-in-flight";
     await challenges.issue({
       challenge,
@@ -695,11 +724,11 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
     expect(devices.createCallCount).toBe(1);
   });
 
-  it("converges: a challenge whose enrolment registered nothing answers REPLAYED for 120 s, then EXPIRED", async () => {
+  it("converges: a challenge whose enrolment registered nothing answers REPLAYED for 120 s, then EXPIRED, on the database clock", async () => {
     const t0 = Date.now();
-    let now = t0;
-    const challenges = new FakeChallengeRepository();
-    const devices = new FakeDeviceRepository();
+    let dbNow = t0;
+    const challenges = new FakeChallengeRepository(() => new Date(dbNow));
+    const devices = new FakeDeviceRepository(challenges);
     await challenges.issue({
       challenge: "replay-converges",
       purpose: "enrol-device",
@@ -715,15 +744,16 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       deviceId: undefined,
       now: new Date(t0),
     });
-    const service = new EnrolDeviceService(challenges, devices, androidConfig(), () => new Date(now));
+    // This API instance's clock runs an hour ahead: it plays no part.
+    const service = new EnrolDeviceService(challenges, devices, androidConfig(), () => new Date(t0 + 3_600_000));
     const replay = enrolInput("replay-converges", "dpop-replay-2", "not-reached", []);
 
-    now = t0 + 120_000;
+    dbNow = t0 + 120_000;
     await expect(service.execute(replay)).rejects.toBeInstanceOf(DeviceChallengeReplayedError);
 
-    now = t0 + 120_001;
+    dbNow = t0 + 120_001;
     await expect(service.execute(replay)).rejects.toBeInstanceOf(DeviceChallengeExpiredError);
-    expect(devices.createCallCount).toBe(0);
+    expect(devices.devices).toHaveLength(0);
   });
 
   it("after the window, a replay of a challenge whose enrolment did register answers 409, never EXPIRED", async () => {
@@ -755,6 +785,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       osVersion: undefined,
       appVersion: undefined,
       attestationMetadata: {},
+      consumedChallenge: { challenge: "replay-registered", purpose: "enrol-device", dpopJkt: "dpop-replay-3" },
     });
     const service = new EnrolDeviceService(challenges, devices, androidConfig(), () => new Date(t0 + 600_000));
 
@@ -763,42 +794,102 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
     ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
   });
 
-  it("registers nothing when it reaches its device insert 60 s or more after consuming its challenge", async () => {
-    let now = Date.now();
-    const challenges = new FakeChallengeRepository();
-    const devices = new FakeDeviceRepository();
-    const challenge = "replay-deadline";
+  it("after the window, answers 409 even when the device row wasn't visible to this replay's own first active-device check", async () => {
+    // The consuming enrolment's row was committed after this replay's first
+    // check ran; the check after the window must still find it.
+    class FirstActiveCheckMissesDeviceRepository extends FakeDeviceRepository {
+      private activeChecks = 0;
+
+      public override async findActiveDeviceForAccount(accountId: string): Promise<Device | null> {
+        this.activeChecks++;
+        return this.activeChecks === 1 ? null : super.findActiveDeviceForAccount(accountId);
+      }
+    }
+    const t0 = Date.now();
+    let dbNow = t0;
+    const challenges = new FakeChallengeRepository(() => new Date(dbNow));
+    const devices = new FirstActiveCheckMissesDeviceRepository();
+    await challenges.issue({
+      challenge: "replay-late-row",
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-5",
+      deviceId: undefined,
+      expiresAt: new Date(t0 + 300_000),
+    });
+    await challenges.consume({
+      challenge: "replay-late-row",
+      purpose: "enrol-device",
+      dpopJkt: "dpop-replay-5",
+      deviceId: undefined,
+      now: new Date(t0),
+    });
+    devices.devices.push({
+      deviceId: "device_late_row",
+      accountId: "account-replay",
+      betterAuthUserId: "user-1",
+      dpopJkt: "dpop-replay-5",
+      bioJkt: "bio",
+      biometricPublicJwk: {},
+      platform: "android",
+      status: "active",
+      createdAt: new Date(t0),
+      lastSeenAt: new Date(t0),
+    });
+    dbNow = t0 + 600_000;
+    const service = new EnrolDeviceService(challenges, devices, androidConfig());
+
+    await expect(
+      service.execute(enrolInput("replay-late-row", "dpop-replay-5", "not-reached", [])),
+    ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
+  });
+
+  // The enrolment's attestation stalls for `stallMs` on the database clock,
+  // between consuming its challenge and inserting its device row.
+  async function enrolWithStalledAttestation(stallMs: number, name: string) {
+    let dbNow = Date.now();
+    const challenges = new FakeChallengeRepository(() => new Date(dbNow));
+    const devices = new FakeDeviceRepository(challenges);
+    const challenge = `replay-deadline-${name}`;
+    const dpopJkt = `dpop-replay-deadline-${name}`;
     await challenges.issue({
       challenge,
       purpose: "enrol-device",
-      dpopJkt: "dpop-replay-4",
+      dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(now + 300_000),
+      expiresAt: new Date(dbNow + 300_000),
     });
-    const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-replay-4" });
+    const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt });
     const chain = await buildAndroidAttestationChain(challenge, publicKey);
-    let advanced = false;
-    // Attestation takes 60 s (the revocation list is slow).
+    let stalled = false;
     const slowRevocationList: AndroidAttestationRevocationList = {
       isRevoked: async () => {
-        if (!advanced) {
-          advanced = true;
-          now += 60_000;
+        if (!stalled) {
+          stalled = true;
+          dbNow += stallMs;
         }
         return false;
       },
     };
-    const service = new EnrolDeviceService(
-      challenges,
-      devices,
-      { ...androidConfig({ pinnedRootCertificates: [chain.rootBase64] }), revocationList: slowRevocationList },
-      () => new Date(now),
-    );
+    const service = new EnrolDeviceService(challenges, devices, {
+      ...androidConfig({ pinnedRootCertificates: [chain.rootBase64] }),
+      revocationList: slowRevocationList,
+    });
+    const outcome = service.execute(enrolInput(challenge, dpopJkt, jws, [chain.leafBase64, chain.rootBase64]));
+    return { outcome, devices };
+  }
 
-    await expect(
-      service.execute(enrolInput(challenge, "dpop-replay-4", jws, [chain.leafBase64, chain.rootBase64])),
-    ).rejects.toBeInstanceOf(DeviceChallengeExpiredError);
-    expect(devices.createCallCount).toBe(0);
+  it("registers nothing when its device insert comes 60 s or more after the challenge was consumed (database clock)", async () => {
+    const { outcome, devices } = await enrolWithStalledAttestation(60_000, "late");
+
+    await expect(outcome).rejects.toBeInstanceOf(DeviceChallengeExpiredError);
+    expect(devices.devices).toHaveLength(0);
+  });
+
+  it("still registers when its device insert comes just under 60 s after the challenge was consumed", async () => {
+    const { outcome, devices } = await enrolWithStalledAttestation(59_999, "in-time");
+
+    await expect(outcome).resolves.toMatchObject({ accountId: "account-replay" });
+    expect(devices.devices).toHaveLength(1);
   });
 });
 

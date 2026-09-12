@@ -12,7 +12,14 @@ export interface Device {
 }
 
 export interface DeviceRepository {
-  /** Generates and assigns the deviceId itself -- the caller never picks one. */
+  /**
+   * Registers the device of the enrolment that consumed `consumedChallenge`,
+   * and only while that challenge was consumed less than
+   * ENROLMENT_INSERT_DEADLINE_MS ago by the database's clock
+   * (domain/device-challenge-replay.ts). Past that it registers nothing and
+   * throws DeviceChallengeExpiredError. Generates and assigns the deviceId
+   * itself -- the caller never picks one.
+   */
   create(input: {
     accountId: string;
     betterAuthUserId: string;
@@ -24,6 +31,7 @@ export interface DeviceRepository {
     osVersion: string | undefined;
     appVersion: string | undefined;
     attestationMetadata: Record<string, unknown>;
+    consumedChallenge: { challenge: string; purpose: string; dpopJkt: string };
   }): Promise<Device>;
   findByDeviceId(deviceId: string): Promise<Device | null>;
   findByDpopJkt(dpopJkt: string): Promise<Device | null>;

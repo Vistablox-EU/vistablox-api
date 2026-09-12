@@ -7,9 +7,11 @@ import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
-// The replay-window queries against Postgres: wasConsumedSince matches only
-// the exact challenge (purpose, DPoP key, device) and consumption time, and
-// pruning keeps expired challenges for the replay window before deleting.
+// The replay-window queries against Postgres, on the database's clock
+// (domain/device-challenge-replay.ts): consumption time comes from the
+// database, wasConsumedWithinReplayWindow matches only the exact challenge
+// (purpose, DPoP key, device) consumed less than 120 s ago, and pruning keeps
+// expired challenges for the replay window before deleting.
 describe.skipIf(databaseUrl === undefined)("device challenge replay window, Postgres", () => {
   const suffix = randomUUID();
   const dpopJkt = `dpop-replay-db-${suffix}`;
@@ -21,29 +23,57 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
     await database.$disconnect();
   });
 
-  it("reports a consumed challenge as consumed since a time before its use, not since a later one, and only for its own DPoP key", async () => {
-    const challenge = `replay-db-consumed-${suffix}`;
-    const now = new Date();
+  async function issueAndConsume(challenge: string, callerNow: Date = new Date()): Promise<void> {
     await challenges.issue({
       challenge,
       purpose: "enrol-device",
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(now.getTime() + 300_000),
+      expiresAt: new Date(Date.now() + 300_000),
     });
     await expect(
-      challenges.consume({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined, now }),
+      challenges.consume({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined, now: callerNow }),
     ).resolves.toBe(true);
+  }
 
+  async function moveConsumptionBack(challenge: string, seconds: number): Promise<void> {
+    await database.$executeRaw`
+      UPDATE auth.device_challenges
+      SET consumed_at = now() - (${seconds}::integer * interval '1 second')
+      WHERE challenge = ${challenge}
+    `;
+  }
+
+  it("reports a challenge consumed less than 120 s ago, and not once 120 s have passed, only for its own purpose and DPoP key", async () => {
+    const challenge = `replay-db-consumed-${suffix}`;
+    await issueAndConsume(challenge);
     const query = { challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined };
-    await expect(challenges.wasConsumedSince({ ...query, since: new Date(now.getTime() - 1_000) })).resolves.toBe(true);
-    await expect(challenges.wasConsumedSince({ ...query, since: new Date(now.getTime() + 1_000) })).resolves.toBe(false);
+
+    await expect(challenges.wasConsumedWithinReplayWindow(query)).resolves.toBe(true);
+    await expect(challenges.wasConsumedWithinReplayWindow({ ...query, dpopJkt: `${dpopJkt}-other` })).resolves.toBe(false);
+    await expect(challenges.wasConsumedWithinReplayWindow({ ...query, purpose: "login" })).resolves.toBe(false);
+
+    await moveConsumptionBack(challenge, 119);
+    await expect(challenges.wasConsumedWithinReplayWindow(query)).resolves.toBe(true);
+
+    await moveConsumptionBack(challenge, 121);
+    await expect(challenges.wasConsumedWithinReplayWindow(query)).resolves.toBe(false);
+  });
+
+  it("records consumed_at from the database's clock, not the caller's", async () => {
+    const challenge = `replay-db-clock-${suffix}`;
+    // The caller's clock is an hour behind; expiry still uses it.
+    await issueAndConsume(challenge, new Date(Date.now() - 3_600_000));
+
+    const rows = await database.$queryRaw<Array<{ close: boolean }>>`
+      SELECT abs(extract(epoch FROM (now() - consumed_at))) < 10 AS close
+      FROM auth.device_challenges
+      WHERE challenge = ${challenge}
+    `;
+    expect(rows[0]?.close).toBe(true);
     await expect(
-      challenges.wasConsumedSince({ ...query, dpopJkt: `${dpopJkt}-other`, since: new Date(now.getTime() - 1_000) }),
-    ).resolves.toBe(false);
-    await expect(
-      challenges.wasConsumedSince({ ...query, purpose: "login", since: new Date(now.getTime() - 1_000) }),
-    ).resolves.toBe(false);
+      challenges.wasConsumedWithinReplayWindow({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined }),
+    ).resolves.toBe(true);
   });
 
   it("never reports an unconsumed challenge as consumed", async () => {
@@ -57,7 +87,7 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
     });
 
     await expect(
-      challenges.wasConsumedSince({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined, since: new Date(0) }),
+      challenges.wasConsumedWithinReplayWindow({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined }),
     ).resolves.toBe(false);
   });
 

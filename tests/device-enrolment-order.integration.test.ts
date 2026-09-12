@@ -57,17 +57,19 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
       betterAuthUserIds.push(user.id);
       await database.account.create({ data: { id: accountId, betterAuthUserId: user.id, status: "active" } });
     }
-    await devices.create({
-      accountId: accountWithDevice,
-      betterAuthUserId: betterAuthUserIds[0] as string,
-      dpopJkt: `existing-device-jkt-${suffix}`,
-      bioJkt: `existing-device-bio-${suffix}`,
-      biometricPublicJwk: {},
-      platform: "android",
-      model: undefined,
-      osVersion: undefined,
-      appVersion: undefined,
-      attestationMetadata: {},
+    // The account's existing device, inserted directly: devices.create
+    // registers only for a freshly consumed enrolment challenge.
+    await database.device.create({
+      data: {
+        deviceId: `device_existing_${suffix}`,
+        accountId: accountWithDevice,
+        betterAuthUserId: betterAuthUserIds[0] as string,
+        dpopJkt: `existing-device-jkt-${suffix}`,
+        bioJkt: `existing-device-bio-${suffix}`,
+        biometricPublicJwk: {},
+        platform: "android",
+        attestationMetadata: {},
+      },
     });
   }, 30_000);
 

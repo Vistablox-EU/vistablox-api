@@ -13,10 +13,17 @@ export interface DeviceChallengeRepository {
    * a single atomic UPDATE, so no check-then-consume gap. Without the
    * dpopJkt/deviceId match, a challenge issued for one requester could be
    * redeemed by a completely different one presenting an otherwise-valid
-   * JWS. `now` is recorded as the consumption time. A `false` result covers
-   * wrong purpose, wrong DPoP key, wrong device_id, already consumed,
-   * expired and unknown alike; the caller then asks wasConsumedSince to tell
-   * DEVICE_CHALLENGE_REPLAYED apart from DEVICE_CHALLENGE_EXPIRED.
+   * JWS.
+   *
+   * `now` (the API clock that also set expires_at at issuance) decides
+   * expiry. The consumption time is recorded from the database's clock, which
+   * the replay window and the enrolment insert deadline are measured on
+   * (domain/device-challenge-replay.ts).
+   *
+   * A `false` result covers wrong purpose, wrong DPoP key, wrong device_id,
+   * already consumed, expired and unknown alike; the caller then asks
+   * wasConsumedWithinReplayWindow to tell DEVICE_CHALLENGE_REPLAYED apart from
+   * DEVICE_CHALLENGE_EXPIRED.
    */
   consume(input: {
     challenge: string;
@@ -27,17 +34,16 @@ export interface DeviceChallengeRepository {
   }): Promise<boolean>;
   /**
    * Whether this exact challenge (same purpose, DPoP key and device_id) was
-   * consumed at or after `since`. Asked only after consume() fails (see
-   * domain/device-challenge-replay.ts). A challenge issued to a different
-   * DPoP key or device never matches, so this reveals nothing about anyone
-   * else's challenges.
+   * consumed less than CHALLENGE_REPLAY_WINDOW_MS ago, by the database's
+   * clock. Asked only after consume() fails. A challenge issued to a
+   * different DPoP key or device never matches, so this reveals nothing
+   * about anyone else's challenges.
    */
-  wasConsumedSince(input: {
+  wasConsumedWithinReplayWindow(input: {
     challenge: string;
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    since: Date;
   }): Promise<boolean>;
   /**
    * Deletes challenges whose expiry passed more than the replay window ago.

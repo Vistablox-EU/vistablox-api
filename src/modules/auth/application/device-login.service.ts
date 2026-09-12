@@ -4,7 +4,6 @@ import {
   DeviceLoginFailedError,
   MobilePlatformUnsupportedError,
 } from "./device-auth-errors.js";
-import { replayWindowStart } from "../domain/device-challenge-replay.js";
 import { isDeviceAuthJwsVerificationError, verifyDeviceAuthJws } from "./device-auth-jws-verifier.js";
 import type { Device, DeviceRepository } from "../repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../repository/device-challenge.repository.js";
@@ -70,14 +69,13 @@ export class LoginDeviceService {
     });
     if (!consumed) {
       // Same code semantics as enrolment (domain/device-challenge-replay.ts).
-      const recentlyUsed = await this.challengeRepository.wasConsumedSince({
+      const recentlyUsed = await this.challengeRepository.wasConsumedWithinReplayWindow({
         challenge: input.challenge,
         purpose: LOGIN_PURPOSE,
         dpopJkt: input.dpopJkt,
         // The device the challenge was bound to (resolved from the DPoP key,
         // contract 3.1), not the optional body device_id.
         deviceId: device.deviceId,
-        since: replayWindowStart(now),
       });
       throw recentlyUsed ? new DeviceChallengeReplayedError() : new DeviceChallengeExpiredError();
     }

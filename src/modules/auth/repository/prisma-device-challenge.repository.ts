@@ -30,9 +30,11 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
     deviceId: string | undefined;
     now: Date;
   }): Promise<boolean> {
+    // consumed_at is the database's now(): the replay window and the
+    // enrolment insert deadline are both measured on the database clock.
     const rows = await this.database.$queryRaw<Array<{ challenge: string }>>`
       UPDATE auth.device_challenges
-      SET consumed_at = ${input.now}
+      SET consumed_at = now()
       WHERE challenge = ${input.challenge}
         AND purpose = ${input.purpose}
         AND dpop_jkt = ${input.dpopJkt}
@@ -44,24 +46,24 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
     return rows.length > 0;
   }
 
-  public async wasConsumedSince(input: {
+  public async wasConsumedWithinReplayWindow(input: {
     challenge: string;
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    since: Date;
   }): Promise<boolean> {
-    const found = await this.database.deviceChallenge.findFirst({
-      where: {
-        challenge: input.challenge,
-        purpose: input.purpose,
-        dpopJkt: input.dpopJkt,
-        deviceId: input.deviceId ?? null,
-        consumedAt: { gte: input.since },
-      },
-      select: { challenge: true },
-    });
-    return found !== null;
+    const rows = await this.database.$queryRaw<Array<{ recent: boolean }>>`
+      SELECT EXISTS (
+        SELECT 1
+        FROM auth.device_challenges
+        WHERE challenge = ${input.challenge}
+          AND purpose = ${input.purpose}
+          AND dpop_jkt = ${input.dpopJkt}
+          AND device_id IS NOT DISTINCT FROM ${input.deviceId ?? null}
+          AND consumed_at >= now() - (${CHALLENGE_REPLAY_WINDOW_MS}::integer * interval '1 millisecond')
+      ) AS recent
+    `;
+    return rows[0]?.recent === true;
   }
 
   public async pruneExpired(now: Date): Promise<number> {

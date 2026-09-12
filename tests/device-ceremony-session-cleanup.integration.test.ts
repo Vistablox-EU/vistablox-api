@@ -83,17 +83,19 @@ describe.skipIf(databaseUrl === undefined)("L2 failure after session creation le
     devicePrivateKey = deviceKeys.privateKey;
     deviceBioJkt = await calculateJwkThumbprint(deviceKeys.publicJwk, "sha256");
     dpopKeyPair = await generateKeyPair();
-    const seeded = await deviceRepository.create({
-      accountId,
-      betterAuthUserId,
-      dpopJkt: await calculateJwkThumbprint(dpopKeyPair.publicJwk, "sha256"),
-      bioJkt: deviceBioJkt,
-      biometricPublicJwk: deviceKeys.publicJwk as unknown as Record<string, unknown>,
-      platform: "android",
-      model: undefined,
-      osVersion: undefined,
-      appVersion: undefined,
-      attestationMetadata: {},
+    // Seeded directly: deviceRepository.create registers a device only for
+    // a freshly consumed enrolment challenge.
+    const seeded = await database.device.create({
+      data: {
+        deviceId: `device_cleanup_${suffix}`,
+        accountId,
+        betterAuthUserId,
+        dpopJkt: await calculateJwkThumbprint(dpopKeyPair.publicJwk, "sha256"),
+        bioJkt: deviceBioJkt,
+        biometricPublicJwk: deviceKeys.publicJwk as object,
+        platform: "android",
+        attestationMetadata: {},
+      },
     });
     deviceId = seeded.deviceId;
 
