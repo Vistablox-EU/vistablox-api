@@ -55,7 +55,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       await expect(
         authPool.query(
-          `UPDATE "auth_user" SET "disabledAt" = now(), "disabledReason" = 'test' WHERE "id" = $1`,
+          `UPDATE "auth_user" SET "disabledAt" = now(), "disabledReason" = 'security_action' WHERE "id" = $1`,
           [customer.id],
         ),
       ).rejects.toThrow(/auth_user_staff_lifecycle_population_check/);
