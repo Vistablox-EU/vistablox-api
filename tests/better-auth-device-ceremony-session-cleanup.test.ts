@@ -12,6 +12,8 @@ import type { EnrolDeviceService } from "../src/modules/auth/application/device-
 import type { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
 import type { Device } from "../src/modules/auth/repository/device.repository.js";
 import { createBetterAuthDeviceAuthPlugin } from "../src/modules/auth/infrastructure/better-auth-device-auth.plugin.js";
+import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/better-auth-audit.plugin.js";
+import type { AuthAuditEvent } from "../src/modules/auth/application/auth-audit-sink.js";
 
 // A real better-auth instance (in-memory database, bearer tokens) with the
 // real device-auth plugin: only the enrolment/login services and the
@@ -71,6 +73,7 @@ async function buildHarness() {
     findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_cleanup_1", status: "active" }),
   };
 
+  const auditEvents: AuthAuditEvent[] = [];
   const auth = betterAuth({
     database: memoryAdapter(db),
     baseURL: BASE_URL,
@@ -89,6 +92,10 @@ async function buildHarness() {
         enrolDevice: enrolDevice as unknown as EnrolDeviceService,
         loginDevice: loginDevice as unknown as LoginDeviceService,
         dpop: { baseUrl: BASE_URL, replayRepository },
+      }),
+      createBetterAuthAuditPlugin({
+        sink: { record: async (event: AuthAuditEvent) => void auditEvents.push(event) },
+        identifierHashKey: "unit-test-audit-key",
       }),
     ],
   });
@@ -144,7 +151,16 @@ async function buildHarness() {
     return db.session!.filter((row) => row.userId === user.id && row.token !== pending.token);
   }
 
-  return { context, pending, enrolDevice, enrol, login, ceremonySessions, db, userId: user.id };
+  /** session_revoked audit reasons, by the revoked session's id. */
+  function revocationReasons(): Map<string, unknown> {
+    return new Map(
+      auditEvents
+        .filter((event) => event.action === "authentication.session_revoked")
+        .map((event) => [event.resourceId, event.changes.reason]),
+    );
+  }
+
+  return { context, pending, enrolDevice, enrol, login, ceremonySessions, db, userId: user.id, revocationReasons };
 }
 
 function expectNoSessionHandedOut(response: Response): void {
@@ -202,6 +218,31 @@ describe("device ceremonies: no live session is left behind after a late failure
     expectNoSessionHandedOut(response);
     expect(harness.ceremonySessions()).toHaveLength(0);
     expect(harness.enrolDevice.rollback).toHaveBeenCalledWith("device_cleanup_1");
+  });
+
+  it("audits the discarded session of a failed E2 as ceremony_failed, while a successful E2's pending session stays rotated", async () => {
+    const failed = await buildHarness();
+    const original = failed.context.internalAdapter.deleteSession.bind(failed.context.internalAdapter);
+    vi.spyOn(failed.context.internalAdapter, "deleteSession").mockImplementation(async (token: string) => {
+      if (token === failed.pending.token) throw new Error("pending session delete failed");
+      return original(token);
+    });
+    await expect(failed.enrol()).rejects.toThrow("pending session delete failed");
+    const failedReasons = [...failed.revocationReasons().values()];
+    expect(failedReasons).toEqual(["ceremony_failed"]);
+
+    const succeeded = await buildHarness();
+    expect((await succeeded.enrol()).status).toBe(200);
+    expect(succeeded.revocationReasons().get(succeeded.pending.id)).toBe("rotated");
+  });
+
+  it("audits the discarded session of a failed L2 as ceremony_failed", async () => {
+    const harness = await buildHarness();
+    vi.spyOn(harness.context.internalAdapter, "findUserById").mockResolvedValueOnce(null);
+
+    expect((await harness.login()).status).toBe(500);
+
+    expect([...harness.revocationReasons().values()]).toEqual(["ceremony_failed"]);
   });
 
   it("L2 success still hands out the new session", async () => {

@@ -19,6 +19,7 @@ import {
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
 import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
+import { markDiscardedCeremonySession } from "./device-ceremony-session.js";
 import {
   assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
@@ -145,6 +146,11 @@ export function createBetterAuthDeviceAuthPlugin(
               // context it needs comes from tryGetCurrentAuthEndpointContext's
               // continuation-local lookup automatically, confirmed against
               // internal-adapter.mjs directly rather than assumed.
+              // session.create.after hooks must not throw: a throw there
+              // would reject this call after the row exists but before its
+              // token is tracked, so the failure cleanup below couldn't
+              // discard it. The audit plugin swallows its own errors (see
+              // tests/better-auth-audit.plugin.test.ts).
               const session = await ctx.context.internalAdapter.createSession(current.user.id);
               if (session === null) {
                 throw APIError.from("INTERNAL_SERVER_ERROR", {
@@ -231,6 +237,8 @@ export function createBetterAuthDeviceAuthPlugin(
               throw accountRestricted();
             }
 
+            // As in E2: session.create.after hooks must not throw, or the
+            // session would exist untracked by the cleanup below.
             const session = await ctx.context.internalAdapter.createSession(
               device.betterAuthUserId,
             );
@@ -295,8 +303,12 @@ async function discardCeremonySession(
     });
   }
   (ctx.context as { newSession?: unknown }).newSession = null;
+  // Lets the audit plugin record this delete as a failed ceremony, not as
+  // E2's ordinary rotation of the pending session.
+  markDiscardedCeremonySession(ctx.context, sessionToken);
   await ctx.context.internalAdapter.deleteSession(sessionToken).catch((sessionError: unknown) => {
-    ctx.context.logger?.warn?.(`failed to delete the session of a failed device ${ceremony}`, {
+    // Error level: a failed delete here leaves a live session behind.
+    ctx.context.logger?.error?.(`failed to delete the session of a failed device ${ceremony}`, {
       sessionError,
     });
   });
