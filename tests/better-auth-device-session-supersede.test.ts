@@ -333,6 +333,21 @@ describe("a successful device ceremony supersedes the device's earlier sessions"
     );
   });
 
+  it("an unexpected error in the supersede step never fails the login or discards its session", async () => {
+    const harness = await buildHarness();
+    // Not an array: the supersede step throws past its own list guard.
+    vi.spyOn(harness.context.internalAdapter, "listSessions").mockResolvedValueOnce(null as never);
+
+    expect((await harness.login()).status).toBe(200);
+
+    expect(harness.deviceSessions()).toHaveLength(1);
+    expect(harness.log).toHaveBeenCalledWith(
+      "error",
+      expect.stringContaining("failed to supersede earlier sessions after a device login"),
+      expect.anything(),
+    );
+  });
+
   it("two overlapping logins from the phone leave exactly one live session, never none", async () => {
     const harness = await buildHarness();
 

@@ -168,11 +168,20 @@ export function createBetterAuthDeviceAuthPlugin(
               // ceremony's own priorSessionToken/deleteSession pattern (E2
               // "rotates" per the wire contract, section 3.1).
               await ctx.context.internalAdapter.deleteSession(current.session.token);
-              await supersedeEarlierDeviceSessions(
-                ctx,
-                { userId: current.user.id, dpopJkt: boundJkt },
-                "enrolment",
-              );
+              // Its own try/catch: nothing the supersede step throws may reach
+              // the cleanup below and discard this session or roll back the
+              // device. Supersede failures never affect the enrolment.
+              try {
+                await supersedeEarlierDeviceSessions(
+                  ctx,
+                  { userId: current.user.id, dpopJkt: boundJkt },
+                  "enrolment",
+                );
+              } catch (supersedeError) {
+                ctx.context.logger?.error?.("failed to supersede earlier sessions after a device enrolment", {
+                  supersedeError,
+                });
+              }
 
               return ctx.json({
                 device_id: device.deviceId,
@@ -269,11 +278,20 @@ export function createBetterAuthDeviceAuthPlugin(
               });
             }
             await setSessionCookie(ctx, { session, user });
-            await supersedeEarlierDeviceSessions(
-              ctx,
-              { userId: device.betterAuthUserId, dpopJkt: dpopClaims.jkt },
-              "login",
-            );
+            // Its own try/catch: nothing the supersede step throws may reach
+            // the cleanup below and discard this session. Supersede failures
+            // never affect the login.
+            try {
+              await supersedeEarlierDeviceSessions(
+                ctx,
+                { userId: device.betterAuthUserId, dpopJkt: dpopClaims.jkt },
+                "login",
+              );
+            } catch (supersedeError) {
+              ctx.context.logger?.error?.("failed to supersede earlier sessions after a device login", {
+                supersedeError,
+              });
+            }
 
             return ctx.json({
               device_id: device.deviceId,
