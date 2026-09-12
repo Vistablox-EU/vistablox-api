@@ -6,7 +6,7 @@ import { PgBoss } from "pg-boss";
 import { createClient } from "redis";
 
 import { createApp } from "./app.js";
-import { loadEnvironment } from "./config/environment.js";
+import { loadEnvironment, resolveWebAuthnSettings } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
@@ -246,6 +246,12 @@ const issueDeviceChallengeService = new IssueDeviceChallengeService(
   deviceRepository,
 );
 
+// The pinned rpId (#51) and every origin a WebAuthn ceremony may come from:
+// the rpId's own origin, Related Origins such as the admin console (served
+// at /.well-known/webauthn, staff-only), and the native Android app origins
+// (customer passkeys). Passed through as-is -- the derivation is tested in
+// resolveWebAuthnSettings, so keep it out of this file.
+const webauthnSettings = resolveWebAuthnSettings(environment);
 // Shared by the audit plugin (session create/revoke) and the session
 // resolvers (device-session activity: last_seen_at, idle_expires_at).
 const sessionMirror = new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET);
@@ -268,13 +274,7 @@ const auth = createBetterAuth({
     enrolDevice: enrolDeviceService,
     loginDevice: loginDeviceService,
   },
-  webauthn: {
-    rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
-    origins: [
-      environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
-      ...(environment.PASSKEY_ANDROID_ORIGINS ?? []),
-    ],
-  },
+  webauthn: webauthnSettings.passkey,
   ...(!environment.GOOGLE_OAUTH_ENABLED ||
   environment.GOOGLE_CLIENT_ID === undefined ||
   environment.GOOGLE_CLIENT_SECRET === undefined
@@ -322,10 +322,7 @@ const staffProvisioningAuth = createBetterAuth({
   secret: environment.BETTER_AUTH_SECRET,
   secureCookies: environment.NODE_ENV === "production",
   trustedOrigins,
-  webauthn: {
-    rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
-    origins: [environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin],
-  },
+  webauthn: webauthnSettings.passkey,
   allowPopulationInput: true,
   onUserCreated: (user) => accountProvisioner.onUserCreated(user),
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
@@ -499,6 +496,7 @@ const app = createApp({
             environment.PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS,
         }),
   },
+  webauthnRelatedOrigins: webauthnSettings.relatedOrigins,
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
   reservationFundingRailEnabled,
   protectedApi: {
@@ -521,8 +519,8 @@ const app = createApp({
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({
       rpName: environment.WEBAUTHN_RP_NAME,
-      rpId: environment.WEBAUTHN_RP_ID ?? authBaseUrl.hostname,
-      expectedOrigin: environment.WEBAUTHN_ORIGIN ?? authBaseUrl.origin,
+      rpId: webauthnSettings.staffCeremony.rpId,
+      expectedOrigin: webauthnSettings.staffCeremony.origins,
     }),
     profile: {
       repository: profileRepository,

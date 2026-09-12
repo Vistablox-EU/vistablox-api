@@ -60,7 +60,16 @@ services:
       # value. The default keeps it pinned even if the Coolify var is
       # somehow missing, same reasoning as DPOP_PHASE1_CUTOVER_AT above.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-api.vistablox.io}
+      # Comma-separated exact origins every WebAuthn ceremony accepts. Staging
+      # sets https://api.vistablox.io,https://admin.vistablox.io so the admin
+      # console can use staff passkeys; entries other than the rpId's own
+      # host are served at /.well-known/webauthn and accept staff passkeys
+      # only. Empty falls back to BETTER_AUTH_URL's origin.
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
+      # Admin-console pages linked from staff invitation / recovery emails.
+      # Empty falls back to /staff/... on BETTER_AUTH_URL's host.
+      STAFF_INVITATION_ACCEPT_URL: ${STAFF_INVITATION_ACCEPT_URL:-}
+      STAFF_RECOVERY_REDIRECT_URL: ${STAFF_RECOVERY_REDIRECT_URL:-}
       # The images set NODE_ENV=production (see the Dockerfile), so APP_ENV is
       # what marks this deployment as staging. Staging-only settings, such as
       # PLAY_INTEGRITY_POLICY=disabled, are accepted here and nowhere else.

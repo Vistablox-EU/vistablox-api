@@ -17,7 +17,9 @@ export class SimpleWebAuthnCeremony implements StaffWebAuthnCeremony {
     private readonly configuration: {
       rpName: string;
       rpId: string;
-      expectedOrigin: string;
+      // Every origin a ceremony may come from: the rpId's own origin plus
+      // any WebAuthn Related Origins (the admin console) -- exact matches.
+      expectedOrigin: string | string[];
     },
   ) {}
 

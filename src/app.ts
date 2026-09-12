@@ -234,6 +234,10 @@ export interface AppDependencies {
     androidPackageName: string;
     androidCertificateFingerprints?: string[];
   };
+  // WebAuthn Related Origins: web origins other than the rpId's own host
+  // (the admin console), published at /.well-known/webauthn. Staff-only;
+  // derived by resolveWebAuthnSettings.
+  webauthnRelatedOrigins?: string[];
   rateLimitStore?: RateLimitStore;
   /** Never true unless a human has done the live Coinbase EUR/Base verification AD-255 leaves open — see docs/investor-offering.md. Defaults false. */
   reservationFundingRailEnabled?: boolean;
@@ -430,6 +434,21 @@ export function createApp(dependencies: AppDependencies): Express {
           },
         },
       ]);
+    });
+  }
+  // WebAuthn Related Origin Requests: a browser on a listed origin (the
+  // admin console) fetches this from the rpId's host -- this API, #51 --
+  // before letting that origin run a ceremony for the rpId. Fetched with no
+  // credentials or referrer; the data is public, so any origin may read it
+  // (ACAO *, credentials off) and helmet's same-origin CORP is lifted.
+  const relatedOrigins = dependencies.webauthnRelatedOrigins ?? [];
+  if (relatedOrigins.length > 0) {
+    app.get("/.well-known/webauthn", (_request, response) => {
+      response.setHeader("Cache-Control", "public, max-age=3600");
+      response.setHeader("Access-Control-Allow-Origin", "*");
+      response.removeHeader("Access-Control-Allow-Credentials");
+      response.setHeader("Cross-Origin-Resource-Policy", "cross-origin");
+      response.json({ origins: relatedOrigins });
     });
   }
   if (dependencies.authHandler !== undefined) {
