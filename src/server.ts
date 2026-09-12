@@ -243,7 +243,6 @@ const loginDeviceService = new LoginDeviceService(
 // when no device_id is sent (contract 3.1).
 const issueDeviceChallengeService = new IssueDeviceChallengeService(
   deviceChallengeRepository,
-  () => new Date(),
   deviceRepository,
 );
 

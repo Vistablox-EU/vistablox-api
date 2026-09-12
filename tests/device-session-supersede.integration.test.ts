@@ -133,7 +133,7 @@ describe.skipIf(databaseUrl === undefined)("device login supersedes the device's
       "/v1/auth/mobile",
       createDeviceAuthRouter(
         createRequireDpopOnly({ baseUrl: BASE_URL, replayRepository: dpopReplayRepository }),
-        new IssueDeviceChallengeService(deviceChallengeRepository, () => new Date(), deviceRepository),
+        new IssueDeviceChallengeService(deviceChallengeRepository, deviceRepository),
         auth,
         createRequireDpopOnly({ baseUrl: BASE_URL, replayRepository: dpopReplayRepository, recordReplays: false }),
       ),

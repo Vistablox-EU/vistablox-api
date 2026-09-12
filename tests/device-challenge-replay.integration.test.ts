@@ -29,7 +29,7 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
       purpose: "enrol-device",
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 300_000),
+      ttlSeconds: 300,
     });
     await expect(
       challenges.consume({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined }),
@@ -69,7 +69,7 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
         purpose: "enrol-device",
         dpopJkt,
         deviceId: undefined,
-        expiresAt: new Date(Date.now() + 300_000),
+        ttlSeconds: 300,
       });
     }
     // Whatever clock wrote expires_at, only the database's now() decides.
@@ -86,6 +86,27 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
     await expect(
       challenges.consume({ challenge: live, purpose: "enrol-device", dpopJkt, deviceId: undefined }),
     ).resolves.toBe(true);
+  });
+
+  it("issue() writes expires_at as the database's now() + TTL and returns exactly that value", async () => {
+    const challenge = `replay-db-issued-${suffix}`;
+
+    const returned = await challenges.issue({
+      challenge,
+      purpose: "enrol-device",
+      dpopJkt,
+      deviceId: undefined,
+      ttlSeconds: 120,
+    });
+
+    const rows = await database.$queryRaw<Array<{ expires_at: Date; ttl_ok: boolean }>>`
+      SELECT expires_at,
+             (expires_at - now()) BETWEEN interval '110 seconds' AND interval '121 seconds' AS ttl_ok
+      FROM auth.device_challenges
+      WHERE challenge = ${challenge}
+    `;
+    expect(rows[0]?.ttl_ok).toBe(true);
+    expect(returned.getTime()).toBe(new Date(rows[0]?.expires_at as Date).getTime());
   });
 
   it("records consumed_at from the database's clock", async () => {
@@ -110,7 +131,7 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
       purpose: "enrol-device",
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 300_000),
+      ttlSeconds: 300,
     });
 
     await expect(
@@ -119,7 +140,6 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
   });
 
   it("keeps an expired challenge for the replay window, then prunes it", async () => {
-    const now = new Date();
     const recent = `replay-db-recent-${suffix}`;
     const old = `replay-db-old-${suffix}`;
     await challenges.issue({
@@ -127,14 +147,14 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
       purpose: "enrol-device",
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(now.getTime() - 60_000),
+      ttlSeconds: -60,
     });
     await challenges.issue({
       challenge: old,
       purpose: "enrol-device",
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(now.getTime() - 180_000),
+      ttlSeconds: -180,
     });
 
     await challenges.pruneExpired();

@@ -127,15 +127,17 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    expiresAt: Date;
-  }): Promise<void> {
+    ttlSeconds: number;
+  }): Promise<Date> {
+    const expiresAt = new Date(this.clock().getTime() + input.ttlSeconds * 1000);
     this.issued.set(input.challenge, {
       purpose: input.purpose,
       dpopJkt: input.dpopJkt,
       deviceId: input.deviceId,
-      expiresAt: input.expiresAt,
+      expiresAt,
       consumed: false,
     });
+    return expiresAt;
   }
 
   public async consume(input: {
@@ -368,7 +370,7 @@ describe("EnrolDeviceService", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-jkt-1",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const { jws, bioJkt, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-jkt-1" });
     const chain = await buildAndroidAttestationChain(challenge, publicKey);
@@ -423,7 +425,7 @@ describe("EnrolDeviceService", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-jkt-2",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
 
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
@@ -481,7 +483,7 @@ describe("EnrolDeviceService", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-jkt-4",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const { jws } = await buildEnrolJws({ challenge, purpose: "login" });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
@@ -527,7 +529,7 @@ describe("EnrolDeviceService", () => {
       purpose: "enrol-device",
       dpopJkt: "reused-dpop-jkt",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const { jws } = await buildEnrolJws({ challenge, dpopJkt: "reused-dpop-jkt" });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
@@ -560,7 +562,7 @@ describe("EnrolDeviceService", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-jkt-6",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const { jws } = await buildEnrolJws({ challenge, dpopJkt: "dpop-jkt-6" });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
@@ -593,7 +595,7 @@ describe("EnrolDeviceService", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-jkt-7",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-jkt-7" });
     const chain = await buildAndroidAttestationChain(challenge, publicKey);
@@ -687,7 +689,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-replay-1",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 300_000),
+      ttlSeconds: 300,
     });
     const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt: "dpop-replay-1" });
     const chain = await buildAndroidAttestationChain(challenge, publicKey);
@@ -733,7 +735,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-replay-2",
       deviceId: undefined,
-      expiresAt: new Date(t0 + 300_000),
+      ttlSeconds: 300,
     });
     // The first enrolment consumed the challenge at t0 and then failed.
     await challenges.consume({
@@ -762,7 +764,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-replay-3",
       deviceId: undefined,
-      expiresAt: new Date(t0 + 300_000),
+      ttlSeconds: 300,
     });
     await challenges.consume({
       challenge: "replay-registered",
@@ -809,7 +811,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       purpose: "enrol-device",
       dpopJkt: "dpop-replay-5",
       deviceId: undefined,
-      expiresAt: new Date(t0 + 300_000),
+      ttlSeconds: 300,
     });
     await challenges.consume({
       challenge: "replay-late-row",
@@ -849,7 +851,7 @@ describe("EnrolDeviceService: replayed vs expired challenges", () => {
       purpose: "enrol-device",
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(dbNow + 300_000),
+      ttlSeconds: 300,
     });
     const { jws, publicKey } = await buildEnrolJws({ challenge, dpopJkt });
     const chain = await buildAndroidAttestationChain(challenge, publicKey);
@@ -933,7 +935,7 @@ describe("EnrolDeviceService: the active-device check runs before the challenge 
       purpose: ENROL,
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
   }
 
@@ -1004,7 +1006,7 @@ describe("EnrolDeviceService: the active-device check runs before the challenge 
       purpose: ENROL,
       dpopJkt: "dpop-order-4",
       deviceId: undefined,
-      expiresAt: new Date(Date.now() - 1_000),
+      ttlSeconds: -1,
     });
     const service = new EnrolDeviceService(challenges, devices, androidConfig());
 

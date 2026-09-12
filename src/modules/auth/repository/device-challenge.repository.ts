@@ -1,11 +1,17 @@
 export interface DeviceChallengeRepository {
+  /**
+   * Records a challenge that expires `ttlSeconds` from now by the database's
+   * clock, like every other time in the challenge lifecycle
+   * (domain/device-challenge-replay.ts), and returns that expiry: it's the
+   * `expires_at` the client is told.
+   */
   issue(input: {
     challenge: string;
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    expiresAt: Date;
-  }): Promise<void>;
+    ttlSeconds: number;
+  }): Promise<Date>;
   /**
    * Atomically consumes a challenge: succeeds only when `challenge`,
    * `purpose`, `dpopJkt`, and `deviceId` all match what was recorded at

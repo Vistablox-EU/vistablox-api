@@ -73,7 +73,7 @@ describe.skipIf(databaseUrl === undefined)("E2 insert deadline and replay window
       purpose: ENROL,
       dpopJkt: dpopJkt(scenario),
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 5 * 60_000),
+      ttlSeconds: 300,
     });
   }
 
