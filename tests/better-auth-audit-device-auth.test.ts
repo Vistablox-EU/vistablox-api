@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { AuthAuditEvent, AuthAuditSink } from "../src/modules/auth/application/auth-audit-sink.js";
 import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/better-auth-audit.plugin.js";
+import { recordVerifiedLoginDpopJkt } from "../src/modules/auth/infrastructure/device-login-audit-context.js";
 
 // E2 (/device/enrol/verify) and L2 (/device/login/verify): session_created
 // when the session row is written, login_succeeded only once the ceremony
@@ -25,7 +26,9 @@ interface DatabaseHooks {
   };
 }
 
-function build(findDeviceOwner?: (deviceId: string) => Promise<string | null>) {
+type FindDeviceByDpopJkt = (dpopJkt: string) => Promise<{ betterAuthUserId: string; deviceId: string } | null>;
+
+function build(findDeviceByDpopJkt?: FindDeviceByDpopJkt) {
   const events: AuthAuditEvent[] = [];
   const sink: AuthAuditSink = {
     record: vi.fn(async (event: AuthAuditEvent) => {
@@ -38,7 +41,7 @@ function build(findDeviceOwner?: (deviceId: string) => Promise<string | null>) {
     identifierHashKey: HASH_KEY,
     clock: () => new Date("2026-09-11T12:00:00.000Z"),
     onLoginMethodUsed,
-    ...(findDeviceOwner === undefined ? {} : { findDeviceOwner }),
+    ...(findDeviceByDpopJkt === undefined ? {} : { findDeviceByDpopJkt }),
   });
   return { plugin, events, sink, onLoginMethodUsed };
 }
@@ -182,48 +185,66 @@ describe("audit plugin: device enrolment (E2) and device login (L2)", () => {
     ]);
   });
 
-  it("links a failed device login with a real device_id to that device's account", async () => {
-    const findDeviceOwner = vi.fn().mockResolvedValue("auth_user_01");
-    const { plugin, events } = build(findDeviceOwner);
+  // L2 failures are attributed from the request's verified DPoP key
+  // (recorded by the device-auth plugin), never from the body's device_id.
+  function failedLoginContext(verifiedJkt: string | null): Record<string, unknown> {
+    const inner: Record<string, unknown> = {
+      returned: APIError.from("UNAUTHORIZED", { code: "DEVICE_LOGIN_FAILED", message: "Device login failed." }),
+      session: null,
+    };
+    if (verifiedJkt !== null) recordVerifiedLoginDpopJkt(inner, verifiedJkt);
+    return inner;
+  }
+
+  it("attributes a failed device login to the device its verified DPoP key belongs to, not to a device_id named in the body", async () => {
+    const findDeviceByDpopJkt = vi.fn().mockResolvedValue({ betterAuthUserId: "auth_user_key_owner", deviceId: "device_of_key" });
+    const { plugin, events } = build(findDeviceByDpopJkt);
 
     await runAfterHook(plugin, {
       path: "/device/login/verify",
       headers,
-      body: loginBody("device_01"),
-      context: {
-        returned: APIError.from("UNAUTHORIZED", { code: "DEVICE_LOGIN_FAILED", message: "Device login failed." }),
-        session: null,
-      },
+      body: loginBody("device_of_victim"),
+      context: failedLoginContext("jkt_of_requester"),
     });
 
-    expect(findDeviceOwner).toHaveBeenCalledWith("device_01");
+    expect(findDeviceByDpopJkt).toHaveBeenCalledWith("jkt_of_requester");
     expect(events[0]).toMatchObject({
       action: "authentication.login_failed",
-      betterAuthUserId: "auth_user_01",
+      betterAuthUserId: "auth_user_key_owner",
       resourceType: "account",
-      resourceId: "auth_user_01",
+      resourceId: "auth_user_key_owner",
       changes: {
         trace_id: "trace_device",
         authentication_method: "device_biometric",
         failure_code: "DEVICE_LOGIN_FAILED",
         purpose: "login",
-        device_id: "device_01",
+        device_id: "device_of_key",
       },
     });
-    expectNoCeremonyMaterial(events);
+    expectNoCeremonyMaterial(events, ["device_of_victim"]);
   });
 
-  it("records a failed device login with an unknown device_id against a keyed hash only", async () => {
+  it("attributes a failed device login that sent no device_id (contract 3.1) to the key's device", async () => {
+    const { plugin, events } = build(vi.fn().mockResolvedValue({ betterAuthUserId: "auth_user_01", deviceId: "device_01" }));
+
+    await runAfterHook(plugin, {
+      path: "/device/login/verify",
+      headers,
+      body: { challenge: CHALLENGE, jws: JWS },
+      context: failedLoginContext("jkt_01"),
+    });
+
+    expect(events[0]).toMatchObject({ betterAuthUserId: "auth_user_01", changes: { device_id: "device_01" } });
+  });
+
+  it("records a failed device login whose DPoP key has no device against a keyed hash of the key only", async () => {
     const { plugin, events } = build(vi.fn().mockResolvedValue(null));
 
     await runAfterHook(plugin, {
       path: "/device/login/verify",
       headers,
       body: loginBody("device_does_not_exist"),
-      context: {
-        returned: APIError.from("UNAUTHORIZED", { code: "DEVICE_LOGIN_FAILED", message: "Device login failed." }),
-        session: null,
-      },
+      context: failedLoginContext("jkt_nobody"),
     });
 
     expect(events).toHaveLength(1);
@@ -231,14 +252,30 @@ describe("audit plugin: device enrolment (E2) and device login (L2)", () => {
       betterAuthUserId: null,
       attributeToSubject: false,
       resourceType: "login_attempt",
-      resourceId: `login_device_${createHmac("sha256", HASH_KEY).update("device_does_not_exist").digest("hex")}`,
+      resourceId: `login_dpop_${createHmac("sha256", HASH_KEY).update("jkt_nobody").digest("hex")}`,
       changes: { failure_code: "DEVICE_LOGIN_FAILED", purpose: "login" },
     });
     expect(events[0]?.changes).not.toHaveProperty("device_id");
     expectNoCeremonyMaterial(events, ["device_does_not_exist"]);
   });
 
-  it("still records a failed device login, against the keyed hash, when the device-owner lookup throws", async () => {
+  it("records a failed device login with no verified DPoP key as login_unknown, without any lookup", async () => {
+    const findDeviceByDpopJkt = vi.fn();
+    const { plugin, events } = build(findDeviceByDpopJkt);
+
+    await runAfterHook(plugin, {
+      path: "/device/login/verify",
+      headers,
+      body: loginBody("device_of_victim"),
+      context: failedLoginContext(null),
+    });
+
+    expect(findDeviceByDpopJkt).not.toHaveBeenCalled();
+    expect(events[0]).toMatchObject({ betterAuthUserId: null, resourceType: "login_attempt", resourceId: "login_unknown" });
+    expectNoCeremonyMaterial(events, ["device_of_victim"]);
+  });
+
+  it("still records a failed device login, against the keyed hash of the key, when the device lookup throws", async () => {
     const events: AuthAuditEvent[] = [];
     const lookupError = new Error("device lookup failed");
     const onError = vi.fn();
@@ -247,17 +284,14 @@ describe("audit plugin: device enrolment (E2) and device login (L2)", () => {
       identifierHashKey: HASH_KEY,
       clock: () => new Date("2026-09-11T12:00:00.000Z"),
       onError,
-      findDeviceOwner: vi.fn().mockRejectedValue(lookupError),
+      findDeviceByDpopJkt: vi.fn().mockRejectedValue(lookupError),
     });
 
     await runAfterHook(plugin, {
       path: "/device/login/verify",
       headers,
       body: loginBody("device_01"),
-      context: {
-        returned: APIError.from("UNAUTHORIZED", { code: "DEVICE_LOGIN_FAILED", message: "Device login failed." }),
-        session: null,
-      },
+      context: failedLoginContext("jkt_01"),
     });
 
     expect(events).toHaveLength(1);
@@ -265,7 +299,7 @@ describe("audit plugin: device enrolment (E2) and device login (L2)", () => {
       action: "authentication.login_failed",
       betterAuthUserId: null,
       resourceType: "login_attempt",
-      resourceId: `login_device_${createHmac("sha256", HASH_KEY).update("device_01").digest("hex")}`,
+      resourceId: `login_dpop_${createHmac("sha256", HASH_KEY).update("jkt_01").digest("hex")}`,
       changes: { failure_code: "DEVICE_LOGIN_FAILED", purpose: "login" },
     });
     expect(events[0]?.changes).not.toHaveProperty("device_id");

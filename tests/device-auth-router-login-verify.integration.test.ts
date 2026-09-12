@@ -117,7 +117,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/mobile/login/verify, n
       "/v1/auth/mobile",
       createDeviceAuthRouter(
         requireDpopOnly,
-        new IssueDeviceChallengeService(deviceChallengeRepository),
+        new IssueDeviceChallengeService(deviceChallengeRepository, () => new Date(), deviceRepository),
         auth,
         requireDpopOnlyForVerify,
       ),
@@ -209,6 +209,32 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/mobile/login/verify, n
       authentication_level: "device_biometric",
     });
     expect(typeof verifyResponse.body.data.session_expires_at).toBe("string");
+    expect(verifyResponse.headers["set-auth-token"]).toBeDefined();
+  });
+
+  it("logs in with no device_id anywhere: the device comes from the DPoP key, and L2 returns its device_id", async () => {
+    const dpopKeyPair = deviceDpopKeyPair;
+
+    const challengeResponse = await request(testApp)
+      .post("/v1/auth/mobile/login/challenge")
+      .set("dpop", await buildDpopProof(dpopKeyPair, "/v1/auth/mobile/login/challenge"))
+      .send({});
+    expect(challengeResponse.status).toBe(200);
+    const challenge: string = challengeResponse.body.data.challenge;
+
+    const jws = await new SignJWT({ purpose: "login", challenge, iat: Math.floor(Date.now() / 1000) })
+      .setProtectedHeader({ alg: "ES256", typ: "vistablox-device-auth+jwt", kid: deviceBioJkt })
+      .sign(devicePrivateKey);
+    const verifyResponse = await request(testApp)
+      .post("/v1/auth/mobile/login/verify")
+      .set("dpop", await buildDpopProof(dpopKeyPair, "/v1/auth/mobile/login/verify"))
+      .send({ challenge, jws });
+
+    expect(verifyResponse.status).toBe(200);
+    expect(verifyResponse.body.data).toMatchObject({
+      device_id: deviceId,
+      authentication_level: "device_biometric",
+    });
     expect(verifyResponse.headers["set-auth-token"]).toBeDefined();
   });
 

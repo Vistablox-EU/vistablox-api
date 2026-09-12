@@ -178,6 +178,35 @@ describe("POST /v1/auth/mobile/login/verify", () => {
   });
 });
 
+describe("L1/L2 without device_id (contract 3.1: the device comes from the DPoP key)", () => {
+  it("issues a login challenge for an empty L1 body", async () => {
+    const response = await request(appFor({ api: {} })).post("/v1/auth/mobile/login/challenge").send({});
+
+    expect(response.status).toBe(200);
+    expect(typeof response.body.data.challenge).toBe("string");
+  });
+
+  it("forwards an L2 without device_id, without inventing one", async () => {
+    const loginVerify = vi.fn().mockResolvedValue({
+      response: {
+        device_id: "device_by_key",
+        session_expires_at: "2026-01-01T00:00:00.000Z",
+        authentication_level: "device_biometric",
+      },
+      headers: new Headers({ "set-auth-token": "the-session-token" }),
+    });
+
+    const response = await request(appFor({ api: { loginVerify } }))
+      .post("/v1/auth/mobile/login/verify")
+      .send({ challenge: "the-challenge", jws: "the-jws" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.device_id).toBe("device_by_key");
+    const call = loginVerify.mock.calls[0]![0] as { body: Record<string, unknown> };
+    expect(call.body).toEqual({ challenge: "the-challenge", jws: "the-jws" });
+  });
+});
+
 describe("device-auth rate limiting", () => {
   function rejectAfterFirstCall(): RequestHandler {
     let calls = 0;

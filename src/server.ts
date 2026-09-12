@@ -225,7 +225,13 @@ const enrolDeviceService = new EnrolDeviceService(
   androidAttestationConfig,
 );
 const loginDeviceService = new LoginDeviceService(deviceChallengeRepository, deviceRepository);
-const issueDeviceChallengeService = new IssueDeviceChallengeService(deviceChallengeRepository);
+// With deviceRepository, L1 can find the device from the request's DPoP key
+// when no device_id is sent (contract 3.1).
+const issueDeviceChallengeService = new IssueDeviceChallengeService(
+  deviceChallengeRepository,
+  () => new Date(),
+  deviceRepository,
+);
 
 // Shared by the audit plugin (session create/revoke) and the session
 // resolvers (device-session activity: last_seen_at, idle_expires_at).
@@ -288,8 +294,10 @@ const auth = createBetterAuth({
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
   onLoginMethodUsed: (method) => accountProvisioner.onLoginMethodUsed(method),
   authAuditSink,
-  findDeviceOwner: async (deviceId) =>
-    (await deviceRepository.findByDeviceId(deviceId))?.betterAuthUserId ?? null,
+  findDeviceByDpopJkt: async (dpopJkt) => {
+    const device = await deviceRepository.findByDpopJkt(dpopJkt);
+    return device === null ? null : { betterAuthUserId: device.betterAuthUserId, deviceId: device.deviceId };
+  },
   sessionMirror,
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");

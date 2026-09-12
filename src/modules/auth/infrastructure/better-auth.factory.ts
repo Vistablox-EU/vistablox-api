@@ -84,7 +84,9 @@ export interface BetterAuthFactoryOptions {
   sessionMirror?: SessionMirror;
   // Audit attribution for a failed device login (L2): the better-auth user
   // that owns a device_id, or null if there's no such device.
-  findDeviceOwner?: (deviceId: string) => Promise<string | null>;
+  findDeviceByDpopJkt?: (
+    dpopJkt: string,
+  ) => Promise<{ betterAuthUserId: string; deviceId: string } | null>;
   // Device binding (DPoP): when set, a valid proof presented at session
   // creation binds the new session to it. Undefined leaves every new
   // session unbound (dpopJkt null), same as today.
@@ -434,9 +436,9 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               ...(options.onLoginMethodUsed === undefined
                 ? {}
                 : { onLoginMethodUsed: options.onLoginMethodUsed }),
-              ...(options.findDeviceOwner === undefined
+              ...(options.findDeviceByDpopJkt === undefined
                 ? {}
-                : { findDeviceOwner: options.findDeviceOwner }),
+                : { findDeviceByDpopJkt: options.findDeviceByDpopJkt }),
             }),
           ]),
     ],

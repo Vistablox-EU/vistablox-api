@@ -32,8 +32,10 @@ export const loginChallengeResponseSchema = z.object({
   }),
 });
 
+// Contract 3.1: the device is resolved from the request's DPoP key, so
+// device_id is optional on L1 and L2; when sent, it must match.
 export const loginChallengeRequestSchema = z.object({
-  device_id: z.string().min(1),
+  device_id: z.string().min(1).optional(),
 });
 
 export const enrolVerifyRequestSchema = z.object({
@@ -52,7 +54,7 @@ export const enrolVerifyResponseSchema = z.object({
 });
 
 export const loginVerifyRequestSchema = z.object({
-  device_id: z.string().min(1),
+  device_id: z.string().min(1).optional(),
   challenge: z.string().min(1),
   jws: z.string().min(1),
 });
