@@ -1,6 +1,6 @@
 import type { BetterAuthPlugin } from "better-auth";
 import { APIError, createAuthEndpoint, getSessionFromCtx } from "better-auth/api";
-import { setSessionCookie } from "better-auth/cookies";
+import { deleteSessionCookie, setSessionCookie } from "better-auth/cookies";
 import { z } from "zod";
 
 import type { AccountRepository } from "../../account/repository/account.repository.js";
@@ -19,6 +19,7 @@ import {
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
 import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
+import { markDiscardedCeremonySession } from "./device-ceremony-session.js";
 import {
   assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
@@ -138,12 +139,18 @@ export function createBetterAuthDeviceAuthPlugin(
               },
             });
 
+            let ceremonySessionToken: string | null = null;
             try {
               // Just the userId: internalAdapter.createSession's 2nd param
               // is dontRememberMe (a boolean), not a context -- the request
               // context it needs comes from tryGetCurrentAuthEndpointContext's
               // continuation-local lookup automatically, confirmed against
               // internal-adapter.mjs directly rather than assumed.
+              // session.create.after hooks must not throw: a throw there
+              // would reject this call after the row exists but before its
+              // token is tracked, so the failure cleanup below couldn't
+              // discard it. The audit plugin swallows its own errors (see
+              // tests/better-auth-audit.plugin.test.ts).
               const session = await ctx.context.internalAdapter.createSession(current.user.id);
               if (session === null) {
                 throw APIError.from("INTERNAL_SERVER_ERROR", {
@@ -151,6 +158,7 @@ export function createBetterAuthDeviceAuthPlugin(
                   message: "Could not create a session for the enrolled device.",
                 });
               }
+              ceremonySessionToken = session.token;
               await setSessionCookie(ctx, { session, user: current.user });
               // The pending session's job is done -- mirrors the passkey
               // ceremony's own priorSessionToken/deleteSession pattern (E2
@@ -173,7 +181,12 @@ export function createBetterAuthDeviceAuthPlugin(
               // live on staging: a real enrolment crashed exactly here and
               // did exactly that, before this existed. Best-effort: if the
               // rollback itself fails, still surface the original error,
-              // not the cleanup failure.
+              // not the cleanup failure. The session this enrolment created
+              // (if it got that far) goes first, so no device_biometric
+              // session is ever left alive without its device row.
+              if (ceremonySessionToken !== null) {
+                await discardCeremonySession(ctx, ceremonySessionToken, "enrolment");
+              }
               await options.enrolDevice.rollback(device.deviceId).catch((rollbackError: unknown) => {
                 ctx.context.logger?.warn?.("failed to roll back an orphaned device after a failed enrolment", {
                   deviceId: device.deviceId,
@@ -206,6 +219,7 @@ export function createBetterAuthDeviceAuthPlugin(
             true,
           );
 
+          let ceremonySessionToken: string | null = null;
           try {
             const device = await options.loginDevice.execute({
               deviceId: ctx.body.device_id,
@@ -223,6 +237,8 @@ export function createBetterAuthDeviceAuthPlugin(
               throw accountRestricted();
             }
 
+            // As in E2: session.create.after hooks must not throw, or the
+            // session would exist untracked by the cleanup below.
             const session = await ctx.context.internalAdapter.createSession(
               device.betterAuthUserId,
             );
@@ -232,6 +248,7 @@ export function createBetterAuthDeviceAuthPlugin(
                 message: "Could not create a session for this device.",
               });
             }
+            ceremonySessionToken = session.token;
             const user = await ctx.context.internalAdapter.findUserById(device.betterAuthUserId);
             if (user === null) {
               throw APIError.from("INTERNAL_SERVER_ERROR", {
@@ -247,6 +264,11 @@ export function createBetterAuthDeviceAuthPlugin(
               authentication_level: "device_biometric" as const,
             });
           } catch (error) {
+            // A login that fails after its session row exists (user lookup,
+            // cookie) must not leave that session alive.
+            if (ceremonySessionToken !== null) {
+              await discardCeremonySession(ctx, ceremonySessionToken, "login");
+            }
             logAttestationRejection(ctx, error);
             throw toApiError(error);
           }
@@ -254,6 +276,42 @@ export function createBetterAuthDeviceAuthPlugin(
       ),
     },
   };
+}
+
+/**
+ * A device ceremony (E2/L2) that fails after internalAdapter.createSession
+ * must neither leave that session alive nor hand it out. It:
+ * - expires the session cookie setSessionCookie may already have queued on
+ *   this response, so no Set-Cookie carries it and bearer() adds no
+ *   set-auth-token (it skips an expired cookie);
+ * - clears the new-session marker after hooks read, so none of them treats
+ *   the failed ceremony as having produced a session;
+ * - deletes the session row.
+ * Best-effort: a cleanup failure is logged, never thrown. The caller always
+ * rethrows the ceremony's original error.
+ */
+async function discardCeremonySession(
+  ctx: Parameters<typeof deleteSessionCookie>[0],
+  sessionToken: string,
+  ceremony: "enrolment" | "login",
+): Promise<void> {
+  try {
+    deleteSessionCookie(ctx);
+  } catch (cookieError) {
+    ctx.context.logger?.warn?.(`failed to expire the session cookie of a failed device ${ceremony}`, {
+      cookieError,
+    });
+  }
+  (ctx.context as { newSession?: unknown }).newSession = null;
+  // Lets the audit plugin record this delete as a failed ceremony, not as
+  // E2's ordinary rotation of the pending session.
+  markDiscardedCeremonySession(ctx.context, sessionToken);
+  await ctx.context.internalAdapter.deleteSession(sessionToken).catch((sessionError: unknown) => {
+    // Error level: a failed delete here leaves a live session behind.
+    ctx.context.logger?.error?.(`failed to delete the session of a failed device ${ceremony}`, {
+      sessionError,
+    });
+  });
 }
 
 // Contract error code ACCOUNT_RESTRICTED (403) -- "Account frozen or
