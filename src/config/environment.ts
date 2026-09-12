@@ -30,9 +30,19 @@ const environmentSchema = z
     // change it. Validated below against BETTER_AUTH_URL's hostname when
     // set -- see the .refine() near the bottom of this schema.
     WEBAUTHN_RP_ID: optionalHostname(),
+    // Every web origin a WebAuthn ceremony may come from: comma-separated
+    // exact origins (scheme://host[:port], no path, no wildcard). The rpId's
+    // own origin is https://<WEBAUTHN_RP_ID>; any other entry (the admin
+    // console, https://admin.vistablox.io) is a WebAuthn Related Origin and
+    // is published at GET /.well-known/webauthn so browsers let it use the
+    // pinned rpId. Unset falls back to BETTER_AUTH_URL's origin -- see
+    // resolveWebAuthnOrigins below.
     WEBAUTHN_ORIGIN: z.preprocess(
-      (value) => (value === "" ? undefined : value),
-      z.url().optional(),
+      splitCommaSeparatedList,
+      z.array(z.string().refine(isExactWebOrigin, {
+        message:
+          "each entry must be an exact origin -- https://host[:port], no path, trailing slash, or wildcard (http is allowed for localhost only)",
+      })).optional(),
     ),
     PASSKEY_APPLE_TEAM_ID: optionalNonEmptyString(),
     PASSKEY_ANDROID_SHA256_CERT_FINGERPRINTS: z.preprocess(
@@ -404,6 +414,17 @@ const environmentSchema = z
         "ANDROID_ATTESTATION_CERT_DIGESTS: each entry must be a 64-character SHA-256 hex digest (colons and case are ignored)",
       path: ["ANDROID_ATTESTATION_CERT_DIGESTS"],
     },
+  )
+  .refine(
+    (environment) =>
+      environment.NODE_ENV !== "production" ||
+      (environment.WEBAUTHN_ORIGIN ?? []).every((origin) => origin.startsWith("https://")),
+    {
+      // Keyed on NODE_ENV, not APP_ENV: staging is a real https deployment
+      // too, so there's no staging relaxation to carve out here.
+      message: "WEBAUTHN_ORIGIN: every entry must be https in production -- http://localhost is for local development only",
+      path: ["WEBAUTHN_ORIGIN"],
+    },
   );
 
 export type Environment = z.infer<typeof environmentSchema>;
@@ -412,8 +433,45 @@ export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Enviro
   return environmentSchema.parse(source);
 }
 
+/**
+ * The web origins every WebAuthn ceremony accepts: WEBAUTHN_ORIGIN's list,
+ * or BETTER_AUTH_URL's own origin when it's unset (local dev).
+ */
+export function resolveWebAuthnOrigins(
+  environment: Pick<Environment, "WEBAUTHN_ORIGIN" | "BETTER_AUTH_URL">,
+): string[] {
+  return environment.WEBAUTHN_ORIGIN ?? [new URL(environment.BETTER_AUTH_URL).origin];
+}
+
 function emptyStringToUndefined(value: unknown): unknown {
   return value === "" ? undefined : value;
+}
+
+// "a, b ,,c" -> ["a", "b", "c"]; empty or all-blank -> undefined, so an
+// unset-but-present compose variable behaves exactly like an absent one.
+function splitCommaSeparatedList(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  const items = value.split(",").map((item) => item.trim()).filter(Boolean);
+  return items.length === 0 ? undefined : items;
+}
+
+// WebAuthn compares clientDataJSON.origin to this list byte-for-byte, so an
+// entry has to be the serialized origin itself: a trailing slash, path,
+// default port, or uppercase host would never match anything. Wildcards
+// are refused outright (URL parsing would otherwise accept "*" in a host).
+// Plain http is allowed for a loopback host only, and the production
+// .refine() below narrows that to https.
+function isExactWebOrigin(value: string): boolean {
+  if (value.includes("*")) return false;
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    return false;
+  }
+  if (url.origin !== value) return false;
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
 }
 
 // Same rule as android-attestation-verifier.ts's normalizeCertDigest, kept

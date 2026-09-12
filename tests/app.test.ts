@@ -51,6 +51,7 @@ function buildApp(options?: {
     androidPackageName: string;
     androidCertificateFingerprints: string[];
   };
+  webauthn?: { rpId: string; origins: string[] };
 }) {
   const databaseProbe: DatabaseProbe = {
     check: options?.databaseFailure === true
@@ -75,6 +76,7 @@ function buildApp(options?: {
       ...(options?.passkeyAssociations === undefined
         ? {}
         : { passkeyAssociations: options.passkeyAssociations }),
+      ...(options?.webauthn === undefined ? {} : { webauthn: options.webauthn }),
     }),
     databaseProbe,
     listPublic,
@@ -196,6 +198,49 @@ describe("VistaBlox API", () => {
         sha256_cert_fingerprints: ["AA:BB:CC"],
       },
     });
+  });
+
+  it("serves the WebAuthn related origins, leaving out the rpId's own host", async () => {
+    const { app } = buildApp({
+      corsOrigins: ["https://admin.vistablox.io"],
+      webauthn: {
+        rpId: "api.vistablox.io",
+        origins: [
+          "https://api.vistablox.io",
+          "https://admin.vistablox.io",
+          "https://sub.api.vistablox.io",
+        ],
+      },
+    });
+
+    // Sent as the admin console's browser would (a trusted CORS origin), to
+    // check the public, credential-free headers win over the global CORS ones.
+    const response = await request(app)
+      .get("/.well-known/webauthn")
+      .set("Origin", "https://admin.vistablox.io");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["content-type"]).toMatch(/^application\/json\b/);
+    expect(response.headers["cache-control"]).toBe("public, max-age=3600");
+    expect(response.headers["access-control-allow-origin"]).toBe("*");
+    expect(response.headers["access-control-allow-credentials"]).toBeUndefined();
+    expect(response.headers["cross-origin-resource-policy"]).toBe("cross-origin");
+    expect(response.body).toEqual({ origins: ["https://admin.vistablox.io"] });
+  });
+
+  it("404s the WebAuthn related origins file when there's nothing to list", async () => {
+    const onlyRpOrigin = buildApp({
+      webauthn: { rpId: "api.vistablox.io", origins: ["https://api.vistablox.io"] },
+    });
+    const unconfigured = buildApp();
+
+    const [first, second] = await Promise.all([
+      request(onlyRpOrigin.app).get("/.well-known/webauthn"),
+      request(unconfigured.app).get("/.well-known/webauthn"),
+    ]);
+
+    expect(first.status).toBe(404);
+    expect(second.status).toBe(404);
   });
 
   it("allows a credentialed cross-origin request from a trusted frontend origin", async () => {

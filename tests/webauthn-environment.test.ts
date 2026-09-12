@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { loadEnvironment } from "../src/config/environment.js";
+import { loadEnvironment, resolveWebAuthnOrigins } from "../src/config/environment.js";
 
 const base = {
   DATABASE_URL: "postgresql://user:password@localhost:5432/vistablox",
@@ -79,5 +79,83 @@ describe("WEBAUTHN_RP_ID configuration", () => {
         WEBAUTHN_RP_ID: value,
       }),
     ).toThrow();
+  });
+});
+
+describe("WEBAUTHN_ORIGIN configuration", () => {
+  it("is left undefined when unset or empty, and falls back to BETTER_AUTH_URL's origin", () => {
+    for (const value of [undefined, "", " , ,"]) {
+      const result = loadEnvironment({
+        ...base,
+        BETTER_AUTH_URL: "https://api.vistablox.io",
+        ...(value === undefined ? {} : { WEBAUTHN_ORIGIN: value }),
+      });
+      expect(result.WEBAUTHN_ORIGIN).toBeUndefined();
+      expect(resolveWebAuthnOrigins(result)).toEqual(["https://api.vistablox.io"]);
+    }
+  });
+
+  it("boots a staging-shaped environment with a single origin", () => {
+    const result = loadEnvironment({
+      ...base,
+      NODE_ENV: "production",
+      APP_ENV: "staging",
+      BETTER_AUTH_URL: "https://api.vistablox.io",
+      WEBAUTHN_RP_ID: "api.vistablox.io",
+      WEBAUTHN_ORIGIN: "https://api.vistablox.io",
+    });
+    expect(result.WEBAUTHN_ORIGIN).toEqual(["https://api.vistablox.io"]);
+    expect(resolveWebAuthnOrigins(result)).toEqual(["https://api.vistablox.io"]);
+  });
+
+  it("parses a comma-separated list, trimming whitespace and dropping empty entries", () => {
+    const result = loadEnvironment({
+      ...base,
+      NODE_ENV: "production",
+      APP_ENV: "staging",
+      BETTER_AUTH_URL: "https://api.vistablox.io",
+      WEBAUTHN_RP_ID: "api.vistablox.io",
+      WEBAUTHN_ORIGIN: " https://api.vistablox.io ,, https://admin.vistablox.io ,",
+    });
+    expect(result.WEBAUTHN_ORIGIN).toEqual([
+      "https://api.vistablox.io",
+      "https://admin.vistablox.io",
+    ]);
+  });
+
+  it("accepts an explicit non-default port", () => {
+    const result = loadEnvironment({ ...base, WEBAUTHN_ORIGIN: "https://admin.vistablox.io:8443" });
+    expect(result.WEBAUTHN_ORIGIN).toEqual(["https://admin.vistablox.io:8443"]);
+  });
+
+  it.each([
+    ["a wildcard host", "https://*.vistablox.io"],
+    ["a path", "https://admin.vistablox.io/login"],
+    ["a trailing slash", "https://admin.vistablox.io/"],
+    ["a query string", "https://admin.vistablox.io?x=1"],
+    ["a default port spelled out", "https://admin.vistablox.io:443"],
+    ["an uppercase host", "https://Admin.vistablox.io"],
+    ["plain http on a real host", "http://admin.vistablox.io"],
+    ["a bare hostname", "admin.vistablox.io"],
+    ["an Android app origin", "android:apk-key-hash:abc123"],
+    ["one bad entry among good ones", "https://api.vistablox.io,https://*.vistablox.io"],
+  ])("rejects an entry with %s", (_label, value) => {
+    expect(() => loadEnvironment({ ...base, WEBAUTHN_ORIGIN: value })).toThrow(
+      "each entry must be an exact origin",
+    );
+  });
+
+  it("allows http://localhost for local development only", () => {
+    expect(
+      loadEnvironment({ ...base, WEBAUTHN_ORIGIN: "http://localhost:3000" }).WEBAUTHN_ORIGIN,
+    ).toEqual(["http://localhost:3000"]);
+    expect(() =>
+      loadEnvironment({
+        ...base,
+        NODE_ENV: "production",
+        APP_ENV: "staging",
+        WEBAUTHN_ORIGIN: "https://api.vistablox.io,http://localhost:3000",
+      }),
+    ).toThrow("every entry must be https in production");
   });
 });
