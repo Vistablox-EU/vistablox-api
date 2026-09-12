@@ -63,15 +63,17 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    expiresAt: Date;
-  }): Promise<void> {
+    ttlSeconds: number;
+  }): Promise<Date> {
+    const expiresAt = new Date(this.clock().getTime() + input.ttlSeconds * 1000);
     this.issued.set(input.challenge, {
       purpose: input.purpose,
       dpopJkt: input.dpopJkt,
       deviceId: input.deviceId,
-      expiresAt: input.expiresAt,
+      expiresAt,
       consumed: false,
     });
+    return expiresAt;
   }
 
   public async consume(input: {
@@ -181,7 +183,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-1",
       deviceId: "device_1",
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const jws = await buildLoginJws({ privateKey, bioJkt, challenge, deviceId: "device_1" });
 
@@ -226,7 +228,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-by-key",
       deviceId: "device_by_key",
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const jws = await new SignJWT({ purpose: "login", challenge: "login-by-key", iat: Math.floor(Date.now() / 1000) })
       .setProtectedHeader({ alg: "ES256", typ: JWS_TYP, kid: bioJkt })
@@ -304,7 +306,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-ios-ok",
       deviceId: "device_ios_ok",
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const jws = await buildLoginJws({ privateKey, bioJkt, challenge: "login-challenge-ios", deviceId: "device_ios_ok" });
     const service = new LoginDeviceService(challenges, devices, () => new Date(), {
@@ -335,7 +337,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-replay",
       deviceId: "device_replay",
-      expiresAt: new Date(now + 120_000),
+      ttlSeconds: 120,
     });
     await challenges.consume({
       challenge: "login-replay",
@@ -366,7 +368,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-nobody-sent",
       deviceId: "device_nobody_sent",
-      expiresAt: new Date(now + 120_000),
+      ttlSeconds: 120,
     });
     await challenges.consume({
       challenge: "login-replay-no-id",
@@ -464,7 +466,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-1",
       deviceId: "device_1",
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     // Signed by a different key than the one on file for device_1 -- kid
     // still claims to be the stored bioJkt, but the signature won't verify
@@ -496,7 +498,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-1",
       deviceId: "device_1",
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const jws = await buildLoginJws({ privateKey, bioJkt, challenge, deviceId: "device_other" });
 
@@ -519,7 +521,7 @@ describe("LoginDeviceService", () => {
       purpose: "login",
       dpopJkt: "dpop-jkt-1",
       deviceId: "device_1",
-      expiresAt: new Date(Date.now() + 60_000),
+      ttlSeconds: 60,
     });
     const jws = await buildLoginJws({
       privateKey,

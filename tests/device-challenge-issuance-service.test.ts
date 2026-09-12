@@ -4,9 +4,12 @@ import { IssueDeviceChallengeService } from "../src/modules/auth/application/dev
 import type { Device } from "../src/modules/auth/repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
 
+// What the repository says the database recorded as expires_at.
+const RECORDED_EXPIRY = new Date("2026-09-12T10:02:00.000Z");
+
 function challengeRepository(): DeviceChallengeRepository & { issue: ReturnType<typeof vi.fn> } {
   return {
-    issue: vi.fn().mockResolvedValue(undefined),
+    issue: vi.fn().mockResolvedValue(RECORDED_EXPIRY),
     consume: vi.fn(),
     wasConsumedWithinReplayWindow: vi.fn(),
     pruneExpired: vi.fn(),
@@ -28,11 +31,29 @@ function device(deviceId: string, dpopJkt: string): Device {
   };
 }
 
+describe("IssueDeviceChallengeService.execute: the expiry comes from the database", () => {
+  it("passes the TTL to the repository and returns the expiry it recorded, not one computed locally", async () => {
+    const repository = challengeRepository();
+    const service = new IssueDeviceChallengeService(repository);
+
+    const issued = await service.execute({
+      purpose: "enrol-device",
+      dpopJkt: "jkt-1",
+      deviceId: undefined,
+      ttlSeconds: 300,
+    });
+
+    expect(repository.issue).toHaveBeenCalledWith(expect.objectContaining({ ttlSeconds: 300 }));
+    expect(repository.issue.mock.calls[0]?.[0]).not.toHaveProperty("expiresAt");
+    expect(issued.expiresAt).toBe(RECORDED_EXPIRY);
+  });
+});
+
 describe("IssueDeviceChallengeService.issueLoginChallenge (L1, contract 3.1)", () => {
   it("binds the challenge to the device this DPoP key belongs to when no device_id is sent", async () => {
     const repository = challengeRepository();
     const devices = { findByDpopJkt: vi.fn().mockResolvedValue(device("device_by_key", "jkt-1")) };
-    const service = new IssueDeviceChallengeService(repository, () => new Date(), devices);
+    const service = new IssueDeviceChallengeService(repository,devices);
 
     await service.issueLoginChallenge({ dpopJkt: "jkt-1", deviceId: undefined, ttlSeconds: 120 });
 
@@ -45,7 +66,7 @@ describe("IssueDeviceChallengeService.issueLoginChallenge (L1, contract 3.1)", (
   it("binds to the key's own device even when a different device_id is sent, so L2 answers DEVICE_LOGIN_FAILED", async () => {
     const repository = challengeRepository();
     const devices = { findByDpopJkt: vi.fn().mockResolvedValue(device("device_by_key", "jkt-1")) };
-    const service = new IssueDeviceChallengeService(repository, () => new Date(), devices);
+    const service = new IssueDeviceChallengeService(repository,devices);
 
     await service.issueLoginChallenge({ dpopJkt: "jkt-1", deviceId: "device_someone_else", ttlSeconds: 120 });
 
@@ -54,7 +75,7 @@ describe("IssueDeviceChallengeService.issueLoginChallenge (L1, contract 3.1)", (
 
   it("uses a sent device_id only when the DPoP key belongs to no device", async () => {
     const repository = challengeRepository();
-    const service = new IssueDeviceChallengeService(repository, () => new Date(), {
+    const service = new IssueDeviceChallengeService(repository,{
       findByDpopJkt: vi.fn().mockResolvedValue(null),
     });
 
@@ -65,7 +86,7 @@ describe("IssueDeviceChallengeService.issueLoginChallenge (L1, contract 3.1)", (
 
   it("still issues a challenge when the DPoP key belongs to no device, so nothing is revealed", async () => {
     const repository = challengeRepository();
-    const service = new IssueDeviceChallengeService(repository, () => new Date(), {
+    const service = new IssueDeviceChallengeService(repository,{
       findByDpopJkt: vi.fn().mockResolvedValue(null),
     });
 

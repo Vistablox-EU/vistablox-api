@@ -10,17 +10,27 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    expiresAt: Date;
-  }): Promise<void> {
-    await this.database.deviceChallenge.create({
-      data: {
-        challenge: input.challenge,
-        purpose: input.purpose,
-        dpopJkt: input.dpopJkt,
-        deviceId: input.deviceId ?? null,
-        expiresAt: input.expiresAt,
-      },
-    });
+    ttlSeconds: number;
+  }): Promise<Date> {
+    // expires_at is the database's now() + TTL, so issuance, expiry, the
+    // replay window, the insert deadline and pruning share one clock.
+    const rows = await this.database.$queryRaw<Array<{ expires_at: Date | string }>>`
+      INSERT INTO auth.device_challenges (challenge, purpose, dpop_jkt, device_id, expires_at)
+      VALUES (
+        ${input.challenge},
+        ${input.purpose},
+        ${input.dpopJkt},
+        ${input.deviceId ?? null},
+        now() + (${input.ttlSeconds}::integer * interval '1 second')
+      )
+      RETURNING expires_at
+    `;
+    const value = rows[0]?.expires_at;
+    const expiresAt = value instanceof Date ? value : new Date(String(value));
+    if (Number.isNaN(expiresAt.getTime())) {
+      throw new Error("Issuing a device challenge returned no expires_at.");
+    }
+    return expiresAt;
   }
 
   public async consume(input: {

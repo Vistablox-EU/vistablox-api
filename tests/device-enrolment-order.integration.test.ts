@@ -110,7 +110,7 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
       purpose: ENROL,
       dpopJkt,
       deviceId: undefined,
-      expiresAt: new Date(Date.now() + 5 * 60_000),
+      ttlSeconds: 300,
     });
   }
 
@@ -143,7 +143,7 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
       purpose: ENROL,
       dpopJkt: dpopWithDevice,
       deviceId: undefined,
-      expiresAt: new Date(Date.now() - 1_000),
+      ttlSeconds: -1,
     });
 
     await expect(
