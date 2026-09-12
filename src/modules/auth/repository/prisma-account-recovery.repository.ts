@@ -71,10 +71,6 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
         where: { id: input.accountId },
         data: { status: "recovery_review", updatedAt: input.openedAt },
       });
-      await transaction.accountRecoveryCode.updateMany({
-        where: { accountId: input.accountId, consumedAt: null },
-        data: { consumedAt: input.openedAt },
-      });
       await transaction.auditLog.create({
         data: {
           id: `audit_${ulid()}`,

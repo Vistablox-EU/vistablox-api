@@ -29,7 +29,6 @@ export function createTotpRouter(
           data: {
             otp_auth_uri: result.otpAuthUri,
             secret: result.secret,
-            backup_codes: result.backupCodes,
           },
         }),
       );

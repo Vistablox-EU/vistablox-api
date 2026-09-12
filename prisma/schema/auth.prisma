@@ -167,23 +167,6 @@ model MfaTotpFactor {
   @@schema("auth")
 }
 
-// AD-177: backup codes are hashed and marked consumed-on-use, mirroring
-// one-way secret-storage discipline rather than the TOTP secret's plaintext posture.
-model MfaBackupCode {
-  id         String    @id @map("backup_code_id")
-  accountId  String    @map("account_id")
-  codeHash   String    @map("code_hash")
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
-
-  account Account @relation(fields: [accountId], references: [id])
-
-  @@unique([accountId, codeHash], map: "mfa_backup_codes_account_code_key")
-  @@index([accountId], map: "idx_mfa_backup_codes_account")
-  @@map("mfa_backup_codes")
-  @@schema("auth")
-}
-
 model AccountRecoveryCase {
   id                        String    @id @map("recovery_case_id")
   accountId                 String    @map("account_id")
@@ -230,17 +213,6 @@ model AccountClosureRequest {
   @@schema("auth")
 }
 
-model AccountRecoveryCode {
-  accountId  String    @id @map("account_id")
-  codeHash   String    @map("code_hash")
-  createdAt  DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
-  consumedAt DateTime? @map("consumed_at") @db.Timestamptz(6)
-
-  account Account @relation(fields: [accountId], references: [id])
-
-  @@map("account_recovery_codes")
-  @@schema("auth")
-}
 
 // Replay protection for DPoP device-binding proofs: one row per (jkt, jti)
 // pair actually seen, pruned once past expiresAt by a scheduled job. Reads

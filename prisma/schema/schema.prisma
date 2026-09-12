@@ -27,8 +27,6 @@ model Account {
   rentCollectionsRecorded        RentCollection[]
   operatingDistributionsApproved OperatingDistribution[]
   mfaTotpFactor                  MfaTotpFactor?
-  mfaBackupCodes                 MfaBackupCode[]
-  accountRecoveryCode            AccountRecoveryCode?
   recoveryCases                  AccountRecoveryCase[]       @relation("RecoverySubject")
   primaryRecoveryReviews         AccountRecoveryCase[]       @relation("PrimaryRecoveryReviewer")
   secondaryRecoveryReviews       AccountRecoveryCase[]       @relation("SecondaryRecoveryReviewer")

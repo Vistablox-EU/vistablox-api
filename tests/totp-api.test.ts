@@ -20,8 +20,6 @@ const repository: TotpRepository = {
   }),
   enroll: vi.fn().mockResolvedValue(undefined),
   recordTotpUse: vi.fn().mockResolvedValue(undefined),
-  countUnconsumedBackupCodes: vi.fn().mockResolvedValue(10),
-  consumeBackupCode: vi.fn().mockResolvedValue(false),
 };
 const provider: TotpProvider = {
   generateSecret: vi.fn().mockReturnValue("SECRET123"),
@@ -48,8 +46,8 @@ function appFor(
     "/v1/auth/totp",
     createTotpRouter(
       authenticated,
-      new EnrollTotpService(repository, provider, "test-hash-key"),
-      new VerifyTotpService(repository, provider, "test-hash-key"),
+      new EnrollTotpService(repository, provider),
+      new VerifyTotpService(repository, provider),
       requireFreshAuthentication,
     ),
   );
@@ -58,13 +56,13 @@ function appFor(
 }
 
 describe("TOTP API", () => {
-  it("enrolls a customer and returns the otpauth URI, secret, and backup codes once", async () => {
+  it("enrolls a customer and returns the otpauth URI and secret once, with no backup codes", async () => {
     const response = await request(appFor("customer")).post("/v1/auth/totp/enroll");
 
     expect(response.status).toBe(201);
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.body.data.otp_auth_uri).toContain("otpauth://");
-    expect(response.body.data.backup_codes).toHaveLength(10);
+    expect(response.body.data).not.toHaveProperty("backup_codes");
   });
 
   it("verifies a code for a customer", async () => {
