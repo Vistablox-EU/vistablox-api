@@ -8,6 +8,7 @@ import { SignJWT, calculateJwkThumbprint, exportJWK, type JWK } from "jose";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
+import { DeviceLoginFailedError } from "../src/modules/auth/application/device-auth-errors.js";
 import type { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
 import type { Device } from "../src/modules/auth/repository/device.repository.js";
@@ -96,6 +97,10 @@ async function buildHarness() {
       createBetterAuthAuditPlugin({
         sink: { record: async (event: AuthAuditEvent) => void auditEvents.push(event) },
         identifierHashKey: "unit-test-audit-key",
+        // The device the request's verified DPoP key belongs to (as in
+        // server.ts, via findByDpopJkt).
+        findDeviceByDpopJkt: async (jkt: string) =>
+          jkt === device.dpopJkt ? { betterAuthUserId: device.betterAuthUserId, deviceId: device.deviceId } : null,
       }),
     ],
   });
@@ -137,10 +142,10 @@ async function buildHarness() {
     })) as Response;
   }
 
-  async function login(): Promise<Response> {
+  async function login(bodyDeviceId: string = device.deviceId): Promise<Response> {
     return (await api.loginVerify({
       headers: new Headers({ dpop: await proof(LOGIN_PATH) }),
-      body: { device_id: device.deviceId, challenge: "login-challenge", jws: "login-jws" },
+      body: { device_id: bodyDeviceId, challenge: "login-challenge", jws: "login-jws" },
       request: new Request(`${BASE_URL}${LOGIN_PATH}`, { method: "POST" }),
       asResponse: true,
     })) as Response;
@@ -160,7 +165,24 @@ async function buildHarness() {
     );
   }
 
-  return { context, pending, enrolDevice, enrol, login, ceremonySessions, db, userId: user.id, revocationReasons };
+  /** The authentication.login_failed audit events. */
+  function loginFailures(): AuthAuditEvent[] {
+    return auditEvents.filter((event) => event.action === "authentication.login_failed");
+  }
+
+  return {
+    context,
+    pending,
+    enrolDevice,
+    loginDevice,
+    enrol,
+    login,
+    ceremonySessions,
+    db,
+    userId: user.id,
+    revocationReasons,
+    loginFailures,
+  };
 }
 
 function expectNoSessionHandedOut(response: Response): void {
@@ -243,6 +265,41 @@ describe("device ceremonies: no live session is left behind after a late failure
     expect((await harness.login()).status).toBe(500);
 
     expect([...harness.revocationReasons().values()]).toEqual(["ceremony_failed"]);
+  });
+
+  // The merged audit path (#72 + #74), through a real request: the verified
+  // DPoP key recorded by the device-auth plugin reaches the audit after hook
+  // on the same per-request context, and the body's device_id plays no part.
+  it("attributes a failed L2 to the verified DPoP key's device, not to a device_id named in the body", async () => {
+    const harness = await buildHarness();
+    harness.loginDevice.execute.mockRejectedValueOnce(new DeviceLoginFailedError());
+
+    expect((await harness.login("device_of_victim")).status).toBe(401);
+
+    expect(harness.loginFailures()).toHaveLength(1);
+    expect(harness.loginFailures()[0]).toMatchObject({
+      betterAuthUserId: harness.userId,
+      resourceType: "account",
+      resourceId: harness.userId,
+      changes: { failure_code: "DEVICE_LOGIN_FAILED", purpose: "login", device_id: "device_cleanup_1" },
+    });
+    expect(JSON.stringify(harness.loginFailures())).not.toContain("device_of_victim");
+    expect(harness.revocationReasons().size).toBe(0);
+  });
+
+  it("a late L2 failure is both attributed to the key's device and audits its discarded session as ceremony_failed", async () => {
+    const harness = await buildHarness();
+    vi.spyOn(harness.context.internalAdapter, "findUserById").mockResolvedValueOnce(null);
+
+    expect((await harness.login("device_of_victim")).status).toBe(500);
+
+    expect([...harness.revocationReasons().values()]).toEqual(["ceremony_failed"]);
+    expect(harness.loginFailures()).toHaveLength(1);
+    expect(harness.loginFailures()[0]).toMatchObject({
+      betterAuthUserId: harness.userId,
+      changes: { failure_code: "device.account_mapping_missing", purpose: "login", device_id: "device_cleanup_1" },
+    });
+    expect(JSON.stringify(harness.loginFailures())).not.toContain("device_of_victim");
   });
 
   it("L2 success still hands out the new session", async () => {
