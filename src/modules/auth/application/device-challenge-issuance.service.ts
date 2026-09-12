@@ -11,7 +11,7 @@ export class IssueDeviceChallengeService {
     private readonly repository: DeviceChallengeRepository,
     private readonly clock: () => Date = () => new Date(),
     // Used only by issueLoginChallenge, to find the device a DPoP key
-    // belongs to when L1 is sent without a device_id.
+    // belongs to.
     private readonly devices?: Pick<DeviceRepository, "findByDpopJkt">,
   ) {}
 
@@ -35,23 +35,24 @@ export class IssueDeviceChallengeService {
 
   /**
    * L1. Contract 3.1: the device is resolved from the request's DPoP key.
-   * With no device_id sent, the challenge is bound to the device this DPoP
-   * key belongs to, if any. A device_id that is sent is used as given; L2
-   * then requires it to be the device the DPoP key resolves to. A challenge
-   * is issued either way, so the answer reveals nothing about whether a
-   * device exists -- and only the holder of the DPoP private key could ask.
+   * The challenge is bound to the device this DPoP key belongs to whenever
+   * there is one, whatever device_id was sent; L2 then refuses a sent
+   * device_id that isn't that device (DEVICE_LOGIN_FAILED), so every
+   * mismatch ends the same way. A sent device_id is used only when the key
+   * belongs to no device. A challenge is issued either way, so the answer
+   * reveals nothing about whether a device exists -- and only the holder of
+   * the DPoP private key could ask.
    */
   public async issueLoginChallenge(input: {
     dpopJkt: string;
     deviceId: string | undefined;
     ttlSeconds: number;
   }): Promise<{ challenge: string; expiresAt: Date }> {
-    const deviceId =
-      input.deviceId ?? (await this.devices?.findByDpopJkt(input.dpopJkt))?.deviceId ?? undefined;
+    const keysDevice = (await this.devices?.findByDpopJkt(input.dpopJkt))?.deviceId;
     return this.execute({
       purpose: "login",
       dpopJkt: input.dpopJkt,
-      deviceId,
+      deviceId: keysDevice ?? input.deviceId,
       ttlSeconds: input.ttlSeconds,
     });
   }

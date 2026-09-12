@@ -19,6 +19,7 @@ import {
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
 import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
+import { recordVerifiedLoginDpopJkt } from "./device-login-audit-context.js";
 import {
   assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
@@ -207,6 +208,9 @@ export function createBetterAuthDeviceAuthPlugin(
             options.dpop,
             true,
           );
+          // For the audit trail: a failed L2 is attributed to the device this
+          // verified key belongs to, not to whatever device_id the body names.
+          recordVerifiedLoginDpopJkt(ctx.context, dpopClaims.jkt);
 
           try {
             const device = await options.loginDevice.execute({

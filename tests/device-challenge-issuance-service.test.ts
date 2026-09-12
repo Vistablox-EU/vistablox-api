@@ -41,14 +41,24 @@ describe("IssueDeviceChallengeService.issueLoginChallenge (L1, contract 3.1)", (
     );
   });
 
-  it("uses a sent device_id as given, without a lookup", async () => {
+  it("binds to the key's own device even when a different device_id is sent, so L2 answers DEVICE_LOGIN_FAILED", async () => {
     const repository = challengeRepository();
-    const devices = { findByDpopJkt: vi.fn() };
+    const devices = { findByDpopJkt: vi.fn().mockResolvedValue(device("device_by_key", "jkt-1")) };
     const service = new IssueDeviceChallengeService(repository, () => new Date(), devices);
 
-    await service.issueLoginChallenge({ dpopJkt: "jkt-1", deviceId: "device_sent", ttlSeconds: 120 });
+    await service.issueLoginChallenge({ dpopJkt: "jkt-1", deviceId: "device_someone_else", ttlSeconds: 120 });
 
-    expect(devices.findByDpopJkt).not.toHaveBeenCalled();
+    expect(repository.issue).toHaveBeenCalledWith(expect.objectContaining({ deviceId: "device_by_key" }));
+  });
+
+  it("uses a sent device_id only when the DPoP key belongs to no device", async () => {
+    const repository = challengeRepository();
+    const service = new IssueDeviceChallengeService(repository, () => new Date(), {
+      findByDpopJkt: vi.fn().mockResolvedValue(null),
+    });
+
+    await service.issueLoginChallenge({ dpopJkt: "jkt-nobody", deviceId: "device_sent", ttlSeconds: 120 });
+
     expect(repository.issue).toHaveBeenCalledWith(expect.objectContaining({ deviceId: "device_sent" }));
   });
 

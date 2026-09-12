@@ -291,8 +291,10 @@ const auth = createBetterAuth({
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
   onLoginMethodUsed: (method) => accountProvisioner.onLoginMethodUsed(method),
   authAuditSink,
-  findDeviceOwner: async (deviceId) =>
-    (await deviceRepository.findByDeviceId(deviceId))?.betterAuthUserId ?? null,
+  findDeviceByDpopJkt: async (dpopJkt) => {
+    const device = await deviceRepository.findByDpopJkt(dpopJkt);
+    return device === null ? null : { betterAuthUserId: device.betterAuthUserId, deviceId: device.deviceId };
+  },
   sessionMirror: new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET),
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");
