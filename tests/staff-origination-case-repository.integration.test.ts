@@ -62,9 +62,15 @@ describe.skipIf(databaseUrl === undefined)(
       await database.auditLog.deleteMany({
         where: { OR: [{ resourceId: createdCaseId }, { actorAccountId: staffAccountId }] },
       });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [
-        [applicantAuthId, staffAuthId],
-      ]);
+      // submission_revisions is append-only (AD-186's trigger rejects UPDATE
+      // and DELETE unconditionally), and its FKs to origination_cases and
+      // accounts are ON DELETE RESTRICT, and accounts -> auth_user is
+      // RESTRICT too -- so once the first test creates a real revision, the
+      // case, its property, the applicant account, and both auth_user rows
+      // all become permanently undeletable. Same tradeoff
+      // origination-offering-handoff.integration.test.ts already accepts:
+      // clean up only what's actually deletable (audit rows above), and
+      // leave the rest.
       await Promise.all([database.$disconnect(), authPool.end(), boss.stop({ graceful: false })]);
     });
 
