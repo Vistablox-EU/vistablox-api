@@ -19,7 +19,7 @@ describe.skipIf(databaseUrl === undefined)("staff WebAuthn repository PostgreSQL
   beforeAll(async () => {
     await authPool.query(
       'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
-      [betterAuthUserId, "Staff WebAuthn Test User", `${betterAuthUserId}@example.test`, true, "staff"],
+      [betterAuthUserId, "Staff WebAuthn Test User", `${betterAuthUserId}@example.test`, true, "staff_partner"],
     );
     await database.account.create({
       data: {
