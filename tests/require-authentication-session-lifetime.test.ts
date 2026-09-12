@@ -25,6 +25,7 @@ const unboundIdentity: AuthenticatedIdentity = {
 function accounts(status = "active"): AccountRepository {
   return {
     findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_01", status }),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn(),
     hasAnyActiveStaffRole: vi.fn(),
     provision: vi.fn(),

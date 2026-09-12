@@ -4,6 +4,7 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import {
   AssignPartnerOrganizationService,
   CloseCaseService,
+  CreateStaffOriginationCaseService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
@@ -19,6 +20,8 @@ import {
   assignPartnerOrganizationResponseSchema,
   closeCaseBodySchema,
   closeCaseResponseSchema,
+  createStaffCaseBodySchema,
+  createStaffCaseResponseSchema,
   founderDecisionBodySchema,
   founderDecisionResponseSchema,
   listCaseMessagesQuerySchema,
@@ -41,6 +44,7 @@ export function createOriginationOperationsRouter(
   closeCase: CloseCaseService,
   listCaseMessages: ListCaseMessagesForOperationsService,
   postCaseMessage: PostCaseMessageForOperationsService,
+  createStaffCase: CreateStaffOriginationCaseService,
   // Optional: only present once the partner-organizations feature
   // (protectedApi.partnerOrganizations) is configured, unlike everything
   // else on this router, which is unconditional. See app.ts.
@@ -53,6 +57,17 @@ export function createOriginationOperationsRouter(
     const query = operationsCaseListQuerySchema.parse(request.query);
     const result = await listCases.execute({ query });
     response.json(operationsCaseListResponseSchema.parse(result));
+  });
+
+  router.post("/", ...staffOnly, async (request, response) => {
+    const authContext = requireAuthContext(response.locals.authContext);
+    const body = createStaffCaseBodySchema.parse(request.body);
+    const result = await createStaffCase.execute({
+      staffAccountId: authContext.accountId,
+      traceId: String(response.locals.traceId),
+      body,
+    });
+    response.status(201).json(createStaffCaseResponseSchema.parse(result));
   });
 
   router.get("/:case_id", ...staffOnly, async (request, response) => {

@@ -6,7 +6,7 @@ import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
-import { CaseSubmissionConflictError } from "./origination.repository.js";
+import { ApplicantAccountNotFoundError, CaseSubmissionConflictError } from "./origination.repository.js";
 import type {
   PostIpoStructuringHandoffRepository,
   TransitionedToPostIpoStructuring,
@@ -22,6 +22,8 @@ import type {
   FounderDecisionInput,
   CreateDraftIntakeInput,
   CreatedDraftIntake,
+  CreatedStaffCase,
+  CreateStaffCaseInput,
   InformationRequestRecord,
   IntakePrerequisites,
   OperationsCaseDetail,
@@ -62,24 +64,27 @@ export class PrismaOriginationRepository
   ) {}
 
   public async getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites> {
-    const [eligibility, floorSetting] = await Promise.all([
+    const [eligibility, minimumPropertyValueEur] = await Promise.all([
       this.kycEligibilityReader.getEligibilitySnapshot(accountId),
-      this.database.platformSetting.findUnique({
-        where: { key: "origination.minimum_property_value_eur" },
-        select: { value: true },
-      }),
+      this.getMinimumPropertyValueEur(),
     ]);
-
-    if (floorSetting === null) {
-      throw new Error("Missing origination.minimum_property_value_eur platform setting");
-    }
-    const parsedFloor = propertyFloorSettingSchema.parse(floorSetting.value);
 
     return {
       eligibilityState: eligibility?.eligibilityState ?? "not_started",
       proofOfAddressCurrentUntil: eligibility?.proofOfAddressCurrentUntil ?? null,
-      minimumPropertyValueEur: parsedFloor.amount,
+      minimumPropertyValueEur,
     };
+  }
+
+  public async getMinimumPropertyValueEur(): Promise<string> {
+    const floorSetting = await this.database.platformSetting.findUnique({
+      where: { key: "origination.minimum_property_value_eur" },
+      select: { value: true },
+    });
+    if (floorSetting === null) {
+      throw new Error("Missing origination.minimum_property_value_eur platform setting");
+    }
+    return propertyFloorSettingSchema.parse(floorSetting.value).amount;
   }
 
   public async createDraftIntake(
@@ -128,6 +133,103 @@ export class PrismaOriginationRepository
     });
 
     return { caseId, propertyId, stage: "draft" };
+  }
+
+  public async createStaffCase(input: CreateStaffCaseInput): Promise<CreatedStaffCase> {
+    const propertyId = `prop_${ulid()}`;
+    const caseId = `case_${ulid()}`;
+    const revisionId = `rev_${ulid()}`;
+
+    return this.database.$transaction(async (transaction) => {
+      const applicant = await transaction.account.findUnique({
+        where: { id: input.applicantAccountId },
+        select: { id: true },
+      });
+      if (applicant === null) {
+        throw new ApplicantAccountNotFoundError(input.applicantAccountId);
+      }
+
+      await transaction.property.create({
+        data: {
+          id: propertyId,
+          propertyType: "residential",
+          countryCode: input.property.countryCode,
+          city: input.property.city,
+          addressLine: input.property.addressLine,
+          landRegistryReference: input.property.landRegistryReference,
+          latitude: null,
+          longitude: null,
+          ownerDeclaredValueEur: input.property.ownerDeclaredValueEur,
+          hasExistingEncumbrance: input.property.hasExistingEncumbrance,
+        },
+      });
+      await transaction.originationCase.create({
+        data: {
+          id: caseId,
+          propertyId,
+          applicantAccountId: input.applicantAccountId,
+          stage: "draft",
+        },
+      });
+
+      const submittedAt = new Date();
+      await transaction.submissionRevision.create({
+        data: {
+          id: revisionId,
+          caseId,
+          revisionNumber: 1,
+          submittedAt,
+          submittedByAccountId: input.staffAccountId,
+          submissionData: input.submissionData as Prisma.InputJsonObject,
+          reason: "initial_staff_created",
+        },
+      });
+      await transaction.documentaryScreeningEvidence.createMany({
+        data: input.documents.map((document) => ({
+          id: `evidence_${ulid()}`,
+          caseId,
+          submissionRevisionId: revisionId,
+          documentType: document.documentType,
+          status: "pending",
+          documentRef: document.documentRef,
+          extractDated: document.extractDated,
+        })),
+      });
+      await transaction.originationCase.update({
+        where: { id: caseId },
+        data: {
+          stage: "submitted",
+          currentSubmissionRevisionId: revisionId,
+          updatedAt: submittedAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.staffAccountId,
+          action: "origination.case_created_by_staff",
+          resourceType: "origination_case",
+          resourceId: caseId,
+          changes: {
+            trace_id: input.traceId,
+            applicant_account_id: input.applicantAccountId,
+            staff_actor_account_id: input.staffAccountId,
+            property_id: propertyId,
+            revision_id: revisionId,
+            stage: "submitted",
+          },
+        },
+      });
+
+      return {
+        caseId,
+        revisionId,
+        revisionNumber: 1 as const,
+        stage: "submitted" as const,
+        submittedAt,
+        applicantAccountId: input.applicantAccountId,
+      };
+    });
   }
 
   public async listOwnedCases(input: {

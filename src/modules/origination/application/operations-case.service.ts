@@ -2,6 +2,7 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import type {
   AssignPartnerOrganizationBody,
   CloseCaseBody,
+  CreateStaffCaseBody,
   FounderDecisionBody,
   OperationsCaseListQuery,
   PublishInformationRequestBody,
@@ -14,8 +15,10 @@ import {
   canRecordFounderDecision,
   evaluateInformationRequestPublication,
 } from "../domain/case-review.policy.js";
+import { evaluateInitialCaseSubmission } from "../domain/case-submission.policy.js";
 import type { PartnerOrganizationRepository } from "../repository/partner-organization.repository.js";
 import {
+  ApplicantAccountNotFoundError,
   CaseReviewConflictError,
   type InformationRequestRecord,
   type OperationsCaseDetail,
@@ -254,6 +257,97 @@ export class CloseCaseService {
   }
 }
 
+// Staff create-and-submit (real estate intake taken by phone/in person).
+// Deliberately does not call evaluateIntakeEntry: that also bundles the
+// self-KYC/proof-of-address checks staff attest to out-of-band, so this
+// re-derives only the property-value floor directly. intake_terms_accepted,
+// one_title_confirmed and property_type are guaranteed by the request
+// schema's literals, so the only remaining runtime policy check is the
+// evidence-shape one (missing/duplicate document types), reused from the
+// owner-facing initial submission via evaluateInitialCaseSubmission with a
+// synthetic draft/no-revision state -- true by construction for a case that
+// doesn't exist yet.
+export class CreateStaffOriginationCaseService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    staffAccountId: string;
+    traceId: string;
+    body: CreateStaffCaseBody;
+  }) {
+    const submissionDecision = evaluateInitialCaseSubmission({
+      stage: "draft",
+      hasCurrentRevision: false,
+      documentTypes: input.body.documents.map((document) => document.document_type),
+    });
+    if (!submissionDecision.allowed) {
+      throw submissionPolicyError(submissionDecision);
+    }
+
+    const minimumPropertyValueEur = await this.repository.getMinimumPropertyValueEur();
+    if (
+      moneyToCents(input.body.property.owner_declared_value_eur) <
+      moneyToCents(minimumPropertyValueEur)
+    ) {
+      throw propertyValueBelowMinimumError(minimumPropertyValueEur);
+    }
+
+    const now = this.clock();
+    try {
+      const created = await this.repository.createStaffCase({
+        applicantAccountId: input.body.applicant_account_id,
+        staffAccountId: input.staffAccountId,
+        traceId: input.traceId,
+        property: {
+          countryCode: input.body.property.country_code,
+          city: input.body.property.city,
+          addressLine: input.body.property.address_line,
+          landRegistryReference: input.body.property.land_registry_reference,
+          ownerDeclaredValueEur: input.body.property.owner_declared_value_eur,
+          hasExistingEncumbrance: input.body.property.has_existing_encumbrance,
+        },
+        submissionData: {
+          attestations: {
+            intake_terms_accepted: true,
+            one_title_confirmed: true,
+            accepted_at: now.toISOString(),
+            staff_created: true,
+          },
+        },
+        documents: input.body.documents.map((document) => ({
+          documentType: document.document_type,
+          documentRef: document.document_ref,
+          extractDated:
+            document.extract_dated === null ? null : new Date(document.extract_dated),
+        })),
+      });
+      return {
+        data: {
+          case_id: created.caseId,
+          revision_id: created.revisionId,
+          revision_number: created.revisionNumber,
+          stage: created.stage,
+          submitted_at: created.submittedAt.toISOString(),
+          applicant_account_id: created.applicantAccountId,
+        },
+      };
+    } catch (error) {
+      if (error instanceof ApplicantAccountNotFoundError) {
+        throw new AppError({
+          code: "origination.applicant_account_not_found",
+          title: "Applicant account not found",
+          status: 404,
+          detail: "No account exists with the given applicant_account_id.",
+        });
+      }
+      throw error;
+    }
+  }
+}
+
 export class AssignPartnerOrganizationService {
   public constructor(
     private readonly repository: OriginationRepository,
@@ -402,6 +496,60 @@ function partnerOrganizationNotFoundError(
     status: 404,
     detail: `No ${resourceType.replace("_", " ")} exists with the given id.`,
   });
+}
+
+function submissionPolicyError(
+  decision: Exclude<ReturnType<typeof evaluateInitialCaseSubmission>, { allowed: true }>,
+): AppError {
+  if (decision.reason === "missing_evidence") {
+    return new AppError({
+      code: "origination.required_evidence_missing",
+      title: "Required intake evidence missing",
+      status: 422,
+      detail: `Required initial evidence is missing: ${decision.missingEvidence?.join(", ")}.`,
+      fieldErrors: (decision.missingEvidence ?? []).map((documentType) => ({
+        field: "documents",
+        code: "evidence.required",
+        message: `${documentType} is required.`,
+      })),
+    });
+  }
+  if (decision.reason === "duplicate_evidence") {
+    return new AppError({
+      code: "origination.duplicate_evidence_type",
+      title: "Duplicate evidence type",
+      status: 422,
+      detail: "Each evidence type may appear only once in an initial submission.",
+    });
+  }
+  return new AppError({
+    code: "origination.case_submission_conflict",
+    title: "Case cannot be submitted",
+    status: 409,
+    detail: "Only a draft case without a submission revision can be initially submitted.",
+  });
+}
+
+function propertyValueBelowMinimumError(minimumValue: string): AppError {
+  return new AppError({
+    code: "origination.property_value_below_minimum",
+    title: "Property value below minimum",
+    status: 422,
+    detail: `The owner-declared property value must be at least EUR ${minimumValue}.`,
+    fieldErrors: [
+      {
+        field: "property.owner_declared_value_eur",
+        code: "number.min",
+        message: `Value must be at least EUR ${minimumValue}.`,
+      },
+    ],
+  });
+}
+
+function moneyToCents(value: string): bigint {
+  const [euros, cents] = value.split(".");
+  if (euros === undefined || cents === undefined) throw new Error("Invalid money value");
+  return BigInt(euros) * 100n + BigInt(cents);
 }
 
 function partnerOrganizationNotActiveError(

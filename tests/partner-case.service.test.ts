@@ -39,6 +39,7 @@ const baseCase: PartnerCaseDetail = {
 function fakeAccounts(organizationId: string | null = "legal_practice_01"): AccountRepository {
   return {
     findByBetterAuthUserId: vi.fn(),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn(),
     hasAnyActiveStaffRole: vi.fn(),
     provision: vi.fn(),
@@ -51,6 +52,8 @@ function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationR
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
+    getMinimumPropertyValueEur: vi.fn(),
+    createStaffCase: vi.fn(),
     listOwnedCases: vi.fn(),
     getOwnedCase: vi.fn(),
     submitInitialCase: vi.fn(),

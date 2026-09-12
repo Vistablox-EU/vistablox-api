@@ -53,6 +53,7 @@ async function buildProof(options: {
 function buildAccounts(): AccountRepository {
   return {
     findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_01", status: "active" }),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn(),
     hasAnyActiveStaffRole: vi.fn(),
     provision: vi.fn(),

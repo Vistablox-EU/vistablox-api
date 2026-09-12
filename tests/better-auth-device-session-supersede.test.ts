@@ -85,6 +85,7 @@ async function buildHarness() {
   const loginDevice = { execute: vi.fn(async () => device) };
   const accounts = {
     findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_supersede_1", status: "active" }),
+    findByEmail: vi.fn(),
   };
 
   const auditEvents: AuthAuditEvent[] = [];

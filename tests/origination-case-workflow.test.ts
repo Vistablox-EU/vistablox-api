@@ -66,6 +66,7 @@ function buildApp(options?: {
   };
   const accounts: AccountRepository = {
     findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_01", status: "active" }),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn().mockResolvedValue(false),
     hasAnyActiveStaffRole: vi.fn().mockResolvedValue(false),
     provision: vi.fn(),
@@ -98,6 +99,8 @@ function buildApp(options?: {
       minimumPropertyValueEur: "150000.00",
     }),
     createDraftIntake: vi.fn(),
+    getMinimumPropertyValueEur: vi.fn(),
+    createStaffCase: vi.fn(),
     listOwnedCases: vi.fn().mockResolvedValue(options?.listRows ?? [ownedCase]),
     getOwnedCase: vi.fn().mockResolvedValue(
       options !== undefined && "caseRecord" in options ? options.caseRecord : ownedCase,

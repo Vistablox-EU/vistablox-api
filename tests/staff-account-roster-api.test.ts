@@ -69,6 +69,8 @@ function fakeOriginationRepository(): OriginationRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
+    getMinimumPropertyValueEur: vi.fn(),
+    createStaffCase: vi.fn(),
     listOwnedCases: vi.fn().mockResolvedValue([]),
     getOwnedCase: vi.fn().mockResolvedValue(null),
     submitInitialCase: vi.fn(),
@@ -136,6 +138,7 @@ function buildApp(options?: {
       accountId: options?.actorAccountId ?? "acct_admin",
       status: "active",
     }),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn().mockResolvedValue(options?.hasAdminRole ?? true),
     hasAnyActiveStaffRole: vi.fn().mockResolvedValue(options?.hasAdminRole ?? true),
     provision: vi.fn(),

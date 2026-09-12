@@ -6,8 +6,20 @@ export interface LocalAccountContext {
   status: AccountStatus;
 }
 
+export interface AccountSummary {
+  accountId: string;
+  email: string | null;
+  status: AccountStatus;
+}
+
 export interface AccountRepository {
   findByBetterAuthUserId(betterAuthUserId: string): Promise<LocalAccountContext | null>;
+  // Exact match only (case-insensitive) -- protectedContactEmail isn't
+  // @unique, so this returns every account sharing the address rather than
+  // picking one. Used by staff intake (search-accounts.service.ts) to pick
+  // an applicant by email; no fuzzy match or pagination needed at that
+  // volume.
+  findByEmail(email: string): Promise<AccountSummary[]>;
   hasActiveStaffRole(
     accountId: string,
     role: "admin_operations" | "legal_partner" | "appraisal_partner",

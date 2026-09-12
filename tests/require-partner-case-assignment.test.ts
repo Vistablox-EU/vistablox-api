@@ -11,6 +11,7 @@ import { requestContext } from "../src/shared/http/request-context.js";
 function fakeAccounts(activeOrganizationId: string | null): AccountRepository {
   return {
     findByBetterAuthUserId: vi.fn(),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn(),
     hasAnyActiveStaffRole: vi.fn(),
     provision: vi.fn(),
@@ -25,6 +26,8 @@ function fakeCases(
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
+    getMinimumPropertyValueEur: vi.fn(),
+    createStaffCase: vi.fn(),
     listOwnedCases: vi.fn(),
     getOwnedCase: vi.fn(),
     submitInitialCase: vi.fn(),
