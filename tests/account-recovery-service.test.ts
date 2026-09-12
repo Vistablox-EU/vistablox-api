@@ -440,14 +440,43 @@ describe("DecideAccountRecoveryCaseService", () => {
 });
 
 describe("CompleteAccountRecoveryService", () => {
-  it("sends the recovery completion email, completes the case with a 72-hour cooldown, and sends the FYI notification", async () => {
+  it("refuses to complete a customer case (409), sends nothing, and leaves the case approved", async () => {
+    const sendRecoveryCompletionEmail = vi.fn();
+    const sendAccountRecoveryCompletedEmail = vi.fn();
+    const completeCase = vi.fn();
+    const service = new CompleteAccountRecoveryService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: false })),
+        completeCase,
+      }),
+      administrator({ sendRecoveryCompletionEmail }),
+      emailSender({ sendAccountRecoveryCompletedEmail }),
+      "https://app.vistablox.io/recover-account",
+      () => now,
+    );
+
+    await expect(
+      service.execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" }),
+    ).rejects.toMatchObject({ code: "authentication.account_recovery_completion_unavailable", status: 409 });
+    // Nothing that a customer passkey link or a "completed" case implies.
+    expect(sendRecoveryCompletionEmail).not.toHaveBeenCalled();
+    expect(completeCase).not.toHaveBeenCalled();
+    expect(sendAccountRecoveryCompletedEmail).not.toHaveBeenCalled();
+  });
+
+  it("staff target, unchanged: sends the recovery completion email, completes the case with a 72-hour cooldown, and sends the FYI notification", async () => {
     const sendRecoveryCompletionEmail = vi.fn().mockResolvedValue(undefined);
     const sendAccountRecoveryCompletedEmail = vi.fn().mockResolvedValue(undefined);
     const completeCase = vi.fn().mockResolvedValue(
       caseRecord({ status: "completed", cooldownEndsAt: new Date(now.getTime() + 72 * 60 * 60 * 1000) }),
     );
     const service = new CompleteAccountRecoveryService(
-      repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })), completeCase }),
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: true })),
+        completeCase,
+      }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender({ sendAccountRecoveryCompletedEmail }),
       "https://app.vistablox.io/recover-account",
@@ -490,7 +519,11 @@ describe("CompleteAccountRecoveryService", () => {
   it("surfaces a retry-safe error and does not complete the case when the completion email fails to send", async () => {
     const completeCase = vi.fn();
     const service = new CompleteAccountRecoveryService(
-      repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })), completeCase }),
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: true })),
+        completeCase,
+      }),
       administrator({ sendRecoveryCompletionEmail: vi.fn().mockRejectedValue(new Error("smtp down")) }),
       emailSender(),
       "https://app.vistablox.io/recover-account",

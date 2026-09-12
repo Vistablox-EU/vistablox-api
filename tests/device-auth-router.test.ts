@@ -51,7 +51,6 @@ function appFor(
       features: {
         device_auth: true,
         device_enrolment_required: false,
-        passkey_login: true,
         signing_requests: false,
         recovery_v2: false,
         safe_account: false,

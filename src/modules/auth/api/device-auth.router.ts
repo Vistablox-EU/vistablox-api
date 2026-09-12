@@ -23,7 +23,6 @@ const LOGIN_CHALLENGE_TTL_SECONDS = 120;
 export interface AppConfigFeatures {
   device_auth: boolean;
   device_enrolment_required: boolean;
-  passkey_login: boolean;
   signing_requests: boolean;
   recovery_v2: boolean;
   safe_account: boolean;
