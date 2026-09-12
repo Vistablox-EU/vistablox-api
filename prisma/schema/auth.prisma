@@ -152,21 +152,6 @@ model Session {
   @@schema("auth")
 }
 
-// AD-120/AD-128: the shared secret must be reversible to compute a live TOTP
-// code, so it is stored as plaintext here — phase 1 relies on storage/
-// transport-level encryption only, not field-level encryption.
-model MfaTotpFactor {
-  accountId  String    @id @map("account_id")
-  secret     String
-  enrolledAt DateTime  @default(now()) @map("enrolled_at") @db.Timestamptz(6)
-  lastUsedAt DateTime? @map("last_used_at") @db.Timestamptz(6)
-
-  account Account @relation(fields: [accountId], references: [id])
-
-  @@map("mfa_totp_factors")
-  @@schema("auth")
-}
-
 model AccountRecoveryCase {
   id                        String    @id @map("recovery_case_id")
   accountId                 String    @map("account_id")

@@ -87,10 +87,6 @@ import {
 } from "./modules/auth/application/customer-session.service.js";
 import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
 import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
-import { createTotpRouter } from "./modules/auth/api/totp.router.js";
-import { EnrollTotpService, VerifyTotpService } from "./modules/auth/application/totp.service.js";
-import type { TotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
-import type { TotpRepository } from "./modules/auth/repository/totp.repository.js";
 import { createHealthRouter } from "./modules/health/health.router.js";
 import {
   createInvestorOfferingRouter,
@@ -330,10 +326,6 @@ export interface AppDependencies {
         expiresAt: Date;
       }) => Promise<void>;
       acceptUrl: string;
-    };
-    totp?: {
-      repository: TotpRepository;
-      provider: TotpProvider;
     };
     customerSessions?: {
       repository: CustomerSessionRepository;
@@ -617,23 +609,6 @@ export function createApp(dependencies: AppDependencies): Express {
           requireAuthentication,
           new ListInvestorReservationsService(investorActivity.repository),
           new ListInvestorCurrentPositionsService(investorActivity.repository),
-        ),
-      );
-    }
-    if (dependencies.protectedApi.totp !== undefined) {
-      const totp = dependencies.protectedApi.totp;
-      app.use(
-        "/v1/auth/totp",
-        ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
-        createTotpRouter(
-          requireAuthentication,
-          new EnrollTotpService(totp.repository, totp.provider),
-          new VerifyTotpService(totp.repository, totp.provider),
-          dependencies.protectedApi.customerSessions === undefined
-            ? undefined
-            : createRequireFreshAuthentication(
-                dependencies.protectedApi.customerSessions.repository,
-              ),
         ),
       );
     }
