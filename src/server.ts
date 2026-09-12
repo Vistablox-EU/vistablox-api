@@ -288,6 +288,8 @@ const auth = createBetterAuth({
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
   onLoginMethodUsed: (method) => accountProvisioner.onLoginMethodUsed(method),
   authAuditSink,
+  findDeviceOwner: async (deviceId) =>
+    (await deviceRepository.findByDeviceId(deviceId))?.betterAuthUserId ?? null,
   sessionMirror,
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");
