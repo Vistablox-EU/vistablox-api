@@ -32,6 +32,8 @@ export const AUTHENTICATION_LEVELS = [
 export type AuthenticationLevel = (typeof AUTHENTICATION_LEVELS)[number];
 import { createBetterAuthAuditPlugin } from "./better-auth-audit.plugin.js";
 import { createBetterAuthDeviceAuthPlugin } from "./better-auth-device-auth.plugin.js";
+import { createDeviceSessionLifetime } from "./better-auth-device-session-lifetime.plugin.js";
+import { deviceSessionAbsoluteExpiresAt } from "../domain/device-session-lifetime.js";
 import { createBetterAuthDpopPlugin } from "./better-auth-dpop.plugin.js";
 import {
   assertDpopKeyMatchesPendingSession,
@@ -143,6 +145,9 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           }),
         }),
   };
+  // Time limits for device_biometric sessions (contract 3.6/3.7). No other
+  // session is affected.
+  const deviceSessionLifetime = createDeviceSessionLifetime();
   const auth = betterAuth({
     appName: "VistaBlox",
     baseURL: options.baseURL,
@@ -178,6 +183,11 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     },
     session: {
       modelName: "auth_session",
+      // Rolling expiry for every session except device_biometric ones,
+      // unchanged by the device-session work. Device sessions have their own
+      // fixed limits (idle 5 min, absolute 30 min, no renewal), set in
+      // session.create.before below and enforced by
+      // createBetterAuthDeviceSessionLifetimePlugin.
       expiresIn: 30 * 60,
       updateAge: 5 * 60,
       additionalFields: {
@@ -256,14 +266,15 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         create: {
           before: async (session, context) => {
             const dpopJkt = await tryBindDpopAtCreation(context, options.dpop);
+            const authenticationLevel = await resolveAuthenticationLevel(session.userId, context);
             return {
               data: {
                 ...session,
-                authenticationLevel: await resolveAuthenticationLevel(
-                  session.userId,
-                  context,
-                ),
+                authenticationLevel,
                 ...(dpopJkt === null ? {} : { dpopJkt }),
+                ...(authenticationLevel === "device_biometric"
+                  ? deviceSessionCreationTimes(session.createdAt)
+                  : {}),
               },
             };
           },
@@ -286,6 +297,10 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       // Native mobile uses the Better Auth session itself, sent as a bearer
       // token via the Authorization header instead of a cookie.
       bearer(),
+      // Device-session time limits: before the DPoP plugin, whose before
+      // hook already reads the session. Registered unconditionally: it only
+      // acts on rows the device-auth plugin created.
+      deviceSessionLifetime.plugin,
       // Device binding (DPoP): must come after bearer() -- bearer turns
       // Authorization into the session cookie context first, so a session
       // is resolvable by the time this runs. Only the passkey verify-*
@@ -461,6 +476,15 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       },
     },
   });
+  // Wrap findSession as soon as the context exists, so even the first
+  // request after boot is covered. Every request awaits this same context
+  // promise after this line, and promise reactions run in registration
+  // order. The plugin's before hook remains as an idempotent backstop. A
+  // context that fails to build fails every request on its own.
+  void auth.$context.then(
+    (context) => deviceSessionLifetime.attach(context.internalAdapter),
+    () => undefined,
+  );
   return auth;
 
   async function resolveAuthenticationLevel(
@@ -653,6 +677,16 @@ function isOAuthSignInCompletionPath(path: string | undefined): boolean {
 // executing, so a plain string match here is enough to recognize it.
 function isDeviceAuthSessionCreationPath(path: string | undefined): boolean {
   return path === "/device/enrol/verify" || path === "/device/login/verify";
+}
+
+// A device session ends exactly 30 minutes after it was created, whatever
+// the global expiresIn says, and its idle timer starts at creation:
+// updatedAt is its last-activity time (see
+// better-auth-device-session-lifetime.plugin.ts), so it starts equal to
+// createdAt instead of a separately sampled "now".
+function deviceSessionCreationTimes(createdAt: unknown): { expiresAt: Date; updatedAt: Date } {
+  const created = createdAt instanceof Date ? createdAt : new Date();
+  return { expiresAt: deviceSessionAbsoluteExpiresAt(created), updatedAt: created };
 }
 
 function isStaffAuthUser(user: unknown): boolean {

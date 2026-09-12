@@ -88,10 +88,34 @@ export function createRequireAuthentication(
         providerSessionId: identity.providerSessionId,
         population: identity.population,
       };
+
+      // Session time limits (contract 3.6/3.7): the request counts as
+      // activity only once it has passed the DPoP proof, the account checks
+      // and the rate limiter. A 429 is not activity. If the activity write
+      // itself fails, the request still goes through: a missing write can
+      // only make the session idle out sooner, never extend it.
+      const recordActivityThenContinue = (): void => {
+        (sessions.recordActivity?.(identity) ?? Promise.resolve()).then(
+          () => next(),
+          (activityError: unknown) => {
+            response.locals.logger?.warn?.(
+              { err: activityError },
+              "session activity update failed; continuing without it",
+            );
+            next();
+          },
+        );
+      };
       if (rateLimiter === undefined) {
-        next();
+        recordActivityThenContinue();
       } else {
-        rateLimiter(request, response, next);
+        rateLimiter(request, response, (limiterError?: unknown) => {
+          if (limiterError !== undefined && limiterError !== null) {
+            next(limiterError);
+            return;
+          }
+          recordActivityThenContinue();
+        });
       }
     } catch (error) {
       next(error);
