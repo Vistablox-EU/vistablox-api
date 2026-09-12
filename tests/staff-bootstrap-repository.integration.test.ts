@@ -3,6 +3,7 @@ import { Pool } from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
 import { PrismaStaffBootstrapRepository } from "../src/modules/auth/repository/prisma-staff-bootstrap.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -13,11 +14,31 @@ describe.skipIf(databaseUrl === undefined)(
     const database = createPrismaClient(databaseUrl ?? "");
     const pool = new Pool({ connectionString: databaseUrl });
     const repository = new PrismaStaffBootstrapRepository(database);
+    const auth = createBetterAuth({
+      database: pool,
+      baseURL: "http://localhost:3000",
+      secret: "integration-test-secret-that-is-at-least-32-characters",
+      secureCookies: false,
+      trustedOrigins: ["http://localhost:3000"],
+      allowPopulationInput: true,
+    });
 
     afterAll(async () => {
       await pool.end();
       await database.$disconnect();
     });
+
+    // accounts.better_auth_user_id has a real FK to auth_user; a made-up
+    // string violates it. Create a genuine staff identity through Better
+    // Auth's own adapter, the same way the app itself would.
+    async function createStaffAuthUser(name: string, email: string): Promise<string> {
+      const context = await auth.$context;
+      const created = await context.internalAdapter.createUser(
+        { name, email, emailVerified: true, population: "staff_partner" },
+        { method: "internal" },
+      );
+      return created.id;
+    }
 
     function issueInput(overrides: Partial<Parameters<typeof repository.issueBootstrapInvitation>[0]> = {}) {
       const suffix = randomUUID();
@@ -49,8 +70,12 @@ describe.skipIf(databaseUrl === undefined)(
     it("refuses when an active account already holds admin_operations", async () => {
       const suffix = randomUUID();
       const accountId = `acct_${suffix}`;
+      const betterAuthUserId = await createStaffAuthUser(
+        "Existing Admin",
+        `existing-admin-${suffix}@example.test`,
+      );
       await database.account.create({
-        data: { id: accountId, betterAuthUserId: `bau_${suffix}`, status: "active" },
+        data: { id: accountId, betterAuthUserId, status: "active" },
       });
       await database.staffRoleAssignment.create({
         data: { id: `role_${suffix}`, accountId, role: "admin_operations" },
@@ -101,8 +126,12 @@ describe.skipIf(databaseUrl === undefined)(
     it("the CHECK constraint refuses a cli_bootstrap row with a non-null issuer", async () => {
       const suffix = randomUUID();
       const accountId = `acct_issuer_${suffix}`;
+      const betterAuthUserId = await createStaffAuthUser(
+        "Issuer Candidate",
+        `issuer-candidate-${suffix}@example.test`,
+      );
       await database.account.create({
-        data: { id: accountId, betterAuthUserId: `bau_issuer_${suffix}`, status: "active" },
+        data: { id: accountId, betterAuthUserId, status: "active" },
       });
 
       await expect(
