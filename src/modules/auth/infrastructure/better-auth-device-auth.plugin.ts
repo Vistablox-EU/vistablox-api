@@ -20,7 +20,8 @@ import {
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
 import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
-import { markDiscardedCeremonySession } from "./device-ceremony-session.js";
+import { sessionsToSupersede } from "../domain/device-session-supersede.js";
+import { markDiscardedCeremonySession, markSupersededDeviceSession } from "./device-ceremony-session.js";
 import { recordVerifiedLoginDpopJkt } from "./device-login-audit-context.js";
 import {
   assertDpopKeyMatchesPendingSession,
@@ -168,6 +169,20 @@ export function createBetterAuthDeviceAuthPlugin(
               // ceremony's own priorSessionToken/deleteSession pattern (E2
               // "rotates" per the wire contract, section 3.1).
               await ctx.context.internalAdapter.deleteSession(current.session.token);
+              // Its own try/catch: nothing the supersede step throws may reach
+              // the cleanup below and discard this session or roll back the
+              // device. Supersede failures never affect the enrolment.
+              try {
+                await supersedeEarlierDeviceSessions(
+                  ctx,
+                  { userId: current.user.id, dpopJkt: boundJkt },
+                  "enrolment",
+                );
+              } catch (supersedeError) {
+                ctx.context.logger?.error?.("failed to supersede earlier sessions after a device enrolment", {
+                  supersedeError,
+                });
+              }
 
               return ctx.json({
                 device_id: device.deviceId,
@@ -264,6 +279,20 @@ export function createBetterAuthDeviceAuthPlugin(
               });
             }
             await setSessionCookie(ctx, { session, user });
+            // Its own try/catch: nothing the supersede step throws may reach
+            // the cleanup below and discard this session. Supersede failures
+            // never affect the login.
+            try {
+              await supersedeEarlierDeviceSessions(
+                ctx,
+                { userId: device.betterAuthUserId, dpopJkt: dpopClaims.jkt },
+                "login",
+              );
+            } catch (supersedeError) {
+              ctx.context.logger?.error?.("failed to supersede earlier sessions after a device login", {
+                supersedeError,
+              });
+            }
 
             return ctx.json({
               device_id: device.deviceId,
@@ -319,6 +348,53 @@ async function discardCeremonySession(
       sessionError,
     });
   });
+}
+
+/**
+ * A successful E2/L2 leaves the phone exactly one live session. After the
+ * new session exists and has been handed out, every live device_biometric
+ * session of this user bound to the same DPoP key (the same device) except
+ * the newest is revoked (domain/device-session-supersede.ts). Usually the
+ * newest is the session just created. When two ceremonies from the phone
+ * overlap, it's the later one, and the earlier ceremony's own session goes
+ * too, so two overlapping logins can never revoke each other's sessions and
+ * leave none. Web, staff and other devices' sessions are untouched.
+ *
+ * The match is the one POST /v1/auth/sessions/devices/:jkt/revoke uses. The
+ * deletes go through internalAdapter.deleteSession, the path better-auth's
+ * own revoke-session takes, so the audit trail and the session mirror record
+ * each one, with reason "superseded".
+ *
+ * Best-effort: a failure is logged at error level and never fails the
+ * ceremony. The phone already holds its new session, and an earlier one that
+ * survives still ends at its own idle and absolute limits.
+ */
+async function supersedeEarlierDeviceSessions(
+  ctx: Parameters<typeof deleteSessionCookie>[0],
+  input: { userId: string; dpopJkt: string },
+  ceremony: "enrolment" | "login",
+): Promise<void> {
+  let sessions: Array<{ id: string; token: string } & Record<string, unknown>>;
+  try {
+    sessions = (await ctx.context.internalAdapter.listSessions(input.userId)) as Array<
+      { id: string; token: string } & Record<string, unknown>
+    >;
+  } catch (listError) {
+    ctx.context.logger?.error?.(`failed to list the sessions a device ${ceremony} supersedes`, {
+      listError,
+    });
+    return;
+  }
+  const superseded = sessionsToSupersede(sessions, input.dpopJkt, new Date());
+  for (const earlier of superseded) {
+    markSupersededDeviceSession(ctx.context, earlier.token);
+    await ctx.context.internalAdapter.deleteSession(earlier.token).catch((sessionError: unknown) => {
+      // Error level: a failed delete here leaves an earlier session alive.
+      ctx.context.logger?.error?.(`failed to revoke a session superseded by a device ${ceremony}`, {
+        sessionError,
+      });
+    });
+  }
 }
 
 // Contract error code ACCOUNT_RESTRICTED (403) -- "Account frozen or
