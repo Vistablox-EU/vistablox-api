@@ -131,12 +131,12 @@ Phased the same way DPoP Phase 1 was: land the new capability *alongside* the ol
 Used for `enrol-device`, `login`, and `tx` requests that have no on-chain part.
 
 - **Compact JWS:** header `{ "alg": "ES256", "typ": "vistablox-device-auth+jwt", "kid": "<bio_jkt>" }`. Only `enrol-device` adds `"jwk"` (public P-256). The signature is raw `r‖s`.
-- **Common claims:** `purpose`, `challenge` (server-issued, single-use), `iat` (±60s), `device_id` (except the first enrolment of a new device).
+- **Common claims:** `purpose`, `challenge` (server-issued, single-use), `iat` (±60s), `device_id` (except the first enrolment of a new device; optional on `login`).
 
 | `purpose` | Extra claims |
 |---|---|
 | `enrol-device` | `dpop_jkt` (must equal the request's proof jkt); `device_id` only when re-enrolling an existing device record |
-| `login` | none |
+| `login` | none. `device_id` may be omitted: the server resolves the device from the request's DPoP jkt (section 3.1), and a `device_id` that is present must match it. |
 | `tx` (off-chain types only) | `request_id`, `request_type`, `amount_minor` (decimal string), `currency`, `destination` (`{ kind: "wallet"\|"iban"\|"contract", value }`), `created_by` (`{ kind: "user"\|"platform"\|"staff", label }`), `created_at`, `expires_at`. Compared field by field, as exact strings; any difference is `TX_FIELD_MISMATCH`. |
 
 - **Rules:** each purpose has its own challenge namespace; challenges are consumed atomically; `kid` must equal the stored `bio_jkt`.
@@ -194,8 +194,8 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
 | E1 | `POST /v1/auth/mobile/enrol/challenge` | pending, recovery-pending, recovery-scoped or re-enrol session | `{}` | `{ challenge, expires_at, first_device }`. `first_device` is true when the account has no Safe yet. |
 | E1b | `POST /v1/auth/mobile/enrol/account-op` | same as E1; first device only, and only while `safe_account` is on | `{ challenge, public_key: { x, y } }` | `{ user_op }`: the sponsored operation whose `initCode` deploys the Safe, with the shared signer configured with this key. The app decodes it before signing (section 4.6). |
 | E2 | `POST /v1/auth/mobile/enrol/verify` | same as E1 | `{ challenge, jws, attestation }`; for the first device while `safe_account` is on, `{ challenge, public_key, assertion, attestation }` (purpose `enrol-device`, over E1b's operation) | `{ device_id, status: "active"\|"pending_approval", owner_address, safe_address, pairing?: { pairing_id, code, expires_at }, session_expires_at?, authentication_level }`, plus `set-auth-token` unless the status is `pending_approval`. It's `pending_approval` when the account already has another active device (a new phone, or this phone re-adding itself after a selfie); that device approves it (P1–P3). For a first device with `safe_account` on, the server verifies the attestation and the assertion, then submits the deployment operation (below). The rotated session is already `device_biometric`, so no L2 follows. |
-| L1 | `POST /v1/auth/mobile/login/challenge` | none (DPoP only) | `{ device_id }` | `{ challenge, expires_at, attestation_required }` |
-| L2 | `POST /v1/auth/mobile/login/verify` | none (DPoP only) | `{ device_id, challenge, jws, attestation? }` | `{ device_id, session_expires_at, authentication_level: "device_biometric", hold_until? }`, plus `set-auth-token` |
+| L1 | `POST /v1/auth/mobile/login/challenge` | none (DPoP only) | `{ device_id? }` | `{ challenge, expires_at, attestation_required }`. Without `device_id`, the challenge is bound to the device the request's DPoP jkt belongs to (section 3.1). |
+| L2 | `POST /v1/auth/mobile/login/verify` | none (DPoP only) | `{ device_id?, challenge, jws, attestation? }` | `{ device_id, session_expires_at, authentication_level: "device_biometric", hold_until? }`, plus `set-auth-token`. The device is the one the request's DPoP jkt belongs to; a `device_id` that is sent must be that device. |
 
 **Account and email backup**
 
