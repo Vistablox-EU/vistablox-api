@@ -225,7 +225,13 @@ const enrolDeviceService = new EnrolDeviceService(
   androidAttestationConfig,
 );
 const loginDeviceService = new LoginDeviceService(deviceChallengeRepository, deviceRepository);
-const issueDeviceChallengeService = new IssueDeviceChallengeService(deviceChallengeRepository);
+// With deviceRepository, L1 can find the device from the request's DPoP key
+// when no device_id is sent (contract 3.1).
+const issueDeviceChallengeService = new IssueDeviceChallengeService(
+  deviceChallengeRepository,
+  () => new Date(),
+  deviceRepository,
+);
 
 const auth = createBetterAuth({
   database: authDatabase,
@@ -285,8 +291,10 @@ const auth = createBetterAuth({
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
   onLoginMethodUsed: (method) => accountProvisioner.onLoginMethodUsed(method),
   authAuditSink,
-  findDeviceOwner: async (deviceId) =>
-    (await deviceRepository.findByDeviceId(deviceId))?.betterAuthUserId ?? null,
+  findDeviceByDpopJkt: async (dpopJkt) => {
+    const device = await deviceRepository.findByDpopJkt(dpopJkt);
+    return device === null ? null : { betterAuthUserId: device.betterAuthUserId, deviceId: device.deviceId };
+  },
   sessionMirror: new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET),
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");

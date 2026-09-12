@@ -7,6 +7,7 @@ import type { AuthAuditEvent, AuthAuditSink } from "../application/auth-audit-si
 import type { SessionMirror } from "../application/session-mirror.js";
 import type { LoginMethodType } from "../../account/repository/account.repository.js";
 import { isDiscardedCeremonySession } from "./device-ceremony-session.js";
+import { verifiedLoginDpopJkt } from "./device-login-audit-context.js";
 
 export interface BetterAuthAuditPluginOptions {
   sink: AuthAuditSink;
@@ -23,10 +24,13 @@ export interface BetterAuthAuditPluginOptions {
     methodType: LoginMethodType;
     occurredAt: Date;
   }) => Promise<void>;
-  // Device login (L2) failures: the better-auth user that owns this device,
-  // or null if there's no such device -- lets a failed L2 with a real
-  // device_id be linked to its account, the way a failed email login is.
-  findDeviceOwner?: (deviceId: string) => Promise<string | null>;
+  // Device login (L2) failures: the device the request's verified DPoP key
+  // belongs to, or null if none -- lets a failed L2 be linked to that
+  // device's account. The body's device_id is never used for attribution:
+  // it's unverified, and optional (contract 3.1).
+  findDeviceByDpopJkt?: (
+    dpopJkt: string,
+  ) => Promise<{ betterAuthUserId: string; deviceId: string } | null>;
 }
 
 interface AuditContext {
@@ -244,7 +248,7 @@ export function createBetterAuthAuditPlugin(
               const identity = await resolveFailedIdentity(
                 context,
                 options.identifierHashKey,
-                options.findDeviceOwner,
+                options.findDeviceByDpopJkt,
                 options.onError,
               );
               const traceId = readTraceId(context);
@@ -279,7 +283,7 @@ export function createBetterAuthAuditPlugin(
 async function resolveFailedIdentity(
   context: unknown,
   hashKey: string,
-  findDeviceOwner: ((deviceId: string) => Promise<string | null>) | undefined,
+  findDeviceByDpopJkt: BetterAuthAuditPluginOptions["findDeviceByDpopJkt"],
   onLookupError: ((error: unknown) => void) | undefined,
 ): Promise<{ betterAuthUserId: string | null; resourceId: string; deviceId?: string }> {
   const auditContext = context as AuditContext & {
@@ -299,29 +303,29 @@ async function resolveFailedIdentity(
       ? { betterAuthUserId: null, resourceId: "login_unknown" }
       : { betterAuthUserId: userId, resourceId: userId };
   }
-  // L2 has no session yet. A device_id that belongs to a real device links
-  // the failure to that device's account, the way a failed email login is
-  // linked to its user below. An unknown device_id is unverified client
-  // input: only a keyed hash of it is recorded.
+  // L2 has no session yet. The failure is attributed to the device the
+  // request's *verified* DPoP key belongs to (recorded by the device-auth
+  // plugin), never to the body's device_id: that is unverified and
+  // optional, and anyone with their own DPoP key could put a victim's
+  // device_id there. No verified key (the proof itself failed): unknown.
+  // A key with no device, or a failed lookup: a keyed hash of the key.
   if (auditContext.path === "/device/login/verify") {
-    const deviceId = readBodyString(auditContext.body, "device_id");
-    if (deviceId === null) return { betterAuthUserId: null, resourceId: "login_unknown" };
-    // The owner lookup only enriches the event: if it fails, the failure is
-    // still recorded, against the keyed hash, and the lookup error reported.
-    let ownerId: string | null = null;
-    if (findDeviceOwner !== undefined) {
+    const dpopJkt = verifiedLoginDpopJkt(auditContext.context);
+    if (dpopJkt === null) return { betterAuthUserId: null, resourceId: "login_unknown" };
+    let device: { betterAuthUserId: string; deviceId: string } | null = null;
+    if (findDeviceByDpopJkt !== undefined) {
       try {
-        ownerId = await findDeviceOwner(deviceId);
+        device = await findDeviceByDpopJkt(dpopJkt);
       } catch (error) {
         onLookupError?.(error);
       }
     }
-    return ownerId === null
+    return device === null
       ? {
           betterAuthUserId: null,
-          resourceId: `login_device_${createHmac("sha256", hashKey).update(deviceId).digest("hex")}`,
+          resourceId: `login_dpop_${createHmac("sha256", hashKey).update(dpopJkt).digest("hex")}`,
         }
-      : { betterAuthUserId: ownerId, resourceId: ownerId, deviceId };
+      : { betterAuthUserId: device.betterAuthUserId, resourceId: device.betterAuthUserId, deviceId: device.deviceId };
   }
   const email = readBodyString(auditContext.body, "email")?.trim().toLowerCase();
   if (email !== null && email !== undefined) {

@@ -20,6 +20,7 @@ import type { EnrolDeviceService } from "../application/device-enrolment.service
 import type { LoginDeviceService } from "../application/device-login.service.js";
 import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
 import { markDiscardedCeremonySession } from "./device-ceremony-session.js";
+import { recordVerifiedLoginDpopJkt } from "./device-login-audit-context.js";
 import {
   assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
@@ -40,8 +41,10 @@ const enrolVerifyBodySchema = z.object({
   attestation: mobileAttestationSchema,
 });
 
+// device_id is optional (contract 3.1): LoginDeviceService resolves the
+// device from the request's DPoP key and checks a sent device_id against it.
 const loginVerifyBodySchema = z.object({
-  device_id: z.string().min(1),
+  device_id: z.string().min(1).optional(),
   challenge: z.string().min(1),
   jws: z.string().min(1),
 });
@@ -218,6 +221,9 @@ export function createBetterAuthDeviceAuthPlugin(
             options.dpop,
             true,
           );
+          // For the audit trail: a failed L2 is attributed to the device this
+          // verified key belongs to, not to whatever device_id the body names.
+          recordVerifiedLoginDpopJkt(ctx.context, dpopClaims.jkt);
 
           let ceremonySessionToken: string | null = null;
           try {

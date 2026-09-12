@@ -65,7 +65,7 @@ interface DeviceAuthApi {
   }>;
   loginVerify(input: {
     headers: Headers;
-    body: { device_id: string; challenge: string; jws: string };
+    body: { device_id?: string; challenge: string; jws: string };
     request: Request;
     asResponse: false;
     returnHeaders: true;
@@ -204,9 +204,8 @@ export function createDeviceAuthRouter(
 
   router.post("/login/challenge", requireDpopOnly, ...deviceAuthRateLimiters, async (request, response) => {
     const dpopJkt = requireDpopJkt(response);
-    const body = loginChallengeRequestSchema.parse(request.body);
-    const { challenge, expiresAt } = await issueChallenge.execute({
-      purpose: "login",
+    const body = loginChallengeRequestSchema.parse(request.body ?? {});
+    const { challenge, expiresAt } = await issueChallenge.issueLoginChallenge({
       dpopJkt,
       deviceId: body.device_id,
       ttlSeconds: LOGIN_CHALLENGE_TTL_SECONDS,
@@ -229,7 +228,7 @@ export function createDeviceAuthRouter(
       const { response: result, headers } = await (auth.api as unknown as DeviceAuthApi).loginVerify({
         headers: fromNodeHeaders(request.headers),
         body: {
-          device_id: body.device_id,
+          ...(body.device_id === undefined ? {} : { device_id: body.device_id }),
           challenge: body.challenge,
           jws: body.jws,
         },
