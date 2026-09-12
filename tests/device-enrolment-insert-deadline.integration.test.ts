@@ -17,7 +17,7 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 const BASE_URL = "http://localhost:3000";
 const ENROL = "enrol-device";
 
-const scenarios = ["fresh", "stalled", "unconsumed", "locked", "replay"] as const;
+const scenarios = ["fresh", "stalled", "unconsumed", "locked", "replay", "idle", "pruned"] as const;
 type Scenario = (typeof scenarios)[number];
 
 // The E2 insert deadline and replay window on the database's clock
@@ -164,6 +164,50 @@ describe.skipIf(databaseUrl === undefined)("E2 insert deadline and replay window
       locker.release();
     }
     expect(await deviceCount("locked")).toBe(0);
+  }, 30_000);
+
+  it("registers nothing when the API stalls between the deadline check and the insert past the idle-in-transaction timeout", async () => {
+    const challenge = `deadline-idle-${suffix}`;
+    await issueAndConsume("idle", challenge);
+    // The API stalls 6 s after the check, inside the transaction. Postgres
+    // ends a transaction left idle for 5 s (idle_in_transaction_session_timeout),
+    // well before Prisma's own 10 s transaction timeout, so the insert that
+    // follows fails and nothing is registered.
+    const stalling = new PrismaDeviceRepository(database, {
+      afterDeadlineCheck: () => new Promise<void>((resolve) => setTimeout(resolve, 6_000)),
+    });
+
+    await expect(stalling.create(createInput("idle", challenge))).rejects.toThrow();
+    expect(await deviceCount("idle")).toBe(0);
+  }, 30_000);
+
+  it("a prune started between the deadline check and the insert waits for the insert to commit", async () => {
+    const challenge = `deadline-pruned-${suffix}`;
+    await issueAndConsume("pruned", challenge);
+    // Expired long enough ago that pruning targets it, though it was
+    // consumed moments ago.
+    await database.$executeRaw`
+      UPDATE auth.device_challenges SET expires_at = now() - interval '10 minutes' WHERE challenge = ${challenge}
+    `;
+    let prune: Promise<number> | undefined;
+    let pruneSettled = false;
+    const repository = new PrismaDeviceRepository(database, {
+      afterDeadlineCheck: async () => {
+        prune = challenges.pruneExpired().finally(() => {
+          pruneSettled = true;
+        });
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        // Still waiting on the challenge row this transaction holds FOR SHARE.
+        expect(pruneSettled).toBe(false);
+      },
+    });
+
+    await expect(repository.create(createInput("pruned", challenge))).resolves.toMatchObject({
+      accountId: accountId("pruned"),
+    });
+    await prune;
+    expect(await deviceCount("pruned")).toBe(1);
+    expect(await database.deviceChallenge.findUnique({ where: { challenge } })).toBeNull();
   }, 30_000);
 
   it("answers a replay REPLAYED inside the window and EXPIRED after it, on the database clock, whatever the API clock says", async () => {
