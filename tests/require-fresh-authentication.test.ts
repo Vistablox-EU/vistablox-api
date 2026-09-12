@@ -16,7 +16,7 @@ function appFor(authContext: {
 }) {
   const sessions: CustomerSessionRepository = {
     listForAccount: vi.fn(),
-    findOwnedSessionToken: vi.fn(),
+    findOwnedProviderSessionId: vi.fn(),
     hasFreshAuthentication: vi.fn().mockResolvedValue(false),
   };
   const app = express();
