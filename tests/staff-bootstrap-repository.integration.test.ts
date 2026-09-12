@@ -81,9 +81,18 @@ describe.skipIf(databaseUrl === undefined)(
         data: { id: `role_${suffix}`, accountId, role: "admin_operations" },
       });
 
-      const result = await repository.issueBootstrapInvitation(issueInput());
-
-      expect(result).toEqual({ outcome: "admin_exists" });
+      try {
+        const result = await repository.issueBootstrapInvitation(issueInput());
+        expect(result).toEqual({ outcome: "admin_exists" });
+      } finally {
+        // countBootstrapState/activeAdminWhere see every unrevoked
+        // admin_operations row for the rest of this suite's shared database
+        // -- revoke it so later tests aren't refused by this one's fixture.
+        await database.staffRoleAssignment.update({
+          where: { id: `role_${suffix}` },
+          data: { revokedAt: new Date() },
+        });
+      }
     });
 
     it("serializes two concurrent runs to exactly one live bootstrap invitation", async () => {
