@@ -6,7 +6,11 @@ import { PgBoss } from "pg-boss";
 import { createClient } from "redis";
 
 import { createApp } from "./app.js";
-import { loadEnvironment, resolveWebAuthnSettings } from "./config/environment.js";
+import {
+  loadEnvironment,
+  resolveStaffInvitationAcceptUrl,
+  resolveWebAuthnSettings,
+} from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
@@ -596,9 +600,7 @@ const app = createApp({
       repository: staffInvitationRepository,
       identities: new BetterAuthStaffIdentityProvider(staffProvisioningAuth),
       sendEmail: (email) => emailSender.sendStaffInvitationEmail(email),
-      acceptUrl:
-        environment.STAFF_INVITATION_ACCEPT_URL ??
-        new URL("/staff/accept-invitation", authBaseUrl).toString(),
+      acceptUrl: resolveStaffInvitationAcceptUrl(environment),
     },
   },
 });

@@ -465,6 +465,20 @@ export function loadEnvironment(source: NodeJS.ProcessEnv = process.env): Enviro
   return environmentSchema.parse(source);
 }
 
+/**
+ * Where an emailed/printed staff invitation link points. Shared by the API
+ * (server.ts) and the first-admin bootstrap CLI so the two can't drift.
+ */
+export function resolveStaffInvitationAcceptUrl(environment: {
+  STAFF_INVITATION_ACCEPT_URL?: string | undefined;
+  BETTER_AUTH_URL: string;
+}): string {
+  return (
+    environment.STAFF_INVITATION_ACCEPT_URL ??
+    new URL("/staff/accept-invitation", environment.BETTER_AUTH_URL).toString()
+  );
+}
+
 // Structural rather than Pick<Environment, ...>: the schema's own .refine()
 // calls resolveWebAuthnSettings, so referencing Environment here would make
 // the schema's inferred type circular.

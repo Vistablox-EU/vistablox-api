@@ -60,7 +60,14 @@ model StaffInvitation {
   legalPracticeId    String?   @map("legal_practice_id")
   appraisalFirmId    String?   @map("appraisal_firm_id")
   tokenHash          String    @unique @map("token_hash")
-  invitedByAccountId String    @map("invited_by_account_id")
+  // Null only for the one-time first-admin bootstrap (issuedVia =
+  // "cli_bootstrap"): no staff account exists yet to be the issuer. A CHECK
+  // constraint ties the two together -- see migration
+  // 20260912100000_staff_invitation_cli_bootstrap.
+  invitedByAccountId String?   @map("invited_by_account_id")
+  // "staff" (issued by a signed-in admin over HTTP) | "cli_bootstrap"
+  // (npm run staff:bootstrap-first-admin, run from the API container).
+  issuedVia          String    @default("staff") @map("issued_via")
   acceptedAccountId  String?   @unique @map("accepted_account_id")
   claimId            String?   @map("claim_id")
   claimedAt          DateTime? @map("claimed_at") @db.Timestamptz(6)
@@ -69,7 +76,7 @@ model StaffInvitation {
   revokedAt          DateTime? @map("revoked_at") @db.Timestamptz(6)
   createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  invitedBy       Account        @relation("StaffInvitationIssuer", fields: [invitedByAccountId], references: [id])
+  invitedBy       Account?       @relation("StaffInvitationIssuer", fields: [invitedByAccountId], references: [id])
   acceptedAccount Account?       @relation("StaffInvitationAcceptance", fields: [acceptedAccountId], references: [id])
   legalPractice   LegalPractice? @relation(fields: [legalPracticeId], references: [id])
   appraisalFirm   AppraisalFirm? @relation(fields: [appraisalFirmId], references: [id])

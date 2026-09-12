@@ -12,6 +12,7 @@
     "build": "npm run db:generate && tsc -p tsconfig.build.json",
     "start": "node dist/server.js",
     "worker:start": "node dist/worker.js",
+    "staff:bootstrap-first-admin": "node dist/cli/bootstrap-first-admin.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",

@@ -4,7 +4,9 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import type { StaffInvitationRepository, StaffRole } from "../repository/staff-invitation.repository.js";
 import type { StaffIdentityProvider } from "./staff-identity-provider.js";
 
-const invitationLifetimeMs = 72 * 60 * 60 * 1000;
+// Shared with the first-admin bootstrap (staff-bootstrap.service.ts) so both
+// issuers produce exactly the same kind of invitation.
+export const STAFF_INVITATION_LIFETIME_MS = 72 * 60 * 60 * 1000;
 const abandonedClaimLifetimeMs = 10 * 60 * 1000;
 
 export class IssueStaffInvitationService {
@@ -32,7 +34,7 @@ export class IssueStaffInvitationService {
   }) {
     const email = input.email.trim().toLowerCase();
     await this.identities.assertEmailAvailable(email);
-    const rawToken = randomBytes(32).toString("base64url");
+    const { rawToken, tokenHash } = generateInvitationToken();
     const createdAt = this.clock();
     const invitation = await this.repository.createInvitation({
       email,
@@ -40,11 +42,11 @@ export class IssueStaffInvitationService {
       role: input.role,
       legalPracticeId: input.legalPracticeId,
       appraisalFirmId: input.appraisalFirmId,
-      tokenHash: hashToken(rawToken),
+      tokenHash,
       invitedByAccountId: input.actorAccountId,
       traceId: input.traceId,
       createdAt,
-      expiresAt: new Date(createdAt.getTime() + invitationLifetimeMs),
+      expiresAt: new Date(createdAt.getTime() + STAFF_INVITATION_LIFETIME_MS),
     });
 
     try {
@@ -128,11 +130,17 @@ export class AcceptStaffInvitationService {
   }
 }
 
-function hashToken(token: string): string {
+/** A fresh single-use invitation token. Only tokenHash is ever stored. */
+export function generateInvitationToken(): { rawToken: string; tokenHash: string } {
+  const rawToken = randomBytes(32).toString("base64url");
+  return { rawToken, tokenHash: hashToken(rawToken) };
+}
+
+export function hashToken(token: string): string {
   return createHash("sha256").update(token, "utf8").digest("hex");
 }
 
-function withToken(baseUrl: string, token: string): string {
+export function withToken(baseUrl: string, token: string): string {
   const url = new URL(baseUrl);
   url.searchParams.set("token", token);
   return url.toString();
