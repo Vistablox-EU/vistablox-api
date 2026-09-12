@@ -11,7 +11,10 @@
 --    (revocation_reason 'passkey_cutover').
 -- 2. Every passkey credential of a non-staff user is deleted. Staff
 --    credentials are kept.
--- 3. The level check constraint no longer allows oauth_passkey.
+-- 3. Every customer's "passkey" row in auth.login_methods is deleted, so
+--    profiles don't list a passkey the customer no longer has. Staff rows
+--    are kept.
+-- 4. The level check constraint no longer allows oauth_passkey.
 WITH removed AS (
   DELETE FROM "auth_session" WHERE "authenticationLevel" = 'oauth_passkey' RETURNING "id"
 )
@@ -21,6 +24,13 @@ WHERE "better_auth_session_id" IN (SELECT "id" FROM removed) AND "revoked_at" IS
 
 DELETE FROM "passkey"
 WHERE "userId" IN (SELECT "id" FROM "auth_user" WHERE "population" <> 'staff_partner');
+
+DELETE FROM "auth"."login_methods" AS lm
+USING "account"."accounts" AS a, "auth_user" AS u
+WHERE lm."account_id" = a."account_id"
+  AND a."better_auth_user_id" = u."id"
+  AND u."population" <> 'staff_partner'
+  AND lm."method_type" = 'passkey';
 
 ALTER TABLE "auth_session" DROP CONSTRAINT "auth_session_authentication_level_check";
 
