@@ -73,7 +73,7 @@ export interface InvestorOfferingDetailRecord {
   fundedEur: string;
   accountReadiness: {
     status: "active" | "recovery_review" | "suspended_restricted";
-    loginMethods: Array<"passkey" | "google" | "apple">;
+    loginMethods: Array<"passkey" | "google" | "apple" | "device_key">;
     kycEligibilityState: string | null;
     kycRenewalDueAt: Date | null;
     walletProvisioned: boolean;

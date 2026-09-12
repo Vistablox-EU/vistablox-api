@@ -162,7 +162,7 @@ const reservationEligibleDetail: InvestorOfferingDetailRecord = {
   fundedEur: "0.00",
   accountReadiness: {
     status: "active",
-    loginMethods: ["passkey", "google"],
+    loginMethods: ["device_key", "google"],
     kycEligibilityState: "eligible",
     kycRenewalDueAt: new Date("2027-01-01T12:00:00.000Z"),
     walletProvisioned: true,

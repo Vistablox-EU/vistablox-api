@@ -6,7 +6,7 @@ export interface ProfileRecord {
   protectedContactEmail: string | null;
   createdAt: Date;
   loginMethods: Array<{
-    methodType: "passkey" | "google" | "apple";
+    methodType: "passkey" | "google" | "apple" | "device_key";
     linkedAt: Date;
   }>;
   kyc: {
