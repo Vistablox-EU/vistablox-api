@@ -8,7 +8,6 @@ export const appConfigResponseSchema = z.object({
     features: z.object({
       device_auth: z.boolean(),
       device_enrolment_required: z.boolean(),
-      passkey_login: z.boolean(),
       signing_requests: z.boolean(),
       recovery_v2: z.boolean(),
       safe_account: z.boolean(),

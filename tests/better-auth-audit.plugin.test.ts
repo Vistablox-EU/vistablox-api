@@ -95,6 +95,8 @@ describe("Better Auth audit plugin", () => {
       userId: "auth_user_01",
       token: "tok_abc123",
       createdAt: new Date("2026-08-31T19:29:00.000Z"),
+      // Passkeys are staff-only since the Phase 4 cutover.
+      authenticationLevel: "staff_passkey",
     };
 
     await hooks.session.create.after(session, { path: "/passkey/verify-authentication", headers });
@@ -104,7 +106,7 @@ describe("Better Auth audit plugin", () => {
       betterAuthUserId: "auth_user_01",
       betterAuthSessionId: "session_01",
       betterAuthSessionToken: "tok_abc123",
-      authMethodAtLogin: "oauth_passkey",
+      authMethodAtLogin: "staff_passkey",
       userAgent: "TestAgent/1.0",
       createdAt: new Date("2026-08-31T19:29:00.000Z"),
       idleExpiresAt: new Date("2026-08-31T19:59:00.000Z"),

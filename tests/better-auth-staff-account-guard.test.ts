@@ -101,7 +101,7 @@ describe("Better Auth staff account guard", () => {
       });
   });
 
-  it("accepts a customer session only after OAuth and passkey are complete", async () => {
+  it("no longer accepts a legacy customer oauth_passkey session (Phase 4 cutover)", async () => {
     const getSession = vi.fn().mockResolvedValue({
       user: {
         id: "auth_customer",
@@ -109,14 +109,10 @@ describe("Better Auth staff account guard", () => {
         disabledAt: null,
         recoveryRequiredAt: null,
       },
-      session: { id: "session_full", authenticationLevel: "oauth_passkey" },
+      session: { id: "session_legacy", authenticationLevel: "oauth_passkey" },
     });
     const resolver = new BetterAuthSessionResolver({ api: { getSession } } as never, {} as never);
 
-    await expect(resolver.resolve({ cookie: "vb.session_token=opaque" }))
-      .resolves.toMatchObject({
-        betterAuthUserId: "auth_customer",
-        providerSessionId: "session_full",
-      });
+    await expect(resolver.resolve({ cookie: "vb.session_token=opaque" })).resolves.toBeNull();
   });
 });

@@ -104,7 +104,6 @@ describe("WEBAUTHN_ORIGIN configuration", () => {
         passkey: {
           rpId: "api.vistablox.io",
           origins: ["https://api.vistablox.io"],
-          customerOrigins: ["https://api.vistablox.io"],
         },
         staffCeremony: { rpId: "api.vistablox.io", origins: ["https://api.vistablox.io"] },
         relatedOrigins: [],
@@ -219,7 +218,6 @@ describe("resolveWebAuthnSettings", () => {
           "https://admin.vistablox.io",
           "android:apk-key-hash:abc123",
         ],
-        customerOrigins: ["https://api.vistablox.io", "android:apk-key-hash:abc123"],
       },
       staffCeremony: {
         rpId: "api.vistablox.io",
@@ -238,9 +236,10 @@ describe("resolveWebAuthnSettings", () => {
     );
 
     expect(settings.relatedOrigins).toEqual(["https://admin.vistablox.io"]);
-    expect(settings.passkey.customerOrigins).toEqual([
+    expect(settings.passkey.origins).toEqual([
       "https://api.vistablox.io",
       "https://eu.api.vistablox.io",
+      "https://admin.vistablox.io",
     ]);
   });
 });

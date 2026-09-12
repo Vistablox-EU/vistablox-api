@@ -97,7 +97,7 @@ describe("BetterAuthSessionResolver: device session time limits", () => {
     };
     const { resolver, query } = buildResolver({ sessionMirror });
 
-    await resolver.recordActivity({ ...identity(new Date(NOW.getTime() - MINUTE)), authenticationLevel: "oauth_passkey" });
+    await resolver.recordActivity({ ...identity(new Date(NOW.getTime() - MINUTE)), authenticationLevel: "staff_passkey" });
 
     expect(query).not.toHaveBeenCalled();
     expect(sessionMirror.recordActivity).not.toHaveBeenCalled();
