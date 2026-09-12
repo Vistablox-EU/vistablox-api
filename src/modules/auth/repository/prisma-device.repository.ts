@@ -146,7 +146,10 @@ export class PrismaDeviceRepository implements DeviceRepository {
   }
 
   public async findByDpopJkt(dpopJkt: string): Promise<Device | null> {
-    const found = await this.database.device.findUnique({ where: { dpopJkt } });
+    // Active devices only. A revoked device's key is free to enrol again
+    // (the key is unique among active devices, devices_dpop_jkt_active_key),
+    // and a revoked device must never be found for a login.
+    const found = await this.database.device.findFirst({ where: { dpopJkt, status: "active" } });
     return found === null ? null : toDevice(found);
   }
 

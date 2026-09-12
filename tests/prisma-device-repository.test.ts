@@ -245,3 +245,23 @@ describe("PrismaDeviceRepository.delete", () => {
     await expect(repository.delete("device_does_not_exist")).resolves.toBeUndefined();
   });
 });
+
+// A revoked device's DPoP key may enrol again, and a revoked device must never
+// be found for a login: the lookup returns active devices only.
+describe("PrismaDeviceRepository.findByDpopJkt", () => {
+  it("looks up the active device for the key only", async () => {
+    const findFirst = vi.fn().mockResolvedValue(CREATED_ROW);
+    const database = { device: { findFirst } } as unknown as DatabaseClient;
+
+    const device = await new PrismaDeviceRepository(database).findByDpopJkt("dpop-jkt-1");
+
+    expect(findFirst).toHaveBeenCalledWith({ where: { dpopJkt: "dpop-jkt-1", status: "active" } });
+    expect(device?.deviceId).toBe("device_1");
+  });
+
+  it("returns null when the key has no active device", async () => {
+    const database = { device: { findFirst: vi.fn().mockResolvedValue(null) } } as unknown as DatabaseClient;
+
+    await expect(new PrismaDeviceRepository(database).findByDpopJkt("dpop-jkt-revoked")).resolves.toBeNull();
+  });
+});

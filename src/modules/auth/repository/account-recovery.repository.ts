@@ -83,4 +83,26 @@ export interface AccountRecoveryRepository {
   }): Promise<AccountRecoveryCaseRecord | null>;
   /** Returns the still-active cooldown expiry for this account, or null if none applies right now. */
   getActiveCooldown(accountId: string, now: Date): Promise<Date | null>;
+  /**
+   * Customer recovery completion: revokes every active device on the account
+   * (status "revoked", with when and why) and removes the account's
+   * device_key login methods, in one transaction, auditing each revoked
+   * device and the removal. Idempotent: a retry finds nothing left to do.
+   */
+  revokeDevicesForRecovery(input: {
+    caseId: string;
+    accountId: string;
+    actorAccountId: string;
+    traceId: string;
+    revokedAt: Date;
+  }): Promise<{ revokedDeviceIds: string[]; removedLoginMethodCount: number }>;
+  /** Records one step of a recovery case in the audit log. */
+  recordRecoveryAuditEvent(input: {
+    caseId: string;
+    actorAccountId: string;
+    traceId: string;
+    action: string;
+    changes: Record<string, string | number | boolean | null>;
+    occurredAt: Date;
+  }): Promise<void>;
 }

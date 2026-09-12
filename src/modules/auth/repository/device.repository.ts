@@ -35,6 +35,10 @@ export interface DeviceRepository {
     consumedChallenge: { challenge: string; purpose: string; dpopJkt: string };
   }): Promise<Device>;
   findByDeviceId(deviceId: string): Promise<Device | null>;
+  /**
+   * The ACTIVE device this DPoP key belongs to, if any. A revoked device is
+   * never returned: its key may enrol again, and it can never log in.
+   */
   findByDpopJkt(dpopJkt: string): Promise<Device | null>;
   /** Drives the `pending_approval` check (E2) -- the only active device on an account, if any. */
   findActiveDeviceForAccount(accountId: string): Promise<Device | null>;

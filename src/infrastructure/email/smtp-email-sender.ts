@@ -38,6 +38,12 @@ export interface AccountRecoveryDecisionEmail {
 export interface AccountRecoveryCompletedEmail {
   to: string;
   cooldownEndsAt: Date;
+  /**
+   * A customer's recovery: their devices were revoked, so the email tells
+   * them to sign in with Google or Apple and set up their phone again. It
+   * carries no link: nothing in it grants access.
+   */
+  deviceReenrolmentRequired?: boolean;
 }
 
 export interface PasskeyRecoveryEmail {
@@ -173,8 +179,12 @@ export class SmtpEmailSender implements EmailSender {
       from: this.options.from,
       to: email.to,
       subject: "Your VistaBlox account access has been restored",
-      text: `Your VistaBlox account recovery is complete. New investments, deposits, and account-control changes stay restricted until ${cooldownEndsAt} as a precaution.`,
-      html: `<p>Your VistaBlox account recovery is complete.</p><p>New investments, deposits, and account-control changes stay restricted until ${escapeHtml(cooldownEndsAt)} as a precaution.</p>`,
+      text: email.deviceReenrolmentRequired === true
+        ? `Your VistaBlox account recovery is complete. For your security, the phone that was set up on your account has been signed out and removed. To get back in, open the VistaBlox app, sign in with Google or Apple, and set up your phone again. New investments, deposits, and account-control changes stay restricted until ${cooldownEndsAt} as a precaution.`
+        : `Your VistaBlox account recovery is complete. New investments, deposits, and account-control changes stay restricted until ${cooldownEndsAt} as a precaution.`,
+      html: email.deviceReenrolmentRequired === true
+        ? `<p>Your VistaBlox account recovery is complete.</p><p>For your security, the phone that was set up on your account has been signed out and removed. To get back in, open the VistaBlox app, sign in with Google or Apple, and set up your phone again.</p><p>New investments, deposits, and account-control changes stay restricted until ${escapeHtml(cooldownEndsAt)} as a precaution.</p>`
+        : `<p>Your VistaBlox account recovery is complete.</p><p>New investments, deposits, and account-control changes stay restricted until ${escapeHtml(cooldownEndsAt)} as a precaution.</p>`,
     });
   }
 

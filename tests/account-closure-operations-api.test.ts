@@ -68,6 +68,8 @@ describe("account closure operations API", () => {
       revokeAllSessions: vi.fn(),
       sendRecoveryCompletionEmail: vi.fn(),
       prepareSelfServicePasskeyReplacement: vi.fn(),
+      revokeSessionsForRecoveryCompletion: vi.fn(),
+      clearRecoveryRequired: vi.fn(),
     };
 
     const response = await request(appFor(repository, administrator)).get(
@@ -94,6 +96,8 @@ describe("account closure operations API", () => {
       revokeAllSessions,
       sendRecoveryCompletionEmail: vi.fn(),
       prepareSelfServicePasskeyReplacement: vi.fn(),
+      revokeSessionsForRecoveryCompletion: vi.fn(),
+      clearRecoveryRequired: vi.fn(),
     };
 
     const response = await request(appFor(repository, administrator))
@@ -120,6 +124,8 @@ describe("account closure operations API", () => {
       revokeAllSessions,
       sendRecoveryCompletionEmail: vi.fn(),
       prepareSelfServicePasskeyReplacement: vi.fn(),
+      revokeSessionsForRecoveryCompletion: vi.fn(),
+      clearRecoveryRequired: vi.fn(),
     };
 
     const response = await request(appFor(repository, administrator))
