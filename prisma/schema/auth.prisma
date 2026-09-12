@@ -270,7 +270,10 @@ model Device {
   // login (L2) has no session context to derive one from otherwise -- it's
   // 1:1 with accountId for a customer, so this avoids a join on every login.
   betterAuthUserId     String   @map("better_auth_user_id")
-  dpopJkt              String   @unique @map("dpop_jkt")
+  // Unique among ACTIVE devices only: the partial unique index
+  // devices_dpop_jkt_active_key (hand-written in its migration; Prisma's DSL
+  // has no syntax for one). A revoked device's key can enrol again.
+  dpopJkt              String   @map("dpop_jkt")
   bioJkt               String   @map("bio_jkt")
   biometricPublicJwk   Json     @map("biometric_public_jwk")
   platform             String
@@ -278,7 +281,10 @@ model Device {
   osVersion            String?  @map("os_version")
   appVersion           String?  @map("app_version")
   attestationMetadata  Json     @map("attestation_metadata")
+  // "active" or "revoked". A revoked device can never log in again.
   status               String   @default("active")
+  revokedAt            DateTime? @map("revoked_at") @db.Timestamptz(6)
+  revocationReason     String?  @map("revocation_reason")
   createdAt            DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
   lastSeenAt           DateTime @default(now()) @map("last_seen_at") @db.Timestamptz(6)
 

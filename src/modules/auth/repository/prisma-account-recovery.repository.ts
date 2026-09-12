@@ -10,6 +10,10 @@ import type {
   RecoveryCorroborationFacts,
 } from "./account-recovery.repository.js";
 
+// auth.devices.revocation_reason for a device revoked by completing a
+// customer's recovery case.
+const RECOVERY_DEVICE_REVOCATION_REASON = "account_recovery";
+
 export class PrismaAccountRecoveryRepository implements AccountRecoveryRepository {
   public constructor(private readonly database: DatabaseClient) {}
 
@@ -284,6 +288,95 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
         },
       });
       return toCaseRecord(current);
+    });
+  }
+
+  public async revokeDevicesForRecovery(input: {
+    caseId: string;
+    accountId: string;
+    actorAccountId: string;
+    traceId: string;
+    revokedAt: Date;
+  }): Promise<{ revokedDeviceIds: string[]; removedLoginMethodCount: number }> {
+    return this.database.$transaction(async (transaction) => {
+      const devices = await transaction.device.findMany({
+        where: { accountId: input.accountId, status: "active" },
+        select: { deviceId: true },
+        orderBy: { createdAt: "asc" },
+      });
+      const revokedDeviceIds = devices.map((device) => device.deviceId);
+      if (revokedDeviceIds.length > 0) {
+        await transaction.device.updateMany({
+          where: { deviceId: { in: revokedDeviceIds }, status: "active" },
+          data: {
+            status: "revoked",
+            revokedAt: input.revokedAt,
+            revocationReason: RECOVERY_DEVICE_REVOCATION_REASON,
+          },
+        });
+      }
+      const removed = await transaction.loginMethod.deleteMany({
+        where: { accountId: input.accountId, methodType: "device_key" },
+      });
+      for (const deviceId of revokedDeviceIds) {
+        await transaction.auditLog.create({
+          data: {
+            id: `audit_${ulid()}`,
+            actorAccountId: input.actorAccountId,
+            action: "authentication.device_revoked",
+            resourceType: "device",
+            resourceId: deviceId,
+            changes: {
+              trace_id: input.traceId,
+              account_id: input.accountId,
+              recovery_case_id: input.caseId,
+              reason: RECOVERY_DEVICE_REVOCATION_REASON,
+            },
+            createdAt: input.revokedAt,
+          },
+        });
+      }
+      if (removed.count > 0) {
+        await transaction.auditLog.create({
+          data: {
+            id: `audit_${ulid()}`,
+            actorAccountId: input.actorAccountId,
+            action: "authentication.login_method_removed",
+            resourceType: "account",
+            resourceId: input.accountId,
+            changes: {
+              trace_id: input.traceId,
+              recovery_case_id: input.caseId,
+              method_type: "device_key",
+              removed_count: removed.count,
+              reason: RECOVERY_DEVICE_REVOCATION_REASON,
+            },
+            createdAt: input.revokedAt,
+          },
+        });
+      }
+      return { revokedDeviceIds, removedLoginMethodCount: removed.count };
+    });
+  }
+
+  public async recordRecoveryAuditEvent(input: {
+    caseId: string;
+    actorAccountId: string;
+    traceId: string;
+    action: string;
+    changes: Record<string, string | number | boolean | null>;
+    occurredAt: Date;
+  }): Promise<void> {
+    await this.database.auditLog.create({
+      data: {
+        id: `audit_${ulid()}`,
+        actorAccountId: input.actorAccountId,
+        action: input.action,
+        resourceType: "account_recovery_case",
+        resourceId: input.caseId,
+        changes: { trace_id: input.traceId, ...input.changes },
+        createdAt: input.occurredAt,
+      },
     });
   }
 
