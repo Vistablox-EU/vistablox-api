@@ -211,6 +211,12 @@ export class CompleteAccountRecoveryService {
     }
     const target = await this.repository.findTargetForRecovery(existingCase.accountId);
     if (target === null) throw caseNotApprovedError();
+    // Phase 4 cutover: completion hands the customer a passkey link, and
+    // customer passkeys are refused (PASSKEY_STAFF_ONLY), so the customer
+    // could never clear recoveryRequiredAt under a case marked completed.
+    // Until Damir decides what completing a customer case does, it's
+    // refused and the case stays approved.
+    if (!target.isStaff) throw recoveryCompletionUnavailableError();
 
     const completedAt = this.clock();
     const cooldownEndsAt = new Date(
@@ -255,6 +261,16 @@ export class CompleteAccountRecoveryService {
 
     return updated;
   }
+}
+
+function recoveryCompletionUnavailableError(): AppError {
+  return new AppError({
+    code: "authentication.account_recovery_completion_unavailable",
+    title: "Recovery completion is unavailable",
+    status: 409,
+    detail:
+      "Completing a customer recovery case is unavailable until device-bound recovery completion is decided. The case remains approved.",
+  });
 }
 
 function targetNotFoundError(): AppError {
