@@ -43,6 +43,11 @@ async function generateKeyPair(): Promise<{ privateKey: webcrypto.CryptoKey; pub
   return { privateKey: pair.privateKey, publicJwk: await exportJWK(pair.publicKey) };
 }
 
+// Sequential logins in a test can land in the same millisecond, and the
+// survivor is the newest by (createdAt, id); a short pause keeps "later"
+// meaning later.
+const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
+
 async function buildHarness() {
   const db: Record<string, Row[]> = { user: [], session: [], account: [], verification: [] };
   const seen = new Set<string>();
@@ -228,6 +233,7 @@ describe("a successful device ceremony supersedes the device's earlier sessions"
     expect((await harness.login()).status).toBe(200);
     const [first] = harness.deviceSessions();
     expect(first).toBeDefined();
+    await tick();
     expect((await harness.login()).status).toBe(200);
 
     const remaining = harness.deviceSessions();
@@ -293,6 +299,7 @@ describe("a successful device ceremony supersedes the device's earlier sessions"
       { authenticationLevel: "device_biometric", dpopJkt: harness.dpopJkt },
       true,
     );
+    await tick();
 
     expect((await harness.enrol()).status).toBe(200);
 
@@ -314,6 +321,7 @@ describe("a successful device ceremony supersedes the device's earlier sessions"
       if (token === earlier?.token) throw new Error("delete failed");
       return original(token);
     });
+    await tick();
 
     expect((await harness.login()).status).toBe(200);
 
@@ -323,5 +331,14 @@ describe("a successful device ceremony supersedes the device's earlier sessions"
       expect.stringContaining("superseded by a device login"),
       expect.anything(),
     );
+  });
+
+  it("two overlapping logins from the phone leave exactly one live session, never none", async () => {
+    const harness = await buildHarness();
+
+    const responses = await Promise.all([harness.login(), harness.login()]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    expect(harness.deviceSessions()).toHaveLength(1);
   });
 });

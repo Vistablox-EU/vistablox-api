@@ -165,18 +165,29 @@ describe.skipIf(databaseUrl === undefined)("device login supersedes the device's
       .sign(who.bioKeys.privateKey);
   }
 
-  async function login(who: Customer): Promise<request.Response> {
+  async function issueChallenge(who: Customer): Promise<string> {
     const challengeResponse = await request(testApp)
       .post(CHALLENGE_PATH)
       .set("dpop", await dpopProof(who, CHALLENGE_PATH))
       .send({});
     expect(challengeResponse.status).toBe(200);
-    const challenge: string = challengeResponse.body.data.challenge;
+    return challengeResponse.body.data.challenge as string;
+  }
+
+  async function verify(who: Customer, challenge: string): Promise<request.Response> {
     return request(testApp)
       .post(VERIFY_PATH)
       .set("dpop", await dpopProof(who, VERIFY_PATH))
       .send({ challenge, jws: await loginJws(who, challenge) });
   }
+
+  async function login(who: Customer): Promise<request.Response> {
+    return verify(who, await issueChallenge(who));
+  }
+
+  // Sequential logins can land in the same millisecond, and the survivor is
+  // the newest by (createdAt, id); a short pause keeps "later" meaning later.
+  const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 5));
 
   /** Live device_biometric sessions of this customer bound to their device's DPoP key. */
   async function deviceSessionIds(who: Customer): Promise<string[]> {
@@ -201,6 +212,7 @@ describe.skipIf(databaseUrl === undefined)("device login supersedes the device's
     expect((await login(customer)).status).toBe(200);
     const [firstId] = await deviceSessionIds(customer);
     expect(firstId).toBeDefined();
+    await tick();
     expect((await login(customer)).status).toBe(200);
 
     const ids = await deviceSessionIds(customer);
@@ -233,5 +245,15 @@ describe.skipIf(databaseUrl === undefined)("device login supersedes the device's
     expect(response.status).toBeGreaterThanOrEqual(400);
     expect(response.status).toBeLessThan(500);
     expect(await deviceSessionIds(customer)).toEqual(before);
+  });
+
+  it("two overlapping logins from the phone leave exactly one live session, never none", async () => {
+    const first = await issueChallenge(customer);
+    const second = await issueChallenge(customer);
+
+    const [a, b] = await Promise.all([verify(customer, first), verify(customer, second)]);
+
+    expect([a.status, b.status]).toEqual([200, 200]);
+    expect(await deviceSessionIds(customer)).toHaveLength(1);
   });
 });

@@ -19,7 +19,7 @@ import {
 import type { EnrolDeviceService } from "../application/device-enrolment.service.js";
 import type { LoginDeviceService } from "../application/device-login.service.js";
 import { mobileAttestationSchema } from "../application/mobile-attestation.schemas.js";
-import { sessionsSupersededBy } from "../domain/device-session-supersede.js";
+import { sessionsToSupersede } from "../domain/device-session-supersede.js";
 import { markDiscardedCeremonySession, markSupersededDeviceSession } from "./device-ceremony-session.js";
 import { recordVerifiedLoginDpopJkt } from "./device-login-audit-context.js";
 import {
@@ -170,7 +170,7 @@ export function createBetterAuthDeviceAuthPlugin(
               await ctx.context.internalAdapter.deleteSession(current.session.token);
               await supersedeEarlierDeviceSessions(
                 ctx,
-                { userId: current.user.id, dpopJkt: boundJkt, newSessionToken: session.token },
+                { userId: current.user.id, dpopJkt: boundJkt },
                 "enrolment",
               );
 
@@ -271,7 +271,7 @@ export function createBetterAuthDeviceAuthPlugin(
             await setSessionCookie(ctx, { session, user });
             await supersedeEarlierDeviceSessions(
               ctx,
-              { userId: device.betterAuthUserId, dpopJkt: dpopClaims.jkt, newSessionToken: session.token },
+              { userId: device.betterAuthUserId, dpopJkt: dpopClaims.jkt },
               "login",
             );
 
@@ -333,10 +333,13 @@ async function discardCeremonySession(
 
 /**
  * A successful E2/L2 leaves the phone exactly one live session. After the
- * new session exists and has been handed out, every other live
- * device_biometric session of this user bound to the same DPoP key (the
- * same device) is revoked (domain/device-session-supersede.ts). Web, staff
- * and other devices' sessions are untouched.
+ * new session exists and has been handed out, every live device_biometric
+ * session of this user bound to the same DPoP key (the same device) except
+ * the newest is revoked (domain/device-session-supersede.ts). Usually the
+ * newest is the session just created. When two ceremonies from the phone
+ * overlap, it's the later one, and the earlier ceremony's own session goes
+ * too, so two overlapping logins can never revoke each other's sessions and
+ * leave none. Web, staff and other devices' sessions are untouched.
  *
  * The match is the one POST /v1/auth/sessions/devices/:jkt/revoke uses. The
  * deletes go through internalAdapter.deleteSession, the path better-auth's
@@ -349,13 +352,13 @@ async function discardCeremonySession(
  */
 async function supersedeEarlierDeviceSessions(
   ctx: Parameters<typeof deleteSessionCookie>[0],
-  input: { userId: string; dpopJkt: string; newSessionToken: string },
+  input: { userId: string; dpopJkt: string },
   ceremony: "enrolment" | "login",
 ): Promise<void> {
-  let sessions: Array<{ token: string } & Record<string, unknown>>;
+  let sessions: Array<{ id: string; token: string } & Record<string, unknown>>;
   try {
     sessions = (await ctx.context.internalAdapter.listSessions(input.userId)) as Array<
-      { token: string } & Record<string, unknown>
+      { id: string; token: string } & Record<string, unknown>
     >;
   } catch (listError) {
     ctx.context.logger?.error?.(`failed to list the sessions a device ${ceremony} supersedes`, {
@@ -363,11 +366,7 @@ async function supersedeEarlierDeviceSessions(
     });
     return;
   }
-  const superseded = sessionsSupersededBy(
-    sessions,
-    { token: input.newSessionToken, dpopJkt: input.dpopJkt },
-    new Date(),
-  );
+  const superseded = sessionsToSupersede(sessions, input.dpopJkt, new Date());
   for (const earlier of superseded) {
     markSupersededDeviceSession(ctx.context, earlier.token);
     await ctx.context.internalAdapter.deleteSession(earlier.token).catch((sessionError: unknown) => {
