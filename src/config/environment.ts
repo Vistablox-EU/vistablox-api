@@ -478,12 +478,11 @@ interface WebAuthnEnvironment {
 export interface WebAuthnSettings {
   /**
    * better-auth's passkey plugin, on both auth instances: every accepted
-   * origin, and the subset a customer may use. Related origins (the admin
-   * console) are staff-only -- the session cookie is shared across the
-   * parent domain, so script on a related origin must never be able to
-   * complete a customer ceremony.
+   * origin. Passkeys are staff-only from all of them since the Phase 4
+   * cutover: customers can't use a passkey from any origin, including the
+   * related ones (the admin console) and the native app's.
    */
-  passkey: { rpId: string; origins: string[]; customerOrigins: string[] };
+  passkey: { rpId: string; origins: string[] };
   /** The staff step-up ceremony at /internal/v1/auth/webauthn. */
   staffCeremony: { rpId: string; origins: string[] };
   /** Web origins that aren't the rpId's own host, served at /.well-known/webauthn. */
@@ -509,7 +508,6 @@ export function resolveWebAuthnSettings(environment: WebAuthnEnvironment): WebAu
     passkey: {
       rpId,
       origins: [...webOrigins, ...androidOrigins],
-      customerOrigins: [...webOrigins.filter(isOwnOrigin), ...androidOrigins],
     },
     staffCeremony: { rpId, origins: webOrigins },
     relatedOrigins: webOrigins.filter((origin) => !isOwnOrigin(origin)),

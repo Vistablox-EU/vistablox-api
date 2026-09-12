@@ -79,14 +79,15 @@ Phased the same way DPoP Phase 1 was: land the new capability *alongside* the ol
 - Runs alongside the *existing* fresh-auth window (both active) until the mobile signing UI is confirmed working end-to-end, then the fresh-auth requirement on these two routes is removed in favor of per-action signing only.
 
 **Phase 3 — recovery redesign**
-- New KYC-bound recovery flow behind a flag. Old recovery-code flow (`rotate`/`redeem`) stays live in parallel until Phase 3 is validated — recovery is the one flow where "can't get back into your account" is worse than a slower rollout.
+- New KYC-bound recovery flow behind the `recovery_v2` flag, which is hard-coded off (`server.ts`) until the flow exists. The old recovery-code flow is already gone (removed at the Phase 4 cutover, #80), so there is nothing to run in parallel. Until Phase 3 ships, the staff-reviewed account recovery case is the only recovery path. Its completion step still issues a customer passkey link, which the cutover refuses; see "Implementation follow-ups".
 - ZK Email wallet-recovery module wired in alongside the KYC recovery flow, both landing on the same 7-day hold — the exact mechanical coordination between the two (see "Wallet architecture") needs settling with mobile-dev before this phase, not during it.
 - Requires 5f (real SMTP) resolved before this phase can go to any real users.
 
-**Phase 4 — cutover**
-- Customer passkey login disabled; existing passkey users are required to log in with the passkey one last time and enroll a device key in the same session (mirrors DPoP's own cutover pattern).
-- Recovery-code endpoints, TOTP backup codes, and the customer-facing passkey plugin paths removed.
-- DPoP binding becomes mandatory for all customer sessions (closes 5e for real, not just Phase-1-style).
+**Phase 4 — cutover (decided by Damir: a direct cutover)**
+- "No old passkey support for the mobile app. Direct cutover." There are no cohorts and no "log in with the passkey one last time" migration. There are no real customers yet; staging test accounts re-onboard with Google/Apple and device enrolment.
+- Customer passkeys are refused outright, from every origin. The `@better-auth/passkey` plugin stays, serving staff and the admin console only. The customer `oauth_passkey` session level is removed, and C1's `passkey_login` flag is gone.
+- Recovery-code endpoints and TOTP backup codes are removed (#80). TOTP codes themselves await Damir's decision.
+- Still to do: DPoP binding becomes mandatory for all customer sessions (closes 5e for real, not just Phase-1-style).
 
 **Phase 5 — cleanup / evaluate the better-auth question**
 - Once the customer passkey plugin is gone, revisit whether customer auth moves out of better-auth into its own module (see "better-auth vs. own module" below). Not gated on anything upstream; purely an internal-quality decision that can happen whenever there's a good window for it.
@@ -111,7 +112,7 @@ Phased the same way DPoP Phase 1 was: land the new capability *alongside* the ol
 
 - **Host:** `https://api.vistablox.io`. Every endpoint is under `/v1`. JSON bodies. Success bodies are `{ "data": { ... } }`; `202`/`204` as noted.
 - **Every request** carries a DPoP proof (the existing contract), plus `Authorization: Bearer <token>` whenever the client holds a session. The client never sends cookies.
-- **Session delivery:** every response that creates, upgrades or rotates a session sets `set-auth-token`. Enrolment and recovery ROTATE the token. The body includes `session_expires_at` and `authentication_level`.
+- **Session delivery:** every response that creates, upgrades or rotates a session sets `set-auth-token`. Enrolment and recovery ROTATE the token. The body includes `session_expires_at` and `authentication_level`. A successful E2 or L2 supersedes the device's earlier sessions: their tokens then answer 401, so the app must always use the newest token.
 - **Errors:** `application/problem+json` `{ type, title, status, detail, code, trace_id }`, plus extension members where noted (`retry_after_s`, `hold_until`, `limit_kind`, `resets_at`, `reason`). `code` is authoritative, and each code has exactly one meaning. The backend implements device auth as a better-auth plugin; the paths, shapes and envelope here hold regardless.
 - **Customer-only:** staff and partner accounts can't create any session in the app. Google/Apple sign-in and every session-creating endpoint answer with the existing `STAFF_PASSKEY_REQUIRED`. RC1 treats a staff email as unknown (still `202`).
 - **Wallet boundary:** each customer's wallet is a Safe smart account on Base (Base Sepolia on staging). Its only owners are the biometric keys of the customer's enrolled devices (threshold 1, at most 2 owners). VistaBlox holds **no key of any kind** over it: the server proposes user operations and relays what a device signed. It never signs. The server obtains gas sponsorship (Coinbase CDP) and submits every user operation; the app holds no bundler or paymaster key.
@@ -179,13 +180,13 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
 
 ### 3.5 Endpoints
 
-"Pending session" means a DPoP-bound session of level `oauth_pending` (a fresh Google/Apple sign-in; during migration also a legacy `oauth_passkey` session). Every endpoint requires a DPoP proof. Endpoints whose auth is "none" ignore an `Authorization` header if one is present: a stale token is never a reason to fail.
+"Pending session" means a DPoP-bound session of level `oauth_pending` (a fresh Google/Apple sign-in). Every endpoint requires a DPoP proof. Endpoints whose auth is "none" ignore an `Authorization` header if one is present: a stale token is never a reason to fail.
 
 **Configuration**
 
 | # | Method and path | Auth | Request | Response `data` |
 |---|---|---|---|---|
-| C1 | `GET /v1/app/config` | none | — | `{ min_app_version: { ios, android }, features: { device_auth, device_enrolment_required, passkey_login, signing_requests, recovery_v2, safe_account }, mobile_auth_platforms: { android, ios } }`. The map advertises platform availability independently; Android is enabled first and iOS remains disabled until App Attest support ships. With `safe_account` off there's no Safe: every device, the first included, enrols through the JWS path, E1b isn't used, and `first_device` is ignored. |
+| C1 | `GET /v1/app/config` | none | — | `{ min_app_version: { ios, android }, features: { device_auth, device_enrolment_required, signing_requests, recovery_v2, safe_account }, mobile_auth_platforms: { android, ios } }`. The map advertises platform availability independently; Android is enabled first and iOS remains disabled until App Attest support ships. With `safe_account` off there's no Safe: every device, the first included, enrols through the JWS path, E1b isn't used, and `first_device` is ignored. |
 
 **Enrolment and login**
 
@@ -350,9 +351,13 @@ New tables (`auth` Postgres schema, following the existing DPoP-replay-table pre
 - **`identity` schema addition**: a `document_identity_hmac` column on the KYC record (HMAC of document number + issuing country + DOB, keyed the same way other identifier-hashing in this codebase already is — see `better-auth-audit.plugin.ts`'s `identifierHashKey` pattern) — the "same-document check" the recovery flow's (RC2/RC3) and re-enrolment flow's (RE1) face-match are both paired with.
 - **`identity`/`platform` schema addition — guardian/email backup**: backs `W1`/`W2` — a `guardian_email`, `email_backup_status` (`not_set`/`awaiting_acceptance`/`active`), and the acceptance-command state, most naturally living alongside the existing wallet/investor-profile read model this extends (`/v1/investor-profile/wallet`) rather than in `auth` — it's account/investor data, not an auth primitive.
 
-**`GET /v1/app/config` (C1)**: not a table — a small config service reading feature-flag state (`device_auth`, `device_enrolment_required`, `passkey_login`, `signing_requests`, `recovery_v2`) and `min_app_version` per platform. Backed by the same environment-driven flag pattern as `RESERVATION_FUNDING_RAIL_ENABLED`/`OPERATING_DISTRIBUTION_ENABLED` for the booleans; `min_app_version` needs an operator-settable value (not just an env var, since it changes on every mobile release without a backend deploy) — simplest is a small `platform.app_config` row DevOps can update directly, matching how other operator-tunable-without-a-deploy settings are handled elsewhere in `platform`.
+**`GET /v1/app/config` (C1)**: not a table — a small config service reading feature-flag state (`device_auth`, `device_enrolment_required`, `signing_requests`, `recovery_v2`, `safe_account`) and `min_app_version` per platform. Backed by the same environment-driven flag pattern as `RESERVATION_FUNDING_RAIL_ENABLED`/`OPERATING_DISTRIBUTION_ENABLED` for the booleans; `min_app_version` needs an operator-settable value (not just an env var, since it changes on every mobile release without a backend deploy) — simplest is a small `platform.app_config` row DevOps can update directly, matching how other operator-tunable-without-a-deploy settings are handled elsewhere in `platform`.
 
-Removed (Phase 4 / cutover): `account_recovery_codes` table and its repository/service pair, TOTP backup-code storage on `mfa_backup_codes`, and whatever the customer passkey plugin's own tables hold once that plugin is removed from the factory.
+Removed (Phase 4 / cutover):
+- the `account_recovery_codes` table and its repository/service pair, and TOTP backup-code storage on `mfa_backup_codes` (#80);
+- every customer's `passkey` credential, and every `auth_session` at level `oauth_passkey`, with the level itself (migration `20260912150000_remove_oauth_passkey_level`).
+
+The passkey plugin and its `passkey` table stay, for staff.
 
 ## Configuration and secrets (DevOps-owned; names adopted from `devops-device-bound-auth.md` §7)
 
@@ -389,13 +394,18 @@ Two concrete additions beyond what section 3 already specifies (`https://api.vis
 
 ## Migration and cutover
 
-Follows the DPoP precedent exactly, since that rollout is the one piece of prior art in this codebase for "replace an auth primitive without breaking everyone logged in":
+**Decided by Damir: a direct cutover.** "No old passkey support for the mobile app. Direct cutover." There are no real customers yet, so there's no migration period: no cohorts, no enrolment prompt for existing passkey users, and no "one last passkey login".
 
-1. Phase 1–3 ship behind the `device_auth`/`recovery_v2` flags served by `GET /v1/app/config` (C1), validated on staging with real devices the same way DPoP was (a session-creation bind, then a live device test, watched via logs before wider rollout).
-2. `device_enrolment_required` (also served by C1) turns on once enrollment and login are validated: every existing passkey user is prompted to enroll a device key on their next launch, completing one last passkey login in the same session (same "one last passkey login, enroll the replacement in the same flow" pattern DPoP used for session binding). Passkey login itself stays available throughout this step.
-3. A cutover date is set once Phase 3's recovery flow is validated end-to-end (recovery is the one path where a bug locks someone out permanently, so it gets the most real-device testing before cutover, not the least).
-4. At cutover: `passkey_login` flips off and `min_app_version` is raised (both via C1) so any client too old to have the enrollment prompt is blocked outright rather than hitting a removed endpoint; customer passkey, recovery-code, and TOTP-backup-code endpoints are removed server-side; DPoP binding is made mandatory (Phase 1's `phase1CutoverAt`-style permissiveness goes away for customers). A user who never updated and never enrolled reaches this point only through the forced-update gate, then re-enters through mobile-dev's recovery flow (RC1–RC3, plus email recovery on the wallet side) on their next successful login, exactly like any other lost-credential case — no separate "missed migration" code path needed.
-5. Staff auth (better-auth, WebAuthn, `WEBAUTHN_RP_ID`) is untouched by any of this — separate population, separate plan section below.
+1. Phases 1–2 ship behind the `device_auth` flag served by `GET /v1/app/config` (C1), validated on staging with real devices the same way DPoP was (a session-creation bind, then a live device test, watched via logs before wider rollout).
+2. The cutover ships as one deploy: the backend's Phase 4 PRs (#80 and the customer passkey restriction) together with the mobile release that removes the app's passkey, recovery-code and backup-code screens (M7). Neither half is deployed alone, since each breaks the other's old version.
+3. At cutover:
+   - customer passkeys are refused from every origin, and customers' passkey credentials and `oauth_passkey` sessions are deleted;
+   - the `oauth_passkey` level and C1's `passkey_login` flag are removed;
+   - the recovery-code and TOTP-backup-code endpoints are removed.
+
+   Staging test accounts re-onboard with Google/Apple and device enrolment. DPoP binding becoming mandatory for customers is still to do.
+4. Until Phase 3's recovery flow exists (`recovery_v2` stays off), the staff-reviewed account recovery case is the only recovery path. Its completion step is an open item: see "Implementation follow-ups".
+5. Staff auth (the better-auth passkey plugin, WebAuthn, `WEBAUTHN_RP_ID`, the admin console as a related origin) is untouched by all of this: separate population, separate plan section below.
 
 ## Staff scope: exclusion from device auth, and staff login (decided)
 
@@ -520,7 +530,7 @@ Round 2's section 3 rewrite covers: the owner-assertion signing mechanism (3.3, 
 
 - Every new endpoint gets an audit event through the existing `AuthAuditSink`, following the DPoP precedent from this session: log enough to reconstruct what happened (device_id, purpose, outcome, account_id) and never the signature, the raw challenge, or key material.
 - Structured logs (`logger.info`/`.warn`, matching the `dpopLogger` pattern from #45): info on successful enroll/login/sign, warn on any rejection with its specific error code, matching the "why did this session land unbound" observability lesson from the DPoP rollout — the first version of that shipped without server-side visibility into binds/rejections and needed a follow-up fix once real device tests started surfacing silent failures.
-- Feature flags: served by `GET /v1/app/config` (C1) — `device_auth`, `device_enrolment_required`, `passkey_login`, `signing_requests`, `recovery_v2`, plus `min_app_version` — each independently toggleable, so disabling `signing_requests` doesn't also have to disable `device_auth` if only one misbehaves in production.
+- Feature flags: served by `GET /v1/app/config` (C1) — `device_auth`, `device_enrolment_required`, `signing_requests`, `recovery_v2`, `safe_account`, plus `min_app_version` — each independently toggleable, so disabling `signing_requests` doesn't also have to disable `device_auth` if only one misbehaves in production.
 - Rollout: staged the same way as DPoP's `DPOP_PHASE1_CUTOVER_AT` — an explicit, operator-set cutover marker per phase, not an implicit "whenever the code ships" behavior change, and each one documented in `.env.example` with the same "why this is pinned, what breaks if it moves" rationale that var got.
 - **Push and email (Damir's decision 12)**: every push stays content-free (FCM/APNs, D4) as already specified in section 3. Security-relevant events additionally go out by email, not push-only: new device paired or enrolled, re-enrolment, device revoked, recovery started, recovery completed, recovery cancelled. No SMS for now. This reuses the existing SMTP-backed email-sending path (`BetterAuthCustomerAccountAdministrator`) rather than a new channel — one email template per event, each auditable the same way as the push/audit events above.
 - **SMTP (Damir's decision 13, DevOps-owned, blocks Phase 3)**: the existing `SMTP_HOST=smtp.example.com` placeholder (5f) must be replaced with a real, production-grade sender before Phase 3 ships, and Damir's requirement is explicit: SPF, DKIM, and DMARC `p=reject` must all be in place, because recovery emails are exactly the template a phisher would clone. Not this plan's to build, but it's a hard Phase 3 blocker, not just a nice-to-have.
@@ -533,6 +543,8 @@ Small, deliberately-deferred items surfaced during the #58 security review of th
 - **Orphaned device row on session-creation failure: done in #62.** E2 inserts the device row through Prisma and creates the session through better-auth's own pg pool, so the two can't share a transaction. When session creation, or anything else after the insert, fails, the device-auth plugin now calls `EnrolDeviceService.rollback`, which removes the new row before the error goes back to the client. If the rollback itself fails, that is logged and the original error is still returned. L2 inserts nothing, so it has nothing to clean up. The failure was not rare in practice: until #62 widened the `auth_session` authentication-level check constraint, every `device_biometric` session was rejected, so every staging enrolment orphaned its row. Migration `20260911170000_device_biometric_session_level` cleared the one such row that existed on staging.
 - **Stale comment in an applied migration.** `prisma/migrations/20260911160000_device_one_active_per_account/migration.sql` says a raced insert maps to `DevicePairingNotImplementedError`. That class no longer exists: #58 folded the "account already has an active device" case into `DeviceAlreadyEnrolledError` (409 `DEVICE_ALREADY_ENROLLED`), which `PrismaDeviceRepository.create` now throws for both unique constraints. Applied migrations are never edited, so the correction is recorded here instead.
 - **`attestation_metadata` stores the full raw certificate chain** (`Device.attestationMetadata`, currently `{ keyAttestationChain: string[] }` verbatim) rather than a reference or a small summary (e.g. serials, thumbprints, security level). Fine for step 1's volume, but worth revisiting before this table sees production traffic, both for storage size and because the raw chain isn't something a support/ops view should need to render in full.
+- **Revoked devices still block re-enrolment (for when device revocation, D3, is built).** `PrismaDeviceRepository.findByDpopJkt` doesn't filter out revoked devices, and E2 answers 409 `DEVICE_ALREADY_ENROLLED` whenever that lookup finds one. Once revocation exists, a revoked phone could never re-enrol with its DPoP key, and would always land on the reset screen. Revocation has to make re-enrolment possible, for example by ignoring revoked devices there.
+- **Open: customer account recovery after the cutover.** Opening a staff-reviewed recovery case sets the customer's `recoveryRequiredAt`, which the session resolver refuses. Completing the case clears that flag only through a customer passkey registration: the completion email carries a passkey link. Customer passkeys are now refused, so a customer whose case opens can't complete recovery. And since device revocation isn't built yet, re-enrolling a device can't replace the old one either. This needs a decision before the cutover deploy: what completing a customer's recovery case should do.
 
 ## Open questions for Damir
 
