@@ -17,6 +17,10 @@ import type { Device, DeviceRepository } from "./device.repository.js";
 // by constraint name rather than target field name.
 const ONE_ACTIVE_DEVICE_PER_ACCOUNT_CONSTRAINT = "devices_one_active_per_account";
 
+// auth.login_methods.method_type for an enrolled device's biometric key.
+// provider_subject holds the device_id.
+const DEVICE_KEY_LOGIN_METHOD = "device_key";
+
 export interface PrismaDeviceRepositoryOptions {
   /**
    * Test seam only: runs inside create()'s transaction, after the insert
@@ -76,7 +80,7 @@ export class PrismaDeviceRepository implements DeviceRepository {
             throw new DeviceChallengeExpiredError();
           }
           await this.options.afterDeadlineCheck?.();
-          return tx.device.create({
+          const device = await tx.device.create({
             data: {
               deviceId: `device_${ulid()}`,
               accountId: input.accountId,
@@ -91,6 +95,29 @@ export class PrismaDeviceRepository implements DeviceRepository {
               attestationMetadata: input.attestationMetadata as Prisma.InputJsonValue,
             },
           });
+          // The enrolled device is one of the account's login methods, in
+          // the same transaction as the device row: both commit or neither
+          // does. One device_key row per account (unique on account and
+          // method), pointing at the current device.
+          await tx.loginMethod.upsert({
+            where: {
+              accountId_methodType: { accountId: input.accountId, methodType: DEVICE_KEY_LOGIN_METHOD },
+            },
+            create: {
+              id: `login_${ulid()}`,
+              accountId: input.accountId,
+              methodType: DEVICE_KEY_LOGIN_METHOD,
+              providerSubject: device.deviceId,
+              linkedAt: device.createdAt,
+              linkedViaFreshAuth: true,
+            },
+            update: {
+              providerSubject: device.deviceId,
+              linkedAt: device.createdAt,
+              linkedViaFreshAuth: true,
+            },
+          });
+          return device;
         },
         // Client-side limits: waiting for a connection happens before the
         // deadline check, and a transaction past `timeout` is rolled back.
@@ -141,8 +168,15 @@ export class PrismaDeviceRepository implements DeviceRepository {
   public async delete(deviceId: string): Promise<void> {
     // deleteMany, not delete: a no-op on an id that's already gone must not
     // throw (P2025) -- this is compensation logic, called from a catch
-    // block that's about to rethrow the real error either way.
-    await this.database.device.deleteMany({ where: { deviceId } });
+    // block that's about to rethrow the real error either way. The device's
+    // login method goes with it, in one transaction; only the row pointing
+    // at this device, never one for another device of the account.
+    await this.database.$transaction([
+      this.database.loginMethod.deleteMany({
+        where: { methodType: DEVICE_KEY_LOGIN_METHOD, providerSubject: deviceId },
+      }),
+      this.database.device.deleteMany({ where: { deviceId } }),
+    ]);
   }
 }
 
