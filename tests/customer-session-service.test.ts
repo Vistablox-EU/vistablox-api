@@ -17,7 +17,7 @@ function summary(overrides: Partial<CustomerSessionSummary> = {}): CustomerSessi
     sessionId: "sess_01",
     channel: "web",
     deviceLabel: "Chrome on macOS",
-    authMethodAtLogin: "oauth_passkey",
+    authMethodAtLogin: "device_biometric",
     createdAt: new Date("2026-08-31T09:00:00.000Z"),
     lastSeenAt: new Date("2026-09-01T09:00:00.000Z"),
     status: "active",

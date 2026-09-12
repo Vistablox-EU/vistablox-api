@@ -61,7 +61,7 @@ export function createBetterAuthPasskeyChallengeHeaderPlugin(): BetterAuthPlugin
             // Authorization the same way this hook injects the passkey
             // challenge cookie; if this hook only ever set its own cookie,
             // its result would silently erase bearer's, and verify-* would
-            // see no session (OAUTH_REQUIRED_BEFORE_PASSKEY). So this hook
+            // see no session. So this hook
             // re-derives and re-injects the session cookie too, onto the
             // SAME headers object as the passkey cookie, producing the one
             // complete Cookie value both need. setRequestCookie parses,

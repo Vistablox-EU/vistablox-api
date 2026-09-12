@@ -398,7 +398,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               !("userId" in credential) ||
               typeof credential.userId !== "string"
             ) {
-              throw oauthPasskeyRequired();
+              throw passkeyNotRecognized();
             }
             await assertStaffPasskeyUser(ctx, credential.userId);
             await assertPasskeySessionKeyMatches(ctx, credential.userId, options.dpop);
@@ -627,10 +627,12 @@ async function assertStaffPasskeyUser(
   });
 }
 
-function oauthPasskeyRequired(): APIError {
+// A sign-in with a credential this instance doesn't hold. Passkeys are
+// staff-only, so there's no customer "continue with Google or Apple" step.
+function passkeyNotRecognized(): APIError {
   return APIError.from("UNAUTHORIZED", {
-    code: "OAUTH_REQUIRED_BEFORE_PASSKEY",
-    message: "Continue with Google or Apple before confirming your passkey.",
+    code: "PASSKEY_NOT_RECOGNIZED",
+    message: "This passkey isn't registered with VistaBlox.",
   });
 }
 
