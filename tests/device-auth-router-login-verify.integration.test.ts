@@ -118,7 +118,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/mobile/login/verify, n
       "/v1/auth/mobile",
       createDeviceAuthRouter(
         requireDpopOnly,
-        new IssueDeviceChallengeService(deviceChallengeRepository, () => new Date(), deviceRepository),
+        new IssueDeviceChallengeService(deviceChallengeRepository, deviceRepository),
         auth,
         requireDpopOnlyForVerify,
       ),

@@ -17,7 +17,8 @@ const dpopOnly: RequestHandler = (_request, response, next) => {
 
 function fakeChallengeRepository(): DeviceChallengeRepository {
   return {
-    issue: vi.fn().mockResolvedValue(undefined),
+    // The expiry the database recorded for the challenge.
+    issue: vi.fn().mockResolvedValue(new Date("2026-01-01T00:02:00.000Z")),
     consume: vi.fn().mockResolvedValue(null),
     wasConsumedWithinReplayWindow: vi.fn().mockResolvedValue(false),
     pruneExpired: vi.fn().mockResolvedValue(0),
@@ -215,6 +216,8 @@ describe("L1/L2 without device_id (contract 3.1: the device comes from the DPoP 
 
     expect(response.status).toBe(200);
     expect(typeof response.body.data.challenge).toBe("string");
+    // Exactly the expiry the repository (the database) recorded.
+    expect(response.body.data.expires_at).toBe("2026-01-01T00:02:00.000Z");
   });
 
   it("forwards an L2 without device_id, without inventing one", async () => {

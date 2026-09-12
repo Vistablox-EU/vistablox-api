@@ -9,12 +9,16 @@ const CHALLENGE_BYTES = 32;
 export class IssueDeviceChallengeService {
   public constructor(
     private readonly repository: DeviceChallengeRepository,
-    private readonly clock: () => Date = () => new Date(),
     // Used only by issueLoginChallenge, to find the device a DPoP key
     // belongs to.
     private readonly devices?: Pick<DeviceRepository, "findByDpopJkt">,
   ) {}
 
+  /**
+   * The returned expiresAt is the one the database recorded (its now() +
+   * TTL), so the expires_at the client is told is exactly what consume()
+   * will enforce.
+   */
   public async execute(input: {
     purpose: string;
     dpopJkt: string;
@@ -22,13 +26,12 @@ export class IssueDeviceChallengeService {
     ttlSeconds: number;
   }): Promise<{ challenge: string; expiresAt: Date }> {
     const challenge = randomBytes(CHALLENGE_BYTES).toString("base64url");
-    const expiresAt = new Date(this.clock().getTime() + input.ttlSeconds * 1000);
-    await this.repository.issue({
+    const expiresAt = await this.repository.issue({
       challenge,
       purpose: input.purpose,
       dpopJkt: input.dpopJkt,
       deviceId: input.deviceId,
-      expiresAt,
+      ttlSeconds: input.ttlSeconds,
     });
     return { challenge, expiresAt };
   }
