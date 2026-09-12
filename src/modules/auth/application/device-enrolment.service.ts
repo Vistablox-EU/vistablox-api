@@ -88,7 +88,6 @@ export class EnrolDeviceService {
       purpose: ENROL_PURPOSE,
       dpopJkt: input.dpopJkt,
       deviceId: undefined,
-      now: this.clock(),
     });
     if (!consumed) {
       return this.throwForUnusableChallenge(input);

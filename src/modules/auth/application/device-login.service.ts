@@ -59,13 +59,11 @@ export class LoginDeviceService {
       throw new MobilePlatformUnsupportedError(device.platform);
     }
 
-    const now = this.clock();
     const consumed = await this.challengeRepository.consume({
       challenge: input.challenge,
       purpose: LOGIN_PURPOSE,
       dpopJkt: input.dpopJkt,
       deviceId: device.deviceId,
-      now,
     });
     if (!consumed) {
       // Same code semantics as enrolment (domain/device-challenge-replay.ts).
