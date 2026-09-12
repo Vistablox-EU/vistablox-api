@@ -11,15 +11,34 @@ export function createBetterAuthStaffAccountGuardPlugin() {
               create: {
                 before: async (
                   session: { userId: string },
-                  context: {
-                    context: {
-                      internalAdapter: {
-                        findUserById: (userId: string) => Promise<unknown>;
-                      };
-                    };
-                  } | null,
+                  context:
+                    | {
+                        path?: string;
+                        context: {
+                          internalAdapter: {
+                            findUserById: (userId: string) => Promise<unknown>;
+                          };
+                        };
+                      }
+                    | null
+                    | undefined,
                 ) => {
-                  if (context === null) return;
+                  // No request context means a session created outside any
+                  // authentication endpoint: better-auth passes undefined
+                  // there (tryGetCurrentAuthEndpointContext); null is treated
+                  // the same. Every real session is created inside an
+                  // endpoint -- better-auth's own sign-in, OAuth callback and
+                  // passkey endpoints, and device E2/L2. Without a context
+                  // this guard can't see how the session is being created
+                  // (staff-only-via-passkey, recovery completion, verified
+                  // OAuth email) and can't look up its user, so it refuses:
+                  // no session is ever created unchecked.
+                  if (context === null || context === undefined) {
+                    throw APIError.from("FORBIDDEN", {
+                      code: "SESSION_CONTEXT_REQUIRED",
+                      message: "Sessions can only be created through an authentication endpoint.",
+                    });
+                  }
                   const user = await context.context.internalAdapter.findUserById(
                     session.userId,
                   );
