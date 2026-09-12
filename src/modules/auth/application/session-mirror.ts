@@ -2,6 +2,7 @@ export interface RecordSessionCreatedInput {
   betterAuthUserId: string;
   betterAuthSessionId: string;
   betterAuthSessionToken: string;
+  channel: "web" | "mobile";
   authMethodAtLogin: string | null;
   userAgent: string | null;
   createdAt: Date;
@@ -18,7 +19,8 @@ export interface RecordSessionRevokedInput {
 export interface RecordSessionActivityInput {
   betterAuthSessionId: string;
   seenAt: Date;
-  idleExpiresAt: Date;
+  // Only device_biometric sessions have a VistaBlox-managed idle expiry.
+  idleExpiresAt?: Date;
 }
 
 // Populates auth.sessions, the customer-facing mirror of Better Auth's
@@ -30,8 +32,8 @@ export interface RecordSessionActivityInput {
 export interface SessionMirror {
   recordCreated(input: RecordSessionCreatedInput): Promise<void>;
   recordRevoked(input: RecordSessionRevokedInput): Promise<void>;
-  // Device sessions only (they have an idle limit): moves last_seen_at and
-  // idle_expires_at forward after a fully authenticated request. Optional
-  // so existing implementations and test doubles stay valid.
+  // Moves last_seen_at after a fully authenticated request. Device sessions
+  // additionally move their VistaBlox-managed idle expiry. Optional so
+  // existing implementations and test doubles stay valid.
   recordActivity?(input: RecordSessionActivityInput): Promise<void>;
 }

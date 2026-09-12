@@ -64,6 +64,7 @@ export function createBetterAuthAuditPlugin(
       token: string;
       createdAt: Date;
       authenticationLevel?: unknown;
+      dpopJkt?: unknown;
     },
     context: AuditContext | null,
     authMethod: string | null,
@@ -77,6 +78,7 @@ export function createBetterAuthAuditPlugin(
         betterAuthUserId: session.userId,
         betterAuthSessionId: session.id,
         betterAuthSessionToken: session.token,
+        channel: sessionChannel(session),
         authMethodAtLogin: authMethod,
         userAgent: context?.headers?.get("user-agent") ?? null,
         createdAt: session.createdAt,
@@ -356,6 +358,15 @@ async function resolveFailedIdentity(
     };
   }
   return { betterAuthUserId: null, resourceId: "login_unknown" };
+}
+
+function sessionChannel(session: {
+  authenticationLevel?: unknown;
+  dpopJkt?: unknown;
+}): "web" | "mobile" {
+  return session.authenticationLevel === "device_biometric" || typeof session.dpopJkt === "string"
+    ? "mobile"
+    : "web";
 }
 
 function isLoginPath(path: string | undefined): boolean {
