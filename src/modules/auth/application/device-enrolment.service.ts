@@ -9,6 +9,7 @@ import {
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
+  DeviceChallengeReplayedError,
   MobilePlatformUnsupportedError,
 } from "./device-auth-errors.js";
 import { verifyDeviceAuthJws } from "./device-auth-jws-verifier.js";
@@ -58,6 +59,10 @@ export class EnrolDeviceService {
   ) {}
 
   public async execute(input: EnrolDeviceInput): Promise<Device> {
+    // The platform policy is the only platform check, and it runs before the
+    // challenge is consumed. The attestation verified below is Android's:
+    // enabling another platform in the policy also needs its attestation
+    // verifier here.
     if (
       !isMobilePlatform(input.attestation.platform) ||
       !isMobilePlatformSupported(input.attestation.platform, this.mobilePlatformPolicy)
@@ -83,10 +88,9 @@ export class EnrolDeviceService {
       purpose: ENROL_PURPOSE,
       dpopJkt: input.dpopJkt,
       deviceId: undefined,
-      now: this.clock(),
     });
     if (!consumed) {
-      throw new DeviceChallengeExpiredError();
+      return this.throwForUnusableChallenge(input);
     }
 
     const claims = await verifyDeviceAuthJws({
@@ -104,9 +108,6 @@ export class EnrolDeviceService {
       throw new DeviceAlreadyEnrolledError();
     }
 
-    if (input.attestation.platform !== "android") {
-      throw new MobilePlatformUnsupportedError(input.attestation.platform);
-    }
     await verifyAndroidKeyAttestation({
       certificateChain: input.attestation.keyAttestationChain,
       pinnedRootCertificates: this.android.pinnedRootCertificates,
@@ -118,6 +119,11 @@ export class EnrolDeviceService {
     });
     await this.verifyPlayIntegrity(input, claims.bioJkt);
 
+    // The repository registers the device only while this challenge was
+    // consumed less than 60 s ago by the database's clock; past that it
+    // registers nothing and throws DeviceChallengeExpiredError. This is what
+    // lets a replay after the window truthfully answer EXPIRED
+    // (domain/device-challenge-replay.ts).
     return this.deviceRepository.create({
       accountId: input.accountId,
       betterAuthUserId: input.betterAuthUserId,
@@ -131,6 +137,7 @@ export class EnrolDeviceService {
       attestationMetadata: {
         keyAttestationChain: input.attestation.keyAttestationChain,
       },
+      consumedChallenge: { challenge: input.challenge, purpose: ENROL_PURPOSE, dpopJkt: input.dpopJkt },
     });
   }
 
@@ -148,6 +155,37 @@ export class EnrolDeviceService {
    */
   public async rollback(deviceId: string): Promise<void> {
     await this.deviceRepository.delete(deviceId);
+  }
+
+  /**
+   * The answer for a challenge consume() refused
+   * (domain/device-challenge-replay.ts):
+   * - REPLAYED while an enrolment that consumed it may still register a
+   *   device;
+   * - past the replay window, 409 if a device was registered for this key or
+   *   the account has one by now;
+   * - EXPIRED only if neither.
+   */
+  private async throwForUnusableChallenge(input: EnrolDeviceInput): Promise<never> {
+    const recentlyUsed = await this.challengeRepository.wasConsumedWithinReplayWindow({
+      challenge: input.challenge,
+      purpose: ENROL_PURPOSE,
+      dpopJkt: input.dpopJkt,
+      deviceId: undefined,
+    });
+    if (recentlyUsed) {
+      throw new DeviceChallengeReplayedError();
+    }
+    // Asked after the window check, so it sees any device row the consuming
+    // enrolment committed: past the window, that enrolment can no longer be
+    // inserting one.
+    const registered =
+      (await this.deviceRepository.findByDpopJkt(input.dpopJkt)) ??
+      (await this.deviceRepository.findActiveDeviceForAccount(input.accountId));
+    if (registered !== null) {
+      throw new DeviceAlreadyEnrolledError();
+    }
+    throw new DeviceChallengeExpiredError();
   }
 
   private async verifyPlayIntegrity(input: EnrolDeviceInput, bioJkt: string): Promise<void> {

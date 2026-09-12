@@ -2,7 +2,8 @@ import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { Prisma } from "../../../generated/prisma/client.js";
-import { DeviceAlreadyEnrolledError } from "../application/device-auth-errors.js";
+import { DeviceAlreadyEnrolledError, DeviceChallengeExpiredError } from "../application/device-auth-errors.js";
+import { ENROLMENT_INSERT_DEADLINE_MS } from "../domain/device-challenge-replay.js";
 import type { Device, DeviceRepository } from "./device.repository.js";
 
 // This table's two unique constraints (dpop_jkt, and the partial
@@ -16,8 +17,20 @@ import type { Device, DeviceRepository } from "./device.repository.js";
 // by constraint name rather than target field name.
 const ONE_ACTIVE_DEVICE_PER_ACCOUNT_CONSTRAINT = "devices_one_active_per_account";
 
+export interface PrismaDeviceRepositoryOptions {
+  /**
+   * Test seam only: runs inside create()'s transaction, after the insert
+   * deadline check and before the insert, to simulate the API stalling
+   * there. Never set in production wiring.
+   */
+  afterDeadlineCheck?: () => Promise<void>;
+}
+
 export class PrismaDeviceRepository implements DeviceRepository {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly options: PrismaDeviceRepositoryOptions = {},
+  ) {}
 
   public async create(input: {
     accountId: string;
@@ -30,23 +43,59 @@ export class PrismaDeviceRepository implements DeviceRepository {
     osVersion: string | undefined;
     appVersion: string | undefined;
     attestationMetadata: Record<string, unknown>;
+    consumedChallenge: { challenge: string; purpose: string; dpopJkt: string };
   }): Promise<Device> {
+    const consumed = input.consumedChallenge;
     try {
-      const created = await this.database.device.create({
-        data: {
-          deviceId: `device_${ulid()}`,
-          accountId: input.accountId,
-          betterAuthUserId: input.betterAuthUserId,
-          dpopJkt: input.dpopJkt,
-          bioJkt: input.bioJkt,
-          biometricPublicJwk: input.biometricPublicJwk as Prisma.InputJsonValue,
-          platform: input.platform,
-          model: input.model ?? null,
-          osVersion: input.osVersion ?? null,
-          appVersion: input.appVersion ?? null,
-          attestationMetadata: input.attestationMetadata as Prisma.InputJsonValue,
+      const created = await this.database.$transaction(
+        async (tx) => {
+          // The insert deadline (domain/device-challenge-replay.ts) is checked
+          // on the database clock below. These bound how long this
+          // transaction can stay open after that check -- running, waiting
+          // for a lock, or idle before COMMIT -- all far under the 60 s
+          // between the deadline and the replay window. Hitting any of them
+          // aborts the transaction: nothing is registered.
+          await tx.$executeRaw`SET LOCAL statement_timeout = '5s'`;
+          await tx.$executeRaw`SET LOCAL lock_timeout = '2s'`;
+          await tx.$executeRaw`SET LOCAL idle_in_transaction_session_timeout = '5s'`;
+          // clock_timestamp(), not now(): the time of this check itself, not
+          // of BEGIN. FOR SHARE holds the challenge row until this
+          // transaction ends, so pruning can't delete it between this check
+          // and the insert's commit: a replay can never find neither the
+          // challenge nor the device while the device is still committing.
+          const rows = await tx.$queryRaw<Array<{ fresh: number }>>`
+            SELECT 1 AS fresh
+            FROM auth.device_challenges
+            WHERE challenge = ${consumed.challenge}
+              AND purpose = ${consumed.purpose}
+              AND dpop_jkt = ${consumed.dpopJkt}
+              AND consumed_at > clock_timestamp() - (${ENROLMENT_INSERT_DEADLINE_MS}::integer * interval '1 millisecond')
+            FOR SHARE
+          `;
+          if (rows.length === 0) {
+            throw new DeviceChallengeExpiredError();
+          }
+          await this.options.afterDeadlineCheck?.();
+          return tx.device.create({
+            data: {
+              deviceId: `device_${ulid()}`,
+              accountId: input.accountId,
+              betterAuthUserId: input.betterAuthUserId,
+              dpopJkt: input.dpopJkt,
+              bioJkt: input.bioJkt,
+              biometricPublicJwk: input.biometricPublicJwk as Prisma.InputJsonValue,
+              platform: input.platform,
+              model: input.model ?? null,
+              osVersion: input.osVersion ?? null,
+              appVersion: input.appVersion ?? null,
+              attestationMetadata: input.attestationMetadata as Prisma.InputJsonValue,
+            },
+          });
         },
-      });
+        // Client-side limits: waiting for a connection happens before the
+        // deadline check, and a transaction past `timeout` is rolled back.
+        { maxWait: 5_000, timeout: 10_000 },
+      );
       return toDevice(created);
     } catch (error) {
       if (

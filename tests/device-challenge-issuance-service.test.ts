@@ -8,6 +8,7 @@ function challengeRepository(): DeviceChallengeRepository & { issue: ReturnType<
   return {
     issue: vi.fn().mockResolvedValue(undefined),
     consume: vi.fn(),
+    wasConsumedWithinReplayWindow: vi.fn(),
     pruneExpired: vi.fn(),
   };
 }

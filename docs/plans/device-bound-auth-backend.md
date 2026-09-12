@@ -17,7 +17,7 @@ Each decision below is reflected in the section named; nothing here is still ope
 7. **On-chain broadcast**: confirmed as already designed — T3 requires `signed_tx`, the server verifies and broadcasts, never signs or holds a key. No change needed; already reflected in section 3.4 (T3) and the Threat model.
 8. **Wallet key custody**: short term, mobile's wrap-key-survives-biometric-change approach is accepted, with the invalidated-key-blocks-signing and server-controls-broadcast compensating controls already in this plan; seed phrases are explicitly rejected. Long term, evaluate an ERC-4337 smart-contract wallet with a device-hardware P-256 signer and time-locked-rotation recovery. *Reflected in: new "Wallet key custody: long-term evaluation" section.*
 9. **Recovery link host**: `api.vistablox.io`, confirmed. *Reflected in: section 3.4 (unchanged, was already the recommended default) and Open Questions (removed).*
-10. **Devices without Google Play Services**: blocked at launch (key-attestation-only as a later option, not now), via `DEVICE_UNSUPPORTED` (section 3.5, settled with mobile-dev). *Reflected in: Threat model.*
+10. **Devices without Google Play Services**: blocked at launch (key-attestation-only as a later option, not now). The app blocks them itself. The server has no dedicated code for this case: while Play Integrity is enforced, enrolment without an integrity token fails with `ATTESTATION_INVALID` (section 3.4; `DEVICE_UNSUPPORTED` was dropped in #63). *Reflected in: Threat model.*
 11. **GDPR Art. 9**: an explicit `consent_version` is required before the Didit session is created in RC2, RE1, and P6 (settled with mobile-dev — a string, not a boolean, per Art. 9's evidentiary requirement), and the DPO must separately confirm Didit's contract covers retaining the original KYC portrait for later face matching. *Reflected in: "GDPR consent and DPO confirmation" section.*
 12. **Push**: content-free via FCM/APNs, confirmed; security events (new device paired/enrolled, re-enrolment, device revoked, recovery started/completed/cancelled) additionally go out by email; no SMS for now. *Reflected in: Observability section.*
 13. **SMTP**: DevOps-owned, blocks Phase 3; must ship with SPF, DKIM, and DMARC `p=reject` because recovery emails are a phishing template. *Reflected in: the 5f finding, updated.*
@@ -131,12 +131,12 @@ Phased the same way DPoP Phase 1 was: land the new capability *alongside* the ol
 Used for `enrol-device`, `login`, and `tx` requests that have no on-chain part.
 
 - **Compact JWS:** header `{ "alg": "ES256", "typ": "vistablox-device-auth+jwt", "kid": "<bio_jkt>" }`. Only `enrol-device` adds `"jwk"` (public P-256). The signature is raw `r‖s`.
-- **Common claims:** `purpose`, `challenge` (server-issued, single-use), `iat` (±60s), `device_id` (except the first enrolment of a new device).
+- **Common claims:** `purpose`, `challenge` (server-issued, single-use), `iat` (±60s), `device_id` (except the first enrolment of a new device; optional on `login`).
 
 | `purpose` | Extra claims |
 |---|---|
 | `enrol-device` | `dpop_jkt` (must equal the request's proof jkt); `device_id` only when re-enrolling an existing device record |
-| `login` | none |
+| `login` | none. `device_id` may be omitted: the server resolves the device from the request's DPoP jkt (section 3.1), and a `device_id` that is present must match it. |
 | `tx` (off-chain types only) | `request_id`, `request_type`, `amount_minor` (decimal string), `currency`, `destination` (`{ kind: "wallet"\|"iban"\|"contract", value }`), `created_by` (`{ kind: "user"\|"platform"\|"staff", label }`), `created_at`, `expires_at`. Compared field by field, as exact strings; any difference is `TX_FIELD_MISMATCH`. |
 
 - **Rules:** each purpose has its own challenge namespace; challenges are consumed atomically; `kid` must equal the stored `bio_jkt`.
@@ -175,7 +175,7 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
   - `attestation_object` is sent at the first enrolment of an install (`attestKey(keyId, binding)`); `assertion` after that.
   - The App Attest key is a third key, separate from both Secure Enclave keys.
   - Secure Enclave access-control flags aren't attested; App Attest proves that a genuine app set them.
-- **No Google Play services:** there's no integrity token, so the server answers `DEVICE_UNSUPPORTED`. The app blocks such devices at launch anyway.
+- **No Google Play services:** there's no integrity token. While `PLAY_INTEGRITY_POLICY` requires one, enrolment without it fails with `ATTESTATION_INVALID`. The app blocks such devices at launch anyway.
 
 ### 3.5 Endpoints
 
@@ -194,8 +194,8 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
 | E1 | `POST /v1/auth/mobile/enrol/challenge` | pending, recovery-pending, recovery-scoped or re-enrol session | `{}` | `{ challenge, expires_at, first_device }`. `first_device` is true when the account has no Safe yet. |
 | E1b | `POST /v1/auth/mobile/enrol/account-op` | same as E1; first device only, and only while `safe_account` is on | `{ challenge, public_key: { x, y } }` | `{ user_op }`: the sponsored operation whose `initCode` deploys the Safe, with the shared signer configured with this key. The app decodes it before signing (section 4.6). |
 | E2 | `POST /v1/auth/mobile/enrol/verify` | same as E1 | `{ challenge, jws, attestation }`; for the first device while `safe_account` is on, `{ challenge, public_key, assertion, attestation }` (purpose `enrol-device`, over E1b's operation) | `{ device_id, status: "active"\|"pending_approval", owner_address, safe_address, pairing?: { pairing_id, code, expires_at }, session_expires_at?, authentication_level }`, plus `set-auth-token` unless the status is `pending_approval`. It's `pending_approval` when the account already has another active device (a new phone, or this phone re-adding itself after a selfie); that device approves it (P1–P3). For a first device with `safe_account` on, the server verifies the attestation and the assertion, then submits the deployment operation (below). The rotated session is already `device_biometric`, so no L2 follows. |
-| L1 | `POST /v1/auth/mobile/login/challenge` | none (DPoP only) | `{ device_id }` | `{ challenge, expires_at, attestation_required }` |
-| L2 | `POST /v1/auth/mobile/login/verify` | none (DPoP only) | `{ device_id, challenge, jws, attestation? }` | `{ device_id, session_expires_at, authentication_level: "device_biometric", hold_until? }`, plus `set-auth-token` |
+| L1 | `POST /v1/auth/mobile/login/challenge` | none (DPoP only) | `{ device_id? }` | `{ challenge, expires_at, attestation_required }`. The challenge is bound to the device the request's DPoP jkt belongs to (section 3.1), even if a different `device_id` is sent; L2 then answers `DEVICE_LOGIN_FAILED`. L1 answers the same whether or not the key belongs to a device. |
+| L2 | `POST /v1/auth/mobile/login/verify` | none (DPoP only) | `{ device_id?, challenge, jws, attestation? }` | `{ device_id, session_expires_at, authentication_level: "device_biometric", hold_until? }`, plus `set-auth-token`. The device is the one the request's DPoP jkt belongs to; a `device_id` that is sent must be that device. |
 
 **Account and email backup**
 
@@ -276,10 +276,10 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | `RATE_LIMITED` | 429 | Too many attempts. | Disable the action for `retry_after_s`, with a countdown. |
 | `ACCOUNT_RESTRICTED` | 403 | Account frozen or closed. | Restriction screen; no retry. |
 | `STAFF_PASSKEY_REQUIRED` | 403 | A staff or partner account (existing staff-account guard), at Google/Apple sign-in or on any session-creating endpoint. | "This account can't use the VistaBlox app." Drop the token; start screen; no retry. |
-| `DEVICE_UNSUPPORTED` | 400 | No Google Play services, so no integrity verdict. | The "This device isn't supported" screen (section 5.0). |
+| `MOBILE_PLATFORM_NOT_SUPPORTED` | 400 | The server doesn't accept this mobile platform yet (today iOS, until App Attest ships; see C1's `mobile_auth_platforms`). Returned by E2, and by L2 for a device of that platform. | The "This device isn't supported" screen (section 5.0); no retry. |
 | `CONSENT_REQUIRED` | 400 | RC2 or RE1 without the current `consent_version`. | Show the consent screen (section 5.14), then retry. |
-| `DEVICE_CHALLENGE_EXPIRED` | 400 | Challenge TTL passed. | Fetch a new challenge and re-prompt once; then show an error. |
-| `DEVICE_CHALLENGE_REPLAYED` | 400 | Challenge already consumed. | As expired; log telemetry. |
+| `DEVICE_CHALLENGE_EXPIRED` | 400 | The challenge is unknown, its TTL passed unused, or it was used more than 120 s before this request. On E2 this means no enrolment can still register a device with it. | Fetch a new challenge and re-prompt once; then show an error. |
+| `DEVICE_CHALLENGE_REPLAYED` | 400 | The challenge was used less than 120 s before this request; the request that used it may still be completing. | Don't discard a pending key on this code. After 120 s the same challenge answers `DEVICE_CHALLENGE_EXPIRED` if nothing was registered with it. On L2, fetch a new challenge and retry once. |
 | `DEVICE_CHALLENGE_PURPOSE_MISMATCH` | 400 | Wrong namespace. | No retry; report the bug. |
 | `DEVICE_JWS_INVALID` | 400 | Malformed JWS, or wrong typ/alg/iat. | No retry; report. |
 | `OWNER_ASSERTION_INVALID` | 400 | Malformed assertion, wrong `vb_` fields, or a bad signature. | No retry. If the local key is invalidated → section 5.9. Otherwise report. |
@@ -292,8 +292,8 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | `STRONG_INTEGRITY_REQUIRED` | 403 | Android, production: the phone passes device integrity but not the strong integrity that moving money and adding a phone require. | "This phone can't approve payments because its security updates are too old. You can still see everything. To approve, update the phone's software, or use your other device." No retry. |
 | `DEVICE_KEY_NOT_HARDWARE_BACKED` | 400 | Software key. | As `ATTESTATION_INVALID`. |
 | `DEVICE_LIMIT_REACHED` | 409 | Already 2 active devices (a tablet counts). | Explain; remove a device on the other phone first. |
-| `DEVICE_ALREADY_ENROLLED` | 409 | This jkt is already an active device. | Go to device login. |
-| `DEVICE_LOGIN_FAILED` | 401 | Generic: unknown device, bad signature or kid mismatch. | If the local bio key is invalidated → section 5.9. Otherwise retry once with a new challenge, then offer "Sign in with Google/Apple". |
+| `DEVICE_ALREADY_ENROLLED` | 409 | The account already has an active device, or this DPoP key already belongs to one. | With a pending enrolment (for example an E2 whose response never arrived), first run L1/L2 without `device_id`, with the same DPoP key: if this phone's enrolment went through, that logs it in. Show the reset screen only if that answers `DEVICE_LOGIN_FAILED`. Never retry E2 automatically. |
+| `DEVICE_LOGIN_FAILED` | 401 | Generic: no active device for this DPoP key, a mismatched `device_id`, bad signature or kid mismatch. | If the local bio key is invalidated → section 5.9. Otherwise retry once with a new challenge, then offer "Sign in with Google/Apple". |
 | `DEVICE_REVOKED` | 403 | This device was removed. | Wipe the bio key, `device_id` and token (keep the DPoP key); start screen. |
 | `DEVICE_NOT_FOUND` | 404 | Target device unknown. | Refresh the device list. |
 | `DEVICE_HOLD_ACTIVE` | 403 | The 7-day wait after an email recovery hasn't finished. | "You can move money again on `hold_until`." Viewing works. |
@@ -321,6 +321,9 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | Item | Value |
 |---|---|
 | Challenge TTL: enrol / login / tx / pairing approval / revoke / cancel | 300s / 120s / 120s / 120s / 120s / 120s |
+| Used challenge answers `DEVICE_CHALLENGE_REPLAYED` | For 120s after it was used, on the server's clock; `DEVICE_CHALLENGE_EXPIRED` after that |
+| E2 device registration deadline | 60s after its challenge was used, on the server's clock; past that nothing is registered |
+| Expired challenges kept before pruning | 120s after expiry, so a recent replay still answers `DEVICE_CHALLENGE_REPLAYED` |
 | Pairing lifetime | 10 min |
 | Recovery link lifetime | 30 min, single-use |
 | Email-recovery command | Must be sent before `expires_at` (24h) |
@@ -410,7 +413,7 @@ No new endpoint-facing error code is needed for staff exclusion: the existing `S
 
 **Confirmed to mobile-dev: this does not move the public HTTP surface to `/api/auth` or `{code, message}`.** "Plugin" here describes the *implementation mechanism* for session lifecycle (creation hooks, DPoP-style binding), not the public routing. Every existing customer-facing precedent in this codebase already separates the two: DPoP itself is wired as a `databaseHooks.session.create` hook inside a better-auth plugin, yet `POST /v1/auth/sessions/devices/:jkt/revoke` (its customer-facing endpoint) is an ordinary `/v1` Express route in `customer-session.router.ts` that calls into better-auth's `auth.api.*`/`internalAdapter` internally — never a `/api/auth/*` route. Every device-auth endpoint in section 3.4 (E1/E2/L1/L2/D*/RE*/P*/T*/RC*) follows that same shape: a new `/v1` Express router (`requireAuthentication`-gated where a session already exists, unauthenticated-but-DPoP-checked where one doesn't), `AppError`/`errorHandler` producing `application/problem+json`, and the handlers call the better-auth plugin's session-creation/rotation/revocation internals rather than being better-auth endpoints themselves. Section 3.4's paths and 3.1's envelope stay exactly as written — no change needed on mobile's side for this.
 
-**Trade-off worth naming honestly**: the brief's own complaint (item 4) is that "bending a web-cookie framework to fit native apps" is exactly what produced the bearer/passkey-challenge cookie-merge bug found and fixed this session (#48) — real complexity in the security-critical path, from a genuine architectural mismatch, not a one-off bug. A plugin approach inherits that mismatch again for device-key auth specifically, since it's registering more `before`/`after` hooks into the same `runBeforeHooks` merge mechanism that bug lived in. The dispatch-level regression test added this session (#49) exists specifically because that merge behavior is subtle enough to break silently — a new plugin adds another hook to reason about there, though not a new *failure mode*, since the merge behavior itself doesn't change, and this new plugin uses `device_id`-keyed lookups rather than injecting anything into `Cookie`, which was specifically what the earlier bug was about.
+**Trade-off worth naming honestly**: the brief's own complaint (item 4) is that "bending a web-cookie framework to fit native apps" is exactly what produced the bearer/passkey-challenge cookie-merge bug found and fixed this session (#48) — real complexity in the security-critical path, from a genuine architectural mismatch, not a one-off bug. A plugin approach inherits that mismatch again for device-key auth specifically, since it's registering more `before`/`after` hooks into the same `runBeforeHooks` merge mechanism that bug lived in. The dispatch-level regression test added this session (#49) exists specifically because that merge behavior is subtle enough to break silently — a new plugin adds another hook to reason about there, though not a new *failure mode*, since the merge behavior itself doesn't change, and this new plugin uses `dpop_jkt`-keyed lookups rather than injecting anything into `Cookie`, which was specifically what the earlier bug was about.
 
 **Later option (brief's item 5, once customer passkeys are fully gone)**: move customer auth to a small module VistaBlox owns outside better-auth — Google/Apple ID-token verification (already just `jose`), device-key signature verification (this plan's own JWS verifier), and opaque session tokens stored hashed and bound to DPoP. Better-auth would then only serve staff web login. This removes the cookie-framework mismatch at the root instead of managing around it, at the cost of re-implementing session issuance/revocation/expiry that better-auth currently gives for free. Recommend revisiting this **after** Phase 4 (customer passkeys fully removed), not before — building the new module while passkeys still exist means running two auth systems in parallel for longer, not shorter.
 
@@ -500,7 +503,7 @@ Round 2's section 3 rewrite covers: the owner-assertion signing mechanism (3.3, 
 | Recovery | Deepfake/injected face during the recovery KYC re-check | Native in-app capture only (no web link), active liveness with injection detection in the Didit workflow, App Attest/Play Integrity on the recovering device |
 | Recovery | KYC-credit exhaustion / inbox-flooding a victim | Didit session created only at RC2, after the email link is used, not at RC1 |
 | Recovery | Weak/auto-approved match lets an impersonator through | Auto-approve only on a strong face-match score; anything weaker goes to `manual_review`, the existing dual-review staff flow |
-| Enrollment/login | Devices without Google Play Services (e.g. Huawei) can't produce a Play Integrity verdict | **Decided: blocked at launch.** Enrolment is rejected with `DEVICE_UNSUPPORTED` (section 3.5, settled) rather than a generic attestation failure. Key-attestation-only enrolment with stricter limits is a later option, not built now. |
+| Enrollment/login | Devices without Google Play Services (e.g. Huawei) can't produce a Play Integrity verdict | **Decided: blocked at launch.** The app blocks these devices at launch. While Play Integrity is enforced, an enrolment without an integrity token fails with `ATTESTATION_INVALID` (`DEVICE_UNSUPPORTED` was dropped in #63). Key-attestation-only enrolment with stricter limits is a later option, not built now. |
 | Enrollment | A device with only weak (Class 2) biometric hardware attempts enrolment | Android: the key-attestation extension's reported user-auth class is checked, not just presence of *some* biometric; iOS: relies on App Attest proving the genuine app set `.biometryCurrentSet`, same platform asymmetry as elsewhere in this plan. Rejected outright — round 2 removed the fallback class this device class would otherwise have used. |
 | All device-bound flows | A better-auth/library upgrade silently changes how signed claims are merged or verified | Direct-dispatch regression tests (the `dispatchAuthEndpoint` pattern from #49) for any new before/after hook this introduces, not just handler-level unit tests |
 

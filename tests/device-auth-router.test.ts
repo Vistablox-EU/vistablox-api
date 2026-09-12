@@ -19,6 +19,7 @@ function fakeChallengeRepository(): DeviceChallengeRepository {
   return {
     issue: vi.fn().mockResolvedValue(undefined),
     consume: vi.fn().mockResolvedValue(null),
+    wasConsumedWithinReplayWindow: vi.fn().mockResolvedValue(false),
     pruneExpired: vi.fn().mockResolvedValue(0),
   };
 }
@@ -134,6 +135,36 @@ describe("POST /v1/auth/mobile/enrol/verify", () => {
 
     expect(response.status).toBe(400);
     expect(response.body.code).toBe("DEVICE_CHALLENGE_EXPIRED");
+  });
+
+  it("accepts an iOS attestation body, forwards it unchanged, and relays MOBILE_PLATFORM_NOT_SUPPORTED in the /v1 envelope", async () => {
+    const enrolVerify = vi.fn().mockRejectedValue(
+      new APIError("BAD_REQUEST", {
+        code: "MOBILE_PLATFORM_NOT_SUPPORTED",
+        message: "This mobile platform is not supported yet.",
+      }),
+    );
+    const attestation = {
+      platform: "ios",
+      app_attest_key_id: "app-attest-key-1",
+      attestation_object: "attestation-object-b64",
+    };
+
+    const response = await request(appFor({ api: { enrolVerify } }))
+      .post("/v1/auth/mobile/enrol/verify")
+      .send({ challenge: "the-challenge", jws: "the-jws", attestation });
+
+    expect(response.status).toBe(400);
+    expect(response.body).toMatchObject({
+      type: "https://api.vistablox.io/errors/MOBILE_PLATFORM_NOT_SUPPORTED",
+      code: "MOBILE_PLATFORM_NOT_SUPPORTED",
+      status: 400,
+      title: expect.any(String),
+      detail: expect.any(String),
+      trace_id: expect.any(String),
+    });
+    const call = enrolVerify.mock.calls[0]![0] as { body: { attestation: unknown } };
+    expect(call.body.attestation).toEqual(attestation);
   });
 });
 

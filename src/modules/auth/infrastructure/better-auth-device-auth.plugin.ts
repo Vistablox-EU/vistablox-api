@@ -8,6 +8,7 @@ import { isAndroidAttestationError } from "../application/android-attestation-ve
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
+  DeviceChallengeReplayedError,
   DeviceLoginFailedError,
   MobilePlatformUnsupportedError,
 } from "../application/device-auth-errors.js";
@@ -443,6 +444,7 @@ export function toApiError(error: unknown): APIError {
   if (error instanceof APIError) return error;
   if (
     error instanceof DeviceChallengeExpiredError ||
+    error instanceof DeviceChallengeReplayedError ||
     error instanceof DeviceChallengePurposeMismatchError ||
     error instanceof DeviceJwsInvalidError ||
     error instanceof DeviceJwsDpopMismatchError
