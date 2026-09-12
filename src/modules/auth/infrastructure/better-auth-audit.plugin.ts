@@ -77,7 +77,6 @@ export function createBetterAuthAuditPlugin(
       await options.sessionMirror.recordCreated({
         betterAuthUserId: session.userId,
         betterAuthSessionId: session.id,
-        betterAuthSessionToken: session.token,
         channel: sessionChannel(session),
         authMethodAtLogin: authMethod,
         userAgent: context?.headers?.get("user-agent") ?? null,

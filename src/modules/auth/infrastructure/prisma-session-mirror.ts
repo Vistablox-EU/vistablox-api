@@ -35,7 +35,6 @@ export class PrismaSessionMirror implements SessionMirror {
         channel: input.channel,
         betterAuthUserId: input.betterAuthUserId,
         betterAuthSessionId: input.betterAuthSessionId,
-        betterAuthSessionToken: input.betterAuthSessionToken,
         authMethodAtLogin: input.authMethodAtLogin ?? "unknown",
         lastFreshAuthAt:
           input.authMethodAtLogin === "oauth_passkey" ||

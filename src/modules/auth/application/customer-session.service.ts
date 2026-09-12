@@ -37,8 +37,8 @@ export class RevokeOwnSessionService {
     sessionId: string,
     headers: IncomingHttpHeaders,
   ): Promise<void> {
-    const token = await this.repository.findOwnedSessionToken(accountId, sessionId);
-    if (token === null) {
+    const providerSessionId = await this.repository.findOwnedProviderSessionId(accountId, sessionId);
+    if (providerSessionId === null) {
       throw new AppError({
         code: "resource.not_found",
         title: "Session not found",
@@ -49,7 +49,7 @@ export class RevokeOwnSessionService {
 
     // Better Auth's own session.delete hook marks the mirror row revoked
     // and writes the audit entry; there is no separate write to make here.
-    await this.revoker.revoke(token, headers);
+    await this.revoker.revoke(providerSessionId, headers);
   }
 }
 

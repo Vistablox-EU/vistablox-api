@@ -38,7 +38,7 @@ describe("ListOwnSessionsService", () => {
         summary({ sessionId: "sess_01", betterAuthSessionId: "auth_session_01" }),
         summary({ sessionId: "sess_02", betterAuthSessionId: "auth_session_02" }),
       ]),
-      findOwnedSessionToken: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
     };
     const service = new ListOwnSessionsService(repository);
 
@@ -50,11 +50,11 @@ describe("ListOwnSessionsService", () => {
 });
 
 describe("RevokeOwnSessionService", () => {
-  it("revokes the Better Auth token for a session owned by the caller", async () => {
+  it("revokes the Better Auth session owned by the caller", async () => {
     const revoke = vi.fn().mockResolvedValue(undefined);
     const repository: CustomerSessionRepository = {
       listForAccount: vi.fn(),
-      findOwnedSessionToken: vi.fn().mockResolvedValue("tok_abc123"),
+      findOwnedProviderSessionId: vi.fn().mockResolvedValue("auth_session_01"),
     };
     const revoker: SessionRevoker = fakeRevoker({ revoke });
     const service = new RevokeOwnSessionService(repository, revoker);
@@ -62,15 +62,15 @@ describe("RevokeOwnSessionService", () => {
 
     await service.execute("acct_01", "sess_01", headers);
 
-    expect(repository.findOwnedSessionToken).toHaveBeenCalledWith("acct_01", "sess_01");
-    expect(revoke).toHaveBeenCalledWith("tok_abc123", headers);
+    expect(repository.findOwnedProviderSessionId).toHaveBeenCalledWith("acct_01", "sess_01");
+    expect(revoke).toHaveBeenCalledWith("auth_session_01", headers);
   });
 
   it("rejects a session ID that does not belong to the caller's account", async () => {
     const revoke = vi.fn();
     const repository: CustomerSessionRepository = {
       listForAccount: vi.fn(),
-      findOwnedSessionToken: vi.fn().mockResolvedValue(null),
+      findOwnedProviderSessionId: vi.fn().mockResolvedValue(null),
     };
     const service = new RevokeOwnSessionService(repository, fakeRevoker({ revoke }));
 
