@@ -89,7 +89,7 @@ describe("BetterAuthSessionResolver: device session time limits", () => {
     });
   });
 
-  it("sends no query at all for a session that isn't a device session", async () => {
+  it("updates only mirror activity for a session that isn't a device session", async () => {
     const sessionMirror: SessionMirror = {
       recordCreated: vi.fn(),
       recordRevoked: vi.fn(),
@@ -100,7 +100,10 @@ describe("BetterAuthSessionResolver: device session time limits", () => {
     await resolver.recordActivity({ ...identity(new Date(NOW.getTime() - MINUTE)), authenticationLevel: "oauth_passkey" });
 
     expect(query).not.toHaveBeenCalled();
-    expect(sessionMirror.recordActivity).not.toHaveBeenCalled();
+    expect(sessionMirror.recordActivity).toHaveBeenCalledWith({
+      betterAuthSessionId: "session_01",
+      seenAt: NOW,
+    });
   });
 
   it("never gives the mirror an idle expiry past the absolute limit", async () => {

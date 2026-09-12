@@ -37,6 +37,7 @@ describe("audit plugin session mirror: device session limits", () => {
 
     expect(sessionMirror.recordCreated).toHaveBeenCalledWith(
       expect.objectContaining({
+        channel: "mobile",
         idleExpiresAt: new Date("2026-09-11T12:05:00.000Z"),
         absoluteExpiresAt: new Date("2026-09-11T12:30:00.000Z"),
       }),
@@ -57,9 +58,34 @@ describe("audit plugin session mirror: device session limits", () => {
 
     expect(sessionMirror.recordCreated).toHaveBeenCalledWith(
       expect.objectContaining({
+        channel: "web",
         idleExpiresAt: new Date("2026-09-11T12:30:00.000Z"),
         absoluteExpiresAt: new Date("2026-09-12T00:00:00.000Z"),
       }),
+    );
+  });
+
+  it("mirrors a DPoP-bound OAuth session as mobile before device enrollment", async () => {
+    const sessionMirror: SessionMirror = {
+      recordCreated: vi.fn().mockResolvedValue(undefined),
+      recordRevoked: vi.fn(),
+    };
+    const after = await sessionCreateAfter(sessionMirror);
+
+    await after(
+      {
+        id: "session_03",
+        userId: "auth_user_01",
+        token: "tok3",
+        createdAt,
+        authenticationLevel: "oauth_pending",
+        dpopJkt: "dpop_jkt_01",
+      },
+      { path: "/sign-in/social", headers: new Headers() },
+    );
+
+    expect(sessionMirror.recordCreated).toHaveBeenCalledWith(
+      expect.objectContaining({ channel: "mobile" }),
     );
   });
 });

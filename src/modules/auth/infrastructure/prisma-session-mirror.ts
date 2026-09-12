@@ -32,7 +32,7 @@ export class PrismaSessionMirror implements SessionMirror {
       data: {
         id: `sess_${ulid()}`,
         accountId: account.id,
-        channel: "web",
+        channel: input.channel,
         betterAuthUserId: input.betterAuthUserId,
         betterAuthSessionId: input.betterAuthSessionId,
         betterAuthSessionToken: input.betterAuthSessionToken,
@@ -66,7 +66,10 @@ export class PrismaSessionMirror implements SessionMirror {
   public async recordActivity(input: RecordSessionActivityInput): Promise<void> {
     await this.database.session.updateMany({
       where: { betterAuthSessionId: input.betterAuthSessionId, revokedAt: null },
-      data: { lastSeenAt: input.seenAt, idleExpiresAt: input.idleExpiresAt },
+      data: {
+        lastSeenAt: input.seenAt,
+        ...(input.idleExpiresAt === undefined ? {} : { idleExpiresAt: input.idleExpiresAt }),
+      },
     });
   }
 

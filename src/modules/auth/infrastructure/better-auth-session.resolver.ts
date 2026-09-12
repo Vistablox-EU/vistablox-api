@@ -22,7 +22,8 @@ import type { VistaBloxAuth } from "./better-auth.factory.js";
 
 export interface BetterAuthSessionResolverOptions {
   allowPendingOAuth?: boolean;
-  // Device sessions only: last_seen_at / idle_expires_at follow activity.
+  // Every accepted product request updates last_seen_at. Device sessions also
+  // move their stricter idle expiry.
   sessionMirror?: SessionMirror;
   // The mirror is a display layer, so a failed mirror write never fails the
   // request; it is reported here instead.
@@ -87,16 +88,27 @@ export class BetterAuthSessionResolver implements SessionResolver {
   }
 
   /**
-   * Device sessions only: `updatedAt` is their last-activity time (see
-   * better-auth-device-session-lifetime.plugin.ts). Every other session is
-   * skipped without a query. The WHERE clause re-checks the level and both
-   * limits, so nothing is written to a session that has already expired.
-   * GREATEST keeps the value from moving backwards when two requests
-   * finish out of order.
+   * Every fully authenticated product request moves the mirror's last-seen
+   * time. Device sessions additionally update Better Auth's last-activity
+   * timestamp and the mirror's idle expiry. The device WHERE clause re-checks
+   * both limits, so nothing is written to an already expired session.
    */
   public async recordActivity(identity: AuthenticatedIdentity): Promise<void> {
-    if (identity.authenticationLevel !== DEVICE_SESSION_AUTHENTICATION_LEVEL) return;
+    const mirror = this.options.sessionMirror;
     const now = (this.options.clock ?? (() => new Date()))();
+    if (identity.authenticationLevel !== DEVICE_SESSION_AUTHENTICATION_LEVEL) {
+      if (mirror?.recordActivity === undefined) return;
+      try {
+        await mirror.recordActivity({
+          betterAuthSessionId: identity.providerSessionId,
+          seenAt: now,
+        });
+      } catch (error) {
+        this.options.onMirrorError?.(error);
+      }
+      return;
+    }
+
     const updated = await this.authPool.query(
       'UPDATE "auth_session" SET "updatedAt" = GREATEST("updatedAt", $1) WHERE "id" = $2 AND "authenticationLevel" = $3 AND "createdAt" > $4 AND "updatedAt" > $5',
       [
@@ -107,7 +119,6 @@ export class BetterAuthSessionResolver implements SessionResolver {
         new Date(now.getTime() - DEVICE_SESSION_IDLE_TIMEOUT_MS),
       ],
     );
-    const mirror = this.options.sessionMirror;
     if ((updated.rowCount ?? 0) === 0 || mirror?.recordActivity === undefined) return;
 
     const verdict = evaluateDeviceSessionLifetime({
