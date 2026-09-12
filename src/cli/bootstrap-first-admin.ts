@@ -148,7 +148,7 @@ async function main(): Promise<number> {
     // AppError details are fixed strings; nothing here ever carries the
     // token, which only exists after the invitation commits.
     if (error instanceof AppError) {
-      printError(`Failed: ${error.code}: ${error.detail}`);
+      printError(`Failed: ${error.code}: ${error.message}`);
     } else {
       printError(`Failed: ${error instanceof Error ? error.message : String(error)}`);
     }
