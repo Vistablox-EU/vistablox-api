@@ -10,7 +10,7 @@ import {
   DEVICE_SESSION_IDLE_TIMEOUT_MS,
   deviceSessionAbsoluteExpiresAt,
 } from "../domain/device-session-lifetime.js";
-import { isDiscardedCeremonySession } from "./device-ceremony-session.js";
+import { ceremonySessionRevocationReason } from "./device-ceremony-session.js";
 import { verifiedLoginDpopJkt } from "./device-login-audit-context.js";
 
 export interface BetterAuthAuditPluginOptions {
@@ -442,8 +442,10 @@ function isSupportedLoginMethod(value: string): value is LoginMethodType {
 // pending-session delete means.
 function revocationReason(session: { token?: unknown }, context: AuditContext | null): string {
   const authContext = (context as { context?: unknown } | null)?.context;
-  if (isDiscardedCeremonySession(authContext, session.token)) return "ceremony_failed";
-  return sessionRevocationReason(context?.path);
+  // A device ceremony's own deletes carry their reason: a failed ceremony's
+  // session ("ceremony_failed"), or an earlier session of the same device
+  // that a successful one replaced ("superseded").
+  return ceremonySessionRevocationReason(authContext, session.token) ?? sessionRevocationReason(context?.path);
 }
 
 function sessionRevocationReason(path: string | undefined): string {

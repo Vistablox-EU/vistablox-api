@@ -2,6 +2,7 @@ import type { IncomingHttpHeaders } from "node:http";
 import { fromNodeHeaders } from "better-auth/node";
 
 import type { SessionRevoker } from "../application/session-revoker.js";
+import { isBoundToDpopKey } from "../domain/device-session-supersede.js";
 import type { VistaBloxAuth } from "./better-auth.factory.js";
 
 // Better Auth's own /revoke-session endpoint (auth.api.revokeSession) is
@@ -38,8 +39,8 @@ export class BetterAuthSessionRevoker implements SessionRevoker {
   public async revokeByDpopKey(jkt: string, headers: IncomingHttpHeaders): Promise<number> {
     const nodeHeaders = fromNodeHeaders(headers);
     const sessions = await this.auth.api.listSessions({ headers: nodeHeaders });
-    const matches = sessions.filter(
-      (session) => (session as Record<string, unknown>).dpopJkt === jkt,
+    const matches = sessions.filter((session) =>
+      isBoundToDpopKey(session as { dpopJkt?: unknown }, jkt),
     );
     for (const session of matches) {
       await this.auth.api.revokeSession({ headers: nodeHeaders, body: { token: session.token } });
