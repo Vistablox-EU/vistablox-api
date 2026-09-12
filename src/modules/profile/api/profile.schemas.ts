@@ -50,7 +50,7 @@ export const profileResponseSchema = z.object({
       .nullable(),
     login_methods: z.array(
       z.object({
-        method_type: z.enum(["passkey", "google", "apple"]),
+        method_type: z.enum(["passkey", "google", "apple", "device_key"]),
         linked_at: dateTime,
         is_registration_method: z.boolean(),
       }),

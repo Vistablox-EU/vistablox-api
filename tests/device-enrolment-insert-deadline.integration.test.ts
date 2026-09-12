@@ -59,6 +59,8 @@ describe.skipIf(databaseUrl === undefined)("E2 insert deadline and replay window
     const accountIds = scenarios.map(accountId);
     await database.deviceChallenge.deleteMany({ where: { dpopJkt: { in: scenarios.map(dpopJkt) } } });
     await database.device.deleteMany({ where: { accountId: { in: accountIds } } });
+    // devices.create records each device as a device_key login method.
+    await database.loginMethod.deleteMany({ where: { accountId: { in: accountIds } } });
     await database.account.deleteMany({ where: { id: { in: accountIds } } });
     for (const id of userIds.values()) {
       await authPool.query('DELETE FROM "auth_session" WHERE "userId" = $1', [id]);

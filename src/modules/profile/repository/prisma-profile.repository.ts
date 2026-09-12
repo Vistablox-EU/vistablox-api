@@ -79,6 +79,8 @@ function asAccountStatus(
 function asLoginMethod(
   value: string,
 ): ProfileRecord["loginMethods"][number]["methodType"] {
-  if (value === "google" || value === "apple" || value === "passkey") return value;
+  if (value === "google" || value === "apple" || value === "passkey" || value === "device_key") {
+    return value;
+  }
   throw new Error(`Unknown login method: ${value}`);
 }

@@ -22,7 +22,7 @@ function profileRecord(overrides: Partial<ProfileRecord> = {}): ProfileRecord {
         methodType: "apple",
         linkedAt: new Date("2026-01-16T10:00:00.000Z"),
       },
-      { methodType: "passkey", linkedAt: new Date("2026-01-17T10:00:00.000Z") },
+      { methodType: "device_key", linkedAt: new Date("2026-01-17T10:00:00.000Z") },
     ],
     kyc: {
       diditReference: "c2237bc6-a76c-4933-b329-6c81843b45c7",
@@ -51,6 +51,41 @@ function profileRecord(overrides: Partial<ProfileRecord> = {}): ProfileRecord {
     ...overrides,
   };
 }
+
+describe("profile readiness: investing needs an enrolled device plus Google or Apple", () => {
+  const displayProfiles: ProtectedDisplayProfileProvider = { get: vi.fn().mockResolvedValue(null) };
+
+  async function investmentEligible(
+    loginMethods: ProfileRecord["loginMethods"][number]["methodType"][],
+  ): Promise<boolean> {
+    const record = profileRecord({
+      loginMethods: loginMethods.map((methodType, index) => ({
+        methodType,
+        linkedAt: new Date(Date.UTC(2026, 0, 15 + index)),
+      })),
+    });
+    const repository: ProfileRepository = { get: vi.fn().mockResolvedValue(record) };
+    const result = await new GetProfileService(repository, displayProfiles, () => now).execute(accountId);
+    return result.data.readiness.investment_eligible;
+  }
+
+  it("is eligible with an enrolled device and Google or Apple", async () => {
+    expect(await investmentEligible(["google", "device_key"])).toBe(true);
+    expect(await investmentEligible(["apple", "device_key"])).toBe(true);
+  });
+
+  it("is not eligible without an enrolled device", async () => {
+    expect(await investmentEligible(["google", "apple"])).toBe(false);
+  });
+
+  it("no longer counts a legacy customer passkey", async () => {
+    expect(await investmentEligible(["google", "passkey"])).toBe(false);
+  });
+
+  it("is not eligible with only an enrolled device", async () => {
+    expect(await investmentEligible(["device_key"])).toBe(false);
+  });
+});
 
 describe("profile service", () => {
   it("assembles durable account data with the protected display profile", async () => {
@@ -101,7 +136,7 @@ describe("profile service", () => {
             is_registration_method: false,
           },
           {
-            method_type: "passkey",
+            method_type: "device_key",
             linked_at: "2026-01-17T10:00:00.000Z",
             is_registration_method: false,
           },
