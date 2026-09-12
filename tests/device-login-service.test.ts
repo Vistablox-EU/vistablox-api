@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 
 import { DeviceChallengeExpiredError, DeviceLoginFailedError } from "../src/modules/auth/application/device-auth-errors.js";
 import { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
+import { CHALLENGE_REPLAY_WINDOW_MS } from "../src/modules/auth/domain/device-challenge-replay.js";
 import type { Device, DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
 import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
 
@@ -47,11 +48,15 @@ interface FakeChallengeEntry {
   deviceId: string | undefined;
   expiresAt: Date;
   consumed: boolean;
+  consumedAt?: Date;
 }
 
 class FakeChallengeRepository implements DeviceChallengeRepository {
   public issued = new Map<string, FakeChallengeEntry>();
   public consumeCallCount = 0;
+
+  /** `clock` stands in for the database's clock: consumption time and the replay window. */
+  public constructor(private readonly clock: () => Date = () => new Date()) {}
 
   public async issue(input: {
     challenge: string;
@@ -89,7 +94,25 @@ class FakeChallengeRepository implements DeviceChallengeRepository {
       return false;
     }
     entry.consumed = true;
+    entry.consumedAt = this.clock();
     return true;
+  }
+
+  public async wasConsumedWithinReplayWindow(input: {
+    challenge: string;
+    purpose: string;
+    dpopJkt: string;
+    deviceId: string | undefined;
+  }): Promise<boolean> {
+    const entry = this.issued.get(input.challenge);
+    return (
+      entry !== undefined &&
+      entry.purpose === input.purpose &&
+      entry.dpopJkt === input.dpopJkt &&
+      entry.deviceId === input.deviceId &&
+      entry.consumedAt !== undefined &&
+      entry.consumedAt.getTime() >= this.clock().getTime() - CHALLENGE_REPLAY_WINDOW_MS
+    );
   }
 
   public async pruneExpired(): Promise<number> {
@@ -241,6 +264,125 @@ describe("LoginDeviceService", () => {
       service.execute({ deviceId: undefined, dpopJkt: "dpop-jkt-nobody", challenge: "irrelevant", jws: "irrelevant" }),
     ).rejects.toBeInstanceOf(DeviceLoginFailedError);
     expect(challenges.consumeCallCount).toBe(0);
+  });
+
+  it("refuses login for an iOS device while the platform policy is Android-only, before consuming the challenge", async () => {
+    const { publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({
+        deviceId: "device_ios",
+        dpopJkt: "dpop-jkt-ios",
+        bioJkt,
+        biometricPublicJwk: publicJwk as Record<string, unknown>,
+        platform: "ios",
+      }),
+    );
+    const challenges = new FakeChallengeRepository();
+    const service = new LoginDeviceService(challenges, devices);
+
+    await expect(
+      service.execute({ deviceId: "device_ios", dpopJkt: "dpop-jkt-ios", challenge: "irrelevant", jws: "irrelevant" }),
+    ).rejects.toMatchObject({ code: "MOBILE_PLATFORM_NOT_SUPPORTED" });
+    expect(challenges.consumeCallCount).toBe(0);
+  });
+
+  it("accepts an iOS device once the injected policy includes iOS", async () => {
+    const { privateKey, publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({
+        deviceId: "device_ios_ok",
+        dpopJkt: "dpop-jkt-ios-ok",
+        bioJkt,
+        biometricPublicJwk: publicJwk as Record<string, unknown>,
+        platform: "ios",
+      }),
+    );
+    const challenges = new FakeChallengeRepository();
+    await challenges.issue({
+      challenge: "login-challenge-ios",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-ios-ok",
+      deviceId: "device_ios_ok",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const jws = await buildLoginJws({ privateKey, bioJkt, challenge: "login-challenge-ios", deviceId: "device_ios_ok" });
+    const service = new LoginDeviceService(challenges, devices, () => new Date(), {
+      supportedPlatforms: ["android", "ios"],
+    });
+
+    const result = await service.execute({
+      deviceId: "device_ios_ok",
+      dpopJkt: "dpop-jkt-ios-ok",
+      challenge: "login-challenge-ios",
+      jws,
+    });
+
+    expect(result.deviceId).toBe("device_ios_ok");
+  });
+
+  it("answers DEVICE_CHALLENGE_REPLAYED for a challenge used moments ago, and DEVICE_CHALLENGE_EXPIRED once the window has passed", async () => {
+    let now = Date.now();
+    const clock = () => new Date(now);
+    const { publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({ deviceId: "device_replay", dpopJkt: "dpop-jkt-replay", bioJkt, biometricPublicJwk: publicJwk as Record<string, unknown> }),
+    );
+    const challenges = new FakeChallengeRepository(clock);
+    await challenges.issue({
+      challenge: "login-replay",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-replay",
+      deviceId: "device_replay",
+      expiresAt: new Date(now + 120_000),
+    });
+    await challenges.consume({
+      challenge: "login-replay",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-replay",
+      deviceId: "device_replay",
+      now: new Date(now),
+    });
+    const service = new LoginDeviceService(challenges, devices, clock);
+    const replay = { deviceId: "device_replay", dpopJkt: "dpop-jkt-replay", challenge: "login-replay", jws: "irrelevant" };
+
+    now += 120_000;
+    await expect(service.execute(replay)).rejects.toMatchObject({ code: "DEVICE_CHALLENGE_REPLAYED" });
+
+    now += 1;
+    await expect(service.execute(replay)).rejects.toMatchObject({ code: "DEVICE_CHALLENGE_EXPIRED" });
+  });
+
+  it("answers DEVICE_CHALLENGE_REPLAYED to a replay that sent no device_id: the check uses the key's device, not the body", async () => {
+    const now = Date.now();
+    const { publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({ deviceId: "device_nobody_sent", dpopJkt: "dpop-jkt-nobody-sent", bioJkt, biometricPublicJwk: publicJwk as Record<string, unknown> }),
+    );
+    const challenges = new FakeChallengeRepository();
+    // L1 bound the challenge to the key's device (contract 3.1).
+    await challenges.issue({
+      challenge: "login-replay-no-id",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-nobody-sent",
+      deviceId: "device_nobody_sent",
+      expiresAt: new Date(now + 120_000),
+    });
+    await challenges.consume({
+      challenge: "login-replay-no-id",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-nobody-sent",
+      deviceId: "device_nobody_sent",
+      now: new Date(now),
+    });
+    const service = new LoginDeviceService(challenges, devices, () => new Date(now + 1_000));
+
+    await expect(
+      service.execute({ deviceId: undefined, dpopJkt: "dpop-jkt-nobody-sent", challenge: "login-replay-no-id", jws: "irrelevant" }),
+    ).rejects.toMatchObject({ code: "DEVICE_CHALLENGE_REPLAYED" });
   });
 
   it("rejects a revoked (non-active) device", async () => {

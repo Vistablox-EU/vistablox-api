@@ -6,7 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import {
   DeviceAlreadyEnrolledError,
-  DeviceChallengeExpiredError,
+  DeviceChallengeReplayedError,
 } from "../src/modules/auth/application/device-auth-errors.js";
 import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
 import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
@@ -57,17 +57,19 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
       betterAuthUserIds.push(user.id);
       await database.account.create({ data: { id: accountId, betterAuthUserId: user.id, status: "active" } });
     }
-    await devices.create({
-      accountId: accountWithDevice,
-      betterAuthUserId: betterAuthUserIds[0] as string,
-      dpopJkt: `existing-device-jkt-${suffix}`,
-      bioJkt: `existing-device-bio-${suffix}`,
-      biometricPublicJwk: {},
-      platform: "android",
-      model: undefined,
-      osVersion: undefined,
-      appVersion: undefined,
-      attestationMetadata: {},
+    // The account's existing device, inserted directly: devices.create
+    // registers only for a freshly consumed enrolment challenge.
+    await database.device.create({
+      data: {
+        deviceId: `device_existing_${suffix}`,
+        accountId: accountWithDevice,
+        betterAuthUserId: betterAuthUserIds[0] as string,
+        dpopJkt: `existing-device-jkt-${suffix}`,
+        bioJkt: `existing-device-bio-${suffix}`,
+        biometricPublicJwk: {},
+        platform: "android",
+        attestationMetadata: {},
+      },
     });
   }, 30_000);
 
@@ -154,7 +156,11 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
     ).rejects.toBeInstanceOf(DeviceAlreadyEnrolledError);
   });
 
-  it("answers 400 for an already-consumed challenge when the account has no device, and creates no device", async () => {
+  // A challenge consumed moments ago answers DEVICE_CHALLENGE_REPLAYED (the
+  // request that used it could still be running); EXPIRED only follows once
+  // the replay window has passed, covered by the unit tests and by
+  // device-challenge-replay.integration.test.ts.
+  it("answers 400 DEVICE_CHALLENGE_REPLAYED for a challenge consumed moments ago when the account has no device, and creates no device", async () => {
     const challenge = `order-db-400-${suffix}`;
     await issue(challenge, dpopWithoutDevice);
     await challenges.consume({
@@ -167,7 +173,7 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
 
     await expect(
       service.execute(enrolInput(accountWithoutDevice, 1, challenge, dpopWithoutDevice)),
-    ).rejects.toBeInstanceOf(DeviceChallengeExpiredError);
+    ).rejects.toBeInstanceOf(DeviceChallengeReplayedError);
 
     expect(await database.device.count({ where: { accountId: accountWithoutDevice } })).toBe(0);
   });

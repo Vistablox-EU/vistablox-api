@@ -35,8 +35,7 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/mobile/login/verify, n
   const suffix = randomUUID();
   const email = `device-auth-login-verify-${suffix}@example.test`;
   const accountId = `acct_${suffix}`;
-  // Assigned by PrismaDeviceRepository.create in beforeAll (it generates its
-  // own device_<ulid> id), not chosen by the test.
+  // The device seeded in beforeAll.
   let deviceId = "";
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
@@ -90,17 +89,19 @@ describe.skipIf(databaseUrl === undefined)("real /v1/auth/mobile/login/verify, n
     const publicJwk = await exportJWK(keyPair.publicKey);
     deviceBioJkt = await calculateJwkThumbprint(publicJwk, "sha256");
     deviceDpopKeyPair = await generateDpopKeyPair();
-    const seededDevice = await deviceRepository.create({
-      accountId,
-      betterAuthUserId,
-      dpopJkt: await calculateJwkThumbprint(deviceDpopKeyPair.publicJwk, "sha256"),
-      bioJkt: deviceBioJkt,
-      biometricPublicJwk: publicJwk as unknown as Record<string, unknown>,
-      platform: "android",
-      model: undefined,
-      osVersion: undefined,
-      appVersion: undefined,
-      attestationMetadata: {},
+    // Seeded directly: deviceRepository.create registers a device only for
+    // a freshly consumed enrolment challenge.
+    const seededDevice = await database.device.create({
+      data: {
+        deviceId: `device_login_verify_${suffix}`,
+        accountId,
+        betterAuthUserId,
+        dpopJkt: await calculateJwkThumbprint(deviceDpopKeyPair.publicJwk, "sha256"),
+        bioJkt: deviceBioJkt,
+        biometricPublicJwk: publicJwk as object,
+        platform: "android",
+        attestationMetadata: {},
+      },
     });
     deviceId = seededDevice.deviceId;
 

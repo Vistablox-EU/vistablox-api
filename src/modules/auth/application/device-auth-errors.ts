@@ -1,8 +1,26 @@
+/**
+ * Contract 3.6: DEVICE_CHALLENGE_EXPIRED (400). The challenge is unknown,
+ * its TTL passed unused, or it was used longer ago than the replay window.
+ * On E2 this means no enrolment can still register a device with it (see
+ * domain/device-challenge-replay.ts).
+ */
 export class DeviceChallengeExpiredError extends Error {
   public readonly code = "DEVICE_CHALLENGE_EXPIRED" as const;
   public constructor() {
-    super("This challenge has expired, was already used, or doesn't exist.");
+    super("This challenge is unknown, has expired, or was used too long ago.");
     this.name = "DeviceChallengeExpiredError";
+  }
+}
+
+/**
+ * Contract 3.6: DEVICE_CHALLENGE_REPLAYED (400). The challenge was used
+ * within the replay window; the request that used it may still be running.
+ */
+export class DeviceChallengeReplayedError extends Error {
+  public readonly code = "DEVICE_CHALLENGE_REPLAYED" as const;
+  public constructor() {
+    super("This challenge was used moments ago.");
+    this.name = "DeviceChallengeReplayedError";
   }
 }
 
