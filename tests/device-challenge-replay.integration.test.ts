@@ -23,7 +23,7 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
     await database.$disconnect();
   });
 
-  async function issueAndConsume(challenge: string, callerNow: Date = new Date()): Promise<void> {
+  async function issueAndConsume(challenge: string): Promise<void> {
     await challenges.issue({
       challenge,
       purpose: "enrol-device",
@@ -32,7 +32,7 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
       expiresAt: new Date(Date.now() + 300_000),
     });
     await expect(
-      challenges.consume({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined, now: callerNow }),
+      challenges.consume({ challenge, purpose: "enrol-device", dpopJkt, deviceId: undefined }),
     ).resolves.toBe(true);
   }
 
@@ -60,10 +60,37 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
     await expect(challenges.wasConsumedWithinReplayWindow(query)).resolves.toBe(false);
   });
 
-  it("records consumed_at from the database's clock, not the caller's", async () => {
+  it("checks expiry on the database's clock: a challenge past expires_at by the database can't be consumed", async () => {
+    const expired = `replay-db-expired-${suffix}`;
+    const live = `replay-db-live-${suffix}`;
+    for (const challenge of [expired, live]) {
+      await challenges.issue({
+        challenge,
+        purpose: "enrol-device",
+        dpopJkt,
+        deviceId: undefined,
+        expiresAt: new Date(Date.now() + 300_000),
+      });
+    }
+    // Whatever clock wrote expires_at, only the database's now() decides.
+    await database.$executeRaw`
+      UPDATE auth.device_challenges SET expires_at = now() - interval '1 second' WHERE challenge = ${expired}
+    `;
+    await database.$executeRaw`
+      UPDATE auth.device_challenges SET expires_at = now() + interval '1 minute' WHERE challenge = ${live}
+    `;
+
+    await expect(
+      challenges.consume({ challenge: expired, purpose: "enrol-device", dpopJkt, deviceId: undefined }),
+    ).resolves.toBe(false);
+    await expect(
+      challenges.consume({ challenge: live, purpose: "enrol-device", dpopJkt, deviceId: undefined }),
+    ).resolves.toBe(true);
+  });
+
+  it("records consumed_at from the database's clock", async () => {
     const challenge = `replay-db-clock-${suffix}`;
-    // The caller's clock is an hour behind; expiry still uses it.
-    await issueAndConsume(challenge, new Date(Date.now() - 3_600_000));
+    await issueAndConsume(challenge);
 
     const rows = await database.$queryRaw<Array<{ close: boolean }>>`
       SELECT abs(extract(epoch FROM (now() - consumed_at))) < 10 AS close

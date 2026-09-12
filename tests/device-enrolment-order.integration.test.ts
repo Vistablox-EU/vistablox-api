@@ -125,7 +125,7 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
     const row = await database.deviceChallenge.findUnique({ where: { challenge } });
     expect(row?.consumedAt).toBeNull();
     await expect(
-      challenges.consume({ challenge, purpose: ENROL, dpopJkt: dpopWithDevice, deviceId: undefined, now: new Date() }),
+      challenges.consume({ challenge, purpose: ENROL, dpopJkt: dpopWithDevice, deviceId: undefined }),
     ).resolves.toBe(true);
   });
 
@@ -136,9 +136,7 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
       challenge: consumedChallenge,
       purpose: ENROL,
       dpopJkt: dpopWithDevice,
-      deviceId: undefined,
-      now: new Date(),
-    });
+      deviceId: undefined,    });
     const expiredChallenge = `order-db-409-expired-${suffix}`;
     await challenges.issue({
       challenge: expiredChallenge,
@@ -167,9 +165,7 @@ describe.skipIf(databaseUrl === undefined)("E2 order against Postgres: active de
       challenge,
       purpose: ENROL,
       dpopJkt: dpopWithoutDevice,
-      deviceId: undefined,
-      now: new Date(),
-    });
+      deviceId: undefined,    });
 
     await expect(
       service.execute(enrolInput(accountWithoutDevice, 1, challenge, dpopWithoutDevice)),

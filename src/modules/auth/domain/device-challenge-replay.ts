@@ -8,7 +8,8 @@
 //
 // Every time below is the database's clock, never an API instance's, so
 // clock skew between instances and a stalled request can't break it:
-// - consume() records consumed_at as the database's now().
+// - consume() checks expiry against, and records consumed_at as, the
+//   database's now().
 // - A device row is inserted only inside a short transaction that first
 //   checks, against the database clock, that its challenge was consumed
 //   less than ENROLMENT_INSERT_DEADLINE_MS ago; past that it registers
