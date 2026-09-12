@@ -87,6 +87,10 @@ export function createRequireAuthentication(
         accountId: account.accountId,
         providerSessionId: identity.providerSessionId,
         population: identity.population,
+        sessionCreatedAt: identity.sessionCreatedAt,
+        ...(identity.authenticationLevel === undefined
+          ? {}
+          : { authenticationLevel: identity.authenticationLevel }),
       };
 
       // Session time limits (contract 3.6/3.7): the request counts as
