@@ -1,0 +1,12 @@
+-- Device-bound auth, Phase 4 (direct cutover): customer TOTP is removed
+-- entirely. Enrolment and verification (/v1/auth/totp/*) are gone, and a
+-- TOTP code is no longer a fresh-auth or step-up factor. Staff never used
+-- TOTP. DESTRUCTIVE: the table and every stored TOTP secret in it are
+-- dropped. Staging holds only test data, and there is no production database
+-- yet.
+--
+-- Dropping the table also drops its primary key and its foreign key to
+-- account.accounts:
+--   auth.mfa_totp_factors: mfa_totp_factors_pkey,
+--     mfa_totp_factors_account_id_fkey
+DROP TABLE "auth"."mfa_totp_factors";

@@ -47,7 +47,6 @@ import {
 import type { StaffAccountAdministrator } from "./modules/auth/application/staff-account-administrator.js";
 import type { StaffAccountLifecycleRepository } from "./modules/auth/repository/staff-account-lifecycle.repository.js";
 import { createAccountRecoveryRouter } from "./modules/auth/api/account-recovery.router.js";
-import { createAccountRecoveryCodeRouter } from "./modules/auth/api/account-recovery-code.router.js";
 import {
   CompleteAccountRecoveryService,
   CreateRecoveryDiditSessionService,
@@ -56,12 +55,7 @@ import {
   OpenAccountRecoveryCaseService,
   RecordPrimaryRecoveryReviewService,
 } from "./modules/auth/application/account-recovery.service.js";
-import {
-  RedeemAccountRecoveryCodeService,
-  RotateAccountRecoveryCodeService,
-} from "./modules/auth/application/account-recovery-code.service.js";
 import type { CustomerAccountAdministrator } from "./modules/auth/application/customer-account-administrator.js";
-import type { AccountRecoveryCodeRepository } from "./modules/auth/repository/account-recovery-code.repository.js";
 import type { AccountRecoveryRepository } from "./modules/auth/repository/account-recovery.repository.js";
 import { createAccountClosureRouter } from "./modules/auth/api/account-closure.router.js";
 import { createAccountClosureOperationsRouter } from "./modules/auth/api/account-closure-operations.router.js";
@@ -93,10 +87,6 @@ import {
 } from "./modules/auth/application/customer-session.service.js";
 import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
 import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
-import { createTotpRouter } from "./modules/auth/api/totp.router.js";
-import { EnrollTotpService, VerifyTotpService } from "./modules/auth/application/totp.service.js";
-import type { TotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
-import type { TotpRepository } from "./modules/auth/repository/totp.repository.js";
 import { createHealthRouter } from "./modules/health/health.router.js";
 import {
   createInvestorOfferingRouter,
@@ -244,10 +234,8 @@ export interface AppDependencies {
   protectedApi?: {
     accounts: AccountRepository;
     sessions: SessionResolver;
-    oauthBootstrapSessions?: SessionResolver;
-    // Device binding (DPoP): shared across both requireAuthentication
-    // instances below (main and OAuth-bootstrap) since it's a property of
-    // the session, not of which resolver found it. Undefined leaves DPoP
+    // Device binding (DPoP): used by requireAuthentication below; it's a
+    // property of the session, not of which resolver found it. Undefined leaves DPoP
     // fully off -- bound sessions can't exist without the plugin/hook side
     // ever setting dpopJkt, so there's nothing for this to enforce.
     dpop?: DpopEnforcementOptions;
@@ -328,11 +316,6 @@ export interface AppDependencies {
       // passkey recovery email delivery is a hard failure.
       emailSender: EmailSender;
     };
-    accountRecoveryCodes?: {
-      repository: AccountRecoveryCodeRepository;
-      administrator: CustomerAccountAdministrator;
-      hashKey: string;
-    };
     accountClosure?: {
       repository: AccountClosureRepository;
       administrator: CustomerAccountAdministrator;
@@ -347,11 +330,6 @@ export interface AppDependencies {
         expiresAt: Date;
       }) => Promise<void>;
       acceptUrl: string;
-    };
-    totp?: {
-      repository: TotpRepository;
-      provider: TotpProvider;
-      backupCodeHashKey: string;
     };
     customerSessions?: {
       repository: CustomerSessionRepository;
@@ -470,12 +448,6 @@ export function createApp(dependencies: AppDependencies): Express {
   if (dependencies.protectedApi !== undefined) {
     const requireAuthentication = createRequireAuthentication(
       dependencies.protectedApi.sessions,
-      dependencies.protectedApi.accounts,
-      baselineRateLimiter,
-      dependencies.protectedApi.dpop,
-    );
-    const requireOAuthBootstrapAuthentication = createRequireAuthentication(
-      dependencies.protectedApi.oauthBootstrapSessions ?? dependencies.protectedApi.sessions,
       dependencies.protectedApi.accounts,
       baselineRateLimiter,
       dependencies.protectedApi.dpop,
@@ -659,46 +631,8 @@ export function createApp(dependencies: AppDependencies): Express {
         ),
       );
     }
-    if (dependencies.protectedApi.totp !== undefined) {
-      const totp = dependencies.protectedApi.totp;
-      app.use(
-        "/v1/auth/totp",
-        ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
-        createTotpRouter(
-          requireAuthentication,
-          new EnrollTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
-          new VerifyTotpService(totp.repository, totp.provider, totp.backupCodeHashKey),
-          dependencies.protectedApi.customerSessions === undefined
-            ? undefined
-            : createRequireFreshAuthentication(
-                dependencies.protectedApi.customerSessions.repository,
-              ),
-        ),
-      );
-    }
     if (dependencies.protectedApi.customerSessions !== undefined) {
       const customerSessions = dependencies.protectedApi.customerSessions;
-      if (dependencies.protectedApi.accountRecoveryCodes !== undefined) {
-        const recoveryCodes = dependencies.protectedApi.accountRecoveryCodes;
-        app.use(
-          "/v1/auth/recovery-code",
-          ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
-          createAccountRecoveryCodeRouter(
-            requireAuthentication,
-            requireOAuthBootstrapAuthentication,
-            createRequireFreshAuthentication(customerSessions.repository),
-            new RotateAccountRecoveryCodeService(
-              recoveryCodes.repository,
-              recoveryCodes.hashKey,
-            ),
-            new RedeemAccountRecoveryCodeService(
-              recoveryCodes.repository,
-              recoveryCodes.administrator,
-              recoveryCodes.hashKey,
-            ),
-          ),
-        );
-      }
       app.use(
         "/v1/auth/sessions",
         createCustomerSessionRouter(

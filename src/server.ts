@@ -39,9 +39,6 @@ import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository
 import { BetterAuthCustomerAccountAdministrator } from "./modules/auth/infrastructure/better-auth-customer-account-administrator.js";
 import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
 import { PrismaAccountClosureRepository } from "./modules/auth/repository/prisma-account-closure.repository.js";
-import { PrismaAccountRecoveryCodeRepository } from "./modules/auth/repository/prisma-account-recovery-code.repository.js";
-import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
-import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
 import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
 import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
 import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
@@ -502,10 +499,6 @@ const app = createApp({
   protectedApi: {
     accounts: accountRepository,
     sessions: betterAuthSessionResolver,
-    oauthBootstrapSessions: new BetterAuthSessionResolver(auth, authDatabase, {
-      ...sessionResolverOptions,
-      allowPendingOAuth: true,
-    }),
     dpop: {
       baseUrl: environment.BETTER_AUTH_URL,
       replayRepository: dpopReplayRepository,
@@ -576,19 +569,9 @@ const app = createApp({
               `${onrampRedirectUrl}?reservation_id=${encodeURIComponent(reservationId)}`,
           },
         }),
-    totp: {
-      repository: new PrismaTotpRepository(database),
-      provider: new OtplibTotpProvider(),
-      backupCodeHashKey: environment.BETTER_AUTH_SECRET,
-    },
     customerSessions: {
       repository: new PrismaCustomerSessionRepository(database),
       revoker: new BetterAuthSessionRevoker(auth),
-    },
-    accountRecoveryCodes: {
-      repository: new PrismaAccountRecoveryCodeRepository(database),
-      administrator: customerAccountAdministrator,
-      hashKey: environment.BETTER_AUTH_SECRET,
     },
     kyc: {
       getStatus: getKycStatus,
