@@ -5,18 +5,22 @@ import type { SessionRevoker } from "../application/session-revoker.js";
 import { isBoundToDpopKey } from "../domain/device-session-supersede.js";
 import type { VistaBloxAuth } from "./better-auth.factory.js";
 
-// Better Auth's own /revoke-session endpoint (auth.api.revokeSession) is
-// what actually authorizes this: it re-derives "who is asking" from the
-// forwarded request headers and only deletes the target token if it
-// belongs to that same caller. Our own account-scoped lookup upstream of
-// this call is a defense-in-depth check, not a substitute for that.
+// Better Auth's own session list/revoke endpoints authorize this: the token
+// is resolved only from the caller's live Better Auth sessions and never
+// copied into the product-facing session mirror.
 export class BetterAuthSessionRevoker implements SessionRevoker {
   public constructor(private readonly auth: VistaBloxAuth) {}
 
-  public async revoke(token: string, headers: IncomingHttpHeaders): Promise<void> {
+  public async revoke(providerSessionId: string, headers: IncomingHttpHeaders): Promise<void> {
+    const nodeHeaders = fromNodeHeaders(headers);
+    const session = (await this.auth.api.listSessions({ headers: nodeHeaders })).find(
+      (candidate) => candidate.id === providerSessionId,
+    );
+    if (session === undefined) return;
+
     await this.auth.api.revokeSession({
-      headers: fromNodeHeaders(headers),
-      body: { token },
+      headers: nodeHeaders,
+      body: { token: session.token },
     });
   }
 

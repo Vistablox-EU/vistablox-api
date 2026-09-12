@@ -25,12 +25,12 @@ export class PrismaCustomerSessionRepository implements CustomerSessionRepositor
     }));
   }
 
-  public async findOwnedSessionToken(accountId: string, sessionId: string): Promise<string | null> {
+  public async findOwnedProviderSessionId(accountId: string, sessionId: string): Promise<string | null> {
     const row = await this.database.session.findFirst({
       where: { id: sessionId, accountId },
-      select: { betterAuthSessionToken: true },
+      select: { betterAuthSessionId: true },
     });
-    return row?.betterAuthSessionToken ?? null;
+    return row?.betterAuthSessionId ?? null;
   }
 
   public async hasFreshAuthentication(input: {

@@ -1,7 +1,8 @@
 import type { IncomingHttpHeaders } from "node:http";
 
 export interface SessionRevoker {
-  revoke(token: string, headers: IncomingHttpHeaders): Promise<void>;
+  /** Revokes a caller-owned Better Auth session by its stable provider session ID. */
+  revoke(providerSessionId: string, headers: IncomingHttpHeaders): Promise<void>;
   /** Revokes every session belonging to the caller identified by headers, including the current one. */
   revokeAll(headers: IncomingHttpHeaders): Promise<void>;
   /**

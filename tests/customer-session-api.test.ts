@@ -59,7 +59,7 @@ describe("customer session API", () => {
           betterAuthSessionId: "auth_session_current",
         },
       ]),
-      findOwnedSessionToken: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
     };
 
     const response = await request(buildApp(repository, fakeRevoker())).get(
@@ -87,7 +87,7 @@ describe("customer session API", () => {
     const revoke = vi.fn().mockResolvedValue(undefined);
     const repository: CustomerSessionRepository = {
       listForAccount: vi.fn(),
-      findOwnedSessionToken: vi.fn().mockResolvedValue("tok_abc123"),
+      findOwnedProviderSessionId: vi.fn().mockResolvedValue("auth_session_01"),
     };
 
     const response = await request(buildApp(repository, fakeRevoker({ revoke }))).post(
@@ -95,13 +95,13 @@ describe("customer session API", () => {
     );
 
     expect(response.status).toBe(204);
-    expect(revoke).toHaveBeenCalledWith("tok_abc123", expect.any(Object));
+    expect(revoke).toHaveBeenCalledWith("auth_session_01", expect.any(Object));
   });
 
   it("returns 404 for a session the caller does not own", async () => {
     const repository: CustomerSessionRepository = {
       listForAccount: vi.fn(),
-      findOwnedSessionToken: vi.fn().mockResolvedValue(null),
+      findOwnedProviderSessionId: vi.fn().mockResolvedValue(null),
     };
 
     const response = await request(buildApp(repository, fakeRevoker())).post(
@@ -116,7 +116,7 @@ describe("customer session API", () => {
     const revokeAll = vi.fn().mockResolvedValue(undefined);
     const repository: CustomerSessionRepository = {
       listForAccount: vi.fn(),
-      findOwnedSessionToken: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
     };
 
     const response = await request(buildApp(repository, fakeRevoker({ revokeAll }))).post(
@@ -131,7 +131,7 @@ describe("customer session API", () => {
     const revokeByDpopKey = vi.fn().mockResolvedValue(2);
     const repository: CustomerSessionRepository = {
       listForAccount: vi.fn(),
-      findOwnedSessionToken: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
     };
 
     const response = await request(

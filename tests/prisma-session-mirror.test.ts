@@ -26,7 +26,6 @@ describe("PrismaSessionMirror", () => {
     await mirror.recordCreated({
       betterAuthUserId: "auth_user_01",
       betterAuthSessionId: "provider_session_01",
-      betterAuthSessionToken: "token_01",
       channel: "mobile",
       authMethodAtLogin: "device_biometric",
       userAgent: null,

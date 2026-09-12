@@ -103,7 +103,6 @@ describe("Better Auth audit plugin", () => {
     expect(sessionMirror.recordCreated).toHaveBeenCalledWith({
       betterAuthUserId: "auth_user_01",
       betterAuthSessionId: "session_01",
-      betterAuthSessionToken: "tok_abc123",
       channel: "web",
       authMethodAtLogin: "oauth_passkey",
       userAgent: "TestAgent/1.0",

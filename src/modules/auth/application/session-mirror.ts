@@ -1,7 +1,6 @@
 export interface RecordSessionCreatedInput {
   betterAuthUserId: string;
   betterAuthSessionId: string;
-  betterAuthSessionToken: string;
   channel: "web" | "mobile";
   authMethodAtLogin: string | null;
   userAgent: string | null;
