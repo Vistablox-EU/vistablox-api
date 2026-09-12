@@ -28,8 +28,9 @@ export class DeviceChallengeReplayedError extends Error {
  * Contract 3.6: DEVICE_ALREADY_ENROLLED (409). Two distinct triggers share
  * this one code/status, both meaning "you can't enrol right now because
  * there's already an active device in the way": this exact DPoP key is
- * already an active device (findByDpopJkt, or a raced P2002 on its unique
- * constraint), or the account already has a different active device
+ * already an active device (findByDpopJkt, which ignores revoked devices, or
+ * a raced P2002 on the active-device unique index
+ * devices_dpop_jkt_active_key), or the account already has a different active device
  * (findActiveDeviceForAccount, or a raced P2002 on the one-active-device-
  * per-account partial index) -- approving a *second* device needs the
  * P1-P5 pairing endpoints, which this PR doesn't build (see the plan's

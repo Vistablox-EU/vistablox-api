@@ -50,6 +50,8 @@ function fakeAdministrator(overrides: Partial<CustomerAccountAdministrator> = {}
     revokeAllSessions: vi.fn().mockResolvedValue(undefined),
     sendRecoveryCompletionEmail: vi.fn(),
     prepareSelfServicePasskeyReplacement: vi.fn(),
+    revokeSessionsForRecoveryCompletion: vi.fn(),
+    clearRecoveryRequired: vi.fn(),
     ...overrides,
   };
 }

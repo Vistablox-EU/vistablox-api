@@ -20,6 +20,29 @@ export class BetterAuthCustomerAccountAdministrator implements CustomerAccountAd
     await context.internalAdapter.deleteUserSessions(betterAuthUserId);
   }
 
+  public async revokeSessionsForRecoveryCompletion(
+    betterAuthUserId: string,
+  ): Promise<{ revokedSessionCount: number; deviceSessionCount: number }> {
+    const context = await this.auth.$context;
+    const user = await context.internalAdapter.findUserById(betterAuthUserId);
+    assertCustomerUser(user);
+    const sessions = await context.internalAdapter.listSessions(betterAuthUserId);
+    const deviceSessionCount = sessions.filter(
+      (session) => (session as Record<string, unknown>).authenticationLevel === "device_biometric",
+    ).length;
+    // Through better-auth's own delete, so every session's delete hooks run:
+    // the audit trail and the auth.sessions mirror record each one.
+    await context.internalAdapter.deleteUserSessions(betterAuthUserId);
+    return { revokedSessionCount: sessions.length, deviceSessionCount };
+  }
+
+  public async clearRecoveryRequired(betterAuthUserId: string): Promise<void> {
+    const context = await this.auth.$context;
+    const user = await context.internalAdapter.findUserById(betterAuthUserId);
+    assertCustomerUser(user);
+    await context.internalAdapter.updateUser(betterAuthUserId, { recoveryRequiredAt: null });
+  }
+
   public async sendRecoveryCompletionEmail(input: {
     betterAuthUserId: string;
     redirectTo: string;
