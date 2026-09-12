@@ -110,7 +110,7 @@ describe.skipIf(databaseUrl === undefined)("device challenge replay window, Post
       expiresAt: new Date(now.getTime() - 180_000),
     });
 
-    await challenges.pruneExpired(now);
+    await challenges.pruneExpired();
 
     expect(await database.deviceChallenge.findUnique({ where: { challenge: recent } })).not.toBeNull();
     expect(await database.deviceChallenge.findUnique({ where: { challenge: old } })).toBeNull();

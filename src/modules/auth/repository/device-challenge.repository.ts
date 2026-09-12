@@ -46,9 +46,12 @@ export interface DeviceChallengeRepository {
     deviceId: string | undefined;
   }): Promise<boolean>;
   /**
-   * Deletes challenges whose expiry passed more than the replay window ago.
-   * They're kept that long so a replay of a recently used challenge still
-   * answers REPLAYED rather than looking unknown.
+   * Deletes challenges whose expiry passed more than the replay window ago,
+   * by the database's clock (the worker's clock plays no part). They're kept
+   * that long so a replay of a recently used challenge still answers
+   * REPLAYED rather than looking unknown. The challenge row of an enrolment
+   * that is registering its device is locked until that insert commits or
+   * aborts (PrismaDeviceRepository.create), so pruning waits for it.
    */
-  pruneExpired(now: Date): Promise<number>;
+  pruneExpired(): Promise<number>;
 }

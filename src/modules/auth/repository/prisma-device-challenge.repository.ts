@@ -66,10 +66,13 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
     return rows[0]?.recent === true;
   }
 
-  public async pruneExpired(now: Date): Promise<number> {
-    const result = await this.database.deviceChallenge.deleteMany({
-      where: { expiresAt: { lt: new Date(now.getTime() - CHALLENGE_REPLAY_WINDOW_MS) } },
-    });
-    return result.count;
+  public async pruneExpired(): Promise<number> {
+    // The database's now(), like consumed_at and the replay window: a worker
+    // with a skewed clock must not prune a row the replay decision still
+    // needs.
+    return this.database.$executeRaw`
+      DELETE FROM auth.device_challenges
+      WHERE expires_at < now() - (${CHALLENGE_REPLAY_WINDOW_MS}::integer * interval '1 millisecond')
+    `;
   }
 }

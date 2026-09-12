@@ -17,8 +17,20 @@ import type { Device, DeviceRepository } from "./device.repository.js";
 // by constraint name rather than target field name.
 const ONE_ACTIVE_DEVICE_PER_ACCOUNT_CONSTRAINT = "devices_one_active_per_account";
 
+export interface PrismaDeviceRepositoryOptions {
+  /**
+   * Test seam only: runs inside create()'s transaction, after the insert
+   * deadline check and before the insert, to simulate the API stalling
+   * there. Never set in production wiring.
+   */
+  afterDeadlineCheck?: () => Promise<void>;
+}
+
 export class PrismaDeviceRepository implements DeviceRepository {
-  public constructor(private readonly database: DatabaseClient) {}
+  public constructor(
+    private readonly database: DatabaseClient,
+    private readonly options: PrismaDeviceRepositoryOptions = {},
+  ) {}
 
   public async create(input: {
     accountId: string;
@@ -47,20 +59,23 @@ export class PrismaDeviceRepository implements DeviceRepository {
           await tx.$executeRaw`SET LOCAL lock_timeout = '2s'`;
           await tx.$executeRaw`SET LOCAL idle_in_transaction_session_timeout = '5s'`;
           // clock_timestamp(), not now(): the time of this check itself, not
-          // of BEGIN.
-          const rows = await tx.$queryRaw<Array<{ fresh: boolean }>>`
-            SELECT EXISTS (
-              SELECT 1
-              FROM auth.device_challenges
-              WHERE challenge = ${consumed.challenge}
-                AND purpose = ${consumed.purpose}
-                AND dpop_jkt = ${consumed.dpopJkt}
-                AND consumed_at > clock_timestamp() - (${ENROLMENT_INSERT_DEADLINE_MS}::integer * interval '1 millisecond')
-            ) AS fresh
+          // of BEGIN. FOR SHARE holds the challenge row until this
+          // transaction ends, so pruning can't delete it between this check
+          // and the insert's commit: a replay can never find neither the
+          // challenge nor the device while the device is still committing.
+          const rows = await tx.$queryRaw<Array<{ fresh: number }>>`
+            SELECT 1 AS fresh
+            FROM auth.device_challenges
+            WHERE challenge = ${consumed.challenge}
+              AND purpose = ${consumed.purpose}
+              AND dpop_jkt = ${consumed.dpopJkt}
+              AND consumed_at > clock_timestamp() - (${ENROLMENT_INSERT_DEADLINE_MS}::integer * interval '1 millisecond')
+            FOR SHARE
           `;
-          if (rows[0]?.fresh !== true) {
+          if (rows.length === 0) {
             throw new DeviceChallengeExpiredError();
           }
+          await this.options.afterDeadlineCheck?.();
           return tx.device.create({
             data: {
               deviceId: `device_${ulid()}`,
