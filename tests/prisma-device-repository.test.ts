@@ -49,6 +49,7 @@ function fakeDatabase(createImpl: () => unknown, options: { challengeFresh?: boo
     $executeRaw: vi.fn().mockResolvedValue(0),
     $queryRaw: vi.fn().mockResolvedValue(options.challengeFresh === false ? [] : [{ fresh: 1 }]),
     device: { create: vi.fn(createImpl) },
+    loginMethod: { upsert: vi.fn().mockResolvedValue({}) },
   };
   const database = {
     $transaction: vi.fn(async (fn: (client: typeof tx) => Promise<unknown>) => fn(tx)),
@@ -90,6 +91,47 @@ describe("PrismaDeviceRepository.create", () => {
     expect(deadlineCheck).toBeLessThan(tx.device.create.mock.invocationCallOrder[0] as number);
   });
 
+  it("records the device as the account's device_key login method, in the same transaction, after the insert", async () => {
+    const { database, tx } = fakeDatabase(() => CREATED_ROW);
+
+    await new PrismaDeviceRepository(database).create(CREATE_INPUT);
+
+    expect(database.$transaction).toHaveBeenCalledTimes(1);
+    expect(tx.loginMethod.upsert).toHaveBeenCalledTimes(1);
+    const upsert = tx.loginMethod.upsert.mock.calls[0]?.[0] as {
+      where: unknown;
+      create: Record<string, unknown>;
+      update: Record<string, unknown>;
+    };
+    expect(upsert.where).toEqual({
+      accountId_methodType: { accountId: "account-1", methodType: "device_key" },
+    });
+    expect(upsert.create).toMatchObject({
+      accountId: "account-1",
+      methodType: "device_key",
+      providerSubject: "device_1",
+      linkedAt: CREATED_ROW.createdAt,
+      linkedViaFreshAuth: true,
+    });
+    expect(String(upsert.create.id)).toMatch(/^login_/);
+    // A stale row from an earlier device of the account now points at this one.
+    expect(upsert.update).toMatchObject({ providerSubject: "device_1", linkedAt: CREATED_ROW.createdAt });
+    expect(tx.device.create.mock.invocationCallOrder[0] as number).toBeLessThan(
+      tx.loginMethod.upsert.mock.invocationCallOrder[0] as number,
+    );
+  });
+
+  it("records no login method when the insert fails", async () => {
+    const { database, tx } = fakeDatabase(() => {
+      throw p2002("devices_one_active_per_account");
+    });
+
+    await expect(new PrismaDeviceRepository(database).create(CREATE_INPUT)).rejects.toBeInstanceOf(
+      DeviceAlreadyEnrolledError,
+    );
+    expect(tx.loginMethod.upsert).not.toHaveBeenCalled();
+  });
+
   it("runs the after-deadline-check test hook between the check and the insert", async () => {
     const { database, tx } = fakeDatabase(() => CREATED_ROW);
     const afterDeadlineCheck = vi.fn().mockResolvedValue(undefined);
@@ -108,6 +150,7 @@ describe("PrismaDeviceRepository.create", () => {
       DeviceChallengeExpiredError,
     );
     expect(tx.device.create).not.toHaveBeenCalled();
+    expect(tx.loginMethod.upsert).not.toHaveBeenCalled();
   });
 
   // This table's two unique constraints (dpop_jkt, and the partial
@@ -162,21 +205,63 @@ describe("PrismaDeviceRepository.create", () => {
 // gone is a no-op rather than a P2025 throw -- this runs from a catch
 // block that's about to rethrow the real error either way.
 describe("PrismaDeviceRepository.delete", () => {
+  function fakeDeleteDatabase(count: number) {
+    const deviceDeleteMany = vi.fn().mockResolvedValue({ count });
+    const loginMethodDeleteMany = vi.fn().mockResolvedValue({ count });
+    const $transaction = vi.fn(async (operations: Array<Promise<unknown>>) => Promise.all(operations));
+    const database = {
+      $transaction,
+      device: { create: vi.fn(), deleteMany: deviceDeleteMany },
+      loginMethod: { deleteMany: loginMethodDeleteMany },
+    } as unknown as DatabaseClient;
+    return { database, $transaction, deviceDeleteMany, loginMethodDeleteMany };
+  }
+
   it("deletes the device by id via deleteMany", async () => {
-    const deleteMany = vi.fn().mockResolvedValue({ count: 1 });
-    const database = { device: { create: vi.fn(), deleteMany } } as unknown as DatabaseClient;
+    const { database, deviceDeleteMany } = fakeDeleteDatabase(1);
     const repository = new PrismaDeviceRepository(database);
 
     await repository.delete("device_orphaned");
 
-    expect(deleteMany).toHaveBeenCalledWith({ where: { deviceId: "device_orphaned" } });
+    expect(deviceDeleteMany).toHaveBeenCalledWith({ where: { deviceId: "device_orphaned" } });
+  });
+
+  it("removes that device's device_key login method with it, in one transaction", async () => {
+    const { database, $transaction, loginMethodDeleteMany } = fakeDeleteDatabase(1);
+
+    await new PrismaDeviceRepository(database).delete("device_orphaned");
+
+    expect($transaction).toHaveBeenCalledTimes(1);
+    expect(($transaction.mock.calls[0]?.[0] as unknown[]).length).toBe(2);
+    expect(loginMethodDeleteMany).toHaveBeenCalledWith({
+      where: { methodType: "device_key", providerSubject: "device_orphaned" },
+    });
   });
 
   it("does not throw when the device is already gone", async () => {
-    const deleteMany = vi.fn().mockResolvedValue({ count: 0 });
-    const database = { device: { create: vi.fn(), deleteMany } } as unknown as DatabaseClient;
+    const { database } = fakeDeleteDatabase(0);
     const repository = new PrismaDeviceRepository(database);
 
     await expect(repository.delete("device_does_not_exist")).resolves.toBeUndefined();
+  });
+});
+
+// A revoked device's DPoP key may enrol again, and a revoked device must never
+// be found for a login: the lookup returns active devices only.
+describe("PrismaDeviceRepository.findByDpopJkt", () => {
+  it("looks up the active device for the key only", async () => {
+    const findFirst = vi.fn().mockResolvedValue(CREATED_ROW);
+    const database = { device: { findFirst } } as unknown as DatabaseClient;
+
+    const device = await new PrismaDeviceRepository(database).findByDpopJkt("dpop-jkt-1");
+
+    expect(findFirst).toHaveBeenCalledWith({ where: { dpopJkt: "dpop-jkt-1", status: "active" } });
+    expect(device?.deviceId).toBe("device_1");
+  });
+
+  it("returns null when the key has no active device", async () => {
+    const database = { device: { findFirst: vi.fn().mockResolvedValue(null) } } as unknown as DatabaseClient;
+
+    await expect(new PrismaDeviceRepository(database).findByDpopJkt("dpop-jkt-revoked")).resolves.toBeNull();
   });
 });

@@ -40,7 +40,9 @@ export class GetProfileService {
       profile.kyc?.eligibilityState === "eligible" &&
       profile.kyc.renewalDueAt !== null &&
       profile.kyc.renewalDueAt > now &&
-      linkedMethods.has("passkey") &&
+      // The offering module's investing rule (isLoginMethodsComplete): an
+      // enrolled device plus Google or Apple.
+      linkedMethods.has("device_key") &&
       (linkedMethods.has("google") || linkedMethods.has("apple"));
     return {
       data: {

@@ -26,6 +26,8 @@ function administrator(): CustomerAccountAdministrator {
     revokeAllSessions: vi.fn().mockResolvedValue(undefined),
     sendRecoveryCompletionEmail: vi.fn().mockResolvedValue(undefined),
     prepareSelfServicePasskeyReplacement: vi.fn().mockResolvedValue("context_01"),
+    revokeSessionsForRecoveryCompletion: vi.fn(),
+    clearRecoveryRequired: vi.fn(),
   };
 }
 

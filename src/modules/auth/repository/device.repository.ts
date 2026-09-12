@@ -18,7 +18,8 @@ export interface DeviceRepository {
    * ENROLMENT_INSERT_DEADLINE_MS ago by the database's clock
    * (domain/device-challenge-replay.ts). Past that it registers nothing and
    * throws DeviceChallengeExpiredError. Generates and assigns the deviceId
-   * itself -- the caller never picks one.
+   * itself -- the caller never picks one. Records the device as the
+   * account's `device_key` login method in the same transaction.
    */
   create(input: {
     accountId: string;
@@ -34,6 +35,10 @@ export interface DeviceRepository {
     consumedChallenge: { challenge: string; purpose: string; dpopJkt: string };
   }): Promise<Device>;
   findByDeviceId(deviceId: string): Promise<Device | null>;
+  /**
+   * The ACTIVE device this DPoP key belongs to, if any. A revoked device is
+   * never returned: its key may enrol again, and it can never log in.
+   */
   findByDpopJkt(dpopJkt: string): Promise<Device | null>;
   /** Drives the `pending_approval` check (E2) -- the only active device on an account, if any. */
   findActiveDeviceForAccount(accountId: string): Promise<Device | null>;
@@ -46,8 +51,9 @@ export interface DeviceRepository {
    * written. Deleting it here is what EnrolDeviceService.rollback calls
    * into -- without it, a failed enrolment leaves an orphaned active
    * device that blocks every retry via the one-active-device-per-account
-   * constraint (confirmed live on staging before this existed). Safe to
-   * call on an id that's already gone (a no-op, not an error).
+   * constraint (confirmed live on staging before this existed). Removes the
+   * device's `device_key` login method with it. Safe to call on an id
+   * that's already gone (a no-op, not an error).
    */
   delete(deviceId: string): Promise<void>;
 }

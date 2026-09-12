@@ -78,6 +78,11 @@ function repository(overrides: Partial<AccountRecoveryRepository> = {}): Account
       }),
     ),
     getActiveCooldown: vi.fn().mockResolvedValue(null),
+    revokeDevicesForRecovery: vi.fn().mockResolvedValue({
+      revokedDeviceIds: ["device_01"],
+      removedLoginMethodCount: 1,
+    }),
+    recordRecoveryAuditEvent: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -87,6 +92,10 @@ function administrator(overrides: Partial<CustomerAccountAdministrator> = {}): C
     revokeAllSessions: vi.fn().mockResolvedValue(undefined),
     sendRecoveryCompletionEmail: vi.fn().mockResolvedValue(undefined),
     prepareSelfServicePasskeyReplacement: vi.fn().mockResolvedValue("bootstrap_context"),
+    revokeSessionsForRecoveryCompletion: vi
+      .fn()
+      .mockResolvedValue({ revokedSessionCount: 2, deviceSessionCount: 1 }),
+    clearRecoveryRequired: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };
 }
@@ -440,29 +449,147 @@ describe("DecideAccountRecoveryCaseService", () => {
 });
 
 describe("CompleteAccountRecoveryService", () => {
-  it("refuses to complete a customer case (409), sends nothing, and leaves the case approved", async () => {
+  it("customer target: revokes devices and device_key rows, ends sessions, clears the flag, completes the case, then sends a no-link re-enrolment notice", async () => {
+    const revokeDevicesForRecovery = vi.fn().mockResolvedValue({
+      revokedDeviceIds: ["device_01"],
+      removedLoginMethodCount: 1,
+    });
+    const revokeSessionsForRecoveryCompletion = vi
+      .fn()
+      .mockResolvedValue({ revokedSessionCount: 2, deviceSessionCount: 1 });
+    const clearRecoveryRequired = vi.fn().mockResolvedValue(undefined);
+    const recordRecoveryAuditEvent = vi.fn().mockResolvedValue(undefined);
+    const completeCase = vi.fn().mockResolvedValue(
+      caseRecord({ status: "completed", cooldownEndsAt: new Date(now.getTime() + 72 * 60 * 60 * 1000) }),
+    );
     const sendRecoveryCompletionEmail = vi.fn();
-    const sendAccountRecoveryCompletedEmail = vi.fn();
+    const sendAccountRecoveryCompletedEmail = vi.fn().mockResolvedValue(undefined);
+    const service = new CompleteAccountRecoveryService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: false })),
+        revokeDevicesForRecovery,
+        recordRecoveryAuditEvent,
+        completeCase,
+      }),
+      administrator({ sendRecoveryCompletionEmail, revokeSessionsForRecoveryCompletion, clearRecoveryRequired }),
+      emailSender({ sendAccountRecoveryCompletedEmail }),
+      "https://app.vistablox.io/recover-account",
+      () => now,
+    );
+
+    const result = await service.execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" });
+
+    expect(result.status).toBe("completed");
+    expect(revokeDevicesForRecovery).toHaveBeenCalledWith({
+      caseId,
+      accountId,
+      actorAccountId: "acct_staff_01",
+      traceId: "trace_01",
+      revokedAt: now,
+    });
+    expect(revokeSessionsForRecoveryCompletion).toHaveBeenCalledWith("better_auth_user_01");
+    expect(clearRecoveryRequired).toHaveBeenCalledWith("better_auth_user_01");
+    expect(completeCase).toHaveBeenCalledWith({
+      caseId,
+      actorAccountId: "acct_staff_01",
+      traceId: "trace_01",
+      completedAt: now,
+      cooldownEndsAt: new Date(now.getTime() + 72 * 60 * 60 * 1000),
+    });
+    // Devices first, then sessions, then the flag, and only then the case.
+    const order = (mock: ReturnType<typeof vi.fn>) => mock.mock.invocationCallOrder[0] as number;
+    expect(order(revokeDevicesForRecovery)).toBeLessThan(order(revokeSessionsForRecoveryCompletion));
+    expect(order(revokeSessionsForRecoveryCompletion)).toBeLessThan(order(clearRecoveryRequired));
+    expect(order(clearRecoveryRequired)).toBeLessThan(order(completeCase));
+    // No passkey link: the customer re-enrols through Google/Apple and E1/E2.
+    expect(sendRecoveryCompletionEmail).not.toHaveBeenCalled();
+    expect(sendAccountRecoveryCompletedEmail).toHaveBeenCalledWith({
+      to: "investor@example.com",
+      cooldownEndsAt: new Date(now.getTime() + 72 * 60 * 60 * 1000),
+      deviceReenrolmentRequired: true,
+    });
+    const audited = recordRecoveryAuditEvent.mock.calls.map((call) => (call[0] as { action: string }).action);
+    expect(audited).toEqual([
+      "authentication.account_recovery_sessions_revoked",
+      "authentication.account_recovery_restriction_cleared",
+      "authentication.account_recovery_reenrolment_notice",
+    ]);
+    expect(recordRecoveryAuditEvent.mock.calls[0]?.[0]).toMatchObject({
+      changes: { revoked_device_count: 1, revoked_session_count: 2, revoked_device_session_count: 1 },
+    });
+    expect(recordRecoveryAuditEvent.mock.calls[2]?.[0]).toMatchObject({ changes: { outcome: "sent" } });
+  });
+
+  it("customer target: a failure before completion is retry-safe (503) and leaves the case approved", async () => {
     const completeCase = vi.fn();
+    const clearRecoveryRequired = vi.fn();
     const service = new CompleteAccountRecoveryService(
       repository({
         findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
         findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: false })),
         completeCase,
       }),
-      administrator({ sendRecoveryCompletionEmail }),
-      emailSender({ sendAccountRecoveryCompletedEmail }),
+      administrator({
+        revokeSessionsForRecoveryCompletion: vi.fn().mockRejectedValue(new Error("auth store down")),
+        clearRecoveryRequired,
+      }),
+      emailSender(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
 
     await expect(
       service.execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" }),
-    ).rejects.toMatchObject({ code: "authentication.account_recovery_completion_unavailable", status: 409 });
-    // Nothing that a customer passkey link or a "completed" case implies.
-    expect(sendRecoveryCompletionEmail).not.toHaveBeenCalled();
+    ).rejects.toMatchObject({ code: "authentication.account_recovery_completion_failed", status: 503 });
+    expect(clearRecoveryRequired).not.toHaveBeenCalled();
     expect(completeCase).not.toHaveBeenCalled();
-    expect(sendAccountRecoveryCompletedEmail).not.toHaveBeenCalled();
+  });
+
+  it("customer target: the case stays completed when the notice can't be sent, and the failure is audited", async () => {
+    const recordRecoveryAuditEvent = vi.fn().mockResolvedValue(undefined);
+    const service = new CompleteAccountRecoveryService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: false })),
+        recordRecoveryAuditEvent,
+      }),
+      administrator(),
+      emailSender({ sendAccountRecoveryCompletedEmail: vi.fn().mockRejectedValue(new Error("smtp down")) }),
+      "https://app.vistablox.io/recover-account",
+      () => now,
+    );
+
+    const result = await service.execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" });
+
+    expect(result.status).toBe("completed");
+    expect(recordRecoveryAuditEvent.mock.calls.at(-1)?.[0]).toMatchObject({
+      action: "authentication.account_recovery_reenrolment_notice",
+      changes: { outcome: "failed" },
+    });
+  });
+
+  it("staff target: never touches devices, sessions or the flag through the customer path", async () => {
+    const revokeDevicesForRecovery = vi.fn();
+    const revokeSessionsForRecoveryCompletion = vi.fn();
+    const clearRecoveryRequired = vi.fn();
+    const service = new CompleteAccountRecoveryService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: true })),
+        revokeDevicesForRecovery,
+      }),
+      administrator({ revokeSessionsForRecoveryCompletion, clearRecoveryRequired }),
+      emailSender(),
+      "https://app.vistablox.io/recover-account",
+      () => now,
+    );
+
+    await service.execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" });
+
+    expect(revokeDevicesForRecovery).not.toHaveBeenCalled();
+    expect(revokeSessionsForRecoveryCompletion).not.toHaveBeenCalled();
+    expect(clearRecoveryRequired).not.toHaveBeenCalled();
   });
 
   it("staff target, unchanged: sends the recovery completion email, completes the case with a 72-hour cooldown, and sends the FYI notification", async () => {

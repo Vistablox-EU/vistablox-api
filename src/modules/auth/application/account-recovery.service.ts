@@ -211,31 +211,37 @@ export class CompleteAccountRecoveryService {
     }
     const target = await this.repository.findTargetForRecovery(existingCase.accountId);
     if (target === null) throw caseNotApprovedError();
-    // Phase 4 cutover: completion hands the customer a passkey link, and
-    // customer passkeys are refused (PASSKEY_STAFF_ONLY), so the customer
-    // could never clear recoveryRequiredAt under a case marked completed.
-    // Until Damir decides what completing a customer case does, it's
-    // refused and the case stays approved.
-    if (!target.isStaff) throw recoveryCompletionUnavailableError();
 
     const completedAt = this.clock();
     const cooldownEndsAt = new Date(
       completedAt.getTime() + RECOVERY_COOLDOWN_HOURS * 60 * 60 * 1000,
     );
 
-    try {
-      await this.administrator.sendRecoveryCompletionEmail({
+    if (target.isStaff) {
+      // Staff target: unchanged -- a staff passkey replacement link.
+      try {
+        await this.administrator.sendRecoveryCompletionEmail({
+          betterAuthUserId: target.betterAuthUserId,
+          redirectTo: this.recoveryRedirectUrl,
+          traceId: input.traceId,
+        });
+      } catch (error) {
+        throw new AppError({
+          code: "authentication.account_recovery_completion_delivery_failed",
+          title: "Recovery completion email could not be delivered",
+          status: 503,
+          detail: "The recovery case remains approved and this operation can be retried safely.",
+          cause: error,
+        });
+      }
+    } else {
+      await this.endCustomerDeviceAccess({
+        caseId: input.caseId,
+        accountId: target.accountId,
         betterAuthUserId: target.betterAuthUserId,
-        redirectTo: this.recoveryRedirectUrl,
+        actorAccountId: input.actorAccountId,
         traceId: input.traceId,
-      });
-    } catch (error) {
-      throw new AppError({
-        code: "authentication.account_recovery_completion_delivery_failed",
-        title: "Recovery completion email could not be delivered",
-        status: 503,
-        detail: "The recovery case remains approved and this operation can be retried safely.",
-        cause: error,
+        at: completedAt,
       });
     }
 
@@ -248,29 +254,135 @@ export class CompleteAccountRecoveryService {
     });
     if (updated === null) throw caseNotApprovedError();
 
-    if (target.contactEmail !== null) {
-      try {
-        await this.emailSender.sendAccountRecoveryCompletedEmail({
-          to: target.contactEmail,
-          cooldownEndsAt,
-        });
-      } catch {
-        // Best-effort — completion and the cooldown are already durable.
+    if (target.isStaff) {
+      if (target.contactEmail !== null) {
+        try {
+          await this.emailSender.sendAccountRecoveryCompletedEmail({
+            to: target.contactEmail,
+            cooldownEndsAt,
+          });
+        } catch {
+          // Best-effort — completion and the cooldown are already durable.
+        }
       }
+    } else {
+      await this.notifyCustomer({
+        caseId: input.caseId,
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        contactEmail: target.contactEmail,
+        cooldownEndsAt,
+        at: completedAt,
+      });
     }
 
     return updated;
   }
-}
 
-function recoveryCompletionUnavailableError(): AppError {
-  return new AppError({
-    code: "authentication.account_recovery_completion_unavailable",
-    title: "Recovery completion is unavailable",
-    status: 409,
-    detail:
-      "Completing a customer recovery case is unavailable until device-bound recovery completion is decided. The case remains approved.",
-  });
+  /**
+   * A customer's recovery ends every way the lost phone could still get in,
+   * then lets them back in through Google/Apple sign-in and a fresh device
+   * enrolment (E1/E2), the same phone included:
+   * 1. their active devices are revoked and their device_key login methods
+   *    removed (one transaction, each device audited);
+   * 2. every remaining session is ended, device sessions included;
+   * 3. recoveryRequiredAt is cleared.
+   * The account itself stays in recovery_review until completeCase runs
+   * after this, and that status alone refuses sign-in and E2, so clearing the
+   * flag first opens no window. Every step is idempotent, so a failure
+   * leaves the case approved and completion can simply be retried.
+   */
+  private async endCustomerDeviceAccess(input: {
+    caseId: string;
+    accountId: string;
+    betterAuthUserId: string;
+    actorAccountId: string;
+    traceId: string;
+    at: Date;
+  }): Promise<void> {
+    try {
+      const devices = await this.repository.revokeDevicesForRecovery({
+        caseId: input.caseId,
+        accountId: input.accountId,
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        revokedAt: input.at,
+      });
+      const sessions = await this.administrator.revokeSessionsForRecoveryCompletion(
+        input.betterAuthUserId,
+      );
+      await this.repository.recordRecoveryAuditEvent({
+        caseId: input.caseId,
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        action: "authentication.account_recovery_sessions_revoked",
+        changes: {
+          account_id: input.accountId,
+          revoked_device_count: devices.revokedDeviceIds.length,
+          revoked_session_count: sessions.revokedSessionCount,
+          revoked_device_session_count: sessions.deviceSessionCount,
+        },
+        occurredAt: input.at,
+      });
+      await this.administrator.clearRecoveryRequired(input.betterAuthUserId);
+      await this.repository.recordRecoveryAuditEvent({
+        caseId: input.caseId,
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        action: "authentication.account_recovery_restriction_cleared",
+        changes: { account_id: input.accountId },
+        occurredAt: input.at,
+      });
+    } catch (error) {
+      throw new AppError({
+        code: "authentication.account_recovery_completion_failed",
+        title: "Recovery completion could not finish",
+        status: 503,
+        detail: "The recovery case remains approved and this operation can be retried safely.",
+        cause: error,
+      });
+    }
+  }
+
+  /**
+   * Best-effort: completion is already durable. The email carries no link;
+   * it tells the customer to sign in with Google or Apple and set their
+   * phone up again. Whether it went out is audited either way.
+   */
+  private async notifyCustomer(input: {
+    caseId: string;
+    actorAccountId: string;
+    traceId: string;
+    contactEmail: string | null;
+    cooldownEndsAt: Date;
+    at: Date;
+  }): Promise<void> {
+    let outcome: "sent" | "failed" | "no_contact_email" = "no_contact_email";
+    if (input.contactEmail !== null) {
+      try {
+        await this.emailSender.sendAccountRecoveryCompletedEmail({
+          to: input.contactEmail,
+          cooldownEndsAt: input.cooldownEndsAt,
+          deviceReenrolmentRequired: true,
+        });
+        outcome = "sent";
+      } catch {
+        outcome = "failed";
+      }
+    }
+    try {
+      await this.repository.recordRecoveryAuditEvent({
+        caseId: input.caseId,
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        action: "authentication.account_recovery_reenrolment_notice",
+        changes: { outcome },
+        occurredAt: input.at,
+      });
+    } catch {
+      // Best-effort, like the notice itself.
+    }
+  }
 }
 
 function targetNotFoundError(): AppError {

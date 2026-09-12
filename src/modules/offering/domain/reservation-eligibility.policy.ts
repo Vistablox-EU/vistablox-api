@@ -41,11 +41,16 @@ export function isKycCurrent(input: {
   );
 }
 
+/**
+ * Investing needs an enrolled device (its biometric key, `device_key`) plus
+ * a linked Google or Apple sign-in. A `passkey` row no longer counts:
+ * customer passkeys are gone, and only staff keep one.
+ */
 export function isLoginMethodsComplete(
-  loginMethods: ReadonlyArray<"passkey" | "google" | "apple">,
+  loginMethods: ReadonlyArray<"passkey" | "google" | "apple" | "device_key">,
 ): boolean {
   const methods = new Set(loginMethods);
-  return methods.has("passkey") && (methods.has("google") || methods.has("apple"));
+  return methods.has("device_key") && (methods.has("google") || methods.has("apple"));
 }
 
 export function isInvestmentEligible(input: {
@@ -74,7 +79,7 @@ export function computeReservationBlockers(input: {
   accountStatus: AccountReadinessStatus;
   kycEligibilityState: string | null;
   kycRenewalDueAt: Date | null;
-  loginMethods: ReadonlyArray<"passkey" | "google" | "apple">;
+  loginMethods: ReadonlyArray<"passkey" | "google" | "apple" | "device_key">;
   walletProvisioned: boolean;
   /** ACCOUNT_RECOVERY_POLICY.md's 72-hour post-recovery restriction — still active when this is set and in the future. */
   recoveryCooldownEndsAt: Date | null;
