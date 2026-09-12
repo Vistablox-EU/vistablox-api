@@ -3,7 +3,7 @@ import type { RequestHandler } from "express";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { CustomerSessionRepository } from "../repository/customer-session.repository.js";
 
-const FRESH_AUTH_WINDOW_MS = 5 * 60 * 1000;
+const FRESH_AUTH_WINDOW_MS = 15 * 60 * 1000;
 
 export function createRequireFreshAuthentication(
   sessions: CustomerSessionRepository,
