@@ -28,10 +28,9 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
     purpose: string;
     dpopJkt: string;
     deviceId: string | undefined;
-    now: Date;
   }): Promise<boolean> {
-    // consumed_at is the database's now(): the replay window and the
-    // enrolment insert deadline are both measured on the database clock.
+    // Expiry and consumed_at both use the database's now(), like the replay
+    // window and the enrolment insert deadline: no API clock is involved.
     const rows = await this.database.$queryRaw<Array<{ challenge: string }>>`
       UPDATE auth.device_challenges
       SET consumed_at = now()
@@ -40,7 +39,7 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
         AND dpop_jkt = ${input.dpopJkt}
         AND device_id IS NOT DISTINCT FROM ${input.deviceId ?? null}
         AND consumed_at IS NULL
-        AND expires_at > ${input.now}
+        AND expires_at > now()
       RETURNING challenge
     `;
     return rows.length > 0;
@@ -66,10 +65,13 @@ export class PrismaDeviceChallengeRepository implements DeviceChallengeRepositor
     return rows[0]?.recent === true;
   }
 
-  public async pruneExpired(now: Date): Promise<number> {
-    const result = await this.database.deviceChallenge.deleteMany({
-      where: { expiresAt: { lt: new Date(now.getTime() - CHALLENGE_REPLAY_WINDOW_MS) } },
-    });
-    return result.count;
+  public async pruneExpired(): Promise<number> {
+    // The database's now(), like consumed_at and the replay window: a worker
+    // with a skewed clock must not prune a row the replay decision still
+    // needs.
+    return this.database.$executeRaw`
+      DELETE FROM auth.device_challenges
+      WHERE expires_at < now() - (${CHALLENGE_REPLAY_WINDOW_MS}::integer * interval '1 millisecond')
+    `;
   }
 }

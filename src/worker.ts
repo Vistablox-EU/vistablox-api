@@ -501,7 +501,8 @@ await boss.work("maintenance.dpop_replay_prune", async () => {
 });
 await boss.work("maintenance.device_challenge_prune", async () => {
   await runJob("maintenance.device_challenge_prune", async () => {
-    const acted = await deviceChallengeRepository.pruneExpired(new Date());
+    // Pruned on the database's clock, not this worker's.
+    const acted = await deviceChallengeRepository.pruneExpired();
     return { checked: acted, acted };
   });
 });

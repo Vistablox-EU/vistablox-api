@@ -47,7 +47,7 @@ function p2002(constraintOrTarget: string | string[]): Prisma.PrismaClientKnownR
 function fakeDatabase(createImpl: () => unknown, options: { challengeFresh?: boolean } = {}) {
   const tx = {
     $executeRaw: vi.fn().mockResolvedValue(0),
-    $queryRaw: vi.fn().mockResolvedValue([{ fresh: options.challengeFresh ?? true }]),
+    $queryRaw: vi.fn().mockResolvedValue(options.challengeFresh === false ? [] : [{ fresh: 1 }]),
     device: { create: vi.fn(createImpl) },
   };
   const database = {
@@ -81,11 +81,24 @@ describe("PrismaDeviceRepository.create", () => {
     expect(settings).toContain("SET LOCAL idle_in_transaction_session_timeout");
     const deadlineCall = tx.$queryRaw.mock.calls[0] as unknown[];
     expect(sqlText(deadlineCall)).toContain("clock_timestamp()");
+    // The challenge row stays locked until the insert commits, so pruning waits.
+    expect(sqlText(deadlineCall)).toContain("FOR SHARE");
     expect(deadlineCall.slice(1)).toEqual(["enrol-challenge-1", "enrol-device", "dpop-jkt-1", 60_000]);
     const lastSetting = Math.max(...tx.$executeRaw.mock.invocationCallOrder);
     const deadlineCheck = tx.$queryRaw.mock.invocationCallOrder[0] as number;
     expect(lastSetting).toBeLessThan(deadlineCheck);
     expect(deadlineCheck).toBeLessThan(tx.device.create.mock.invocationCallOrder[0] as number);
+  });
+
+  it("runs the after-deadline-check test hook between the check and the insert", async () => {
+    const { database, tx } = fakeDatabase(() => CREATED_ROW);
+    const afterDeadlineCheck = vi.fn().mockResolvedValue(undefined);
+
+    await new PrismaDeviceRepository(database, { afterDeadlineCheck }).create(CREATE_INPUT);
+
+    const hookRan = afterDeadlineCheck.mock.invocationCallOrder[0] as number;
+    expect(tx.$queryRaw.mock.invocationCallOrder[0] as number).toBeLessThan(hookRan);
+    expect(hookRan).toBeLessThan(tx.device.create.mock.invocationCallOrder[0] as number);
   });
 
   it("registers nothing and throws DeviceChallengeExpiredError when the challenge wasn't consumed within the deadline", async () => {

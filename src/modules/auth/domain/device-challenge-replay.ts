@@ -8,7 +8,8 @@
 //
 // Every time below is the database's clock, never an API instance's, so
 // clock skew between instances and a stalled request can't break it:
-// - consume() records consumed_at as the database's now().
+// - consume() checks expiry against, and records consumed_at as, the
+//   database's now().
 // - A device row is inserted only inside a short transaction that first
 //   checks, against the database clock, that its challenge was consumed
 //   less than ENROLMENT_INSERT_DEADLINE_MS ago; past that it registers
@@ -31,6 +32,9 @@
 //
 // Expired challenges are kept for CHALLENGE_REPLAY_WINDOW_MS after their
 // expiry before pruning, so a replay of a recently used one still answers
-// REPLAYED rather than looking unknown.
+// REPLAYED rather than looking unknown. Pruning runs on the database clock
+// too, and the insert-deadline check locks the challenge row (FOR SHARE)
+// until the insert commits or aborts, so a prune can never leave a replay
+// seeing neither the challenge nor a device that is still committing.
 export const CHALLENGE_REPLAY_WINDOW_MS = 120_000;
 export const ENROLMENT_INSERT_DEADLINE_MS = 60_000;
