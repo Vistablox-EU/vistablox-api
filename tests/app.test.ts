@@ -51,7 +51,7 @@ function buildApp(options?: {
     androidPackageName: string;
     androidCertificateFingerprints: string[];
   };
-  webauthn?: { rpId: string; origins: string[] };
+  webauthnRelatedOrigins?: string[];
 }) {
   const databaseProbe: DatabaseProbe = {
     check: options?.databaseFailure === true
@@ -76,7 +76,9 @@ function buildApp(options?: {
       ...(options?.passkeyAssociations === undefined
         ? {}
         : { passkeyAssociations: options.passkeyAssociations }),
-      ...(options?.webauthn === undefined ? {} : { webauthn: options.webauthn }),
+      ...(options?.webauthnRelatedOrigins === undefined
+        ? {}
+        : { webauthnRelatedOrigins: options.webauthnRelatedOrigins }),
     }),
     databaseProbe,
     listPublic,
@@ -200,17 +202,12 @@ describe("VistaBlox API", () => {
     });
   });
 
-  it("serves the WebAuthn related origins, leaving out the rpId's own host", async () => {
+  it("serves the WebAuthn related origins as public, cacheable JSON", async () => {
+    // Which origins count as related (not the rpId's own host) is decided
+    // by resolveWebAuthnSettings -- see webauthn-environment.test.ts.
     const { app } = buildApp({
       corsOrigins: ["https://admin.vistablox.io"],
-      webauthn: {
-        rpId: "api.vistablox.io",
-        origins: [
-          "https://api.vistablox.io",
-          "https://admin.vistablox.io",
-          "https://sub.api.vistablox.io",
-        ],
-      },
+      webauthnRelatedOrigins: ["https://admin.vistablox.io"],
     });
 
     // Sent as the admin console's browser would (a trusted CORS origin), to
@@ -229,9 +226,7 @@ describe("VistaBlox API", () => {
   });
 
   it("404s the WebAuthn related origins file when there's nothing to list", async () => {
-    const onlyRpOrigin = buildApp({
-      webauthn: { rpId: "api.vistablox.io", origins: ["https://api.vistablox.io"] },
-    });
+    const onlyRpOrigin = buildApp({ webauthnRelatedOrigins: [] });
     const unconfigured = buildApp();
 
     const [first, second] = await Promise.all([

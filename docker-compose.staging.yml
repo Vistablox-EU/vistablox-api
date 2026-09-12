@@ -63,8 +63,8 @@ services:
       # Comma-separated exact origins every WebAuthn ceremony accepts. Staging
       # sets https://api.vistablox.io,https://admin.vistablox.io so the admin
       # console can use staff passkeys; entries other than the rpId's own
-      # host are served at /.well-known/webauthn. Empty falls back to
-      # BETTER_AUTH_URL's origin.
+      # host are served at /.well-known/webauthn and accept staff passkeys
+      # only. Empty falls back to BETTER_AUTH_URL's origin.
       WEBAUTHN_ORIGIN: ${WEBAUTHN_ORIGIN:-}
       # Admin-console pages linked from staff invitation / recovery emails.
       # Empty falls back to /staff/... on BETTER_AUTH_URL's host.

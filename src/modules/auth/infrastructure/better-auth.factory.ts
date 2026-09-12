@@ -69,7 +69,11 @@ export interface BetterAuthFactoryOptions {
   };
   webauthn?: {
     rpId: string;
+    // Every origin a passkey ceremony may come from.
     origins: string[];
+    // The subset a customer may use -- never a related origin like the
+    // admin console. Anything else is refused unless the user is staff.
+    customerOrigins: string[];
   };
   onUserCreated?: (user: AuthUserSnapshot) => Promise<void>;
   onUserUpdated?: (user: AuthUserSnapshot) => Promise<void>;
@@ -132,6 +136,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
   const defaultOrigin = new URL(options.baseURL).origin;
   const rpId = options.webauthn?.rpId ?? new URL(defaultOrigin).hostname;
   const origins = options.webauthn?.origins ?? [defaultOrigin];
+  const customerOrigins = options.webauthn?.customerOrigins ?? [defaultOrigin];
   const crossSubDomainCookieDomain = deriveCrossSubDomainCookieDomain(defaultOrigin);
   const apple = options.apple;
   const socialProviders = {
@@ -346,7 +351,13 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               displayName: bootstrap.displayName,
             };
           },
-          afterVerification: async ({ ctx, user, context }) => {
+          afterVerification: async ({ ctx, user, context, verification }) => {
+            await assertPasskeyOriginAllowed(
+              ctx,
+              user.id,
+              verification.registrationInfo?.origin,
+              customerOrigins,
+            );
             const pendingBootstrap = context == null
               ? null
               : await readPasskeyBootstrap(ctx, context);
@@ -394,7 +405,7 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           },
         },
         authentication: {
-          afterVerification: async ({ ctx, clientData }) => {
+          afterVerification: async ({ ctx, clientData, verification }) => {
             const credential = await ctx.context.adapter.findOne({
               model: "passkey",
               where: [{ field: "credentialID", value: clientData.id }],
@@ -407,6 +418,12 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
             ) {
               throw oauthPasskeyRequired();
             }
+            await assertPasskeyOriginAllowed(
+              ctx,
+              credential.userId,
+              verification.authenticationInfo.origin,
+              customerOrigins,
+            );
             const priorSessionToken = await assertPasskeyCeremonyAuthorized(
               ctx,
               credential.userId,
@@ -639,6 +656,30 @@ async function assertPasskeyCeremonyAuthorized(
   }
 
   return skipLevelGate ? null : (current?.session.token ?? null);
+}
+
+/**
+ * Related origins (the admin console) are staff-only. This instance also
+ * serves customer passkeys, and its session cookie is shared across the
+ * parent domain, so script running on a related origin must never complete
+ * a customer ceremony. Fails closed: a missing origin or an unknown user is
+ * treated as a customer on an unlisted origin. Thrown as an APIError on a
+ * verify-* path, so the audit plugin records it as login_failed with
+ * failure_code PASSKEY_ORIGIN_NOT_ALLOWED, like every other refusal there.
+ */
+async function assertPasskeyOriginAllowed(
+  ctx: { context: { internalAdapter: { findUserById(id: string): Promise<unknown> } } },
+  passkeyUserId: string,
+  ceremonyOrigin: string | undefined,
+  customerOrigins: readonly string[],
+): Promise<void> {
+  if (ceremonyOrigin !== undefined && customerOrigins.includes(ceremonyOrigin)) return;
+  const user = await ctx.context.internalAdapter.findUserById(passkeyUserId);
+  if (isStaffAuthUser(user)) return;
+  throw APIError.from("FORBIDDEN", {
+    code: "PASSKEY_ORIGIN_NOT_ALLOWED",
+    message: "Passkeys for this account can't be used from this site.",
+  });
 }
 
 function oauthPasskeyRequired(): APIError {

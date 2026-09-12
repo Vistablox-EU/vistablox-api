@@ -234,10 +234,10 @@ export interface AppDependencies {
     androidPackageName: string;
     androidCertificateFingerprints?: string[];
   };
-  // The pinned rpId and every web origin its ceremonies accept. Origins
-  // that aren't the rpId's own host (the admin console) are published at
-  // /.well-known/webauthn as WebAuthn Related Origins.
-  webauthn?: { rpId: string; origins: string[] };
+  // WebAuthn Related Origins: web origins other than the rpId's own host
+  // (the admin console), published at /.well-known/webauthn. Staff-only;
+  // derived by resolveWebAuthnSettings.
+  webauthnRelatedOrigins?: string[];
   rateLimitStore?: RateLimitStore;
   /** Never true unless a human has done the live Coinbase EUR/Base verification AD-255 leaves open — see docs/investor-offering.md. Defaults false. */
   reservationFundingRailEnabled?: boolean;
@@ -441,7 +441,7 @@ export function createApp(dependencies: AppDependencies): Express {
   // before letting that origin run a ceremony for the rpId. Fetched with no
   // credentials or referrer; the data is public, so any origin may read it
   // (ACAO *, credentials off) and helmet's same-origin CORP is lifted.
-  const relatedOrigins = webAuthnRelatedOrigins(dependencies.webauthn);
+  const relatedOrigins = dependencies.webauthnRelatedOrigins ?? [];
   if (relatedOrigins.length > 0) {
     app.get("/.well-known/webauthn", (_request, response) => {
       response.setHeader("Cache-Control", "public, max-age=3600");
@@ -949,16 +949,4 @@ export function createApp(dependencies: AppDependencies): Express {
   app.use(errorHandler);
 
   return app;
-}
-
-// The origins a browser needs /.well-known/webauthn for: an origin whose
-// host is the rpId or a subdomain of it can already use the rpId under the
-// ordinary WebAuthn rule, so listing it would only spend one of the
-// browser's (at least five) registrable-domain label slots.
-function webAuthnRelatedOrigins(webauthn: AppDependencies["webauthn"]): string[] {
-  if (webauthn === undefined) return [];
-  return webauthn.origins.filter((origin) => {
-    const hostname = new URL(origin).hostname;
-    return hostname !== webauthn.rpId && !hostname.endsWith(`.${webauthn.rpId}`);
-  });
 }
