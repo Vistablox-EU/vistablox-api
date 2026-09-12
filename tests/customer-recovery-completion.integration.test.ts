@@ -332,13 +332,16 @@ describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, 
     expect(oldAfterRecovery.body.code).toBe("DEVICE_LOGIN_FAILED");
     expect(oldAfterRecovery.headers["set-auth-token"]).toBeUndefined();
 
-    // The same phone signs in with Google again (a pending session bound to
-    // its same DPoP key) and re-enrols: E1, then E2 with a new biometric key.
-    const pending = await authContext.internalAdapter.createSession(
-      customerUserId,
-      false,
-      { authenticationLevel: "oauth_pending", dpopJkt },
-      true,
+    // The same phone signs in with Google again and re-enrols: E1, then E2
+    // with a new biometric key. A real Google sign-in can't run here, and
+    // sessions can only be created through an authentication endpoint, so
+    // its result is written directly: the pending oauth_pending session that
+    // /sign-in/social creates, bound to the phone's same DPoP key.
+    const pending = { token: `pending${randomUUID().replace(/-/g, "")}` };
+    await authPool.query(
+      `INSERT INTO "auth_session" ("id", "token", "userId", "expiresAt", "updatedAt", "authenticationLevel", "dpopJkt")
+       VALUES ($1, $2, $3, now() + interval '10 minutes', now(), 'oauth_pending', $4)`,
+      [`session_pending_${suffix}`, pending.token, customerUserId, dpopJkt],
     );
     const enrolChallengeResponse = await request(testApp)
       .post(`${MOBILE}/enrol/challenge`)
