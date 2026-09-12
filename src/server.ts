@@ -39,9 +39,6 @@ import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository
 import { BetterAuthCustomerAccountAdministrator } from "./modules/auth/infrastructure/better-auth-customer-account-administrator.js";
 import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
 import { PrismaAccountClosureRepository } from "./modules/auth/repository/prisma-account-closure.repository.js";
-import { PrismaAccountRecoveryCodeRepository } from "./modules/auth/repository/prisma-account-recovery-code.repository.js";
-import { PrismaTotpRepository } from "./modules/auth/repository/prisma-totp.repository.js";
-import { OtplibTotpProvider } from "./modules/auth/infrastructure/otplib-totp.provider.js";
 import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
 import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
 import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
@@ -534,18 +531,14 @@ const app = createApp({
       auth,
       issueChallenge: issueDeviceChallengeService,
       baseUrl: environment.BETTER_AUTH_URL,
-      // Step 1 only: device_auth on (this PR), everything past it still
-      // off -- Safe/pairing/signing/recovery-v2 land in later PRs, and
-      // customer passkey login stays the default until phase 3 cuts over.
-      // No env var yet: this is a rollout sequence, not an ops toggle, and
-      // hardcoding it here keeps that sequence visible in the diff of each
-      // follow-up PR rather than buried in a value nobody re-reads.
+      // Customer authentication is device-bound. Passkeys remain limited to
+      // staff/partner web access through the same Better Auth instance.
       appConfig: {
         minAppVersion: { ios: "0.0.0", android: "0.0.0" },
         features: {
           device_auth: true,
-          device_enrolment_required: false,
-          passkey_login: true,
+          device_enrolment_required: true,
+          passkey_login: false,
           signing_requests: false,
           recovery_v2: false,
           safe_account: false,
@@ -576,19 +569,9 @@ const app = createApp({
               `${onrampRedirectUrl}?reservation_id=${encodeURIComponent(reservationId)}`,
           },
         }),
-    totp: {
-      repository: new PrismaTotpRepository(database),
-      provider: new OtplibTotpProvider(),
-      backupCodeHashKey: environment.BETTER_AUTH_SECRET,
-    },
     customerSessions: {
       repository: new PrismaCustomerSessionRepository(database),
       revoker: new BetterAuthSessionRevoker(auth),
-    },
-    accountRecoveryCodes: {
-      repository: new PrismaAccountRecoveryCodeRepository(database),
-      administrator: customerAccountAdministrator,
-      hashKey: environment.BETTER_AUTH_SECRET,
     },
     kyc: {
       getStatus: getKycStatus,

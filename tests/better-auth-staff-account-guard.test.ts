@@ -101,7 +101,7 @@ describe("Better Auth staff account guard", () => {
       });
   });
 
-  it("accepts a customer session only after OAuth and passkey are complete", async () => {
+  it("rejects a legacy customer passkey session", async () => {
     const getSession = vi.fn().mockResolvedValue({
       user: {
         id: "auth_customer",
@@ -113,10 +113,6 @@ describe("Better Auth staff account guard", () => {
     });
     const resolver = new BetterAuthSessionResolver({ api: { getSession } } as never, {} as never);
 
-    await expect(resolver.resolve({ cookie: "vb.session_token=opaque" }))
-      .resolves.toMatchObject({
-        betterAuthUserId: "auth_customer",
-        providerSessionId: "session_full",
-      });
+    await expect(resolver.resolve({ cookie: "vb.session_token=opaque" })).resolves.toBeNull();
   });
 });

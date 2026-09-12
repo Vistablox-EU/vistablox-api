@@ -5,7 +5,6 @@ import type { Pool } from "pg";
 import { describe, expect, it } from "vitest";
 
 import { loadEnvironment, resolveWebAuthnSettings } from "../src/config/environment.js";
-import type { AuthAuditEvent } from "../src/modules/auth/application/auth-audit-sink.js";
 import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
 import { issuePasskeyBootstrap } from "../src/modules/auth/infrastructure/passkey-bootstrap.js";
 import {
@@ -13,10 +12,8 @@ import {
   type SoftwareAuthenticator,
 } from "./support/software-authenticator.js";
 
-// The main better-auth instance serves both staff and customer passkeys,
-// and its session cookie is shared across .vistablox.io. The admin console
-// is a WebAuthn related origin: staff may use it, customers must not, or
-// script running there could complete a customer passkey ceremony.
+// The main Better Auth instance serves staff passkeys and customer device
+// authentication. Passkeys are staff-only, including on the API origin.
 //
 // Everything here runs through the real createBetterAuth + @better-auth/passkey
 // plugin (on better-auth's memory adapter), configured by the same
@@ -60,7 +57,6 @@ async function setUp() {
     auth_verification: [],
     passkey: [],
   };
-  const audit: AuthAuditEvent[] = [];
   const auth = createBetterAuth({
     // The factory takes the production pg Pool; better-auth itself accepts
     // any adapter, and nothing else in the factory touches the pool.
@@ -70,11 +66,6 @@ async function setUp() {
     secureCookies: false,
     trustedOrigins: environment.AUTH_TRUSTED_ORIGINS,
     webauthn: resolveWebAuthnSettings(environment).passkey,
-    authAuditSink: {
-      record: async (event) => {
-        audit.push(event);
-      },
-    },
   });
   const context = await auth.$context;
 
@@ -113,7 +104,7 @@ async function setUp() {
         { headers: { origin } },
       ),
     );
-    expect(options.status).toBe(200);
+    if (options.status !== 200) return options;
     const { challenge } = (await options.json()) as { challenge: string };
     return auth.handler(
       new Request(`${API_ORIGIN}/api/auth/passkey/verify-registration`, {
@@ -180,14 +171,7 @@ async function setUp() {
 
   const sessionsOf = (userId: string) => db.auth_session!.filter((row) => row.userId === userId);
   const passkeysOf = (userId: string) => db.passkey!.filter((row) => row.userId === userId);
-  const originRefusals = () =>
-    audit.filter(
-      (event) =>
-        event.action === "authentication.login_failed" &&
-        event.changes.failure_code === "PASSKEY_ORIGIN_NOT_ALLOWED",
-    );
-
-  return { createUser, register, signIn, seedOAuthPendingSession, sessionsOf, passkeysOf, originRefusals };
+  return { createUser, register, signIn, seedOAuthPendingSession, sessionsOf, passkeysOf };
 }
 
 describe("passkey related origins through the real better-auth passkey plugin", () => {
@@ -205,7 +189,6 @@ describe("passkey related origins through the real better-auth passkey plugin", 
     expect(harness.sessionsOf(staff.id)).toEqual([
       expect.objectContaining({ authenticationLevel: "staff_passkey" }),
     ]);
-    expect(harness.originRefusals()).toEqual([]);
   });
 
   it("refuses a customer passkey registration from the admin console, storing nothing", async () => {
@@ -220,53 +203,23 @@ describe("passkey related origins through the real better-auth passkey plugin", 
     );
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "PASSKEY_ORIGIN_NOT_ALLOWED" });
+    expect(await response.json()).toMatchObject({ code: "CUSTOMER_PASSKEY_DISABLED" });
     expect(harness.passkeysOf(customer.id)).toEqual([]);
-    expect(harness.originRefusals()).toHaveLength(1);
   });
 
-  it("refuses a customer passkey sign-in from the admin console, even mid-OAuth, creating no session", async () => {
+  it("refuses a customer passkey registration from the API origin", async () => {
     const harness = await setUp();
     const customer = await harness.createUser("customer");
-    const authenticator = createSoftwareAuthenticator(RP_ID);
-    expect((await harness.register(customer, authenticator, API_ORIGIN, true)).status).toBe(200);
-    const sessionCookie = harness.seedOAuthPendingSession(customer.id);
-
-    const response = await harness.signIn(authenticator, ADMIN_ORIGIN, sessionCookie);
+    const response = await harness.register(customer, createSoftwareAuthenticator(RP_ID), API_ORIGIN, true);
 
     expect(response.status).toBe(403);
-    expect(await response.json()).toMatchObject({ code: "PASSKEY_ORIGIN_NOT_ALLOWED" });
-    // Only the seeded oauth_pending session -- no oauth_passkey one.
-    expect(harness.sessionsOf(customer.id)).toEqual([
-      expect.objectContaining({ authenticationLevel: "oauth_pending" }),
-    ]);
-    expect(harness.originRefusals()).toHaveLength(1);
+    expect(await response.json()).toMatchObject({ code: "CUSTOMER_PASSKEY_DISABLED" });
+    expect(harness.passkeysOf(customer.id)).toEqual([]);
   });
 
-  it("still lets a customer register and sign in from the rpId's own origin", async () => {
+  it("refuses a customer passkey registration from the native Android app origin", async () => {
     const harness = await setUp();
     const customer = await harness.createUser("customer");
-    const authenticator = createSoftwareAuthenticator(RP_ID);
-
-    expect((await harness.register(customer, authenticator, API_ORIGIN, true)).status).toBe(200);
-    const response = await harness.signIn(
-      authenticator,
-      API_ORIGIN,
-      harness.seedOAuthPendingSession(customer.id),
-    );
-
-    expect(response.status).toBe(200);
-    // The oauth_pending session is replaced by the passkey-assured one.
-    expect(harness.sessionsOf(customer.id)).toEqual([
-      expect.objectContaining({ authenticationLevel: "oauth_passkey" }),
-    ]);
-    expect(harness.originRefusals()).toEqual([]);
-  });
-
-  it("still lets a customer register from the native Android app origin", async () => {
-    const harness = await setUp();
-    const customer = await harness.createUser("customer");
-
     const response = await harness.register(
       customer,
       createSoftwareAuthenticator(RP_ID),
@@ -274,8 +227,9 @@ describe("passkey related origins through the real better-auth passkey plugin", 
       true,
     );
 
-    expect(response.status).toBe(200);
-    expect(harness.passkeysOf(customer.id)).toHaveLength(1);
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ code: "CUSTOMER_PASSKEY_DISABLED" });
+    expect(harness.passkeysOf(customer.id)).toEqual([]);
   });
 });
 

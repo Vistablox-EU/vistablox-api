@@ -13,10 +13,20 @@ export function createRequireFreshAuthentication(
     try {
       const context = response.locals.authContext;
       if (context === undefined) throw freshAuthRequired();
+      const freshAfter = new Date(clock().getTime() - FRESH_AUTH_WINDOW_MS);
+      if (
+        context.population === "customer" &&
+        context.authenticationLevel === "device_biometric" &&
+        context.sessionCreatedAt !== undefined &&
+        context.sessionCreatedAt >= freshAfter
+      ) {
+        next();
+        return;
+      }
       const verified = await sessions.hasFreshAuthentication?.({
         accountId: context.accountId,
         providerSessionId: context.providerSessionId,
-        freshAfter: new Date(clock().getTime() - FRESH_AUTH_WINDOW_MS),
+        freshAfter,
       });
       if (verified !== true) throw freshAuthRequired();
       next();
@@ -31,6 +41,6 @@ function freshAuthRequired(): AppError {
     code: "authentication.fresh_auth_required",
     title: "Fresh authentication required",
     status: 403,
-    detail: "Confirm with a passkey or authenticator code before continuing.",
+    detail: "Confirm on this device before continuing.",
   });
 }

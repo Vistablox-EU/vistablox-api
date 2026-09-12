@@ -50,8 +50,8 @@ function appFor(
       minAppVersion: { ios: "0.0.0", android: "0.0.0" },
       features: {
         device_auth: true,
-        device_enrolment_required: false,
-        passkey_login: true,
+        device_enrolment_required: true,
+        passkey_login: false,
         signing_requests: false,
         recovery_v2: false,
         safe_account: false,

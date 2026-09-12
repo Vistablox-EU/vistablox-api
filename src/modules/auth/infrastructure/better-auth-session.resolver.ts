@@ -61,18 +61,18 @@ export class BetterAuthSessionResolver implements SessionResolver {
       return null;
     }
     const authenticationLevel = result.session.authenticationLevel;
-    const accepted =
-      authenticationLevel === "oauth_passkey" ||
-      authenticationLevel === "staff_passkey" ||
-      authenticationLevel === DEVICE_SESSION_AUTHENTICATION_LEVEL ||
-      (this.options.allowPendingOAuth === true && authenticationLevel === "oauth_pending");
+    const isStaff = result.user.population === "staff_partner";
+    const accepted = isStaff
+      ? authenticationLevel === "staff_passkey"
+      : authenticationLevel === DEVICE_SESSION_AUTHENTICATION_LEVEL ||
+        (this.options.allowPendingOAuth === true && authenticationLevel === "oauth_pending");
     if (!accepted) return null;
 
     const dpopJkt = (result.session as Record<string, unknown>).dpopJkt;
     return {
       betterAuthUserId: result.user.id,
       providerSessionId: result.session.id,
-      population: result.user.population === "staff_partner" ? "staff_partner" : "customer",
+      population: isStaff ? "staff_partner" : "customer",
       dpopJkt: typeof dpopJkt === "string" ? dpopJkt : null,
       sessionCreatedAt: result.session.createdAt,
       authenticationLevel,
