@@ -18,7 +18,10 @@ import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaAccountRepository } from "../src/modules/account/repository/prisma-account.repository.js";
 import { createDeviceAuthRouter } from "../src/modules/auth/api/device-auth.router.js";
 import { createRequireDpopOnly } from "../src/modules/auth/api/require-dpop-only.js";
-import { CompleteAccountRecoveryService } from "../src/modules/auth/application/account-recovery.service.js";
+import {
+  CompleteAccountRecoveryService,
+  OpenAccountRecoveryCaseService,
+} from "../src/modules/auth/application/account-recovery.service.js";
 import { IssueDeviceChallengeService } from "../src/modules/auth/application/device-challenge-issuance.service.js";
 import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
 import { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
@@ -40,12 +43,13 @@ const MOBILE = "/v1/auth/mobile";
 type KeyPair = { privateKey: webcrypto.CryptoKey; publicJwk: JWK };
 type BetterAuthContext = Awaited<ReturnType<typeof createBetterAuth>["$context"]>;
 
-// Completing a staff-reviewed CUSTOMER recovery case, through the real
-// services, better-auth and Postgres: the lost phone's device is revoked and
-// can't log in, its device_key login method and sessions are gone, the
-// recovery flag is cleared, every step is audited, and the same phone (same
-// DPoP key) then re-enrols through a Google sign-in and E1/E2 and logs in.
-describe.skipIf(databaseUrl === undefined)("customer recovery completion, then re-enrolment, real stack", () => {
+// A staff-reviewed CUSTOMER recovery case from opening to completion,
+// through the real services, better-auth and Postgres: opening restricts the
+// account and ends the lost phone's session; completion revokes the device
+// (it can't log in), removes its device_key login method, clears the
+// recovery flag and audits every step; the same phone (same DPoP key) then
+// re-enrols through a Google sign-in and E1/E2 and logs in.
+describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, then re-enrolment, real stack", () => {
   const suffix = randomUUID();
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
@@ -54,7 +58,11 @@ describe.skipIf(databaseUrl === undefined)("customer recovery completion, then r
   const dpopReplayRepository = new PrismaDpopReplayRepository(database);
   const recoveryRepository = new PrismaAccountRecoveryRepository(database);
   const sendAccountRecoveryCompletedEmail = vi.fn().mockResolvedValue(undefined);
-  const emailSender = { sendAccountRecoveryCompletedEmail } as unknown as EmailSender;
+  const sendAccountRecoveryCaseOpenedEmail = vi.fn().mockResolvedValue(undefined);
+  const emailSender = {
+    sendAccountRecoveryCompletedEmail,
+    sendAccountRecoveryCaseOpenedEmail,
+  } as unknown as EmailSender;
 
   const customerAccountId = `acct_recovery_customer_${suffix}`;
   const actorAccountId = `acct_recovery_actor_${suffix}`;
@@ -108,6 +116,11 @@ describe.skipIf(databaseUrl === undefined)("customer recovery completion, then r
       .post(`${MOBILE}/login/verify`)
       .set("dpop", await dpopProof(`${MOBILE}/login/verify`))
       .send({ device_id: deviceId, challenge, jws });
+  }
+
+  async function liveSessionCount(): Promise<number> {
+    const result = await authPool.query('SELECT "id" FROM "auth_session" WHERE "userId" = $1', [customerUserId]);
+    return result.rowCount ?? 0;
   }
 
   beforeAll(async () => {
@@ -211,34 +224,43 @@ describe.skipIf(databaseUrl === undefined)("customer recovery completion, then r
     await Promise.all([database.$disconnect(), authPool.end()]);
   });
 
-  it("revokes the lost phone, ends its sessions, clears the flag and audits every step; the same phone then re-enrols via Google + E1/E2 and logs in, and the old device can't", async () => {
-    // The lost phone still has a live device session.
+  it("opens and completes the case, revoking the lost phone and auditing every step; the same phone then re-enrols via Google + E1/E2 and logs in, and the old device can't", async () => {
+    const administrator = new BetterAuthCustomerAccountAdministrator(auth, emailSender);
+
+    // The lost phone has a live device session.
     const beforeLogin = await deviceLogin(oldDeviceId, oldBioKeys, oldBioJkt);
     expect(beforeLogin.status).toBe(200);
+    expect(await liveSessionCount()).toBe(1);
 
-    // A staff-reviewed case: opened (account restricted, recovery flag set),
-    // Didit session, primary review, second-reviewer approval.
-    const openedAt = new Date();
-    const opened = await recoveryRepository.openCase({
+    // Staff open the case through the real service: the recovery flag is
+    // set on the customer (this CHECK used to refuse it for customers), the
+    // account is restricted, and every session ends.
+    const opened = await new OpenAccountRecoveryCaseService(recoveryRepository, administrator, emailSender).execute({
       accountId: customerAccountId,
       actorAccountId,
       traceId: `trace_${suffix}`,
-      openedAt,
     });
-    await authContext.internalAdapter.updateUser(customerUserId, { recoveryRequiredAt: openedAt } as Record<string, unknown>);
+    expect(opened.status).toBe("open");
+    const flagWhileOpen = await authPool.query('SELECT "recoveryRequiredAt" FROM "auth_user" WHERE "id" = $1', [customerUserId]);
+    expect(flagWhileOpen.rows[0]?.recoveryRequiredAt).not.toBeNull();
+    expect((await database.account.findUniqueOrThrow({ where: { id: customerAccountId } })).status).toBe("recovery_review");
+    expect(await liveSessionCount()).toBe(0);
+
+    // Didit session, primary review, second-reviewer approval.
+    const reviewedAt = new Date();
     await recoveryRepository.recordDiditSession({
       caseId: opened.id,
       diditReference: `didit_${suffix}`,
       actorAccountId,
       traceId: `trace_${suffix}`,
-      recordedAt: openedAt,
+      recordedAt: reviewedAt,
     });
     await recoveryRepository.recordPrimaryReview({
       caseId: opened.id,
       reviewerAccountId: reviewerOneId,
       corroborationCategory: "last_login",
       traceId: `trace_${suffix}`,
-      reviewedAt: openedAt,
+      reviewedAt,
     });
     const approved = await recoveryRepository.decideCase({
       caseId: opened.id,
@@ -246,17 +268,16 @@ describe.skipIf(databaseUrl === undefined)("customer recovery completion, then r
       decision: "approved",
       reason: "Didit and corroboration checked out.",
       traceId: `trace_${suffix}`,
-      decidedAt: openedAt,
+      decidedAt: reviewedAt,
     });
     expect(approved?.status).toBe("approved");
 
-    const completion = new CompleteAccountRecoveryService(
+    const completed = await new CompleteAccountRecoveryService(
       recoveryRepository,
-      new BetterAuthCustomerAccountAdministrator(auth, emailSender),
+      administrator,
       emailSender,
       "https://app.example.test/recover-account",
-    );
-    const completed = await completion.execute({ caseId: opened.id, actorAccountId, traceId: `trace_${suffix}` });
+    ).execute({ caseId: opened.id, actorAccountId, traceId: `trace_${suffix}` });
     expect(completed.status).toBe("completed");
 
     // The old device is revoked, with when and why, and its device_key row is gone.
@@ -269,8 +290,7 @@ describe.skipIf(databaseUrl === undefined)("customer recovery completion, then r
     ).toBe(0);
 
     // No session survives, and the session mirror shows none as active.
-    const liveSessions = await authPool.query('SELECT "id" FROM "auth_session" WHERE "userId" = $1', [customerUserId]);
-    expect(liveSessions.rowCount).toBe(0);
+    expect(await liveSessionCount()).toBe(0);
     expect(await database.session.count({ where: { accountId: customerAccountId, status: "active" } })).toBe(0);
 
     // The recovery flag is cleared and the account is active again.
@@ -278,13 +298,12 @@ describe.skipIf(databaseUrl === undefined)("customer recovery completion, then r
     expect(flag.rows[0]?.recoveryRequiredAt).toBeNull();
     expect((await database.account.findUniqueOrThrow({ where: { id: customerAccountId } })).status).toBe("active");
 
-    // Every step is audited.
+    // Every completion step is audited.
     const audited = await database.auditLog.findMany({
       where: { actorAccountId, resourceId: { in: [opened.id, oldDeviceId, customerAccountId] } },
       select: { action: true, resourceId: true, changes: true },
     });
-    const actions = audited.map((row) => row.action);
-    expect(actions).toEqual(
+    expect(audited.map((row) => row.action)).toEqual(
       expect.arrayContaining([
         "authentication.device_revoked",
         "authentication.login_method_removed",
@@ -295,9 +314,11 @@ describe.skipIf(databaseUrl === undefined)("customer recovery completion, then r
       ]),
     );
     expect(audited.find((row) => row.action === "authentication.device_revoked")?.resourceId).toBe(oldDeviceId);
+    // Opening the case already ended the device session, so completion's
+    // own sweep finds none left here.
     expect(audited.find((row) => row.action === "authentication.account_recovery_sessions_revoked")?.changes).toMatchObject({
       revoked_device_count: 1,
-      revoked_device_session_count: 1,
+      revoked_session_count: 0,
     });
 
     // The customer is told, with no link, to sign in with Google/Apple and set the phone up again.
