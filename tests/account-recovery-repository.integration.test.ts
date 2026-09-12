@@ -50,7 +50,7 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
         accountId,
         channel: "web",
         betterAuthUserId,
-        authMethodAtLogin: "oauth_passkey",
+        authMethodAtLogin: "device_biometric",
         idleExpiresAt: new Date("2026-09-02T13:00:00.000Z"),
         absoluteExpiresAt: new Date("2026-09-02T20:00:00.000Z"),
       },
@@ -86,7 +86,7 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
   it("surfaces the last login as a corroboration fact", async () => {
     const facts = await repository.getCorroborationFacts(accountId);
 
-    expect(facts.lastLogin).toMatchObject({ authMethod: "oauth_passkey" });
+    expect(facts.lastLogin).toMatchObject({ authMethod: "device_biometric" });
     expect(facts.lastDeposit).toBeNull();
     expect(facts.lastReservation).toBeNull();
   });

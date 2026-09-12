@@ -189,7 +189,7 @@ describe("device session lifetime plugin (real better-auth get-session)", () => 
 
   it("leaves non-device sessions exactly as before: no idle limit, rolling renewal", async () => {
     const harness = await buildAuth();
-    const token = await harness.createSession("oauth_passkey");
+    const token = await harness.createSession("staff_passkey");
 
     vi.setSystemTime(at(10 * MINUTE));
     const result = await harness.getSession(token);
@@ -257,7 +257,7 @@ describe("device session lifetime plugin: every session lookup, not just get-ses
 
   it("leaves non-device sessions usable on both routes after 12 idle minutes", async () => {
     const harness = await buildAuth();
-    const token = await harness.createSession("oauth_passkey");
+    const token = await harness.createSession("staff_passkey");
 
     vi.setSystemTime(at(12 * MINUTE));
     await expect(harness.listSessions(token)).resolves.toBeDefined();
@@ -283,7 +283,7 @@ describe("device session lifetime plugin: no refresh write for device sessions",
   it("never writes to a device session on a refresh-due lookup, while a non-device session still refreshes", async () => {
     const harness = await buildAuth();
     const deviceToken = await harness.createSession("device_biometric");
-    const webToken = await harness.createSession("oauth_passkey");
+    const webToken = await harness.createSession("staff_passkey");
     harness.setRow(deviceToken, { updatedAt: at(8 * MINUTE) });
     const updateSession = vi.spyOn(harness.context.internalAdapter, "updateSession");
 

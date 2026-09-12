@@ -25,7 +25,6 @@ import type { LoginDeviceService } from "../application/device-login.service.js"
 export const AUTHENTICATION_LEVELS = [
   "unassured",
   "oauth_pending",
-  "oauth_passkey",
   "staff_passkey",
   "device_biometric",
 ] as const;
@@ -69,11 +68,9 @@ export interface BetterAuthFactoryOptions {
   };
   webauthn?: {
     rpId: string;
-    // Every origin a passkey ceremony may come from.
+    // Every origin a passkey ceremony may come from. Passkeys are staff-only
+    // from every one of them (assertStaffPasskeyUser).
     origins: string[];
-    // The subset a customer may use -- never a related origin like the
-    // admin console. Anything else is refused unless the user is staff.
-    customerOrigins: string[];
   };
   onUserCreated?: (user: AuthUserSnapshot) => Promise<void>;
   onUserUpdated?: (user: AuthUserSnapshot) => Promise<void>;
@@ -136,7 +133,6 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
   const defaultOrigin = new URL(options.baseURL).origin;
   const rpId = options.webauthn?.rpId ?? new URL(defaultOrigin).hostname;
   const origins = options.webauthn?.origins ?? [defaultOrigin];
-  const customerOrigins = options.webauthn?.customerOrigins ?? [defaultOrigin];
   const crossSubDomainCookieDomain = deriveCrossSubDomainCookieDomain(defaultOrigin);
   const apple = options.apple;
   const socialProviders = {
@@ -345,28 +341,17 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
           requireSession: false,
           resolveUser: async ({ ctx, context }) => {
             const bootstrap = await readPasskeyBootstrap(ctx, context);
+            // Refused before the WebAuthn prompt, not only after it.
+            await assertStaffPasskeyUser(ctx, bootstrap.userId);
             return {
               id: bootstrap.userId,
               name: bootstrap.email,
               displayName: bootstrap.displayName,
             };
           },
-          afterVerification: async ({ ctx, user, context, verification }) => {
-            await assertPasskeyOriginAllowed(
-              ctx,
-              user.id,
-              verification.registrationInfo?.origin,
-              customerOrigins,
-            );
-            const pendingBootstrap = context == null
-              ? null
-              : await readPasskeyBootstrap(ctx, context);
-            const priorSessionToken = await assertPasskeyCeremonyAuthorized(
-              ctx,
-              user.id,
-              pendingBootstrap?.customerIdentityVerified === true,
-              options.dpop,
-            );
+          afterVerification: async ({ ctx, user, context }) => {
+            await assertStaffPasskeyUser(ctx, user.id);
+            await assertPasskeySessionKeyMatches(ctx, user.id, options.dpop);
             if (context === null || context === undefined) {
               const existing = await ctx.context.adapter.findMany({
                 model: "passkey",
@@ -399,13 +384,10 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
                 });
               }
             }
-            if (priorSessionToken !== null) {
-              await ctx.context.internalAdapter.deleteSession(priorSessionToken);
-            }
           },
         },
         authentication: {
-          afterVerification: async ({ ctx, clientData, verification }) => {
+          afterVerification: async ({ ctx, clientData }) => {
             const credential = await ctx.context.adapter.findOne({
               model: "passkey",
               where: [{ field: "credentialID", value: clientData.id }],
@@ -416,23 +398,10 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
               !("userId" in credential) ||
               typeof credential.userId !== "string"
             ) {
-              throw oauthPasskeyRequired();
+              throw passkeyNotRecognized();
             }
-            await assertPasskeyOriginAllowed(
-              ctx,
-              credential.userId,
-              verification.authenticationInfo.origin,
-              customerOrigins,
-            );
-            const priorSessionToken = await assertPasskeyCeremonyAuthorized(
-              ctx,
-              credential.userId,
-              false,
-              options.dpop,
-            );
-            if (priorSessionToken !== null) {
-              await ctx.context.internalAdapter.deleteSession(priorSessionToken);
-            }
+            await assertStaffPasskeyUser(ctx, credential.userId);
+            await assertPasskeySessionKeyMatches(ctx, credential.userId, options.dpop);
           },
         },
       }),
@@ -517,7 +486,6 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     if (isStaffAuthUser(user) && isPasskeyVerificationPath(context?.path)) {
       return "staff_passkey";
     }
-    if (isPasskeyVerificationPath(context?.path)) return "oauth_passkey";
     if (isOAuthSignInCompletionPath(context?.path)) return "oauth_pending";
     if (isDeviceAuthSessionCreationPath(context?.path)) return "device_biometric";
     return "unassured";
@@ -618,74 +586,53 @@ function invalidPasskeyBootstrap(): APIError {
   });
 }
 
-async function assertPasskeyCeremonyAuthorized(
+/**
+ * Passkeys are staff-only (assertStaffPasskeyUser runs first), and a staff
+ * ceremony needs no prior session. But if the request does carry a session
+ * of this same user that is bound to a DPoP key, that key must still match.
+ */
+async function assertPasskeySessionKeyMatches(
   ctx: Parameters<typeof getSessionFromCtx>[0],
   passkeyUserId: string,
-  customerIdentityVerifiedByBootstrap: boolean,
   dpop: BetterAuthFactoryOptions["dpop"],
-): Promise<string | null> {
-  const user = await ctx.context.internalAdapter.findUserById(passkeyUserId);
-  // Staff and a verified recovery bootstrap don't need an existing
-  // oauth_pending/oauth_passkey session to proceed -- but "no session
-  // required" is not the same as "any session's key goes unchecked": if
-  // one of these requests DOES carry a session already bound to a DPoP
-  // key, that key must still match (below), the same as it would for an
-  // ordinary customer.
-  const skipLevelGate = isStaffAuthUser(user) || customerIdentityVerifiedByBootstrap;
-
+): Promise<void> {
   const current = await getSessionFromCtx(ctx);
-
-  if (!skipLevelGate) {
-    const level = (current?.session as Record<string, unknown> | undefined)?.authenticationLevel;
-    if (
-      current?.user.id !== passkeyUserId ||
-      (level !== "oauth_pending" && level !== "oauth_passkey")
-    ) {
-      throw oauthPasskeyRequired();
-    }
-  }
-
-  if (current !== null && current.user.id === passkeyUserId) {
-    const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
-    await resolvePendingSessionDpopKey(
-      ctx,
-      typeof boundJkt === "string" ? boundJkt : null,
-      current.session.createdAt,
-      dpop,
-    );
-  }
-
-  return skipLevelGate ? null : (current?.session.token ?? null);
+  if (current === null || current.user.id !== passkeyUserId) return;
+  const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
+  await resolvePendingSessionDpopKey(
+    ctx,
+    typeof boundJkt === "string" ? boundJkt : null,
+    current.session.createdAt,
+    dpop,
+  );
 }
 
 /**
- * Related origins (the admin console) are staff-only. This instance also
- * serves customer passkeys, and its session cookie is shared across the
- * parent domain, so script running on a related origin must never complete
- * a customer ceremony. Fails closed: a missing origin or an unknown user is
- * treated as a customer on an unlisted origin. Thrown as an APIError on a
- * verify-* path, so the audit plugin records it as login_failed with
- * failure_code PASSKEY_ORIGIN_NOT_ALLOWED, like every other refusal there.
+ * Passkeys are staff-only (Phase 4, a direct cutover). Customers sign in with
+ * Google/Apple and a device key (E1/E2, L1/L2), never a passkey, from any
+ * origin: the API's own, the admin console (a WebAuthn related origin, #79)
+ * or a native app's. Checked on the passkey's own user. Fails closed: an
+ * unknown user is refused. On a verify-* path it's an APIError, so the audit
+ * plugin records it as login_failed with failure_code PASSKEY_STAFF_ONLY.
  */
-async function assertPasskeyOriginAllowed(
+async function assertStaffPasskeyUser(
   ctx: { context: { internalAdapter: { findUserById(id: string): Promise<unknown> } } },
   passkeyUserId: string,
-  ceremonyOrigin: string | undefined,
-  customerOrigins: readonly string[],
 ): Promise<void> {
-  if (ceremonyOrigin !== undefined && customerOrigins.includes(ceremonyOrigin)) return;
   const user = await ctx.context.internalAdapter.findUserById(passkeyUserId);
   if (isStaffAuthUser(user)) return;
   throw APIError.from("FORBIDDEN", {
-    code: "PASSKEY_ORIGIN_NOT_ALLOWED",
-    message: "Passkeys for this account can't be used from this site.",
+    code: "PASSKEY_STAFF_ONLY",
+    message: "Passkeys are only available to VistaBlox staff accounts.",
   });
 }
 
-function oauthPasskeyRequired(): APIError {
+// A sign-in with a credential this instance doesn't hold. Passkeys are
+// staff-only, so there's no customer "continue with Google or Apple" step.
+function passkeyNotRecognized(): APIError {
   return APIError.from("UNAUTHORIZED", {
-    code: "OAUTH_REQUIRED_BEFORE_PASSKEY",
-    message: "Continue with Google or Apple before confirming your passkey.",
+    code: "PASSKEY_NOT_RECOGNIZED",
+    message: "This passkey isn't registered with VistaBlox.",
   });
 }
 

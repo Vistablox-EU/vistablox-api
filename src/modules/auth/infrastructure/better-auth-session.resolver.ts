@@ -61,8 +61,9 @@ export class BetterAuthSessionResolver implements SessionResolver {
       return null;
     }
     const authenticationLevel = result.session.authenticationLevel;
+    // No customer oauth_passkey level any more: customers reach protected
+    // APIs only with a device session (Phase 4 cutover).
     const accepted =
-      authenticationLevel === "oauth_passkey" ||
       authenticationLevel === "staff_passkey" ||
       authenticationLevel === DEVICE_SESSION_AUTHENTICATION_LEVEL ||
       (this.options.allowPendingOAuth === true && authenticationLevel === "oauth_pending");

@@ -412,9 +412,8 @@ function resolveLoginMethod(
   const path = context?.path;
   if (isDeviceAuthPath(path)) return "device_biometric";
   if (path === "/passkey/verify-authentication" || path === "/passkey/verify-registration") {
-    return session?.authenticationLevel === "staff_passkey"
-      ? "staff_passkey"
-      : "oauth_passkey";
+    // Passkeys are staff-only since the Phase 4 cutover.
+    return session?.authenticationLevel === "staff_passkey" ? "staff_passkey" : null;
   }
   if (path === "/sign-in/social") return readBodyString(context?.body, "provider");
   if (path?.startsWith("/callback/") === true) {
