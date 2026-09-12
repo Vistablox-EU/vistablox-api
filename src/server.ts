@@ -239,8 +239,17 @@ const loginDeviceService = new LoginDeviceService(
   () => new Date(),
   mobilePlatformPolicy,
 );
-const issueDeviceChallengeService = new IssueDeviceChallengeService(deviceChallengeRepository);
+// With deviceRepository, L1 can find the device from the request's DPoP key
+// when no device_id is sent (contract 3.1).
+const issueDeviceChallengeService = new IssueDeviceChallengeService(
+  deviceChallengeRepository,
+  () => new Date(),
+  deviceRepository,
+);
 
+// Shared by the audit plugin (session create/revoke) and the session
+// resolvers (device-session activity: last_seen_at, idle_expires_at).
+const sessionMirror = new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET);
 const auth = createBetterAuth({
   database: authDatabase,
   baseURL: environment.BETTER_AUTH_URL,
@@ -299,7 +308,11 @@ const auth = createBetterAuth({
   onUserUpdated: (user) => accountProvisioner.onUserUpdated(user),
   onLoginMethodUsed: (method) => accountProvisioner.onLoginMethodUsed(method),
   authAuditSink,
-  sessionMirror: new PrismaSessionMirror(database, environment.BETTER_AUTH_SECRET),
+  findDeviceByDpopJkt: async (dpopJkt) => {
+    const device = await deviceRepository.findByDpopJkt(dpopJkt);
+    return device === null ? null : { betterAuthUserId: device.betterAuthUserId, deviceId: device.deviceId };
+  },
+  sessionMirror,
   onBackgroundError: (error) => {
     logger.error({ err: error }, "background authentication task failed");
   },
@@ -400,7 +413,17 @@ const coinbaseCdpClient =
 // it, or vice versa).
 const reservationFundingRailEnabled =
   environment.RESERVATION_FUNDING_RAIL_ENABLED && coinbaseCdpClient !== undefined;
-const betterAuthSessionResolver = new BetterAuthSessionResolver(auth, authDatabase);
+const sessionResolverOptions = {
+  sessionMirror,
+  onMirrorError: (error: unknown) => {
+    logger.warn({ err: error }, "session mirror activity update failed");
+  },
+};
+const betterAuthSessionResolver = new BetterAuthSessionResolver(
+  auth,
+  authDatabase,
+  sessionResolverOptions,
+);
 // Unconditional -- identity's own services are already a required
 // dependency for /v1/kyc itself (getKycDisplayProfile above), so there's no
 // "unavailable at construction time" state left to model here, only a
@@ -483,6 +506,7 @@ const app = createApp({
     accounts: accountRepository,
     sessions: betterAuthSessionResolver,
     oauthBootstrapSessions: new BetterAuthSessionResolver(auth, authDatabase, {
+      ...sessionResolverOptions,
       allowPendingOAuth: true,
     }),
     dpop: {

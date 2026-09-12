@@ -6,6 +6,12 @@ import { createAuthMiddleware, isAPIError } from "better-auth/api";
 import type { AuthAuditEvent, AuthAuditSink } from "../application/auth-audit-sink.js";
 import type { SessionMirror } from "../application/session-mirror.js";
 import type { LoginMethodType } from "../../account/repository/account.repository.js";
+import {
+  DEVICE_SESSION_IDLE_TIMEOUT_MS,
+  deviceSessionAbsoluteExpiresAt,
+} from "../domain/device-session-lifetime.js";
+import { isDiscardedCeremonySession } from "./device-ceremony-session.js";
+import { verifiedLoginDpopJkt } from "./device-login-audit-context.js";
 
 export interface BetterAuthAuditPluginOptions {
   sink: AuthAuditSink;
@@ -22,6 +28,13 @@ export interface BetterAuthAuditPluginOptions {
     methodType: LoginMethodType;
     occurredAt: Date;
   }) => Promise<void>;
+  // Device login (L2) failures: the device the request's verified DPoP key
+  // belongs to, or null if none -- lets a failed L2 be linked to that
+  // device's account. The body's device_id is never used for attribution:
+  // it's unverified, and optional (contract 3.1).
+  findDeviceByDpopJkt?: (
+    dpopJkt: string,
+  ) => Promise<{ betterAuthUserId: string; deviceId: string } | null>;
 }
 
 interface AuditContext {
@@ -45,11 +58,20 @@ export function createBetterAuthAuditPlugin(
     }
   };
   const mirrorCreated = async (
-    session: { id: string; userId: string; token: string; createdAt: Date },
+    session: {
+      id: string;
+      userId: string;
+      token: string;
+      createdAt: Date;
+      authenticationLevel?: unknown;
+    },
     context: AuditContext | null,
     authMethod: string | null,
   ): Promise<void> => {
     if (options.sessionMirror === undefined) return;
+    // Device sessions have their own limits (idle 5 min, absolute 30 min,
+    // contract 3.6/3.7); every other session keeps the configured web policy.
+    const isDeviceSession = session.authenticationLevel === "device_biometric";
     try {
       await options.sessionMirror.recordCreated({
         betterAuthUserId: session.userId,
@@ -58,15 +80,19 @@ export function createBetterAuthAuditPlugin(
         authMethodAtLogin: authMethod,
         userAgent: context?.headers?.get("user-agent") ?? null,
         createdAt: session.createdAt,
-        idleExpiresAt: new Date(session.createdAt.getTime() + idleMinutes * 60_000),
-        absoluteExpiresAt: new Date(session.createdAt.getTime() + absoluteHours * 60 * 60_000),
+        idleExpiresAt: isDeviceSession
+          ? new Date(session.createdAt.getTime() + DEVICE_SESSION_IDLE_TIMEOUT_MS)
+          : new Date(session.createdAt.getTime() + idleMinutes * 60_000),
+        absoluteExpiresAt: isDeviceSession
+          ? deviceSessionAbsoluteExpiresAt(session.createdAt)
+          : new Date(session.createdAt.getTime() + absoluteHours * 60 * 60_000),
       });
     } catch (error) {
       options.onError?.(error);
     }
   };
   const mirrorRevoked = async (
-    session: { id: string },
+    session: { id: string; token?: unknown },
     context: AuditContext | null,
   ): Promise<void> => {
     if (options.sessionMirror === undefined) return;
@@ -74,7 +100,40 @@ export function createBetterAuthAuditPlugin(
       await options.sessionMirror.recordRevoked({
         betterAuthSessionId: session.id,
         revokedAt: clock(),
-        reason: sessionRevocationReason(context?.path),
+        reason: revocationReason(session, context),
+      });
+    } catch (error) {
+      options.onError?.(error);
+    }
+  };
+
+  // E2/L2 success, recorded only once the endpoint has returned its success
+  // body: every step after session creation has completed. The session
+  // comes from ctx.context.newSession (set by setSessionCookie) and the
+  // device_id from the response body, so enrolment gets its new device_id
+  // too. Nothing from the request body (JWS, challenge, attestation) is used.
+  const recordDeviceCeremonySucceeded = async (context: unknown): Promise<void> => {
+    try {
+      const auditContext = context as AuditContext & {
+        context: { returned?: unknown; newSession?: unknown };
+      };
+      const newSession = readNewSession(auditContext.context.newSession);
+      if (newSession === null) return;
+      await record({
+        eventKey: `better_auth:login_succeeded:${newSession.sessionId}`,
+        action: "authentication.login_succeeded",
+        betterAuthUserId: newSession.userId,
+        attributeToSubject: true,
+        resourceType: "account",
+        resourceId: newSession.userId,
+        changes: {
+          trace_id: readTraceId(auditContext),
+          authentication_method: "device_biometric",
+          provider_session_id: newSession.sessionId,
+          device_id: readObjectString(auditContext.context.returned, "device_id"),
+          ...deviceCeremonyPurpose(auditContext.path),
+        },
+        occurredAt: clock(),
       });
     } catch (error) {
       options.onError?.(error);
@@ -128,7 +187,12 @@ export function createBetterAuthAuditPlugin(
                     },
                     occurredAt: session.createdAt,
                   });
-                  if (isLoginPath(context?.path)) {
+                  // E2/L2 still have work to do after their session row
+                  // exists (E2 deletes the pending session; L2 loads the
+                  // user and sets the cookie), and either can still fail.
+                  // Their login_succeeded is recorded by the after hook
+                  // below, once the ceremony has actually completed.
+                  if (isLoginPath(context?.path) && !isDeviceAuthPath(context?.path)) {
                     if (linkedMethod !== null && isSupportedLoginMethod(linkedMethod)) {
                       try {
                         await options.onLoginMethodUsed?.({
@@ -175,7 +239,7 @@ export function createBetterAuthAuditPlugin(
                     resourceId: session.id,
                     changes: {
                       trace_id: readTraceId(context),
-                      reason: sessionRevocationReason(context?.path),
+                      reason: revocationReason(session, context),
                     },
                     occurredAt: clock(),
                   });
@@ -191,9 +255,19 @@ export function createBetterAuthAuditPlugin(
         {
           matcher: (context) => isLoginPath(context.path),
           handler: createAuthMiddleware(async (context) => {
-            if (!isAPIError(context.context.returned)) return;
+            if (!isAPIError(context.context.returned)) {
+              if (isDeviceAuthPath(context.path)) {
+                await recordDeviceCeremonySucceeded(context);
+              }
+              return;
+            }
             try {
-              const identity = await resolveFailedIdentity(context, options.identifierHashKey);
+              const identity = await resolveFailedIdentity(
+                context,
+                options.identifierHashKey,
+                options.findDeviceByDpopJkt,
+                options.onError,
+              );
               const traceId = readTraceId(context);
               const eventId = readEventId(context);
               await record({
@@ -208,6 +282,8 @@ export function createBetterAuthAuditPlugin(
                   trace_id: traceId,
                   authentication_method: resolveLoginMethod(context),
                   failure_code: readErrorCode(context.context.returned),
+                  ...deviceCeremonyPurpose(context.path),
+                  ...(identity.deviceId === undefined ? {} : { device_id: identity.deviceId }),
                 },
                 occurredAt: clock(),
               });
@@ -224,14 +300,50 @@ export function createBetterAuthAuditPlugin(
 async function resolveFailedIdentity(
   context: unknown,
   hashKey: string,
-): Promise<{ betterAuthUserId: string | null; resourceId: string }> {
+  findDeviceByDpopJkt: BetterAuthAuditPluginOptions["findDeviceByDpopJkt"],
+  onLookupError: ((error: unknown) => void) | undefined,
+): Promise<{ betterAuthUserId: string | null; resourceId: string; deviceId?: string }> {
   const auditContext = context as AuditContext & {
     context: {
       internalAdapter: {
         findUserByEmail(email: string): Promise<{ user: { id: string } } | null>;
       };
+      session?: unknown;
     };
   };
+  // E2: the pending Google/Apple session the enrolment ran under, when the
+  // ceremony got far enough to read it (getSessionFromCtx caches it on
+  // ctx.context.session).
+  if (auditContext.path === "/device/enrol/verify") {
+    const userId = readSessionUserId(auditContext.context.session);
+    return userId === null
+      ? { betterAuthUserId: null, resourceId: "login_unknown" }
+      : { betterAuthUserId: userId, resourceId: userId };
+  }
+  // L2 has no session yet. The failure is attributed to the device the
+  // request's *verified* DPoP key belongs to (recorded by the device-auth
+  // plugin), never to the body's device_id: that is unverified and
+  // optional, and anyone with their own DPoP key could put a victim's
+  // device_id there. No verified key (the proof itself failed): unknown.
+  // A key with no device, or a failed lookup: a keyed hash of the key.
+  if (auditContext.path === "/device/login/verify") {
+    const dpopJkt = verifiedLoginDpopJkt(auditContext.context);
+    if (dpopJkt === null) return { betterAuthUserId: null, resourceId: "login_unknown" };
+    let device: { betterAuthUserId: string; deviceId: string } | null = null;
+    if (findDeviceByDpopJkt !== undefined) {
+      try {
+        device = await findDeviceByDpopJkt(dpopJkt);
+      } catch (error) {
+        onLookupError?.(error);
+      }
+    }
+    return device === null
+      ? {
+          betterAuthUserId: null,
+          resourceId: `login_dpop_${createHmac("sha256", hashKey).update(dpopJkt).digest("hex")}`,
+        }
+      : { betterAuthUserId: device.betterAuthUserId, resourceId: device.betterAuthUserId, deviceId: device.deviceId };
+  }
   const email = readBodyString(auditContext.body, "email")?.trim().toLowerCase();
   if (email !== null && email !== undefined) {
     const found = await auditContext.context.internalAdapter.findUserByEmail(email);
@@ -251,8 +363,37 @@ function isLoginPath(path: string | undefined): boolean {
     path === "/passkey/verify-authentication" ||
     path === "/passkey/verify-registration" ||
     path === "/sign-in/social" ||
-    path?.startsWith("/callback/") === true
+    path?.startsWith("/callback/") === true ||
+    isDeviceAuthPath(path)
   );
+}
+
+// The device-auth plugin's E2 (enrolment) and L2 (device login) endpoints.
+// Both create a device_biometric session, so they're recorded like every
+// other login path: login_succeeded on success, login_failed on failure.
+function isDeviceAuthPath(path: string | undefined): boolean {
+  return path === "/device/enrol/verify" || path === "/device/login/verify";
+}
+
+// The device-auth JWS purpose each ceremony runs under (contract 3.2).
+function deviceCeremonyPurpose(path: string | undefined): { purpose?: string } {
+  if (path === "/device/enrol/verify") return { purpose: "enrol-device" };
+  if (path === "/device/login/verify") return { purpose: "login" };
+  return {};
+}
+
+function readNewSession(value: unknown): { sessionId: string; userId: string } | null {
+  if (typeof value !== "object" || value === null) return null;
+  const session = (value as { session?: unknown }).session;
+  const sessionId = readObjectString(session, "id");
+  const userId = readObjectString(session, "userId");
+  return sessionId === null || userId === null ? null : { sessionId, userId };
+}
+
+function readSessionUserId(session: unknown): string | null {
+  if (typeof session !== "object" || session === null) return null;
+  const user = (session as { user?: unknown }).user;
+  return readObjectString(user, "id");
 }
 
 // Mirrors isLoginPath above, minus the passkey paths: "/sign-in/social" also
@@ -269,6 +410,7 @@ function resolveLoginMethod(
   session?: Record<string, unknown>,
 ): string | null {
   const path = context?.path;
+  if (isDeviceAuthPath(path)) return "device_biometric";
   if (path === "/passkey/verify-authentication" || path === "/passkey/verify-registration") {
     return session?.authenticationLevel === "staff_passkey"
       ? "staff_passkey"
@@ -293,12 +435,25 @@ function isSupportedLoginMethod(value: string): value is LoginMethodType {
   return value === "passkey" || value === "google" || value === "apple";
 }
 
+// A session a failed E2/L2 created and then deleted again (see
+// better-auth-device-auth.plugin.ts's discardCeremonySession) is recorded
+// as "ceremony_failed", not by the path it was deleted on -- on E2's path
+// that would read "rotated", which is what a *successful* enrolment's
+// pending-session delete means.
+function revocationReason(session: { token?: unknown }, context: AuditContext | null): string {
+  const authContext = (context as { context?: unknown } | null)?.context;
+  if (isDiscardedCeremonySession(authContext, session.token)) return "ceremony_failed";
+  return sessionRevocationReason(context?.path);
+}
+
 function sessionRevocationReason(path: string | undefined): string {
   if (path === "/sign-out") return "sign_out";
   if (path === "/revoke-session") return "self_revoke_one";
   if (path === "/revoke-sessions") return "self_revoke_all";
   if (path === "/revoke-other-sessions") return "self_revoke_others";
   if (path === "/get-session") return "expired";
+  // E2 replaces the pending Google/Apple session with the new device session.
+  if (path === "/device/enrol/verify") return "rotated";
   return "internal";
 }
 

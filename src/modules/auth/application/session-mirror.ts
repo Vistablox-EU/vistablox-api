@@ -15,6 +15,12 @@ export interface RecordSessionRevokedInput {
   reason: string;
 }
 
+export interface RecordSessionActivityInput {
+  betterAuthSessionId: string;
+  seenAt: Date;
+  idleExpiresAt: Date;
+}
+
 // Populates auth.sessions, the customer-facing mirror of Better Auth's
 // own session table (SESSION_MODEL.md): richer display fields than Better
 // Auth's generic session carries, and a self-service revoke surface. Better
@@ -24,4 +30,8 @@ export interface RecordSessionRevokedInput {
 export interface SessionMirror {
   recordCreated(input: RecordSessionCreatedInput): Promise<void>;
   recordRevoked(input: RecordSessionRevokedInput): Promise<void>;
+  // Device sessions only (they have an idle limit): moves last_seen_at and
+  // idle_expires_at forward after a fully authenticated request. Optional
+  // so existing implementations and test doubles stay valid.
+  recordActivity?(input: RecordSessionActivityInput): Promise<void>;
 }

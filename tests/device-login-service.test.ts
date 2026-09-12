@@ -212,6 +212,57 @@ describe("LoginDeviceService", () => {
     expect(challenges.consumeCallCount).toBe(0);
   });
 
+  it("finds the device from the DPoP key when no device_id is sent, and accepts a JWS without the device_id claim", async () => {
+    const { privateKey, publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({ deviceId: "device_by_key", dpopJkt: "dpop-jkt-by-key", bioJkt, biometricPublicJwk: publicJwk as Record<string, unknown> }),
+    );
+    const challenges = new FakeChallengeRepository();
+    await challenges.issue({
+      challenge: "login-by-key",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-by-key",
+      deviceId: "device_by_key",
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+    const jws = await new SignJWT({ purpose: "login", challenge: "login-by-key", iat: Math.floor(Date.now() / 1000) })
+      .setProtectedHeader({ alg: "ES256", typ: JWS_TYP, kid: bioJkt })
+      .sign(privateKey);
+    const service = new LoginDeviceService(challenges, devices);
+
+    const result = await service.execute({ deviceId: undefined, dpopJkt: "dpop-jkt-by-key", challenge: "login-by-key", jws });
+
+    expect(result.deviceId).toBe("device_by_key");
+  });
+
+  it("rejects a sent device_id that isn't the device the DPoP key belongs to, before consuming the challenge", async () => {
+    const own = await makeDeviceKeyPair();
+    const other = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({ deviceId: "device_own", dpopJkt: "dpop-jkt-own", bioJkt: own.bioJkt, biometricPublicJwk: own.publicJwk as Record<string, unknown> }),
+      makeDevice({ deviceId: "device_other", dpopJkt: "dpop-jkt-other", bioJkt: other.bioJkt, biometricPublicJwk: other.publicJwk as Record<string, unknown> }),
+    );
+    const challenges = new FakeChallengeRepository();
+    const service = new LoginDeviceService(challenges, devices);
+
+    await expect(
+      service.execute({ deviceId: "device_other", dpopJkt: "dpop-jkt-own", challenge: "irrelevant", jws: "irrelevant" }),
+    ).rejects.toBeInstanceOf(DeviceLoginFailedError);
+    expect(challenges.consumeCallCount).toBe(0);
+  });
+
+  it("rejects a DPoP key that belongs to no device, with no device_id sent", async () => {
+    const challenges = new FakeChallengeRepository();
+    const service = new LoginDeviceService(challenges, new FakeDeviceRepository());
+
+    await expect(
+      service.execute({ deviceId: undefined, dpopJkt: "dpop-jkt-nobody", challenge: "irrelevant", jws: "irrelevant" }),
+    ).rejects.toBeInstanceOf(DeviceLoginFailedError);
+    expect(challenges.consumeCallCount).toBe(0);
+  });
+
   it("refuses login for an iOS device while the platform policy is Android-only, before consuming the challenge", async () => {
     const { publicJwk, bioJkt } = await makeDeviceKeyPair();
     const devices = new FakeDeviceRepository();
@@ -299,6 +350,36 @@ describe("LoginDeviceService", () => {
 
     now += 1;
     await expect(service.execute(replay)).rejects.toMatchObject({ code: "DEVICE_CHALLENGE_EXPIRED" });
+  });
+
+  it("answers DEVICE_CHALLENGE_REPLAYED to a replay that sent no device_id: the check uses the key's device, not the body", async () => {
+    const now = Date.now();
+    const { publicJwk, bioJkt } = await makeDeviceKeyPair();
+    const devices = new FakeDeviceRepository();
+    devices.devices.push(
+      makeDevice({ deviceId: "device_nobody_sent", dpopJkt: "dpop-jkt-nobody-sent", bioJkt, biometricPublicJwk: publicJwk as Record<string, unknown> }),
+    );
+    const challenges = new FakeChallengeRepository();
+    // L1 bound the challenge to the key's device (contract 3.1).
+    await challenges.issue({
+      challenge: "login-replay-no-id",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-nobody-sent",
+      deviceId: "device_nobody_sent",
+      expiresAt: new Date(now + 120_000),
+    });
+    await challenges.consume({
+      challenge: "login-replay-no-id",
+      purpose: "login",
+      dpopJkt: "dpop-jkt-nobody-sent",
+      deviceId: "device_nobody_sent",
+      now: new Date(now),
+    });
+    const service = new LoginDeviceService(challenges, devices, () => new Date(now + 1_000));
+
+    await expect(
+      service.execute({ deviceId: undefined, dpopJkt: "dpop-jkt-nobody-sent", challenge: "login-replay-no-id", jws: "irrelevant" }),
+    ).rejects.toMatchObject({ code: "DEVICE_CHALLENGE_REPLAYED" });
   });
 
   it("rejects a revoked (non-active) device", async () => {
