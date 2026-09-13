@@ -60,6 +60,7 @@ const operationsCase: OperationsCaseDetail = {
     yearBuilt: null,
     condition: null,
     energyRating: null,
+    rooms: [],
   },
   applicantAccountId: "acct_owner",
   legalPracticeId: null,

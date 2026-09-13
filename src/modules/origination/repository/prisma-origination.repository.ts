@@ -117,6 +117,16 @@ export class PrismaOriginationRepository
           energyRating: input.property.energyRating,
         },
       });
+      if (input.property.rooms.length > 0) {
+        await transaction.propertyRoom.createMany({
+          data: input.property.rooms.map((room) => ({
+            id: `room_${ulid()}`,
+            propertyId,
+            roomType: room.roomType,
+            sizeSqM: room.sizeSqM,
+          })),
+        });
+      }
       await transaction.originationCase.create({
         data: {
           id: caseId,
@@ -181,6 +191,16 @@ export class PrismaOriginationRepository
           energyRating: input.property.energyRating,
         },
       });
+      if (input.property.rooms.length > 0) {
+        await transaction.propertyRoom.createMany({
+          data: input.property.rooms.map((room) => ({
+            id: `room_${ulid()}`,
+            propertyId,
+            roomType: room.roomType,
+            sizeSqM: room.sizeSqM,
+          })),
+        });
+      }
       await transaction.originationCase.create({
         data: {
           id: caseId,
@@ -1396,6 +1416,10 @@ const ownedCaseSelect = {
       yearBuilt: true,
       condition: true,
       energyRating: true,
+      rooms: {
+        orderBy: { id: "asc" },
+        select: { id: true, roomType: true, sizeSqM: true },
+      },
     },
   },
 } as const;
@@ -1460,6 +1484,7 @@ function toOwnedCase(input: {
     yearBuilt: number | null;
     condition: string | null;
     energyRating: string | null;
+    rooms: Array<{ id: string; roomType: string; sizeSqM: { toNumber(): number } }>;
   };
 }): OwnedOriginationCase {
   return {
@@ -1486,6 +1511,11 @@ function toOwnedCase(input: {
       yearBuilt: input.property.yearBuilt,
       condition: input.property.condition,
       energyRating: input.property.energyRating,
+      rooms: input.property.rooms.map((room) => ({
+        roomId: room.id,
+        roomType: room.roomType,
+        sizeSqM: room.sizeSqM.toNumber(),
+      })),
     },
   };
 }

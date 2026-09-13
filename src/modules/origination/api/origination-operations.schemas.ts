@@ -6,6 +6,7 @@ import {
   ownedCaseSchema,
   propertyConditionSchema,
   residentialSubtypeSchema,
+  roomTypeSchema,
   submissionDocumentTypeSchema,
 } from "./origination.schemas.js";
 
@@ -51,6 +52,15 @@ export const createStaffCaseBodySchema = z.object({
     year_built: z.number().int().min(1800).max(2100).nullable().default(null),
     condition: propertyConditionSchema.nullable().default(null),
     energy_rating: energyRatingSchema.nullable().default(null),
+    rooms: z
+      .array(
+        z.object({
+          room_type: roomTypeSchema,
+          size_sq_m: z.number().positive().max(9999.99),
+        }),
+      )
+      .max(30)
+      .default([]),
   }),
   documents: z
     .array(

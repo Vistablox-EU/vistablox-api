@@ -19,6 +19,19 @@ export interface StructuredPropertyDetails {
   energyRating: string | null;
 }
 
+// A per-room breakdown, additive alongside StructuredPropertyDetails'
+// bedrooms/bathrooms aggregate counts -- not a replacement. Input and
+// output shapes diverge (a room only gets a stable id once persisted), so
+// this isn't folded into StructuredPropertyDetails above.
+export interface PropertyRoomInput {
+  roomType: string;
+  sizeSqM: number;
+}
+
+export interface PropertyRoomDetail extends PropertyRoomInput {
+  roomId: string;
+}
+
 export interface CreateDraftIntakeInput {
   accountId: string;
   traceId: string;
@@ -31,6 +44,7 @@ export interface CreateDraftIntakeInput {
     longitude: number | null;
     ownerDeclaredValueEur: string;
     hasExistingEncumbrance: boolean;
+    rooms: PropertyRoomInput[];
   } & StructuredPropertyDetails;
 }
 
@@ -51,6 +65,7 @@ export interface CreateStaffCaseInput {
     landRegistryReference: string | null;
     ownerDeclaredValueEur: string;
     hasExistingEncumbrance: boolean;
+    rooms: PropertyRoomInput[];
   } & StructuredPropertyDetails;
   submissionData: Record<string, unknown>;
   documents: SubmissionDocumentInput[];
@@ -88,6 +103,7 @@ export interface OwnedOriginationCase {
     landRegistryReference: string | null;
     ownerDeclaredValueEur: string;
     hasExistingEncumbrance: boolean;
+    rooms: PropertyRoomDetail[];
   } & StructuredPropertyDetails;
 }
 

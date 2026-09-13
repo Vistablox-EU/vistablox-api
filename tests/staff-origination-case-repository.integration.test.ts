@@ -95,6 +95,11 @@ describe.skipIf(databaseUrl === undefined)(
           yearBuilt: 1998,
           condition: "good",
           energyRating: "C",
+          rooms: [
+            { roomType: "bedroom", sizeSqM: 14.2 },
+            { roomType: "bedroom", sizeSqM: 11.8 },
+            { roomType: "bathroom", sizeSqM: 5.5 },
+          ],
         },
         submissionData: { attestations: { staff_created: true } },
         documents: [
@@ -169,6 +174,24 @@ describe.skipIf(databaseUrl === undefined)(
         energyRating: "C",
       });
       expect(typeof owned?.property.livingAreaSqM).toBe("number");
+
+      // ordered (orderBy id asc), sizeSqM as a plain number not a Decimal,
+      // and each room carries a stable id (evidence_id's counterpart).
+      expect(owned?.property.rooms).toHaveLength(3);
+      expect(owned?.property.rooms.map((room) => room.roomType)).toEqual([
+        "bedroom",
+        "bedroom",
+        "bathroom",
+      ]);
+      expect(owned?.property.rooms.every((room) => typeof room.sizeSqM === "number")).toBe(true);
+      expect(owned?.property.rooms.every((room) => room.roomId.startsWith("room_"))).toBe(true);
+
+      const rooms = await database.propertyRoom.findMany({
+        where: { propertyId: originationCase.propertyId },
+        orderBy: { id: "asc" },
+      });
+      expect(rooms).toHaveLength(3);
+      expect(rooms[0]?.sizeSqM.toFixed(2)).toBe("14.20");
     });
 
     it("refuses an out-of-enum residential_subtype at the database layer, defense-in-depth beneath the Zod schema", async () => {
@@ -194,6 +217,20 @@ describe.skipIf(databaseUrl === undefined)(
           },
         }),
       ).rejects.toThrow(/properties_energy_rating_check/);
+
+      await database.property.create({
+        data: { id: propertyId, countryCode: "RS", ownerDeclaredValueEur: "200000.00" },
+      });
+      await expect(
+        database.propertyRoom.create({
+          data: {
+            id: `room_check_${suffix}`,
+            propertyId,
+            roomType: "garage",
+            sizeSqM: "20.00",
+          },
+        }),
+      ).rejects.toThrow(/property_rooms_room_type_check/);
     });
 
     it("rejects an applicant_account_id that doesn't resolve to a real account, writing nothing", async () => {
@@ -218,6 +255,7 @@ describe.skipIf(databaseUrl === undefined)(
             yearBuilt: null,
             condition: null,
             energyRating: null,
+            rooms: [],
           },
           submissionData: { attestations: { staff_created: true } },
           documents: [

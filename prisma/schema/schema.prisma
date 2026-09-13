@@ -142,8 +142,23 @@ model Property {
 
   cases OriginationCase[]
   piv   Piv?
+  rooms PropertyRoom[]
 
   @@map("properties")
+  @@schema("origination")
+}
+
+model PropertyRoom {
+  id         String   @id @map("room_id")
+  propertyId String   @map("property_id")
+  roomType   String   @map("room_type")
+  sizeSqM    Decimal  @map("size_sq_m") @db.Decimal(6, 2)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  property Property @relation(fields: [propertyId], references: [id])
+
+  @@index([propertyId], map: "idx_property_rooms_property")
+  @@map("property_rooms")
   @@schema("origination")
 }
 

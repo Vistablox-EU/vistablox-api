@@ -11,6 +11,7 @@ import {
   originationCaseStageSchema,
   propertyConditionSchema,
   residentialSubtypeSchema,
+  roomTypeSchema,
 } from "../api/origination.schemas.js";
 import { canRecordPartnerWriteback } from "../domain/case-review.policy.js";
 import {
@@ -199,6 +200,11 @@ function toPartnerCaseResponse(input: PartnerCaseDetail): PartnerCaseResponse {
         input.property.energyRating === null
           ? null
           : energyRatingSchema.parse(input.property.energyRating),
+      rooms: input.property.rooms.map((room) => ({
+        room_id: room.roomId,
+        room_type: roomTypeSchema.parse(room.roomType),
+        size_sq_m: room.sizeSqM,
+      })),
     },
     legal_document_refs: input.legalDocumentRefs,
     legal_structuring_completed_at: input.legalStructuringCompletedAt?.toISOString() ?? null,

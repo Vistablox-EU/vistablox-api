@@ -36,6 +36,7 @@ const baseCase: PartnerCaseDetail = {
     yearBuilt: null,
     condition: null,
     energyRating: null,
+    rooms: [],
   },
   legalDocumentRefs: [],
   legalStructuringCompletedAt: null,

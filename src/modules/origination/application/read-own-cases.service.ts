@@ -10,6 +10,7 @@ import {
   originationCaseStageSchema,
   propertyConditionSchema,
   residentialSubtypeSchema,
+  roomTypeSchema,
 } from "../api/origination.schemas.js";
 import type {
   OriginationCaseCursor,
@@ -105,6 +106,11 @@ export function toOwnedCaseResponse(input: OwnedOriginationCase): OwnedCaseRespo
         input.property.energyRating === null
           ? null
           : energyRatingSchema.parse(input.property.energyRating),
+      rooms: input.property.rooms.map((room) => ({
+        room_id: room.roomId,
+        room_type: roomTypeSchema.parse(room.roomType),
+        size_sq_m: room.sizeSqM,
+      })),
     },
   };
 }

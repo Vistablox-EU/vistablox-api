@@ -201,8 +201,55 @@ describe("POST /v1/origination-cases", () => {
         yearBuilt: null,
         condition: null,
         energyRating: null,
+        rooms: [],
       },
     });
+  });
+
+  it("threads a room breakdown through when supplied, defaulting to an empty list otherwise", async () => {
+    const { app, createDraftIntake } = buildProtectedApp();
+
+    const response = await request(app)
+      .post("/v1/origination-cases")
+      .send({
+        ...validBody,
+        property: {
+          ...validBody.property,
+          rooms: [
+            { room_type: "bedroom", size_sq_m: 14.2 },
+            { room_type: "kitchen", size_sq_m: 9.0 },
+          ],
+        },
+      });
+
+    expect(response.status).toBe(201);
+    expect(createDraftIntake).toHaveBeenCalledWith(
+      expect.objectContaining({
+        property: expect.objectContaining({
+          rooms: [
+            { roomType: "bedroom", sizeSqM: 14.2 },
+            { roomType: "kitchen", sizeSqM: 9 },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it("rejects a room breakdown over the 30-room cap", async () => {
+    const { app, createDraftIntake } = buildProtectedApp();
+
+    const response = await request(app)
+      .post("/v1/origination-cases")
+      .send({
+        ...validBody,
+        property: {
+          ...validBody.property,
+          rooms: Array.from({ length: 31 }, () => ({ room_type: "other", size_sq_m: 5 })),
+        },
+      });
+
+    expect(response.status).toBe(422);
+    expect(createDraftIntake).not.toHaveBeenCalled();
   });
 });
 

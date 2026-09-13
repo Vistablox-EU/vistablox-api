@@ -317,6 +317,10 @@ export class CreateStaffOriginationCaseService {
           yearBuilt: input.body.property.year_built,
           condition: input.body.property.condition,
           energyRating: input.body.property.energy_rating,
+          rooms: input.body.property.rooms.map((room) => ({
+            roomType: room.room_type,
+            sizeSqM: room.size_sq_m,
+          })),
         },
         submissionData: {
           attestations: {
