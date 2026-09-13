@@ -144,7 +144,7 @@ describe.skipIf(databaseUrl === undefined)(
         where: { id: originationCase.propertyId },
       });
       expect(property.residentialSubtype).toBe("apartment");
-      expect(property.livingAreaSqM?.toString()).toBe("82.50");
+      expect(property.livingAreaSqM?.toFixed(2)).toBe("82.50");
       expect(property.bedrooms).toBe(2);
       expect(property.bathrooms).toBe(1);
       expect(property.floor).toBe(3);
