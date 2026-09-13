@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createWalletRouter } from "../src/modules/wallet/api/wallet.router.js";
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
 import { GetWalletBalanceService } from "../src/modules/wallet/application/get-wallet-balance.service.js";
+import { GetWalletStatusService } from "../src/modules/wallet/application/get-wallet-status.service.js";
 import { RequestWalletTransferService } from "../src/modules/wallet/application/request-wallet-transfer.service.js";
 import type { WalletRepository } from "../src/modules/wallet/repository/wallet.repository.js";
 import type { KycEligibilityReader } from "../src/modules/identity/repository/kyc-eligibility-reader.js";
@@ -69,6 +70,7 @@ function buildApp(options?: {
         TEST_REGISTRY_ADDRESS,
         () => new Date("2026-09-02T10:00:00.000Z"),
       ),
+      new GetWalletStatusService(repository),
     ),
   );
   app.use(errorHandler);
@@ -143,6 +145,62 @@ describe("POST /v1/investor-profile/wallet", () => {
 });
 
 describe("GET /v1/investor-profile/wallet", () => {
+  it("reads the registered wallet's address and status without needing a balance service", async () => {
+    const repository: WalletRepository = {
+      registerWallet: vi.fn(),
+      findByAccountId: vi.fn().mockResolvedValue({
+        walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
+        registrationCommitment: "commitment_01",
+        requestedAt: new Date("2026-09-02T10:00:00.000Z"),
+        registeredAt: new Date("2026-09-02T10:05:00.000Z"),
+      }),
+    };
+    const app = express();
+    const authenticated: RequestHandler = (_request, response, next) => {
+      response.locals.authContext = {
+        accountId: "acct_01",
+        providerSessionId: "session_01",
+        population: "customer",
+      };
+      next();
+    };
+    app.use(requestContext);
+    app.use(express.json());
+    app.use(
+      "/v1/investor-profile/wallet",
+      createWalletRouter(
+        authenticated,
+        new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
+        new GetWalletStatusService(repository),
+      ),
+    );
+    app.use(errorHandler);
+
+    const response = await request(app).get("/v1/investor-profile/wallet");
+
+    expect(response.status).toBe(200);
+    expect(response.headers["cache-control"]).toBe("no-store");
+    expect(response.body).toEqual({
+      data: {
+        wallet_address: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
+        status: "registered",
+        requested_at: "2026-09-02T10:00:00.000Z",
+        registered_at: "2026-09-02T10:05:00.000Z",
+      },
+    });
+  });
+
+  it("404s when the account has no registered wallet", async () => {
+    const { app } = buildApp();
+
+    const response = await request(app).get("/v1/investor-profile/wallet");
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe("wallet.not_registered");
+  });
+});
+
+describe("GET /v1/investor-profile/wallet/balance", () => {
   function buildBalanceApp(options?: { balanceService?: GetWalletBalanceService }) {
     const repository: WalletRepository = {
       registerWallet: vi.fn(),
@@ -179,6 +237,7 @@ describe("GET /v1/investor-profile/wallet", () => {
       createWalletRouter(
         authenticated,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
+        new GetWalletStatusService(repository),
         balanceService,
       ),
     );
@@ -189,7 +248,7 @@ describe("GET /v1/investor-profile/wallet", () => {
   it("reads the registered wallet's capital and token balances", async () => {
     const { app } = buildBalanceApp();
 
-    const response = await request(app).get("/v1/investor-profile/wallet");
+    const response = await request(app).get("/v1/investor-profile/wallet/balance");
 
     expect(response.status).toBe(200);
     expect(response.headers["cache-control"]).toBe("no-store");
@@ -205,7 +264,7 @@ describe("GET /v1/investor-profile/wallet", () => {
   it("is not mounted when no balance service is configured", async () => {
     const { app } = buildApp();
 
-    const response = await request(app).get("/v1/investor-profile/wallet");
+    const response = await request(app).get("/v1/investor-profile/wallet/balance");
 
     expect(response.status).toBe(404);
   });
@@ -257,6 +316,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       createWalletRouter(
         authenticated,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
+        new GetWalletStatusService(repository),
         undefined,
         transferService,
       ),

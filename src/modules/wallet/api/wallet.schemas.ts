@@ -21,6 +21,15 @@ export const registerWalletResponseSchema = z.object({
   }),
 });
 
+export const getWalletStatusResponseSchema = z.object({
+  data: z.object({
+    wallet_address: z.string().min(1),
+    status: z.enum(["pending", "registered"]),
+    requested_at: dateTime,
+    registered_at: dateTime.nullable(),
+  }),
+});
+
 export const getWalletBalanceResponseSchema = z.object({
   data: z.object({
     wallet_address: z.string().min(1),
