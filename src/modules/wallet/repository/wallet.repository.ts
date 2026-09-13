@@ -28,6 +28,7 @@ export interface WalletRepository {
 // constructs -- a live read, not a local copy. Same rationale as
 // KycEligibilityReader in identity/repository/kyc-eligibility-reader.ts.
 export interface WalletStatusSnapshot {
+  walletAddress: string;
   requestedAt: Date;
   registeredAt: Date | null;
 }

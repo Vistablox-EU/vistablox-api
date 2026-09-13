@@ -308,7 +308,11 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
           taxResidenceCountryCode: "HR",
         },
         activitySummary: { reservationCount: 3, activePositionCount: 2 },
-        walletStatus: { requestedAt, registeredAt: null },
+        walletStatus: {
+          walletAddress: `0x${suffix.replaceAll("-", "")}`,
+          requestedAt,
+          registeredAt: null,
+        },
         preferences: defaultAccountPreferences,
         pendingClosureRequest: null,
       });

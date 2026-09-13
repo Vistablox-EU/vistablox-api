@@ -85,7 +85,7 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
   public async getStatus(accountId: string): Promise<WalletStatusSnapshot | null> {
     return this.database.walletRegistration.findUnique({
       where: { accountId },
-      select: { requestedAt: true, registeredAt: true },
+      select: { walletAddress: true, requestedAt: true, registeredAt: true },
     });
   }
 

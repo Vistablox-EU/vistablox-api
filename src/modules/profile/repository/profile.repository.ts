@@ -21,6 +21,7 @@ export interface ProfileRecord {
     renewalDueAt: Date | null;
   } | null;
   walletStatus: {
+    walletAddress: string;
     requestedAt: Date;
     registeredAt: Date | null;
   } | null;

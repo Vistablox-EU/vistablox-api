@@ -95,6 +95,7 @@ export const profileResponseSchema = z.object({
     }),
     wallet: z.object({
       status: z.enum(["not_registered", "pending", "registered"]),
+      wallet_address: z.string().nullable(),
       requested_at: dateTime.nullable(),
       registered_at: dateTime.nullable(),
     }),

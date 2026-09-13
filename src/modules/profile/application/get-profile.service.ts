@@ -98,6 +98,11 @@ export class GetProfileService {
               : profile.walletStatus.registeredAt === null
                 ? "pending"
                 : "registered",
+          // Needed by the mobile app's wallet-recovery flow: restoring a
+          // wallet from a backed-up seed phrase must verify the derived
+          // address matches what's already on file before treating the
+          // restore as successful, rather than trusting the phrase blindly.
+          wallet_address: profile.walletStatus?.walletAddress ?? null,
           requested_at:
             profile.walletStatus?.requestedAt.toISOString() ?? null,
           registered_at:
