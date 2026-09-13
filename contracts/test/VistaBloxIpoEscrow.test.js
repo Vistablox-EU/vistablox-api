@@ -107,15 +107,7 @@ describe("VistaBloxIpoEscrow", function () {
     });
   });
 
-  describe("updateTreasury / extendDeadline", function () {
-    it("updates the treasury address while open", async function () {
-      await openDefaultCampaign();
-      await expect(escrow.connect(campaignManager).updateTreasury(TOKEN_ID, investor2.address))
-        .to.emit(escrow, "TreasuryUpdated")
-        .withArgs(TOKEN_ID, investor2.address, campaignManager.address);
-      expect((await escrow.campaignOf(TOKEN_ID)).treasury).to.equal(investor2.address);
-    });
-
+  describe("extendDeadline", function () {
     it("extends the deadline while open", async function () {
       const deadline = await openDefaultCampaign();
       const newDeadline = deadline + BigInt(WEEK);
@@ -125,13 +117,10 @@ describe("VistaBloxIpoEscrow", function () {
       expect((await escrow.campaignOf(TOKEN_ID)).deadline).to.equal(newDeadline);
     });
 
-    it("reverts both once the campaign is no longer open", async function () {
+    it("reverts once the campaign is no longer open", async function () {
       const deadline = await openDefaultCampaign();
       await networkHelpers.time.increaseTo(deadline + 1n);
       await escrow.finalize(TOKEN_ID);
-      await expect(
-        escrow.connect(campaignManager).updateTreasury(TOKEN_ID, investor2.address),
-      ).to.be.revertedWithCustomError(escrow, "CampaignNotOpen");
       await expect(
         escrow.connect(campaignManager).extendDeadline(TOKEN_ID, deadline + BigInt(WEEK)),
       ).to.be.revertedWithCustomError(escrow, "CampaignNotOpen");
@@ -140,11 +129,14 @@ describe("VistaBloxIpoEscrow", function () {
     it("reverts when called by an account without CAMPAIGN_MANAGER_ROLE", async function () {
       await openDefaultCampaign();
       await expect(
-        escrow.connect(stranger).updateTreasury(TOKEN_ID, investor2.address),
-      ).to.be.revertedWithCustomError(escrow, "AccessControlUnauthorizedAccount");
-      await expect(
         escrow.connect(stranger).extendDeadline(TOKEN_ID, (await futureDeadline()) + BigInt(WEEK)),
       ).to.be.revertedWithCustomError(escrow, "AccessControlUnauthorizedAccount");
+    });
+  });
+
+  describe("treasury immutability", function () {
+    it("has no function to change the treasury address once a campaign is opened", function () {
+      expect(escrow.interface.hasFunction("updateTreasury")).to.equal(false);
     });
   });
 
