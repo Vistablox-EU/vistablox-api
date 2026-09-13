@@ -6,7 +6,12 @@ import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
-import { ApplicantAccountNotFoundError, CaseSubmissionConflictError } from "./origination.repository.js";
+import {
+  ApplicantAccountNotFoundError,
+  CaseSubmissionConflictError,
+  EvidenceCaseMismatchError,
+  EvidenceNotFoundError,
+} from "./origination.repository.js";
 import type {
   PostIpoStructuringHandoffRepository,
   TransitionedToPostIpoStructuring,
@@ -37,6 +42,8 @@ import type {
   RecordedFounderDecision,
   RecordLegalStructuringInput,
   ResubmittedCase,
+  ReviewedEvidence,
+  ReviewEvidenceInput,
   SubmitInitialCaseInput,
   SubmittedCase,
   ThreadLane,
@@ -445,6 +452,9 @@ export class PrismaOriginationRepository
                 documentRef: true,
                 extractDated: true,
                 uploadedAt: true,
+                reviewedByAccountId: true,
+                reviewedAt: true,
+                reviewNotes: true,
               },
             },
           },
@@ -498,6 +508,9 @@ export class PrismaOriginationRepository
                 documentRef: evidence.documentRef,
                 extractDated: evidence.extractDated,
                 uploadedAt: evidence.uploadedAt,
+                reviewedByAccountId: evidence.reviewedByAccountId,
+                reviewedAt: evidence.reviewedAt,
+                reviewNotes: evidence.reviewNotes,
               })),
             },
       informationRequests: originationCase.informationRequests.map(toInformationRequest),
@@ -1256,6 +1269,61 @@ export class PrismaOriginationRepository
         stage,
         decidedAt: input.decidedAt,
         ipoEndAt: input.decision === "approve" ? input.ipoEndAt : null,
+      };
+    });
+  }
+
+  // Purely advisory (nothing reads documentary_screening_evidence.status
+  // for any decision) and reviewable at any case stage, so this locks and
+  // validates the evidence row itself rather than the case row every other
+  // write above locks -- there's no case-stage recheck to protect. Throws
+  // EvidenceNotFoundError if no row exists with that id at all, or
+  // EvidenceCaseMismatchError if it exists under a different case.
+  public async reviewEvidence(input: ReviewEvidenceInput): Promise<ReviewedEvidence> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ evidence_id: string; case_id: string }>>`
+        SELECT evidence_id, case_id
+        FROM origination.documentary_screening_evidence
+        WHERE evidence_id = ${input.evidenceId}
+        FOR UPDATE
+      `;
+      const row = locked[0];
+      if (row === undefined) throw new EvidenceNotFoundError(input.evidenceId);
+      if (row.case_id !== input.caseId) {
+        throw new EvidenceCaseMismatchError(input.evidenceId, input.caseId);
+      }
+
+      await transaction.documentaryScreeningEvidence.update({
+        where: { id: input.evidenceId },
+        data: {
+          status: input.status,
+          reviewedByAccountId: input.accountId,
+          reviewedAt: input.reviewedAt,
+          reviewNotes: input.reviewNotes,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "origination.evidence_reviewed",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            evidence_id: input.evidenceId,
+            status: input.status,
+            review_notes: input.reviewNotes,
+          },
+        },
+      });
+      return {
+        evidenceId: input.evidenceId,
+        caseId: input.caseId,
+        status: input.status,
+        reviewedByAccountId: input.accountId,
+        reviewedAt: input.reviewedAt,
+        reviewNotes: input.reviewNotes,
       };
     });
   }

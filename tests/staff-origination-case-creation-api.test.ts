@@ -91,6 +91,7 @@ function buildApp(options?: {
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     closeCase: vi.fn().mockResolvedValue(null),
+    reviewEvidence: vi.fn(),
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn().mockResolvedValue(null),
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),

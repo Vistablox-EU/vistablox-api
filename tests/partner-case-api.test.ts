@@ -76,6 +76,7 @@ function fakeOriginationRepository(overrides: Partial<OriginationRepository> = {
     resubmitAfterInformationRequest: vi.fn(),
     recordFounderDecision: vi.fn(),
     closeCase: vi.fn(),
+    reviewEvidence: vi.fn(),
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),

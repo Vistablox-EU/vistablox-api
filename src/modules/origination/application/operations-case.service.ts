@@ -6,6 +6,7 @@ import type {
   FounderDecisionBody,
   OperationsCaseListQuery,
   PublishInformationRequestBody,
+  ReviewEvidenceBody,
 } from "../api/origination-operations.schemas.js";
 import { originationCaseStageSchema } from "../api/origination.schemas.js";
 import {
@@ -20,6 +21,8 @@ import type { PartnerOrganizationRepository } from "../repository/partner-organi
 import {
   ApplicantAccountNotFoundError,
   CaseReviewConflictError,
+  EvidenceCaseMismatchError,
+  EvidenceNotFoundError,
   type InformationRequestRecord,
   type OperationsCaseDetail,
   type OriginationRepository,
@@ -187,6 +190,55 @@ export class RecordFounderDecisionService {
       if (error instanceof CaseReviewConflictError) {
         throw reviewConflictError("record a founder decision", error);
       }
+      throw error;
+    }
+  }
+}
+
+// Purely advisory: nothing today reads documentary_screening_evidence.status
+// for any decision (canRecordFounderDecision included), and this doesn't
+// change that -- it only lets staff record what they found. No case-stage
+// restriction either, by the same design call: reviewable at any stage. So,
+// unlike RecordFounderDecisionService above, there's no domain-policy check
+// here -- existence and case-ownership validation both happen inside
+// repository.reviewEvidence's own transaction.
+export class ReviewEvidenceService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    accountId: string;
+    caseId: string;
+    evidenceId: string;
+    traceId: string;
+    body: ReviewEvidenceBody;
+  }) {
+    const reviewedAt = this.clock();
+    try {
+      const reviewed = await this.repository.reviewEvidence({
+        accountId: input.accountId,
+        caseId: input.caseId,
+        evidenceId: input.evidenceId,
+        traceId: input.traceId,
+        status: input.body.status,
+        reviewNotes: input.body.review_notes,
+        reviewedAt,
+      });
+      return {
+        data: {
+          evidence_id: reviewed.evidenceId,
+          case_id: reviewed.caseId,
+          status: reviewed.status,
+          reviewed_by_account_id: reviewed.reviewedByAccountId,
+          reviewed_at: reviewed.reviewedAt.toISOString(),
+          review_notes: reviewed.reviewNotes,
+        },
+      };
+    } catch (error) {
+      if (error instanceof EvidenceNotFoundError) throw evidenceNotFoundError();
+      if (error instanceof EvidenceCaseMismatchError) throw evidenceCaseMismatchError(error);
       throw error;
     }
   }
@@ -458,6 +510,9 @@ function toOperationsResponse(input: OperationsCaseDetail) {
               document_ref: evidence.documentRef,
               extract_dated: evidence.extractDated?.toISOString() ?? null,
               uploaded_at: evidence.uploadedAt.toISOString(),
+              reviewed_by_account_id: evidence.reviewedByAccountId,
+              reviewed_at: evidence.reviewedAt?.toISOString() ?? null,
+              review_notes: evidence.reviewNotes,
             })),
           },
     information_requests: input.informationRequests.map(toInformationRequestResponse),
@@ -498,6 +553,25 @@ function reviewConflictError(action: string, cause?: unknown): AppError {
     title: "Review action unavailable",
     status: 409,
     detail: `The case can no longer ${action} from its current stage.`,
+    cause,
+  });
+}
+
+function evidenceNotFoundError(): AppError {
+  return new AppError({
+    code: "origination.evidence_not_found",
+    title: "Evidence not found",
+    status: 404,
+    detail: "The requested evidence document was not found.",
+  });
+}
+
+function evidenceCaseMismatchError(cause?: unknown): AppError {
+  return new AppError({
+    code: "origination.evidence_case_mismatch",
+    title: "Evidence does not belong to this case",
+    status: 409,
+    detail: "The requested evidence document does not belong to the given case.",
     cause,
   });
 }
