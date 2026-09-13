@@ -21,6 +21,7 @@ import {
   DiditWebhookVerifier,
 } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
 import type { KycRepository } from "../src/modules/identity/repository/kyc.repository.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
 import type {
   ListPublicOfferingsInput,
@@ -141,6 +142,21 @@ function fakeDiditClient(): DiditClient {
 // /webhooks/didit doesn't use any of protectedApi's other fields (it's
 // unauthenticated), but AppDependencies.protectedApi requires them all
 // once provided at all -- these are never exercised by the test below.
+function fakeEmailSender(): EmailSender {
+  return {
+    sendStaffInvitationEmail: vi.fn(),
+    sendApplicantResponseReminderEmail: vi.fn(),
+    sendKycRenewalReminderEmail: vi.fn(),
+    sendReconfirmationReminderEmail: vi.fn(),
+    sendReconfirmationWindowOpenedEmail: vi.fn(),
+    sendAccountRecoveryCaseOpenedEmail: vi.fn(),
+    sendAccountRecoveryApprovedEmail: vi.fn(),
+    sendAccountRecoveryRejectedEmail: vi.fn(),
+    sendAccountRecoveryCompletedEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
+  };
+}
+
 function fakeOriginationRepository(): OriginationRepository {
   return {
     getIntakePrerequisites: vi.fn(),
@@ -160,6 +176,7 @@ function fakeOriginationRepository(): OriginationRepository {
     resubmitAfterInformationRequest: vi.fn(),
     recordFounderDecision: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
+    getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     closeCase: vi.fn(),
     listCaseMessages: vi.fn().mockResolvedValue([]),
@@ -468,6 +485,7 @@ describe("VistaBlox API", () => {
         accounts,
         sessions,
         originationRepository: fakeOriginationRepository(),
+        emailSender: fakeEmailSender(),
         staffWebAuthnRepository: {
           listCredentials: vi.fn().mockResolvedValue([]),
           findCredential: vi.fn().mockResolvedValue(null),

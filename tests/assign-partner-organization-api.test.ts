@@ -5,8 +5,24 @@ import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
 import type { PartnerOrganizationRepository } from "../src/modules/origination/repository/partner-organization.repository.js";
+
+function fakeEmailSender(): EmailSender {
+  return {
+    sendStaffInvitationEmail: vi.fn(),
+    sendApplicantResponseReminderEmail: vi.fn(),
+    sendKycRenewalReminderEmail: vi.fn(),
+    sendReconfirmationReminderEmail: vi.fn(),
+    sendReconfirmationWindowOpenedEmail: vi.fn(),
+    sendAccountRecoveryCaseOpenedEmail: vi.fn(),
+    sendAccountRecoveryApprovedEmail: vi.fn(),
+    sendAccountRecoveryRejectedEmail: vi.fn(),
+    sendAccountRecoveryCompletedEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
+  };
+}
 
 function fakeOriginationRepository(
   overrides: Partial<OriginationRepository> = {},
@@ -44,6 +60,7 @@ function fakeOriginationRepository(
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
+    getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     ...overrides,
   };
@@ -123,6 +140,7 @@ function buildApp(options?: {
         accounts,
         sessions,
         originationRepository,
+        emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
         ...((options?.includePartnerOrganizations ?? true)

@@ -512,6 +512,7 @@ const app = createApp({
         : { phase1CutoverAt: environment.DPOP_PHASE1_CUTOVER_AT }),
     },
     originationRepository,
+    emailSender,
     offeringOperations: { repository: offeringRepository },
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({

@@ -5,16 +5,23 @@ import {
   AssignPartnerOrganizationService,
   CloseCaseService,
   CreateStaffOriginationCaseService,
+  ForceExpireInformationRequestService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
   RecordFounderDecisionService,
+  SendManualReminderService,
 } from "../application/operations-case.service.js";
 import {
   ListCaseMessagesForOperationsService,
   PostCaseMessageForOperationsService,
 } from "../application/case-message.service.js";
-import { caseIdParamsSchema, listCaseMessagesResponseSchema, postCaseMessageResponseSchema } from "./origination.schemas.js";
+import {
+  caseIdParamsSchema,
+  informationRequestParamsSchema,
+  listCaseMessagesResponseSchema,
+  postCaseMessageResponseSchema,
+} from "./origination.schemas.js";
 import {
   assignPartnerOrganizationBodySchema,
   assignPartnerOrganizationResponseSchema,
@@ -22,6 +29,8 @@ import {
   closeCaseResponseSchema,
   createStaffCaseBodySchema,
   createStaffCaseResponseSchema,
+  forceExpireInformationRequestBodySchema,
+  forceExpireInformationRequestResponseSchema,
   founderDecisionBodySchema,
   founderDecisionResponseSchema,
   listCaseMessagesQuerySchema,
@@ -31,6 +40,7 @@ import {
   postOperationsCaseMessageBodySchema,
   publishInformationRequestBodySchema,
   publishInformationRequestResponseSchema,
+  sendManualReminderResponseSchema,
 } from "./origination-operations.schemas.js";
 
 export function createOriginationOperationsRouter(
@@ -45,6 +55,8 @@ export function createOriginationOperationsRouter(
   listCaseMessages: ListCaseMessagesForOperationsService,
   postCaseMessage: PostCaseMessageForOperationsService,
   createStaffCase: CreateStaffOriginationCaseService,
+  forceExpireInformationRequest: ForceExpireInformationRequestService,
+  sendManualReminder: SendManualReminderService,
   // Optional: only present once the partner-organizations feature
   // (protectedApi.partnerOrganizations) is configured, unlike everything
   // else on this router, which is unconditional. See app.ts.
@@ -88,6 +100,37 @@ export function createOriginationOperationsRouter(
     });
     response.status(201).json(publishInformationRequestResponseSchema.parse(result));
   });
+
+  router.post(
+    "/:case_id/information-requests/:request_id/send-reminder",
+    ...staffOnly,
+    async (request, response) => {
+      const params = informationRequestParamsSchema.parse(request.params);
+      const result = await sendManualReminder.execute({
+        caseId: params.case_id,
+        requestId: params.request_id,
+      });
+      response.json(sendManualReminderResponseSchema.parse(result));
+    },
+  );
+
+  router.post(
+    "/:case_id/information-requests/:request_id/force-expire",
+    ...staffOnly,
+    async (request, response) => {
+      const authContext = requireAuthContext(response.locals.authContext);
+      const params = informationRequestParamsSchema.parse(request.params);
+      const body = forceExpireInformationRequestBodySchema.parse(request.body);
+      const result = await forceExpireInformationRequest.execute({
+        accountId: authContext.accountId,
+        caseId: params.case_id,
+        requestId: params.request_id,
+        traceId: String(response.locals.traceId),
+        body,
+      });
+      response.json(forceExpireInformationRequestResponseSchema.parse(result));
+    },
+  );
 
   router.post("/:case_id/decisions", ...staffOnly, async (request, response) => {
     const authContext = requireAuthContext(response.locals.authContext);

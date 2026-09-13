@@ -10,6 +10,22 @@ import {
   type CreatedStaffCase,
   type OriginationRepository,
 } from "../src/modules/origination/repository/origination.repository.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
+
+function fakeEmailSender(): EmailSender {
+  return {
+    sendStaffInvitationEmail: vi.fn(),
+    sendApplicantResponseReminderEmail: vi.fn(),
+    sendKycRenewalReminderEmail: vi.fn(),
+    sendReconfirmationReminderEmail: vi.fn(),
+    sendReconfirmationWindowOpenedEmail: vi.fn(),
+    sendAccountRecoveryCaseOpenedEmail: vi.fn(),
+    sendAccountRecoveryApprovedEmail: vi.fn(),
+    sendAccountRecoveryRejectedEmail: vi.fn(),
+    sendAccountRecoveryCompletedEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
+  };
+}
 
 const validDocuments = [
   { document_type: "ownership_declaration", document_ref: "doc-owner", extract_dated: null },
@@ -89,6 +105,7 @@ function buildApp(options?: {
     resubmitAfterInformationRequest: vi.fn().mockResolvedValue(null),
     recordFounderDecision: vi.fn().mockResolvedValue(null),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
+    getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     closeCase: vi.fn().mockResolvedValue(null),
     listCaseMessages: vi.fn().mockResolvedValue([]),
@@ -114,6 +131,7 @@ function buildApp(options?: {
         accounts,
         sessions,
         originationRepository: repository,
+        emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
       },

@@ -141,10 +141,12 @@ import {
   AssignPartnerOrganizationService,
   CloseCaseService,
   CreateStaffOriginationCaseService,
+  ForceExpireInformationRequestService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
   RecordFounderDecisionService,
+  SendManualReminderService,
 } from "./modules/origination/application/operations-case.service.js";
 import {
   GetCaseForPartnerService,
@@ -243,6 +245,13 @@ export interface AppDependencies {
     // ever setting dpopJkt, so there's nothing for this to enforce.
     dpop?: DpopEnforcementOptions;
     originationRepository: OriginationRepository;
+    // Unconditional, like originationRepository above: the manual
+    // reminder/force-expire operations routes need it to send the
+    // applicant-response-reminder email SendApplicantResponseRemindersService
+    // already sends on its own schedule (case-timer.service.ts). server.ts
+    // always constructs one regardless of feature flags, so this is required
+    // rather than optional.
+    emailSender: EmailSender;
     staffWebAuthnRepository: StaffWebAuthnRepository;
     staffWebAuthnCeremony: StaffWebAuthnCeremony;
     kyc?: {
@@ -830,6 +839,8 @@ export function createApp(dependencies: AppDependencies): Express {
         new ListCaseMessagesForOperationsService(originationRepository),
         new PostCaseMessageForOperationsService(originationRepository),
         new CreateStaffOriginationCaseService(originationRepository),
+        new ForceExpireInformationRequestService(originationRepository),
+        new SendManualReminderService(originationRepository, dependencies.protectedApi.emailSender),
         partnerOrganizationRepository === undefined
           ? undefined
           : new AssignPartnerOrganizationService(originationRepository, partnerOrganizationRepository),

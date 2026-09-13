@@ -960,11 +960,44 @@ export class PrismaOriginationRepository
       }));
   }
 
+  public async getPublishedInformationRequestForTimer(
+    caseId: string,
+    requestId: string,
+  ): Promise<PublishedInformationRequestForTimer | null> {
+    const request = await this.database.informationRequest.findFirst({
+      where: { id: requestId, caseId, status: "published" },
+      select: {
+        id: true,
+        caseId: true,
+        publishedAt: true,
+        dueAt: true,
+        case: {
+          select: {
+            applicantAccountId: true,
+            applicant: { select: { protectedContactEmail: true } },
+          },
+        },
+      },
+    });
+    if (request === null || request.publishedAt === null || request.dueAt === null) {
+      return null;
+    }
+    return {
+      requestId: request.id,
+      caseId: request.caseId,
+      applicantAccountId: request.case.applicantAccountId,
+      applicantContactEmail: request.case.applicant.protectedContactEmail,
+      publishedAt: request.publishedAt,
+      dueAt: request.dueAt,
+    };
+  }
+
   public async expireInformationRequest(input: {
     requestId: string;
     caseId: string;
     traceId: string;
     expiredAt: Date;
+    manualOverride?: { reason: string; actorAccountId: string };
   }): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
       const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
@@ -1010,7 +1043,7 @@ export class PrismaOriginationRepository
       await transaction.auditLog.create({
         data: {
           id: `audit_${ulid()}`,
-          actorAccountId: null,
+          actorAccountId: input.manualOverride?.actorAccountId ?? null,
           action: "origination.information_request_expired",
           resourceType: "origination_case",
           resourceId: input.caseId,
@@ -1019,6 +1052,9 @@ export class PrismaOriginationRepository
             request_id: input.requestId,
             previous_stage: "waiting_on_applicant",
             new_stage: "expired",
+            ...(input.manualOverride === undefined
+              ? {}
+              : { manual_override: true, reason: input.manualOverride.reason }),
           },
           createdAt: input.expiredAt,
         },

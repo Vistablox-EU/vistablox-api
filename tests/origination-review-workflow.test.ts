@@ -11,8 +11,25 @@ import type {
   OperationsCaseDetail,
   OriginationRepository,
   PublishedInformationRequest,
+  PublishedInformationRequestForTimer,
   SubmitInitialCaseInput,
 } from "../src/modules/origination/repository/origination.repository.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
+
+function fakeEmailSender(): EmailSender {
+  return {
+    sendStaffInvitationEmail: vi.fn(),
+    sendApplicantResponseReminderEmail: vi.fn().mockResolvedValue(undefined),
+    sendKycRenewalReminderEmail: vi.fn(),
+    sendReconfirmationReminderEmail: vi.fn(),
+    sendReconfirmationWindowOpenedEmail: vi.fn(),
+    sendAccountRecoveryCaseOpenedEmail: vi.fn(),
+    sendAccountRecoveryApprovedEmail: vi.fn(),
+    sendAccountRecoveryRejectedEmail: vi.fn(),
+    sendAccountRecoveryCompletedEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
+  };
+}
 
 const validDocuments = [
   { document_type: "ownership_declaration", document_ref: "doc-owner", extract_dated: null },
@@ -31,6 +48,15 @@ const informationRequest = {
   resolvedAt: null,
   resolutionType: null,
   resolvingRevisionId: null,
+};
+
+const publishedRequestForTimer: PublishedInformationRequestForTimer = {
+  requestId: "rfi_01",
+  caseId: "case_01",
+  applicantAccountId: "acct_owner",
+  applicantContactEmail: "owner@example.com",
+  publishedAt: new Date("2026-08-31T10:00:00.000Z"),
+  dueAt: new Date("2026-09-14T10:00:00.000Z"),
 };
 
 const operationsCase: OperationsCaseDetail = {
@@ -92,6 +118,8 @@ function buildApp(options?: {
   ownerCaseStage?: string;
   ownedRequest?: typeof informationRequest | null;
   mfaVerified?: boolean;
+  publishedRequestForTimer?: PublishedInformationRequestForTimer | null;
+  expireInformationRequestResult?: boolean;
 }) {
   const sessions: SessionResolver = {
     resolve: vi.fn().mockResolvedValue({
@@ -159,6 +187,15 @@ function buildApp(options?: {
     informationRequests: undefined,
     submission: undefined,
   };
+  const emailSender = fakeEmailSender();
+  const getPublishedInformationRequestForTimer = vi.fn().mockResolvedValue(
+    options !== undefined && "publishedRequestForTimer" in options
+      ? options.publishedRequestForTimer
+      : publishedRequestForTimer,
+  );
+  const expireInformationRequest = vi
+    .fn()
+    .mockResolvedValue(options?.expireInformationRequestResult ?? true);
   const repository: OriginationRepository = {
     getIntakePrerequisites: vi.fn().mockResolvedValue({
       eligibilityState: "eligible",
@@ -187,7 +224,8 @@ function buildApp(options?: {
     resubmitAfterInformationRequest,
     recordFounderDecision,
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
-    expireInformationRequest: vi.fn().mockResolvedValue(false),
+    getPublishedInformationRequestForTimer,
+    expireInformationRequest,
     closeCase,
     listCaseMessages,
     postCaseMessage,
@@ -212,6 +250,7 @@ function buildApp(options?: {
         accounts,
         sessions,
         originationRepository: repository,
+        emailSender,
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
       },
@@ -223,6 +262,9 @@ function buildApp(options?: {
     closeCase,
     listCaseMessages,
     postCaseMessage,
+    emailSender,
+    expireInformationRequest,
+    getPublishedInformationRequestForTimer,
   };
 }
 
@@ -614,6 +656,156 @@ describe("operations case messages (internal_case and applicant lanes)", () => {
 
     expect(response.status).toBe(404);
     expect(postCaseMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("manual reminder and force-expire for a single information request", () => {
+  it("denies the internal surface to a customer for send-reminder", async () => {
+    const { app, emailSender } = buildApp({ population: "customer", hasAdminRole: true });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_01/information-requests/rfi_01/send-reminder",
+    );
+
+    expect(response.status).toBe(403);
+    expect(emailSender.sendApplicantResponseReminderEmail).not.toHaveBeenCalled();
+  });
+
+  it("denies the internal surface to a customer for force-expire", async () => {
+    const { app, expireInformationRequest } = buildApp({
+      population: "customer",
+      hasAdminRole: true,
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/force-expire")
+      .send({ reason: "Applicant unresponsive after repeated outreach." });
+
+    expect(response.status).toBe(403);
+    expect(expireInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("sends a reminder immediately even though the normal reminder-milestone gate wouldn't have fired yet", async () => {
+    // publishedAt is "today" for the fixture's default clock-independent fixed
+    // date, so isApplicantReminderDue (business-day milestones) would not be
+    // due -- SendManualReminderService deliberately never calls that gate.
+    const { app, emailSender } = buildApp({
+      publishedRequestForTimer: {
+        ...publishedRequestForTimer,
+        publishedAt: new Date(),
+        dueAt: new Date("2099-01-01T00:00:00.000Z"),
+      },
+    });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_01/information-requests/rfi_01/send-reminder",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      request_id: "rfi_01",
+      case_id: "case_01",
+      sent: true,
+    });
+    expect(emailSender.sendApplicantResponseReminderEmail).toHaveBeenCalledWith({
+      to: "owner@example.com",
+      dueAt: new Date("2099-01-01T00:00:00.000Z"),
+    });
+  });
+
+  it("force-expires a published request with a typed reason, recorded as a manual override", async () => {
+    const { app, expireInformationRequest } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/force-expire")
+      .send({ reason: "Applicant unresponsive after repeated outreach." });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      request_id: "rfi_01",
+      case_id: "case_01",
+      status: "expired",
+    });
+    expect(expireInformationRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        requestId: "rfi_01",
+        caseId: "case_01",
+        manualOverride: {
+          reason: "Applicant unresponsive after repeated outreach.",
+          actorAccountId: "acct_founder",
+        },
+      }),
+    );
+  });
+
+  it("rejects an empty reason before any repository work", async () => {
+    const { app, expireInformationRequest } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/force-expire")
+      .send({ reason: "" });
+
+    expect(response.status).toBe(422);
+    expect(expireInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("returns 409 when the request is no longer published (precondition not met)", async () => {
+    const { app, expireInformationRequest } = buildApp({
+      publishedRequestForTimer: null,
+      caseRecord: {
+        ...operationsCase,
+        informationRequests: [{ ...informationRequest, status: "answered" }],
+      },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/force-expire")
+      .send({ reason: "Trying to expire an already-answered request." });
+
+    expect(response.status).toBe(409);
+    expect(expireInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("404s force-expire for a request that doesn't exist on a real case", async () => {
+    const { app, expireInformationRequest } = buildApp({
+      publishedRequestForTimer: null,
+      caseRecord: { ...operationsCase, informationRequests: [] },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_missing/force-expire")
+      .send({ reason: "Never existed." });
+
+    expect(response.status).toBe(404);
+    expect(expireInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("404s force-expire for a case that doesn't exist", async () => {
+    const { app, expireInformationRequest } = buildApp({
+      publishedRequestForTimer: null,
+      caseRecord: null,
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_missing/information-requests/rfi_01/force-expire")
+      .send({ reason: "Case is gone." });
+
+    expect(response.status).toBe(404);
+    expect(expireInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("404s send-reminder for a case that doesn't exist", async () => {
+    const { app, emailSender } = buildApp({
+      publishedRequestForTimer: null,
+      caseRecord: null,
+    });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_missing/information-requests/rfi_01/send-reminder",
+    );
+
+    expect(response.status).toBe(404);
+    expect(emailSender.sendApplicantResponseReminderEmail).not.toHaveBeenCalled();
   });
 });
 
