@@ -25,6 +25,17 @@ export const propertyConditionSchema = z.enum([
 // Standard EU EPC scale.
 export const energyRatingSchema = z.enum(["A+", "A", "B", "C", "D", "E", "F", "G"]);
 
+export const roomTypeSchema = z.enum([
+  "bedroom",
+  "bathroom",
+  "kitchen",
+  "living_room",
+  "dining_room",
+  "office",
+  "storage",
+  "other",
+]);
+
 export const createDraftIntakeBodySchema = z.object({
   intake_terms_accepted: z.literal(true),
   one_title_confirmed: z.literal(true),
@@ -47,6 +58,17 @@ export const createDraftIntakeBodySchema = z.object({
     year_built: z.number().int().min(1800).max(2100).nullable().default(null),
     condition: propertyConditionSchema.nullable().default(null),
     energy_rating: energyRatingSchema.nullable().default(null),
+    // .default([]), not .min(1): this is a live customer endpoint, and a
+    // non-defaulted required array would 400 every existing caller.
+    rooms: z
+      .array(
+        z.object({
+          room_type: roomTypeSchema,
+          size_sq_m: z.number().positive().max(9999.99),
+        }),
+      )
+      .max(30)
+      .default([]),
   }),
 });
 
@@ -113,6 +135,13 @@ export const ownedCaseSchema = z.object({
     year_built: z.number().int().nullable(),
     condition: propertyConditionSchema.nullable(),
     energy_rating: energyRatingSchema.nullable(),
+    rooms: z.array(
+      z.object({
+        room_id: z.string(),
+        room_type: roomTypeSchema,
+        size_sq_m: z.number(),
+      }),
+    ),
   }),
 });
 

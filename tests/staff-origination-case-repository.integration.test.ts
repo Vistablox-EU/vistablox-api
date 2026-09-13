@@ -95,6 +95,11 @@ describe.skipIf(databaseUrl === undefined)(
           yearBuilt: 1998,
           condition: "good",
           energyRating: "C",
+          rooms: [
+            { roomType: "bedroom", sizeSqM: 14.2 },
+            { roomType: "bedroom", sizeSqM: 11.8 },
+            { roomType: "bathroom", sizeSqM: 5.5 },
+          ],
         },
         submissionData: { attestations: { staff_created: true } },
         documents: [
@@ -169,6 +174,38 @@ describe.skipIf(databaseUrl === undefined)(
         energyRating: "C",
       });
       expect(typeof owned?.property.livingAreaSqM).toBe("number");
+
+      // orderBy id asc gives a stable order across repeated reads, but NOT
+      // necessarily submission order: these ulids were all minted within
+      // the same millisecond, and ulid's relative order among same-ms ids
+      // is decided by its random component, not generation sequence. So
+      // this asserts the row set and each room's shape, not position.
+      expect(owned?.property.rooms).toHaveLength(3);
+      expect(owned?.property.rooms.map((room) => room.roomType).sort()).toEqual([
+        "bathroom",
+        "bedroom",
+        "bedroom",
+      ]);
+      expect(owned?.property.rooms.every((room) => typeof room.sizeSqM === "number")).toBe(true);
+      expect(owned?.property.rooms.every((room) => room.roomId.startsWith("room_"))).toBe(true);
+
+      const rooms = await database.propertyRoom.findMany({
+        where: { propertyId: originationCase.propertyId },
+        orderBy: { id: "asc" },
+      });
+      expect(rooms).toHaveLength(3);
+      expect(rooms.map((room) => room.sizeSqM.toFixed(2)).sort()).toEqual([
+        "11.80",
+        "14.20",
+        "5.50",
+      ]);
+      // Same order on a second read -- orderBy is deterministic, even if it
+      // doesn't track submission order.
+      const roomsAgain = await database.propertyRoom.findMany({
+        where: { propertyId: originationCase.propertyId },
+        orderBy: { id: "asc" },
+      });
+      expect(roomsAgain.map((room) => room.id)).toEqual(rooms.map((room) => room.id));
     });
 
     it("refuses an out-of-enum residential_subtype at the database layer, defense-in-depth beneath the Zod schema", async () => {
@@ -194,6 +231,20 @@ describe.skipIf(databaseUrl === undefined)(
           },
         }),
       ).rejects.toThrow(/properties_energy_rating_check/);
+
+      await database.property.create({
+        data: { id: propertyId, countryCode: "RS", ownerDeclaredValueEur: "200000.00" },
+      });
+      await expect(
+        database.propertyRoom.create({
+          data: {
+            id: `room_check_${suffix}`,
+            propertyId,
+            roomType: "garage",
+            sizeSqM: "20.00",
+          },
+        }),
+      ).rejects.toThrow(/property_rooms_room_type_check/);
     });
 
     it("rejects an applicant_account_id that doesn't resolve to a real account, writing nothing", async () => {
@@ -218,6 +269,7 @@ describe.skipIf(databaseUrl === undefined)(
             yearBuilt: null,
             condition: null,
             energyRating: null,
+            rooms: [],
           },
           submissionData: { attestations: { staff_created: true } },
           documents: [

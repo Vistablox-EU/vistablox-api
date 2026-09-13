@@ -208,6 +208,7 @@ describe("staff create-and-submit an origination case (POST /internal/v1/origina
           yearBuilt: null,
           condition: null,
           energyRating: null,
+          rooms: [],
         }),
         documents: expect.arrayContaining([
           expect.objectContaining({ documentType: "ownership_declaration", documentRef: "doc-owner" }),
@@ -253,6 +254,69 @@ describe("staff create-and-submit an origination case (POST /internal/v1/origina
         }),
       }),
     );
+  });
+
+  it("threads a room breakdown through when supplied", async () => {
+    const { app, createStaffCase } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases")
+      .send({
+        ...validBody,
+        property: {
+          ...validBody.property,
+          rooms: [
+            { room_type: "bedroom", size_sq_m: 14.2 },
+            { room_type: "bathroom", size_sq_m: 5.5 },
+          ],
+        },
+      });
+
+    expect(response.status).toBe(201);
+    expect(createStaffCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        property: expect.objectContaining({
+          rooms: [
+            { roomType: "bedroom", sizeSqM: 14.2 },
+            { roomType: "bathroom", sizeSqM: 5.5 },
+          ],
+        }),
+      }),
+    );
+  });
+
+  it("rejects a room breakdown over the 30-room cap", async () => {
+    const { app, createStaffCase } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases")
+      .send({
+        ...validBody,
+        property: {
+          ...validBody.property,
+          rooms: Array.from({ length: 31 }, () => ({ room_type: "other", size_sq_m: 5 })),
+        },
+      });
+
+    expect(response.status).toBe(422);
+    expect(createStaffCase).not.toHaveBeenCalled();
+  });
+
+  it("rejects an out-of-enum room_type at the schema layer", async () => {
+    const { app, createStaffCase } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases")
+      .send({
+        ...validBody,
+        property: {
+          ...validBody.property,
+          rooms: [{ room_type: "garage", size_sq_m: 20 }],
+        },
+      });
+
+    expect(response.status).toBe(422);
+    expect(createStaffCase).not.toHaveBeenCalled();
   });
 
   it("rejects an out-of-enum residential_subtype at the schema layer", async () => {

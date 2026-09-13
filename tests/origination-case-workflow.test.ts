@@ -36,6 +36,7 @@ const ownedCase: OwnedOriginationCase = {
     yearBuilt: null,
     condition: null,
     energyRating: null,
+    rooms: [],
   },
 };
 
