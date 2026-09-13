@@ -106,6 +106,15 @@ export class PrismaOriginationRepository
           longitude: input.property.longitude,
           ownerDeclaredValueEur: input.property.ownerDeclaredValueEur,
           hasExistingEncumbrance: input.property.hasExistingEncumbrance,
+          residentialSubtype: input.property.residentialSubtype,
+          livingAreaSqM: input.property.livingAreaSqM,
+          bedrooms: input.property.bedrooms,
+          bathrooms: input.property.bathrooms,
+          floor: input.property.floor,
+          totalFloors: input.property.totalFloors,
+          yearBuilt: input.property.yearBuilt,
+          condition: input.property.condition,
+          energyRating: input.property.energyRating,
         },
       });
       await transaction.originationCase.create({
@@ -161,6 +170,15 @@ export class PrismaOriginationRepository
           longitude: null,
           ownerDeclaredValueEur: input.property.ownerDeclaredValueEur,
           hasExistingEncumbrance: input.property.hasExistingEncumbrance,
+          residentialSubtype: input.property.residentialSubtype,
+          livingAreaSqM: input.property.livingAreaSqM,
+          bedrooms: input.property.bedrooms,
+          bathrooms: input.property.bathrooms,
+          floor: input.property.floor,
+          totalFloors: input.property.totalFloors,
+          yearBuilt: input.property.yearBuilt,
+          condition: input.property.condition,
+          energyRating: input.property.energyRating,
         },
       });
       await transaction.originationCase.create({
@@ -1369,6 +1387,15 @@ const ownedCaseSelect = {
       landRegistryReference: true,
       ownerDeclaredValueEur: true,
       hasExistingEncumbrance: true,
+      residentialSubtype: true,
+      livingAreaSqM: true,
+      bedrooms: true,
+      bathrooms: true,
+      floor: true,
+      totalFloors: true,
+      yearBuilt: true,
+      condition: true,
+      energyRating: true,
     },
   },
 } as const;
@@ -1424,6 +1451,15 @@ function toOwnedCase(input: {
     landRegistryReference: string | null;
     ownerDeclaredValueEur: { toFixed(fractionDigits: number): string };
     hasExistingEncumbrance: boolean;
+    residentialSubtype: string | null;
+    livingAreaSqM: { toNumber(): number } | null;
+    bedrooms: number | null;
+    bathrooms: number | null;
+    floor: number | null;
+    totalFloors: number | null;
+    yearBuilt: number | null;
+    condition: string | null;
+    energyRating: string | null;
   };
 }): OwnedOriginationCase {
   return {
@@ -1441,6 +1477,15 @@ function toOwnedCase(input: {
       landRegistryReference: input.property.landRegistryReference,
       ownerDeclaredValueEur: input.property.ownerDeclaredValueEur.toFixed(2),
       hasExistingEncumbrance: input.property.hasExistingEncumbrance,
+      residentialSubtype: input.property.residentialSubtype,
+      livingAreaSqM: input.property.livingAreaSqM === null ? null : input.property.livingAreaSqM.toNumber(),
+      bedrooms: input.property.bedrooms,
+      bathrooms: input.property.bathrooms,
+      floor: input.property.floor,
+      totalFloors: input.property.totalFloors,
+      yearBuilt: input.property.yearBuilt,
+      condition: input.property.condition,
+      energyRating: input.property.energyRating,
     },
   };
 }

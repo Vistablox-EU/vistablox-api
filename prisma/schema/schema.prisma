@@ -129,6 +129,15 @@ model Property {
   longitude              Float?
   ownerDeclaredValueEur  Decimal  @map("owner_declared_value_eur") @db.Decimal(15, 2)
   hasExistingEncumbrance Boolean  @default(false) @map("has_existing_encumbrance")
+  residentialSubtype     String?  @map("residential_subtype")
+  livingAreaSqM          Decimal? @map("living_area_sq_m") @db.Decimal(6, 2)
+  bedrooms               Int?
+  bathrooms              Int?
+  floor                  Int?
+  totalFloors            Int?     @map("total_floors")
+  yearBuilt              Int?     @map("year_built")
+  condition              String?
+  energyRating           String?  @map("energy_rating")
   createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
   cases OriginationCase[]

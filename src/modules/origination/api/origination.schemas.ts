@@ -1,5 +1,30 @@
 import { z } from "zod";
 
+// Shared across the input (createDraftIntakeBodySchema, staff
+// createStaffCaseBodySchema) and output (ownedCaseSchema) property shapes
+// below, so all three stay in lockstep. property_type itself stays
+// z.literal("residential") -- locked by AD-081/properties_residential_only,
+// unrelated to and unchanged by residentialSubtypeSchema here.
+export const residentialSubtypeSchema = z.enum([
+  "apartment",
+  "house",
+  "townhouse",
+  "multi_family",
+  "studio",
+  "other",
+]);
+
+export const propertyConditionSchema = z.enum([
+  "new",
+  "renovated",
+  "good",
+  "fair",
+  "needs_renovation",
+]);
+
+// Standard EU EPC scale.
+export const energyRatingSchema = z.enum(["A+", "A", "B", "C", "D", "E", "F", "G"]);
+
 export const createDraftIntakeBodySchema = z.object({
   intake_terms_accepted: z.literal(true),
   one_title_confirmed: z.literal(true),
@@ -13,6 +38,15 @@ export const createDraftIntakeBodySchema = z.object({
     longitude: z.number().min(-180).max(180).nullable().default(null),
     owner_declared_value_eur: z.string().regex(/^\d{1,13}\.\d{2}$/),
     has_existing_encumbrance: z.boolean().default(false),
+    residential_subtype: residentialSubtypeSchema.nullable().default(null),
+    living_area_sq_m: z.number().positive().max(9999.99).nullable().default(null),
+    bedrooms: z.number().int().min(0).nullable().default(null),
+    bathrooms: z.number().int().min(0).nullable().default(null),
+    floor: z.number().int().min(-5).nullable().default(null),
+    total_floors: z.number().int().min(1).nullable().default(null),
+    year_built: z.number().int().min(1800).max(2100).nullable().default(null),
+    condition: propertyConditionSchema.nullable().default(null),
+    energy_rating: energyRatingSchema.nullable().default(null),
   }),
 });
 
@@ -70,6 +104,15 @@ export const ownedCaseSchema = z.object({
     land_registry_reference: z.string().nullable(),
     owner_declared_value_eur: z.string().regex(/^\d+\.\d{2}$/),
     has_existing_encumbrance: z.boolean(),
+    residential_subtype: residentialSubtypeSchema.nullable(),
+    living_area_sq_m: z.number().nullable(),
+    bedrooms: z.number().int().nullable(),
+    bathrooms: z.number().int().nullable(),
+    floor: z.number().int().nullable(),
+    total_floors: z.number().int().nullable(),
+    year_built: z.number().int().nullable(),
+    condition: propertyConditionSchema.nullable(),
+    energy_rating: energyRatingSchema.nullable(),
   }),
 });
 

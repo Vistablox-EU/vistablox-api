@@ -6,7 +6,12 @@ import type {
   RecordAppraisalBody,
   RecordLegalStructuringBody,
 } from "../api/partner-case.schemas.js";
-import { originationCaseStageSchema } from "../api/origination.schemas.js";
+import {
+  energyRatingSchema,
+  originationCaseStageSchema,
+  propertyConditionSchema,
+  residentialSubtypeSchema,
+} from "../api/origination.schemas.js";
 import { canRecordPartnerWriteback } from "../domain/case-review.policy.js";
 import {
   CaseReviewConflictError,
@@ -176,6 +181,24 @@ function toPartnerCaseResponse(input: PartnerCaseDetail): PartnerCaseResponse {
       land_registry_reference: input.property.landRegistryReference,
       owner_declared_value_eur: input.property.ownerDeclaredValueEur,
       has_existing_encumbrance: input.property.hasExistingEncumbrance,
+      residential_subtype:
+        input.property.residentialSubtype === null
+          ? null
+          : residentialSubtypeSchema.parse(input.property.residentialSubtype),
+      living_area_sq_m: input.property.livingAreaSqM,
+      bedrooms: input.property.bedrooms,
+      bathrooms: input.property.bathrooms,
+      floor: input.property.floor,
+      total_floors: input.property.totalFloors,
+      year_built: input.property.yearBuilt,
+      condition:
+        input.property.condition === null
+          ? null
+          : propertyConditionSchema.parse(input.property.condition),
+      energy_rating:
+        input.property.energyRating === null
+          ? null
+          : energyRatingSchema.parse(input.property.energyRating),
     },
     legal_document_refs: input.legalDocumentRefs,
     legal_structuring_completed_at: input.legalStructuringCompletedAt?.toISOString() ?? null,
