@@ -86,6 +86,15 @@ describe.skipIf(databaseUrl === undefined)(
           landRegistryReference: `BG-${suffix}`,
           ownerDeclaredValueEur: "200000.00",
           hasExistingEncumbrance: false,
+          residentialSubtype: "apartment",
+          livingAreaSqM: 82.5,
+          bedrooms: 2,
+          bathrooms: 1,
+          floor: 3,
+          totalFloors: 6,
+          yearBuilt: 1998,
+          condition: "good",
+          energyRating: "C",
         },
         submissionData: { attestations: { staff_created: true } },
         documents: [
@@ -130,6 +139,61 @@ describe.skipIf(databaseUrl === undefined)(
         applicant_account_id: applicantAccountId,
         staff_actor_account_id: staffAccountId,
       });
+
+      const property = await database.property.findUniqueOrThrow({
+        where: { id: originationCase.propertyId },
+      });
+      expect(property.residentialSubtype).toBe("apartment");
+      expect(property.livingAreaSqM?.toString()).toBe("82.50");
+      expect(property.bedrooms).toBe(2);
+      expect(property.bathrooms).toBe(1);
+      expect(property.floor).toBe(3);
+      expect(property.totalFloors).toBe(6);
+      expect(property.yearBuilt).toBe(1998);
+      expect(property.condition).toBe("good");
+      expect(property.energyRating).toBe("C");
+
+      // Round-trips through ownedCaseSelect/toOwnedCase (the same mapper
+      // GET /v1/origination-cases/:case_id uses): living_area_sq_m comes
+      // back as a plain JS number, not a Prisma.Decimal.
+      const owned = await originationRepository.getOwnedCase(applicantAccountId, created.caseId);
+      expect(owned?.property).toMatchObject({
+        residentialSubtype: "apartment",
+        livingAreaSqM: 82.5,
+        bedrooms: 2,
+        bathrooms: 1,
+        floor: 3,
+        totalFloors: 6,
+        yearBuilt: 1998,
+        condition: "good",
+        energyRating: "C",
+      });
+      expect(typeof owned?.property.livingAreaSqM).toBe("number");
+    });
+
+    it("refuses an out-of-enum residential_subtype at the database layer, defense-in-depth beneath the Zod schema", async () => {
+      const propertyId = `prop_check_${suffix}`;
+      await expect(
+        database.property.create({
+          data: {
+            id: propertyId,
+            countryCode: "RS",
+            ownerDeclaredValueEur: "200000.00",
+            residentialSubtype: "castle",
+          },
+        }),
+      ).rejects.toThrow(/properties_residential_subtype_check/);
+
+      await expect(
+        database.property.create({
+          data: {
+            id: propertyId,
+            countryCode: "RS",
+            ownerDeclaredValueEur: "200000.00",
+            energyRating: "Z",
+          },
+        }),
+      ).rejects.toThrow(/properties_energy_rating_check/);
     });
 
     it("rejects an applicant_account_id that doesn't resolve to a real account, writing nothing", async () => {
@@ -145,6 +209,15 @@ describe.skipIf(databaseUrl === undefined)(
             landRegistryReference: null,
             ownerDeclaredValueEur: "200000.00",
             hasExistingEncumbrance: false,
+            residentialSubtype: null,
+            livingAreaSqM: null,
+            bedrooms: null,
+            bathrooms: null,
+            floor: null,
+            totalFloors: null,
+            yearBuilt: null,
+            condition: null,
+            energyRating: null,
           },
           submissionData: { attestations: { staff_created: true } },
           documents: [

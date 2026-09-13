@@ -1,8 +1,11 @@
 import { z } from "zod";
 
 import {
+  energyRatingSchema,
   originationCaseStageSchema,
   ownedCaseSchema,
+  propertyConditionSchema,
+  residentialSubtypeSchema,
   submissionDocumentTypeSchema,
 } from "./origination.schemas.js";
 
@@ -39,6 +42,15 @@ export const createStaffCaseBodySchema = z.object({
     land_registry_reference: z.string().trim().min(1).max(200).nullable().default(null),
     owner_declared_value_eur: z.string().regex(/^\d{1,13}\.\d{2}$/),
     has_existing_encumbrance: z.boolean().default(false),
+    residential_subtype: residentialSubtypeSchema.nullable().default(null),
+    living_area_sq_m: z.number().positive().max(9999.99).nullable().default(null),
+    bedrooms: z.number().int().min(0).nullable().default(null),
+    bathrooms: z.number().int().min(0).nullable().default(null),
+    floor: z.number().int().min(-5).nullable().default(null),
+    total_floors: z.number().int().min(1).nullable().default(null),
+    year_built: z.number().int().min(1800).max(2100).nullable().default(null),
+    condition: propertyConditionSchema.nullable().default(null),
+    energy_rating: energyRatingSchema.nullable().default(null),
   }),
   documents: z
     .array(

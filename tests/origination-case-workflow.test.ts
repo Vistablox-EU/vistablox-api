@@ -27,6 +27,15 @@ const ownedCase: OwnedOriginationCase = {
     landRegistryReference: "BG-123",
     ownerDeclaredValueEur: "150000.00",
     hasExistingEncumbrance: false,
+    residentialSubtype: null,
+    livingAreaSqM: null,
+    bedrooms: null,
+    bathrooms: null,
+    floor: null,
+    totalFloors: null,
+    yearBuilt: null,
+    condition: null,
+    energyRating: null,
   },
 };
 

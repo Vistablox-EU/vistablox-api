@@ -308,6 +308,15 @@ export class CreateStaffOriginationCaseService {
           landRegistryReference: input.body.property.land_registry_reference,
           ownerDeclaredValueEur: input.body.property.owner_declared_value_eur,
           hasExistingEncumbrance: input.body.property.has_existing_encumbrance,
+          residentialSubtype: input.body.property.residential_subtype,
+          livingAreaSqM: input.body.property.living_area_sq_m,
+          bedrooms: input.body.property.bedrooms,
+          bathrooms: input.body.property.bathrooms,
+          floor: input.body.property.floor,
+          totalFloors: input.body.property.total_floors,
+          yearBuilt: input.body.property.year_built,
+          condition: input.body.property.condition,
+          energyRating: input.body.property.energy_rating,
         },
         submissionData: {
           attestations: {

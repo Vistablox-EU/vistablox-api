@@ -196,12 +196,74 @@ describe("staff create-and-submit an origination case (POST /internal/v1/origina
       expect.objectContaining({
         applicantAccountId: "acct_owner",
         staffAccountId: "acct_founder",
-        property: expect.objectContaining({ countryCode: "RS", ownerDeclaredValueEur: "175000.00" }),
+        property: expect.objectContaining({
+          countryCode: "RS",
+          ownerDeclaredValueEur: "175000.00",
+          residentialSubtype: null,
+          livingAreaSqM: null,
+          bedrooms: null,
+          bathrooms: null,
+          floor: null,
+          totalFloors: null,
+          yearBuilt: null,
+          condition: null,
+          energyRating: null,
+        }),
         documents: expect.arrayContaining([
           expect.objectContaining({ documentType: "ownership_declaration", documentRef: "doc-owner" }),
         ]),
       }),
     );
+  });
+
+  it("threads the structured property fields through when supplied", async () => {
+    const { app, createStaffCase } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases")
+      .send({
+        ...validBody,
+        property: {
+          ...validBody.property,
+          residential_subtype: "apartment",
+          living_area_sq_m: 82.5,
+          bedrooms: 2,
+          bathrooms: 1,
+          floor: 3,
+          total_floors: 6,
+          year_built: 1998,
+          condition: "good",
+          energy_rating: "C",
+        },
+      });
+
+    expect(response.status).toBe(201);
+    expect(createStaffCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        property: expect.objectContaining({
+          residentialSubtype: "apartment",
+          livingAreaSqM: 82.5,
+          bedrooms: 2,
+          bathrooms: 1,
+          floor: 3,
+          totalFloors: 6,
+          yearBuilt: 1998,
+          condition: "good",
+          energyRating: "C",
+        }),
+      }),
+    );
+  });
+
+  it("rejects an out-of-enum residential_subtype at the schema layer", async () => {
+    const { app, createStaffCase } = buildApp();
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases")
+      .send({ ...validBody, property: { ...validBody.property, residential_subtype: "castle" } });
+
+    expect(response.status).toBe(422);
+    expect(createStaffCase).not.toHaveBeenCalled();
   });
 
   it("rejects a submission missing one of the four required evidence types", async () => {

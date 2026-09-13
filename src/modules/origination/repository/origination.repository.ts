@@ -4,6 +4,21 @@ export interface IntakePrerequisites {
   minimumPropertyValueEur: string;
 }
 
+// Shared by every property-shaped input/output below so all four stay in
+// lockstep -- property_type itself stays out of this (still locked to
+// "residential" by AD-081, unrelated to these fields).
+export interface StructuredPropertyDetails {
+  residentialSubtype: string | null;
+  livingAreaSqM: number | null;
+  bedrooms: number | null;
+  bathrooms: number | null;
+  floor: number | null;
+  totalFloors: number | null;
+  yearBuilt: number | null;
+  condition: string | null;
+  energyRating: string | null;
+}
+
 export interface CreateDraftIntakeInput {
   accountId: string;
   traceId: string;
@@ -16,7 +31,7 @@ export interface CreateDraftIntakeInput {
     longitude: number | null;
     ownerDeclaredValueEur: string;
     hasExistingEncumbrance: boolean;
-  };
+  } & StructuredPropertyDetails;
 }
 
 export interface CreatedDraftIntake {
@@ -36,7 +51,7 @@ export interface CreateStaffCaseInput {
     landRegistryReference: string | null;
     ownerDeclaredValueEur: string;
     hasExistingEncumbrance: boolean;
-  };
+  } & StructuredPropertyDetails;
   submissionData: Record<string, unknown>;
   documents: SubmissionDocumentInput[];
 }
@@ -73,7 +88,7 @@ export interface OwnedOriginationCase {
     landRegistryReference: string | null;
     ownerDeclaredValueEur: string;
     hasExistingEncumbrance: boolean;
-  };
+  } & StructuredPropertyDetails;
 }
 
 export interface SubmissionDocumentInput {
