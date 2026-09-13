@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
+import { GetWalletAccountForOperationsService } from "../src/modules/wallet/application/get-wallet-account-for-operations.service.js";
 import {
   WalletAddressConflictError,
   type WalletRepository,
@@ -172,6 +173,61 @@ describe("RegisterWalletService", () => {
     await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
       code: "wallet.address_already_claimed",
       status: 409,
+    });
+  });
+});
+
+describe("GetWalletAccountForOperationsService", () => {
+  it("returns the wallet registration for the given account", async () => {
+    const repository = buildRepository({
+      findByAccountId: vi.fn().mockResolvedValue({
+        walletAddress,
+        registrationCommitment: "commitment_01",
+        requestedAt: now,
+        registeredAt: null,
+      }),
+    });
+    const service = new GetWalletAccountForOperationsService(repository);
+
+    const result = await service.execute(accountId);
+
+    expect(result).toEqual({
+      data: {
+        account_id: accountId,
+        wallet_address: walletAddress,
+        registration_commitment: "commitment_01",
+        status: "pending",
+        requested_at: now.toISOString(),
+        registered_at: null,
+      },
+    });
+    expect(repository.findByAccountId).toHaveBeenCalledWith(accountId);
+  });
+
+  it("reports registered status once registered_at is set", async () => {
+    const registeredAt = new Date("2026-09-02T10:05:00.000Z");
+    const repository = buildRepository({
+      findByAccountId: vi.fn().mockResolvedValue({
+        walletAddress,
+        registrationCommitment: "commitment_01",
+        requestedAt: now,
+        registeredAt,
+      }),
+    });
+    const service = new GetWalletAccountForOperationsService(repository);
+
+    const result = await service.execute(accountId);
+
+    expect(result.data).toMatchObject({ status: "registered", registered_at: registeredAt.toISOString() });
+  });
+
+  it("404s rather than synthesizing a response for an account with no wallet on file", async () => {
+    const repository = buildRepository({ findByAccountId: vi.fn().mockResolvedValue(null) });
+    const service = new GetWalletAccountForOperationsService(repository);
+
+    await expect(service.execute("acct_missing")).rejects.toMatchObject({
+      code: "wallet.account_not_found",
+      status: 404,
     });
   });
 });

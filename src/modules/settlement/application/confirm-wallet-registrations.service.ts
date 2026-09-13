@@ -90,6 +90,16 @@ export class ConfirmWalletRegistrationsService {
         summary.addressMismatches.push(
           `account_id=${pending.accountId} commitment=${commitment}: stored wallet ${pending.walletAddress} != on-chain sender ${wallet}`,
         );
+        // Durable record, not just the log line worker.ts emits from this
+        // summary -- a log scrolls away; this is what a support/security
+        // review actually queries later.
+        await this.repository.recordWalletRegistrationAddressMismatch({
+          accountId: pending.accountId,
+          commitment,
+          storedWalletAddress: pending.walletAddress,
+          onChainSender: wallet,
+          detectedAt: this.clock(),
+        });
         continue;
       }
 

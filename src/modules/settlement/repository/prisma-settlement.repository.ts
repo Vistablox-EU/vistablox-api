@@ -8,6 +8,7 @@ import type {
   PivTokenHoldingsReader,
   RecordEscrowMintedPositionInput,
   SettlementRepository,
+  WalletRegistrationAddressMismatchInput,
 } from "./settlement.repository.js";
 
 // Reuses the generic platform.settings key-value table (PlatformSetting)
@@ -132,6 +133,27 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
           "Last block number processed by the VistaBloxWalletRegistry WalletRegistered event watcher (AD-241).",
       },
       update: { value: block.toString() },
+    });
+  }
+
+  public async recordWalletRegistrationAddressMismatch(
+    input: WalletRegistrationAddressMismatchInput,
+  ): Promise<void> {
+    // No actorAccountId: this fires from the worker's own event watcher, not
+    // a staff action -- there's no acting account to attribute it to.
+    await this.database.auditLog.create({
+      data: {
+        id: `audit_${ulid()}`,
+        action: "settlement.wallet_registration_address_mismatch",
+        resourceType: "wallet_registration",
+        resourceId: input.accountId,
+        changes: {
+          commitment: input.commitment,
+          stored_wallet_address: input.storedWalletAddress,
+          onchain_sender: input.onChainSender,
+        },
+        createdAt: input.detectedAt,
+      },
     });
   }
 }
