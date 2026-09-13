@@ -56,6 +56,7 @@ model Account {
   closureRequests                AccountClosureRequest[] @relation("ClosureRequestSubject")
   resolvedClosureRequests        AccountClosureRequest[] @relation("ClosureRequestResolver")
   devices                        Device[]
+  reviewedEvidence                DocumentaryScreeningEvidence[] @relation("EvidenceReviewer")
 
   @@map("accounts")
   @@schema("account")
@@ -296,9 +297,13 @@ model DocumentaryScreeningEvidence {
   documentRef          String    @map("document_ref")
   extractDated         DateTime? @map("extract_dated") @db.Timestamptz(6)
   uploadedAt           DateTime  @default(now()) @map("uploaded_at") @db.Timestamptz(6)
+  reviewedByAccountId  String?   @map("reviewed_by_account_id")
+  reviewedAt           DateTime? @map("reviewed_at") @db.Timestamptz(6)
+  reviewNotes          String?   @map("review_notes")
 
   case               OriginationCase    @relation(fields: [caseId], references: [id])
   submissionRevision SubmissionRevision @relation(fields: [submissionRevisionId], references: [id])
+  reviewer           Account?           @relation("EvidenceReviewer", fields: [reviewedByAccountId], references: [id])
 
   @@index([caseId], map: "idx_evidence_case")
   @@index([submissionRevisionId], map: "idx_evidence_revision")

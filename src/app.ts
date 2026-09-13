@@ -146,8 +146,12 @@ import {
   ListCasesForOperationsService,
   PublishInformationRequestService,
   RecordFounderDecisionService,
+  RetryPostIpoStructuringHandoffService,
+  ReviewEvidenceService,
   SendManualReminderService,
+  WithdrawInformationRequestService,
 } from "./modules/origination/application/operations-case.service.js";
+import { TransitionCaseToPostIpoStructuringService } from "./modules/origination/application/post-ipo-structuring-handoff.service.js";
 import {
   GetCaseForPartnerService,
   ListCasesForPartnerService,
@@ -189,6 +193,7 @@ import type { LoginMethodUnlinker } from "./modules/auth/application/login-metho
 import { createWalletRouter } from "./modules/wallet/api/wallet.router.js";
 import { RegisterWalletService } from "./modules/wallet/application/register-wallet.service.js";
 import { GetWalletBalanceService, type WalletChainReader } from "./modules/wallet/application/get-wallet-balance.service.js";
+import { GetWalletStatusService } from "./modules/wallet/application/get-wallet-status.service.js";
 import { RequestWalletTransferService, type WalletTransferChainReader } from "./modules/wallet/application/request-wallet-transfer.service.js";
 import type { WalletRepository } from "./modules/wallet/repository/wallet.repository.js";
 import type { PivTokenHoldingsReader } from "./modules/settlement/repository/settlement.repository.js";
@@ -623,6 +628,7 @@ export function createApp(dependencies: AppDependencies): Express {
             wallet.kycEligibilityReader,
             wallet.walletRegistryContractAddress,
           ),
+          new GetWalletStatusService(wallet.repository),
           wallet.balances === undefined
             ? undefined
             : new GetWalletBalanceService(
@@ -839,8 +845,14 @@ export function createApp(dependencies: AppDependencies): Express {
         new ListCaseMessagesForOperationsService(originationRepository),
         new PostCaseMessageForOperationsService(originationRepository),
         new CreateStaffOriginationCaseService(originationRepository),
+        new RetryPostIpoStructuringHandoffService(
+          originationRepository,
+          new TransitionCaseToPostIpoStructuringService(originationRepository),
+        ),
+        new ReviewEvidenceService(originationRepository),
         new ForceExpireInformationRequestService(originationRepository),
         new SendManualReminderService(originationRepository, dependencies.protectedApi.emailSender),
+        new WithdrawInformationRequestService(originationRepository),
         partnerOrganizationRepository === undefined
           ? undefined
           : new AssignPartnerOrganizationService(originationRepository, partnerOrganizationRepository),

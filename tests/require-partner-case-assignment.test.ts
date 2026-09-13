@@ -47,11 +47,14 @@ function fakeCases(
     resubmitAfterInformationRequest: vi.fn(),
     recordFounderDecision: vi.fn(),
     closeCase: vi.fn(),
+    reviewEvidence: vi.fn(),
     listCaseMessages: vi.fn(),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),
     getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn(),
+    transitionToPostIpoStructuring: vi.fn(),
+    withdrawInformationRequest: vi.fn(),
   };
 }
 

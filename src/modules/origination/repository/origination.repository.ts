@@ -1,3 +1,8 @@
+import type {
+  TransitionedToPostIpoStructuring,
+  TransitionToPostIpoStructuringInput,
+} from "./post-ipo-structuring-handoff.repository.js";
+
 export interface IntakePrerequisites {
   eligibilityState: string;
   proofOfAddressCurrentUntil: Date | null;
@@ -154,6 +159,21 @@ export interface OperationsCaseDetail extends OwnedOriginationCase {
   ipoValueEur: string | null;
   legalPracticeId: string | null;
   appraisalFirmId: string | null;
+  // The case's own PIV's most recent Offering (Piv -> Offering is a
+  // one-to-many relation in the schema, though nothing in the application
+  // today creates a second Offering for an existing Piv -- see
+  // openOfferingForApprovedCase's reuse-existing-before-create-new logic).
+  // Null until the post-approval origination-to-offering handoff
+  // (AD-145/AD-152) has actually opened one. This is exactly the field the
+  // staff detail view uses to surface a stuck post-IPO handoff: a case
+  // sitting at pre_offering_open whose offering already has
+  // final_offering_published_at set is a case whose automatic handoff job
+  // should have fired but didn't.
+  offering: {
+    offeringId: string;
+    status: string;
+    finalOfferingPublishedAt: Date | null;
+  } | null;
   submission: {
     revisionId: string;
     revisionNumber: number;
@@ -167,9 +187,60 @@ export interface OperationsCaseDetail extends OwnedOriginationCase {
       documentRef: string;
       extractDated: Date | null;
       uploadedAt: Date;
+      reviewedByAccountId: string | null;
+      reviewedAt: Date | null;
+      reviewNotes: string | null;
     }>;
   } | null;
   informationRequests: InformationRequestRecord[];
+}
+
+// The three terminal outcomes a review can record -- "pending" isn't
+// reviewable-into, it's only ever the starting value nothing has touched
+// yet (documentary_screening_evidence_status_check and this migration's
+// _review_consistency_check both enforce that pairing at the DB level).
+export type EvidenceReviewStatus = "accepted" | "rejected" | "mandatory_missing";
+
+export interface ReviewEvidenceInput {
+  accountId: string;
+  caseId: string;
+  evidenceId: string;
+  traceId: string;
+  status: EvidenceReviewStatus;
+  reviewNotes: string | null;
+  reviewedAt: Date;
+}
+
+export interface ReviewedEvidence {
+  evidenceId: string;
+  caseId: string;
+  status: EvidenceReviewStatus;
+  reviewedByAccountId: string;
+  reviewedAt: Date;
+  reviewNotes: string | null;
+}
+
+// Thrown by reviewEvidence when no evidence row exists with the given id at
+// all -- maps to a 404 at the service layer.
+export class EvidenceNotFoundError extends Error {
+  public constructor(public readonly evidenceId: string) {
+    super(`No evidence exists with id ${evidenceId}`);
+    this.name = "EvidenceNotFoundError";
+  }
+}
+
+// Thrown by reviewEvidence when the evidence row exists but under a
+// different case than the one in the URL -- a distinct condition from
+// EvidenceNotFoundError above, and mapped to a 409 rather than a 404 since,
+// behind staffOnly, this never needs to hide the row's existence.
+export class EvidenceCaseMismatchError extends Error {
+  public constructor(
+    public readonly evidenceId: string,
+    public readonly caseId: string,
+  ) {
+    super(`Evidence ${evidenceId} does not belong to case ${caseId}`);
+    this.name = "EvidenceCaseMismatchError";
+  }
 }
 
 export interface PublishedInformationRequest extends InformationRequestRecord {
@@ -179,6 +250,14 @@ export interface PublishedInformationRequest extends InformationRequestRecord {
 }
 
 export type ResubmittedCase = SubmittedCase;
+
+export interface WithdrawnInformationRequest {
+  requestId: string;
+  caseId: string;
+  status: "withdrawn";
+  resolvedAt: Date;
+  stage: "submitted";
+}
 
 export interface PublishedInformationRequestForTimer {
   requestId: string;
@@ -403,10 +482,34 @@ export interface OriginationRepository {
     requestId: string;
     submittedAt: Date;
   }): Promise<ResubmittedCase | null>;
+  // Targeted withdrawal of a single published information request --
+  // reverts the case's stage back to "submitted" (same revision it was
+  // already reviewing) rather than terminating the whole case the way
+  // closeCase's "withdrawn" outcome does. Throws CaseReviewConflictError if
+  // the case's stage or the request's status no longer allow this by the
+  // time the FOR UPDATE-locked recheck runs, matching
+  // publishInformationRequest/resubmitAfterInformationRequest above.
+  // Returns null only if the case has vanished entirely since the caller's
+  // own check.
+  withdrawInformationRequest(input: {
+    accountId: string;
+    caseId: string;
+    requestId: string;
+    traceId: string;
+    founderReviewNotes: string | null;
+    withdrawnAt: Date;
+  }): Promise<WithdrawnInformationRequest | null>;
   recordFounderDecision(
     input: FounderDecisionInput,
   ): Promise<RecordedFounderDecision | null>;
   closeCase(input: CloseCaseInput): Promise<ClosedCase | null>;
+  // Purely advisory (nothing reads evidence status for any decision, and
+  // this doesn't change that) and reviewable at any case stage, so there's
+  // no accompanying policy check here the way canRecordFounderDecision
+  // gates recordFounderDecision above. Throws EvidenceNotFoundError if no
+  // row exists with that id at all, or EvidenceCaseMismatchError if it
+  // exists under a different case than caseId.
+  reviewEvidence(input: ReviewEvidenceInput): Promise<ReviewedEvidence>;
   // Ownership/existence scoping happens one level up (getOwnedCase for the
   // applicant-lane owner routes, getCaseForOperations for staff), matching
   // how every other write here separates that check from the write itself
@@ -443,6 +546,19 @@ export interface OriginationRepository {
     // instead of the batch job's system-actor (null) shape.
     manualOverride?: { reason: string; actorAccountId: string };
   }): Promise<boolean>;
+  // Same method PostIpoStructuringHandoffRepository declares for the
+  // pg-boss worker path (post-ipo-structuring-handoff.repository.ts) --
+  // PrismaOriginationRepository already implements both interfaces with the
+  // one method. Re-declared here (not just relied on via that separate
+  // interface) so the HTTP-side staff retry action
+  // (RetryPostIpoStructuringHandoffService, wrapping
+  // TransitionCaseToPostIpoStructuringService) can call it through the same
+  // OriginationRepository handle every other operations service already
+  // uses, instead of threading a second repository reference through
+  // app.ts.
+  transitionToPostIpoStructuring(
+    input: TransitionToPostIpoStructuringInput,
+  ): Promise<TransitionedToPostIpoStructuring>;
 }
 
 export class CaseSubmissionConflictError extends Error {

@@ -57,11 +57,14 @@ function fakeOriginationRepository(
     resubmitAfterInformationRequest: vi.fn(),
     recordFounderDecision: vi.fn(),
     closeCase: vi.fn(),
+    reviewEvidence: vi.fn(),
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    transitionToPostIpoStructuring: vi.fn(),
+    withdrawInformationRequest: vi.fn(),
     ...overrides,
   };
 }
