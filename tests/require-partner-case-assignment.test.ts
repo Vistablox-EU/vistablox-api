@@ -51,6 +51,7 @@ function fakeCases(
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),
     expireInformationRequest: vi.fn(),
+    withdrawInformationRequest: vi.fn(),
   };
 }
 

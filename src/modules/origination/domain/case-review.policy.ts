@@ -13,6 +13,16 @@ export function evaluateInformationRequestPublication(input: {
   return { allowed: true };
 }
 
+// A targeted walk-back for a single mistakenly-published information
+// request, distinct from canCloseCase's much broader "reject/withdraw/expire
+// the whole case" below -- this only reverts a case that is currently
+// waiting on the applicant to answer a still-published request, the exact
+// mirror image of the applicant's own resubmission path
+// (evaluateCaseResubmission) but ending the request instead of answering it.
+export function canWithdrawInformationRequest(input: { caseStage: string; requestStatus: string }): boolean {
+  return input.caseStage === "waiting_on_applicant" && input.requestStatus === "published";
+}
+
 export type FounderDecision = "approve" | "reject";
 
 export function canRecordFounderDecision(input: {
