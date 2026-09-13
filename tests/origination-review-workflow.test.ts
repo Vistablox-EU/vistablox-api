@@ -14,6 +14,7 @@ import type {
   ReviewedEvidence,
   ReviewEvidenceInput,
   SubmitInitialCaseInput,
+  WithdrawnInformationRequest,
 } from "../src/modules/origination/repository/origination.repository.js";
 import {
   EvidenceCaseMismatchError,
@@ -153,6 +154,19 @@ function buildApp(options?: {
       reviewNotes: input.reviewNotes,
     }),
   );
+  const withdrawInformationRequest = vi.fn(
+    async (input: {
+      caseId: string;
+      requestId: string;
+      withdrawnAt: Date;
+    }): Promise<WithdrawnInformationRequest> => ({
+      requestId: input.requestId,
+      caseId: input.caseId,
+      status: "withdrawn",
+      resolvedAt: input.withdrawnAt,
+      stage: "submitted",
+    }),
+  );
   const listCaseMessages = vi.fn().mockResolvedValue([
     {
       messageId: "msg_01",
@@ -204,6 +218,7 @@ function buildApp(options?: {
     recordFounderDecision,
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    withdrawInformationRequest,
     closeCase,
     reviewEvidence,
     listCaseMessages,
@@ -239,6 +254,7 @@ function buildApp(options?: {
     resubmitAfterInformationRequest,
     closeCase,
     reviewEvidence,
+    withdrawInformationRequest,
     listCaseMessages,
     postCaseMessage,
   };
@@ -703,6 +719,114 @@ describe("reviewing a submitted evidence document (PUT, full-replace)", () => {
 
     expect(response.status).toBe(409);
     expect(response.body.code).toBe("origination.evidence_case_mismatch");
+  });
+});
+
+describe("withdrawing a published information request", () => {
+  const waitingCaseWithPublishedRequest: OperationsCaseDetail = {
+    ...operationsCase,
+    stage: "waiting_on_applicant",
+    informationRequests: [informationRequest],
+  };
+
+  it("denies the internal surface to a customer", async () => {
+    const { app, withdrawInformationRequest } = buildApp({
+      population: "customer",
+      hasAdminRole: true,
+      caseRecord: waitingCaseWithPublishedRequest,
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/withdraw")
+      .send({ founder_review_notes: "Published in error." });
+
+    expect(response.status).toBe(403);
+    expect(withdrawInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("withdraws a published request and reverts the case back to submitted", async () => {
+    const { app, withdrawInformationRequest } = buildApp({
+      caseRecord: waitingCaseWithPublishedRequest,
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/withdraw")
+      .send({ founder_review_notes: "Published in error." });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      request_id: "rfi_01",
+      case_id: "case_01",
+      status: "withdrawn",
+      stage: "submitted",
+    });
+    expect(withdrawInformationRequest).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "acct_founder",
+        caseId: "case_01",
+        requestId: "rfi_01",
+        founderReviewNotes: "Published in error.",
+      }),
+    );
+  });
+
+  it("defaults founder_review_notes to null when omitted", async () => {
+    const { app, withdrawInformationRequest } = buildApp({
+      caseRecord: waitingCaseWithPublishedRequest,
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/withdraw")
+      .send({});
+
+    expect(response.status).toBe(200);
+    expect(withdrawInformationRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ founderReviewNotes: null }),
+    );
+  });
+
+  it("refuses to withdraw when the case stage isn't waiting_on_applicant", async () => {
+    const { app, withdrawInformationRequest } = buildApp({
+      caseRecord: { ...waitingCaseWithPublishedRequest, stage: "submitted" },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/withdraw")
+      .send({ founder_review_notes: "Too early." });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("origination.review_transition_conflict");
+    expect(withdrawInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("refuses to withdraw a request that isn't currently published", async () => {
+    const { app, withdrawInformationRequest } = buildApp({
+      caseRecord: {
+        ...waitingCaseWithPublishedRequest,
+        informationRequests: [{ ...informationRequest, status: "answered" }],
+      },
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_01/withdraw")
+      .send({ founder_review_notes: "Already answered." });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("origination.review_transition_conflict");
+    expect(withdrawInformationRequest).not.toHaveBeenCalled();
+  });
+
+  it("404s for a request id that doesn't belong to the case", async () => {
+    const { app, withdrawInformationRequest } = buildApp({
+      caseRecord: waitingCaseWithPublishedRequest,
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/origination-cases/case_01/information-requests/rfi_missing/withdraw")
+      .send({ founder_review_notes: "Nope." });
+
+    expect(response.status).toBe(404);
+    expect(withdrawInformationRequest).not.toHaveBeenCalled();
   });
 });
 

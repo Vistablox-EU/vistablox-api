@@ -47,6 +47,7 @@ import type {
   SubmitInitialCaseInput,
   SubmittedCase,
   ThreadLane,
+  WithdrawnInformationRequest,
 } from "./origination.repository.js";
 import { CaseReviewConflictError } from "./origination.repository.js";
 
@@ -1037,6 +1038,91 @@ export class PrismaOriginationRepository
         },
       });
       return true;
+    });
+  }
+
+  // Targeted counterpart to expireInformationRequest above: same
+  // $transaction + row-lock + existence/status recheck shape, but instead
+  // of expiring the request and terminating the case, it withdraws just the
+  // request and hands the case back to "submitted" -- the same revert
+  // resubmitAfterInformationRequest below performs on a normal answer,
+  // copied verbatim here since staff withdrawing a mistaken RFI must leave
+  // the case exactly where a correct resubmission would have. Unlike
+  // resubmitAfterInformationRequest, currentSubmissionRevisionId is left
+  // untouched: there is no new revision, the case resumes reviewing the one
+  // it was already on.
+  public async withdrawInformationRequest(input: {
+    accountId: string;
+    caseId: string;
+    requestId: string;
+    traceId: string;
+    founderReviewNotes: string | null;
+    withdrawnAt: Date;
+  }): Promise<WithdrawnInformationRequest | null> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return null;
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: {
+          stage: true,
+          informationRequests: {
+            where: { id: input.requestId },
+            take: 1,
+            select: { id: true, status: true },
+          },
+        },
+      });
+      const request = current.informationRequests[0];
+      if (current.stage !== "waiting_on_applicant" || request?.status !== "published") {
+        throw new CaseReviewConflictError(current.stage, "withdraw this information request");
+      }
+
+      await transaction.informationRequest.update({
+        where: { id: input.requestId },
+        data: {
+          status: "withdrawn",
+          resolvedAt: input.withdrawnAt,
+          resolutionType: "withdrawn",
+        },
+      });
+      await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: {
+          stage: "submitted",
+          updatedAt: input.withdrawnAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "origination.information_request_withdrawn",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            request_id: input.requestId,
+            previous_stage: "waiting_on_applicant",
+            new_stage: "submitted",
+            founder_review_notes: input.founderReviewNotes,
+          },
+          createdAt: input.withdrawnAt,
+        },
+      });
+      return {
+        requestId: input.requestId,
+        caseId: input.caseId,
+        status: "withdrawn",
+        resolvedAt: input.withdrawnAt,
+        stage: "submitted",
+      };
     });
   }
 

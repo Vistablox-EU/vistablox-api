@@ -10,12 +10,18 @@ import {
   PublishInformationRequestService,
   RecordFounderDecisionService,
   ReviewEvidenceService,
+  WithdrawInformationRequestService,
 } from "../application/operations-case.service.js";
 import {
   ListCaseMessagesForOperationsService,
   PostCaseMessageForOperationsService,
 } from "../application/case-message.service.js";
-import { caseIdParamsSchema, listCaseMessagesResponseSchema, postCaseMessageResponseSchema } from "./origination.schemas.js";
+import {
+  caseIdParamsSchema,
+  informationRequestParamsSchema,
+  listCaseMessagesResponseSchema,
+  postCaseMessageResponseSchema,
+} from "./origination.schemas.js";
 import {
   assignPartnerOrganizationBodySchema,
   assignPartnerOrganizationResponseSchema,
@@ -35,6 +41,8 @@ import {
   publishInformationRequestResponseSchema,
   reviewEvidenceBodySchema,
   reviewEvidenceResponseSchema,
+  withdrawInformationRequestBodySchema,
+  withdrawInformationRequestResponseSchema,
 } from "./origination-operations.schemas.js";
 
 export function createOriginationOperationsRouter(
@@ -50,6 +58,7 @@ export function createOriginationOperationsRouter(
   postCaseMessage: PostCaseMessageForOperationsService,
   createStaffCase: CreateStaffOriginationCaseService,
   reviewEvidence: ReviewEvidenceService,
+  withdrawInformationRequest: WithdrawInformationRequestService,
   // Optional: only present once the partner-organizations feature
   // (protectedApi.partnerOrganizations) is configured, unlike everything
   // else on this router, which is unconditional. See app.ts.
@@ -93,6 +102,24 @@ export function createOriginationOperationsRouter(
     });
     response.status(201).json(publishInformationRequestResponseSchema.parse(result));
   });
+
+  router.post(
+    "/:case_id/information-requests/:request_id/withdraw",
+    ...staffOnly,
+    async (request, response) => {
+      const authContext = requireAuthContext(response.locals.authContext);
+      const params = informationRequestParamsSchema.parse(request.params);
+      const body = withdrawInformationRequestBodySchema.parse(request.body);
+      const result = await withdrawInformationRequest.execute({
+        accountId: authContext.accountId,
+        caseId: params.case_id,
+        requestId: params.request_id,
+        traceId: String(response.locals.traceId),
+        body,
+      });
+      response.json(withdrawInformationRequestResponseSchema.parse(result));
+    },
+  );
 
   router.post("/:case_id/decisions", ...staffOnly, async (request, response) => {
     const authContext = requireAuthContext(response.locals.authContext);

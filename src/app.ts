@@ -146,6 +146,7 @@ import {
   PublishInformationRequestService,
   RecordFounderDecisionService,
   ReviewEvidenceService,
+  WithdrawInformationRequestService,
 } from "./modules/origination/application/operations-case.service.js";
 import {
   GetCaseForPartnerService,
@@ -832,6 +833,7 @@ export function createApp(dependencies: AppDependencies): Express {
         new PostCaseMessageForOperationsService(originationRepository),
         new CreateStaffOriginationCaseService(originationRepository),
         new ReviewEvidenceService(originationRepository),
+        new WithdrawInformationRequestService(originationRepository),
         partnerOrganizationRepository === undefined
           ? undefined
           : new AssignPartnerOrganizationService(originationRepository, partnerOrganizationRepository),

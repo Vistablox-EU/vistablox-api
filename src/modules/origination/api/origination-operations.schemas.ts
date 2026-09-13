@@ -205,6 +205,20 @@ export const publishInformationRequestResponseSchema = z.object({
   }),
 });
 
+export const withdrawInformationRequestBodySchema = z.object({
+  founder_review_notes: z.string().trim().min(1).max(5000).nullable().default(null),
+});
+
+export const withdrawInformationRequestResponseSchema = z.object({
+  data: z.object({
+    request_id: z.string(),
+    case_id: z.string(),
+    status: z.literal("withdrawn"),
+    resolved_at: z.iso.datetime(),
+    stage: z.literal("submitted"),
+  }),
+});
+
 export const founderDecisionBodySchema = z.discriminatedUnion("decision", [
   z.object({
     decision: z.literal("approve"),
@@ -287,6 +301,7 @@ export const assignPartnerOrganizationResponseSchema = z.object({
 export type CreateStaffCaseBody = z.infer<typeof createStaffCaseBodySchema>;
 export type OperationsCaseListQuery = z.infer<typeof operationsCaseListQuerySchema>;
 export type PublishInformationRequestBody = z.infer<typeof publishInformationRequestBodySchema>;
+export type WithdrawInformationRequestBody = z.infer<typeof withdrawInformationRequestBodySchema>;
 export type FounderDecisionBody = z.infer<typeof founderDecisionBodySchema>;
 export type CloseCaseBody = z.infer<typeof closeCaseBodySchema>;
 export type AssignPartnerOrganizationBody = z.infer<typeof assignPartnerOrganizationBodySchema>;

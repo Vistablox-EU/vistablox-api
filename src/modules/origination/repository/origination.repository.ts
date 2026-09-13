@@ -231,6 +231,14 @@ export interface PublishedInformationRequest extends InformationRequestRecord {
 
 export type ResubmittedCase = SubmittedCase;
 
+export interface WithdrawnInformationRequest {
+  requestId: string;
+  caseId: string;
+  status: "withdrawn";
+  resolvedAt: Date;
+  stage: "submitted";
+}
+
 export interface PublishedInformationRequestForTimer {
   requestId: string;
   caseId: string;
@@ -454,6 +462,23 @@ export interface OriginationRepository {
     requestId: string;
     submittedAt: Date;
   }): Promise<ResubmittedCase | null>;
+  // Targeted withdrawal of a single published information request --
+  // reverts the case's stage back to "submitted" (same revision it was
+  // already reviewing) rather than terminating the whole case the way
+  // closeCase's "withdrawn" outcome does. Throws CaseReviewConflictError if
+  // the case's stage or the request's status no longer allow this by the
+  // time the FOR UPDATE-locked recheck runs, matching
+  // publishInformationRequest/resubmitAfterInformationRequest above.
+  // Returns null only if the case has vanished entirely since the caller's
+  // own check.
+  withdrawInformationRequest(input: {
+    accountId: string;
+    caseId: string;
+    requestId: string;
+    traceId: string;
+    founderReviewNotes: string | null;
+    withdrawnAt: Date;
+  }): Promise<WithdrawnInformationRequest | null>;
   recordFounderDecision(
     input: FounderDecisionInput,
   ): Promise<RecordedFounderDecision | null>;
