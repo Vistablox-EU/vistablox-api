@@ -2,10 +2,12 @@ import { Router, type RequestHandler } from "express";
 
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { GetWalletBalanceService } from "../application/get-wallet-balance.service.js";
+import type { GetWalletStatusService } from "../application/get-wallet-status.service.js";
 import type { RegisterWalletService } from "../application/register-wallet.service.js";
 import type { RequestWalletTransferService } from "../application/request-wallet-transfer.service.js";
 import {
   getWalletBalanceResponseSchema,
+  getWalletStatusResponseSchema,
   registerWalletBodySchema,
   registerWalletResponseSchema,
   requestWalletTransferBodySchema,
@@ -15,6 +17,7 @@ import {
 export function createWalletRouter(
   requireAuthentication: RequestHandler,
   registerWallet: RegisterWalletService,
+  getStatus: GetWalletStatusService,
   getBalance?: GetWalletBalanceService,
   requestTransfer?: RequestWalletTransferService,
 ): Router {
@@ -29,8 +32,18 @@ export function createWalletRouter(
     response.setHeader("Cache-Control", "no-store");
     response.status(201).json(registerWalletResponseSchema.parse(result));
   });
+  // Address + registration status only -- a plain DB read, no chain access,
+  // so this stays available regardless of whether CHAIN_* is configured.
+  // Callers that need on-chain capital/token balances use GET /balance
+  // instead, which is genuinely chain-dependent and stays gated on it.
+  router.get("/", requireAuthentication, async (request, response) => {
+    const context = requireCustomerContext(response.locals.authContext);
+    const result = await getStatus.execute(context.accountId);
+    response.setHeader("Cache-Control", "no-store");
+    response.json(getWalletStatusResponseSchema.parse(result));
+  });
   if (getBalance !== undefined) {
-    router.get("/", requireAuthentication, async (request, response) => {
+    router.get("/balance", requireAuthentication, async (request, response) => {
       const context = requireCustomerContext(response.locals.authContext);
       const result = await getBalance.execute(context.accountId);
       response.setHeader("Cache-Control", "no-store");
