@@ -126,6 +126,8 @@ class FakeSettlementRepository implements SettlementRepository {
   }
 
   public async setLastProcessedWalletRegistryBlock(): Promise<void> {}
+
+  public async recordWalletRegistrationAddressMismatch(): Promise<void> {}
 }
 
 describe("FinalizeIpoEscrowCampaignsService", () => {

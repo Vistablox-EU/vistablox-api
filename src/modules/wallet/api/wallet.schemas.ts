@@ -65,3 +65,24 @@ export const requestWalletTransferResponseSchema = z.object({
     }),
   }),
 });
+
+export const walletAccountIdParamsSchema = z.object({
+  account_id: z.string().min(1),
+});
+
+// Staff-only view (admin_operations + staff WebAuthn, same gate as the
+// equivalent KYC operations read) of the same wallet_registrations row the
+// customer's own GET /v1/investor-profile/wallet reads from -- surfaces
+// registration_commitment too, since a stuck "pending" registration is
+// exactly the kind of thing a support ticket needs staff to see (whether the
+// commitment ever reached the chain at all).
+export const operationsWalletAccountResponseSchema = z.object({
+  data: z.object({
+    account_id: z.string().min(1),
+    wallet_address: z.string().min(1),
+    registration_commitment: z.string().min(1),
+    status: z.enum(["pending", "registered"]),
+    requested_at: dateTime,
+    registered_at: dateTime.nullable(),
+  }),
+});

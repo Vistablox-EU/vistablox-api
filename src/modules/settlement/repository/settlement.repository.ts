@@ -20,6 +20,14 @@ export interface PendingWalletRegistration {
   walletAddress: string;
 }
 
+export interface WalletRegistrationAddressMismatchInput {
+  accountId: string;
+  commitment: string;
+  storedWalletAddress: string;
+  onChainSender: string;
+  detectedAt: Date;
+}
+
 /**
  * The settlement-side read/write surface AD-256's escrow finalize-and-mint
  * flow needs: which PIVs have a resolvable but not-yet-actioned escrow
@@ -40,6 +48,11 @@ export interface SettlementRepository {
   confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void>;
   getLastProcessedWalletRegistryBlock(): Promise<bigint | null>;
   setLastProcessedWalletRegistryBlock(block: bigint): Promise<void>;
+  // A durable, queryable record of a possible spoofed-registration attempt
+  // (on-chain sender != the address this account actually has on file) --
+  // ConfirmWalletRegistrationsService's own log warning scrolls away; this
+  // survives in audit_log for staff/ops to actually find later.
+  recordWalletRegistrationAddressMismatch(input: WalletRegistrationAddressMismatchInput): Promise<void>;
 }
 
 export interface PivTokenHolding {

@@ -5,6 +5,7 @@ import type {
   PendingWalletRegistration,
   PivPendingEscrowResolution,
   SettlementRepository,
+  WalletRegistrationAddressMismatchInput,
 } from "../src/modules/settlement/repository/settlement.repository.js";
 
 const MAX_BLOCK_RANGE_PER_RUN = 2000n;
@@ -44,6 +45,7 @@ function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[] }) {
 // mirroring the real repository's registered_at IS NULL filter.
 class FakeSettlementRepository implements SettlementRepository {
   public readonly confirmedAccountIds: string[] = [];
+  public readonly recordedMismatches: WalletRegistrationAddressMismatchInput[] = [];
   private readonly byCommitment: Map<string, PendingWalletRegistration>;
   private readonly confirmed = new Set<string>();
   private cursor: bigint | null;
@@ -67,6 +69,12 @@ class FakeSettlementRepository implements SettlementRepository {
   public async confirmWalletRegistration(accountId: string): Promise<void> {
     this.confirmed.add(accountId);
     this.confirmedAccountIds.push(accountId);
+  }
+
+  public async recordWalletRegistrationAddressMismatch(
+    input: WalletRegistrationAddressMismatchInput,
+  ): Promise<void> {
+    this.recordedMismatches.push(input);
   }
 
   public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {
@@ -162,6 +170,17 @@ describe("ConfirmWalletRegistrationsService", () => {
     expect(summary.addressMismatches).toHaveLength(1);
     expect(summary.addressMismatches[0]).toContain("acct_01");
     expect(repository.confirmedAccountIds).toEqual([]);
+    // Not just the in-memory summary string worker.ts logs -- a durable
+    // record too, so this survives past the log line scrolling away.
+    expect(repository.recordedMismatches).toEqual([
+      {
+        accountId: "acct_01",
+        commitment: "0xc1",
+        storedWalletAddress: "0xEXPECTED",
+        onChainSender: "0xATTACKER",
+        detectedAt: expect.any(Date),
+      },
+    ]);
   });
 
   it("caps the scanned range per run instead of scanning a large gap in one call", async () => {

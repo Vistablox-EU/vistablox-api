@@ -191,9 +191,11 @@ import { createLoginMethodsRouter } from "./modules/auth/api/login-methods.route
 import { UnlinkLoginMethodService } from "./modules/auth/application/unlink-login-method.service.js";
 import type { LoginMethodUnlinker } from "./modules/auth/application/login-method-unlinker.js";
 import { createWalletRouter } from "./modules/wallet/api/wallet.router.js";
+import { createWalletOperationsRouter } from "./modules/wallet/api/wallet-operations.router.js";
 import { RegisterWalletService } from "./modules/wallet/application/register-wallet.service.js";
 import { GetWalletBalanceService, type WalletChainReader } from "./modules/wallet/application/get-wallet-balance.service.js";
 import { GetWalletStatusService } from "./modules/wallet/application/get-wallet-status.service.js";
+import { GetWalletAccountForOperationsService } from "./modules/wallet/application/get-wallet-account-for-operations.service.js";
 import { RequestWalletTransferService, type WalletTransferChainReader } from "./modules/wallet/application/request-wallet-transfer.service.js";
 import type { WalletRepository } from "./modules/wallet/repository/wallet.repository.js";
 import type { PivTokenHoldingsReader } from "./modules/settlement/repository/settlement.repository.js";
@@ -643,6 +645,15 @@ export function createApp(dependencies: AppDependencies): Express {
                 wallet.balances.pivTokenHoldingsReader,
                 wallet.balances.chainReader,
               ),
+        ),
+      );
+      app.use(
+        "/internal/v1/wallet-accounts",
+        createWalletOperationsRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new GetWalletAccountForOperationsService(wallet.repository),
         ),
       );
     }
