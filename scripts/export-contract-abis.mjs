@@ -11,7 +11,7 @@ import path from "node:path";
 // it is not part of `npm run build`.
 
 const root = path.join(import.meta.dirname, "..");
-const CONTRACTS = ["VistaBloxProperty", "VistaBloxIpoEscrow"];
+const CONTRACTS = ["VistaBloxProperty", "VistaBloxIpoEscrow", "VistaBloxWalletRegistry"];
 
 for (const name of CONTRACTS) {
   const artifactPath = path.join(root, "contracts", "artifacts", "contracts", `${name}.sol`, `${name}.json`);

@@ -2,12 +2,19 @@ import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import type {
+  PendingWalletRegistration,
   PivPendingEscrowResolution,
   PivTokenHolding,
   PivTokenHoldingsReader,
   RecordEscrowMintedPositionInput,
   SettlementRepository,
 } from "./settlement.repository.js";
+
+// Reuses the generic platform.settings key-value table (PlatformSetting)
+// rather than a bespoke single-row table -- there is exactly one watermark
+// value to persist and this table already exists for exactly this kind of
+// thing.
+const WALLET_REGISTRY_CURSOR_SETTING_KEY = "wallet_registry.last_processed_block";
 
 export class PrismaSettlementRepository implements SettlementRepository, PivTokenHoldingsReader {
   public constructor(private readonly database: DatabaseClient) {}
@@ -85,6 +92,46 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
         },
       });
       return { positionId: position.id };
+    });
+  }
+
+  public async findPendingWalletRegistrationByCommitment(
+    commitment: string,
+  ): Promise<PendingWalletRegistration | null> {
+    // Case-insensitive for the same reason resolveAccountIdForWallet is
+    // above: nothing guarantees the on-chain event's hex casing matches what
+    // was stored when the commitment was generated.
+    return this.database.walletRegistration.findFirst({
+      where: { registrationCommitment: { equals: commitment, mode: "insensitive" }, registeredAt: null },
+      select: { accountId: true, walletAddress: true },
+    });
+  }
+
+  public async confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void> {
+    await this.database.walletRegistration.update({
+      where: { accountId },
+      data: { registeredAt },
+    });
+  }
+
+  public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {
+    const setting = await this.database.platformSetting.findUnique({
+      where: { key: WALLET_REGISTRY_CURSOR_SETTING_KEY },
+      select: { value: true },
+    });
+    return setting === null ? null : BigInt(setting.value as string);
+  }
+
+  public async setLastProcessedWalletRegistryBlock(block: bigint): Promise<void> {
+    await this.database.platformSetting.upsert({
+      where: { key: WALLET_REGISTRY_CURSOR_SETTING_KEY },
+      create: {
+        key: WALLET_REGISTRY_CURSOR_SETTING_KEY,
+        value: block.toString(),
+        description:
+          "Last block number processed by the VistaBloxWalletRegistry WalletRegistered event watcher (AD-241).",
+      },
+      update: { value: block.toString() },
     });
   }
 }

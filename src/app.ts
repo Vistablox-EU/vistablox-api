@@ -269,6 +269,10 @@ export interface AppDependencies {
     wallet?: {
       repository: WalletRepository;
       kycEligibilityReader: KycEligibilityReader;
+      // undefined until VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS is set --
+      // see register-wallet.service.ts for why this is independent of the
+      // rest of the chain-settlement config.
+      walletRegistryContractAddress: string | undefined;
       // Both required together to read on-chain balances (dormant unless
       // the CHAIN_* env group is configured, same all-or-none gate the
       // write-side ChainClients in worker.ts already uses). Investor
@@ -605,7 +609,11 @@ export function createApp(dependencies: AppDependencies): Express {
         "/v1/investor-profile/wallet",
         createWalletRouter(
           requireAuthentication,
-          new RegisterWalletService(wallet.repository, wallet.kycEligibilityReader),
+          new RegisterWalletService(
+            wallet.repository,
+            wallet.kycEligibilityReader,
+            wallet.walletRegistryContractAddress,
+          ),
           wallet.balances === undefined
             ? undefined
             : new GetWalletBalanceService(

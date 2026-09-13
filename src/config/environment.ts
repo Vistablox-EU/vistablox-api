@@ -263,6 +263,16 @@ const environmentSchema = z
     // exists specifically so this can be corrected per campaign once a real
     // multisig is provisioned, without redeploying anything.
     PIV_TREASURY_ADDRESS: optionalEthAddress(),
+    // Deliberately NOT part of the CHAIN_* bundle above: preparing a wallet
+    // registration (RegisterWalletService) is a pure off-chain operation --
+    // generate a commitment, store a pending row -- that needs only this
+    // contract's address, not RPC connectivity or an operator key. Keeping
+    // it independently configurable means investor wallet onboarding
+    // (AD-241) can work before the rest of the chain-settlement bundle is
+    // ready. The confirmation half (watching for the on-chain
+    // WalletRegistered event) does need live chain access, so that job
+    // additionally requires the CHAIN_* bundle above to be configured.
+    VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: optionalEthAddress(),
   })
   .refine(
     (environment) => {

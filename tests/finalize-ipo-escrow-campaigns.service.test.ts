@@ -111,6 +111,21 @@ class FakeSettlementRepository implements SettlementRepository {
     this.existingPositions.add(`${input.pivId}:${input.accountId}`);
     return { positionId: `position_fake_${this.recordedPositions.length}` };
   }
+
+  // Unused by this suite -- it exercises escrow finalize-and-mint only, not
+  // AD-241's wallet-registration confirmation (see
+  // confirm-wallet-registrations.service.test.ts for that).
+  public async findPendingWalletRegistrationByCommitment(): Promise<null> {
+    return null;
+  }
+
+  public async confirmWalletRegistration(): Promise<void> {}
+
+  public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {
+    return null;
+  }
+
+  public async setLastProcessedWalletRegistryBlock(): Promise<void> {}
 }
 
 describe("FinalizeIpoEscrowCampaignsService", () => {

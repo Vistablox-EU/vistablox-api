@@ -15,19 +15,31 @@ export interface RecordEscrowMintedPositionInput {
   chainTxHash: string;
 }
 
+export interface PendingWalletRegistration {
+  accountId: string;
+  walletAddress: string;
+}
+
 /**
  * The settlement-side read/write surface AD-256's escrow finalize-and-mint
  * flow needs: which PIVs have a resolvable but not-yet-actioned escrow
  * campaign, resolving an on-chain contributor address back to a
  * KYC-verified account (AD-240's existing wallet_registrations attribution
  * mechanism -- not a new one), and durably recording a position once its
- * mint transaction has actually confirmed on-chain.
+ * mint transaction has actually confirmed on-chain. Also carries AD-241's
+ * registration-confirmation surface: matching a WalletRegistered event back
+ * to the pending row that requested it, and a block-number watermark so the
+ * event watcher never has to rescan from genesis.
  */
 export interface SettlementRepository {
   findPivsWithPassedIpoDeadline(now: Date): Promise<PivPendingEscrowResolution[]>;
   resolveAccountIdForWallet(walletAddress: string): Promise<string | null>;
   hasPosition(pivId: string, accountId: string): Promise<boolean>;
   recordEscrowMintedPosition(input: RecordEscrowMintedPositionInput): Promise<{ positionId: string }>;
+  findPendingWalletRegistrationByCommitment(commitment: string): Promise<PendingWalletRegistration | null>;
+  confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void>;
+  getLastProcessedWalletRegistryBlock(): Promise<bigint | null>;
+  setLastProcessedWalletRegistryBlock(block: bigint): Promise<void>;
 }
 
 export interface PivTokenHolding {

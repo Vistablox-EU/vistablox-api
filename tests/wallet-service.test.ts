@@ -10,6 +10,7 @@ import type { KycEligibilityReader, KycEligibilitySnapshot } from "../src/module
 const now = new Date("2026-09-02T10:00:00.000Z");
 const accountId = "acct_01";
 const walletAddress = "0x71c7656ec7ab88b098defb751b7401b5f6d8976f";
+const TEST_REGISTRY_ADDRESS = "0x1234567890123456789012345678901234567890";
 
 function eligibleKyc(overrides: Partial<KycEligibilitySnapshot> = {}): KycEligibilitySnapshot {
   return {
@@ -52,6 +53,7 @@ describe("RegisterWalletService", () => {
     const service = new RegisterWalletService(
       repository,
       buildKycEligibilityReader(),
+      TEST_REGISTRY_ADDRESS,
       () => now,
       () => "commitment_01",
     );
@@ -62,6 +64,7 @@ describe("RegisterWalletService", () => {
       data: {
         wallet_address: walletAddress,
         registration_commitment: "commitment_01",
+        registry_contract_address: TEST_REGISTRY_ADDRESS,
         status: "pending",
         requested_at: now.toISOString(),
         registered_at: null,
@@ -84,16 +87,37 @@ describe("RegisterWalletService", () => {
         registeredAt: now,
       }),
     });
-    const service = new RegisterWalletService(repository, buildKycEligibilityReader(), () => now);
+    const service = new RegisterWalletService(
+      repository,
+      buildKycEligibilityReader(),
+      TEST_REGISTRY_ADDRESS,
+      () => now,
+    );
 
     const result = await service.execute({ accountId, walletAddress });
 
     expect(result.data).toMatchObject({ status: "registered", registered_at: now.toISOString() });
   });
 
+  it("503s when the wallet registry contract isn't configured yet, before touching the repository", async () => {
+    const repository = buildRepository();
+    const service = new RegisterWalletService(repository, buildKycEligibilityReader(), undefined, () => now);
+
+    await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
+      code: "wallet.on_chain_registration_unavailable",
+      status: 503,
+    });
+    expect(repository.registerWallet).not.toHaveBeenCalled();
+  });
+
   it("requires current KYC eligibility", async () => {
     const repository = buildRepository();
-    const service = new RegisterWalletService(repository, buildKycEligibilityReader(null), () => now);
+    const service = new RegisterWalletService(
+      repository,
+      buildKycEligibilityReader(null),
+      TEST_REGISTRY_ADDRESS,
+      () => now,
+    );
 
     await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
       code: "identity.kyc_required",
@@ -107,6 +131,7 @@ describe("RegisterWalletService", () => {
     const service = new RegisterWalletService(
       repository,
       buildKycEligibilityReader(eligibleKyc({ renewalDueAt: new Date("2020-01-01T00:00:00.000Z") })),
+      TEST_REGISTRY_ADDRESS,
       () => now,
     );
 
@@ -120,7 +145,12 @@ describe("RegisterWalletService", () => {
     const repository = buildRepository({
       registerWallet: vi.fn().mockRejectedValue(new WalletAddressConflictError("address_mismatch")),
     });
-    const service = new RegisterWalletService(repository, buildKycEligibilityReader(), () => now);
+    const service = new RegisterWalletService(
+      repository,
+      buildKycEligibilityReader(),
+      TEST_REGISTRY_ADDRESS,
+      () => now,
+    );
 
     await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
       code: "wallet.registration_address_mismatch",
@@ -132,7 +162,12 @@ describe("RegisterWalletService", () => {
     const repository = buildRepository({
       registerWallet: vi.fn().mockRejectedValue(new WalletAddressConflictError("address_claimed")),
     });
-    const service = new RegisterWalletService(repository, buildKycEligibilityReader(), () => now);
+    const service = new RegisterWalletService(
+      repository,
+      buildKycEligibilityReader(),
+      TEST_REGISTRY_ADDRESS,
+      () => now,
+    );
 
     await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
       code: "wallet.address_already_claimed",

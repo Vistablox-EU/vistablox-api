@@ -552,6 +552,7 @@ const app = createApp({
     wallet: {
       repository: walletRepository,
       kycEligibilityReader: kycRepository,
+      walletRegistryContractAddress: environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS,
       ...(walletBalances === undefined ? {} : { balances: walletBalances }),
     },
     investorActivity: {

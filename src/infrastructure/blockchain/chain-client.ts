@@ -14,6 +14,7 @@ import { base, baseSepolia } from "viem/chains";
 
 import vistaBloxPropertyAbi from "./abis/VistaBloxProperty.abi.json" with { type: "json" };
 import vistaBloxIpoEscrowAbi from "./abis/VistaBloxIpoEscrow.abi.json" with { type: "json" };
+import vistaBloxWalletRegistryAbi from "./abis/VistaBloxWalletRegistry.abi.json" with { type: "json" };
 
 type OperatorChain = typeof base | typeof baseSepolia;
 
@@ -25,6 +26,9 @@ export interface ChainSettlementConfig {
   ipoEscrowContractAddress: Address;
   eurcTokenAddress: Address;
   pivTreasuryAddress: Address;
+  // Optional: independently configured (see environment.ts), not part of
+  // the rest of this bundle -- neither should gate the other.
+  walletRegistryContractAddress?: Address;
 }
 
 /**
@@ -71,6 +75,19 @@ export class ChainClients {
     return getContract({
       address: this.config.ipoEscrowContractAddress,
       abi: vistaBloxIpoEscrowAbi,
+      client: { public: this.publicClient, wallet: this.walletClient },
+    });
+  }
+
+  public get walletRegistry() {
+    if (this.config.walletRegistryContractAddress === undefined) {
+      throw new Error(
+        "VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS is not configured -- cannot access the wallet registry contract.",
+      );
+    }
+    return getContract({
+      address: this.config.walletRegistryContractAddress,
+      abi: vistaBloxWalletRegistryAbi,
       client: { public: this.publicClient, wallet: this.walletClient },
     });
   }

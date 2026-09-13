@@ -38,6 +38,7 @@ import { RunOperatingDistributionSweepService } from "./modules/rental/applicati
 import { PrismaOperatingDistributionRepository } from "./modules/rental/repository/prisma-operating-distribution.repository.js";
 import { OpenIpoEscrowCampaignService } from "./modules/settlement/application/open-ipo-escrow-campaign.service.js";
 import { FinalizeIpoEscrowCampaignsService } from "./modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
+import { ConfirmWalletRegistrationsService } from "./modules/settlement/application/confirm-wallet-registrations.service.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
@@ -187,6 +188,16 @@ const chainClients =
         ipoEscrowContractAddress: environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS as `0x${string}`,
         eurcTokenAddress: environment.EURC_TOKEN_ADDRESS as `0x${string}`,
         pivTreasuryAddress: environment.PIV_TREASURY_ADDRESS as `0x${string}`,
+        // Independently optional (see environment.ts / chain-client.ts) --
+        // threaded through here too so the wallet-registry accessor doesn't
+        // throw for a worker that has the rest of CHAIN_* configured but not
+        // this.
+        ...(environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS === undefined
+          ? {}
+          : {
+              walletRegistryContractAddress:
+                environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS as `0x${string}`,
+            }),
       });
 const openIpoEscrowCampaign =
   chainClients === undefined ? undefined : new OpenIpoEscrowCampaignService(chainClients);
@@ -195,6 +206,12 @@ const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined
     ? undefined
     : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients);
+const confirmWalletRegistrations =
+  chainClients === undefined ||
+  settlementRepository === undefined ||
+  environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS === undefined
+    ? undefined
+    : new ConfirmWalletRegistrationsService(settlementRepository, chainClients);
 
 const RETRY_OPTIONS = JOB_RETRY_OPTIONS;
 
@@ -237,6 +254,9 @@ if (openIpoEscrowCampaign !== undefined) {
 }
 if (finalizeIpoEscrowCampaigns !== undefined) {
   await boss.createQueue("settlement.finalize_ipo_escrow_campaigns");
+}
+if (confirmWalletRegistrations !== undefined) {
+  await boss.createQueue("settlement.confirm_wallet_registrations");
 }
 // Reversal (undoing the KYC microservice split): identity's own scheduled
 // jobs, back in this worker alongside everything else -- these used to
@@ -295,6 +315,18 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
   // buys nothing an investor would notice, same reasoning as
   // case_timers.offering_reconfirmation_window_close above.
   await boss.schedule("settlement.finalize_ipo_escrow_campaigns", "0 * * * *", null, {
+    tz: "UTC",
+    ...RETRY_OPTIONS,
+  });
+}
+if (confirmWalletRegistrations !== undefined) {
+  // Every minute, not hourly like the campaign-finalization job above: an
+  // investor is looking at a "pending" wallet screen waiting on this
+  // (AD-241 step 9-10), the same latency bar as
+  // case_timers.reservation_unfunded_expiry's -- unlike campaign
+  // finalization, which only needs to happen at deadline-passage
+  // granularity and nobody is watching in real time.
+  await boss.schedule("settlement.confirm_wallet_registrations", "* * * * *", null, {
     tz: "UTC",
     ...RETRY_OPTIONS,
   });
@@ -384,6 +416,37 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
     } catch (error) {
       logger.error(
         { err: error, trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns" },
+        "case timer job failed",
+      );
+      throw error;
+    }
+  });
+}
+if (confirmWalletRegistrations !== undefined) {
+  // Same reasoning as finalizeIpoEscrowCampaigns above: its own
+  // block-range/match-count summary is more useful logged directly than
+  // squeezed into JobRunSummary's shape.
+  await boss.work("settlement.confirm_wallet_registrations", async () => {
+    const traceId = `req_${ulid()}`;
+    try {
+      const summary = await confirmWalletRegistrations.execute();
+      logger.info(
+        { trace_id: traceId, job: "settlement.confirm_wallet_registrations", ...summary },
+        "case timer job completed",
+      );
+      if (summary.addressMismatches.length > 0) {
+        logger.warn(
+          {
+            trace_id: traceId,
+            job: "settlement.confirm_wallet_registrations",
+            mismatches: summary.addressMismatches,
+          },
+          "wallet registration event address mismatch -- possible spoofed registration attempt",
+        );
+      }
+    } catch (error) {
+      logger.error(
+        { err: error, trace_id: traceId, job: "settlement.confirm_wallet_registrations" },
         "case timer job failed",
       );
       throw error;

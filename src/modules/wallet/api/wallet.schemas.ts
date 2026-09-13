@@ -14,6 +14,7 @@ export const registerWalletResponseSchema = z.object({
   data: z.object({
     wallet_address: z.string().min(1),
     registration_commitment: z.string().min(1),
+    registry_contract_address: z.string().min(1),
     status: z.enum(["pending", "registered"]),
     requested_at: dateTime,
     registered_at: dateTime.nullable(),
