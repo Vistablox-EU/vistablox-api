@@ -175,13 +175,16 @@ describe.skipIf(databaseUrl === undefined)(
       });
       expect(typeof owned?.property.livingAreaSqM).toBe("number");
 
-      // ordered (orderBy id asc), sizeSqM as a plain number not a Decimal,
-      // and each room carries a stable id (evidence_id's counterpart).
+      // orderBy id asc gives a stable order across repeated reads, but NOT
+      // necessarily submission order: these ulids were all minted within
+      // the same millisecond, and ulid's relative order among same-ms ids
+      // is decided by its random component, not generation sequence. So
+      // this asserts the row set and each room's shape, not position.
       expect(owned?.property.rooms).toHaveLength(3);
-      expect(owned?.property.rooms.map((room) => room.roomType)).toEqual([
-        "bedroom",
-        "bedroom",
+      expect(owned?.property.rooms.map((room) => room.roomType).sort()).toEqual([
         "bathroom",
+        "bedroom",
+        "bedroom",
       ]);
       expect(owned?.property.rooms.every((room) => typeof room.sizeSqM === "number")).toBe(true);
       expect(owned?.property.rooms.every((room) => room.roomId.startsWith("room_"))).toBe(true);
@@ -191,7 +194,18 @@ describe.skipIf(databaseUrl === undefined)(
         orderBy: { id: "asc" },
       });
       expect(rooms).toHaveLength(3);
-      expect(rooms[0]?.sizeSqM.toFixed(2)).toBe("14.20");
+      expect(rooms.map((room) => room.sizeSqM.toFixed(2)).sort()).toEqual([
+        "11.80",
+        "14.20",
+        "5.50",
+      ]);
+      // Same order on a second read -- orderBy is deterministic, even if it
+      // doesn't track submission order.
+      const roomsAgain = await database.propertyRoom.findMany({
+        where: { propertyId: originationCase.propertyId },
+        orderBy: { id: "asc" },
+      });
+      expect(roomsAgain.map((room) => room.id)).toEqual(rooms.map((room) => room.id));
     });
 
     it("refuses an out-of-enum residential_subtype at the database layer, defense-in-depth beneath the Zod schema", async () => {
