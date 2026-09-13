@@ -44,6 +44,7 @@ function repository(overrides: Partial<OriginationRepository> = {}): Origination
     recordFounderDecision: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(true),
+    transitionToPostIpoStructuring: vi.fn(),
     withdrawInformationRequest: vi.fn(),
     closeCase: vi.fn(),
     reviewEvidence: vi.fn(),

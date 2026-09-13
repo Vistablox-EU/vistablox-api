@@ -20,6 +20,7 @@ import {
   EvidenceCaseMismatchError,
   EvidenceNotFoundError,
 } from "../src/modules/origination/repository/origination.repository.js";
+import type { TransitionedToPostIpoStructuring } from "../src/modules/origination/repository/post-ipo-structuring-handoff.repository.js";
 
 const validDocuments = [
   { document_type: "ownership_declaration", document_ref: "doc-owner", extract_dated: null },
@@ -72,6 +73,7 @@ const operationsCase: OperationsCaseDetail = {
   applicantAccountId: "acct_owner",
   legalPracticeId: null,
   appraisalFirmId: null,
+  offering: null,
   founderReviewNotes: null,
   reviewedByAccountId: null,
   approvedAt: null,
@@ -144,6 +146,12 @@ function buildApp(options?: {
     stage: input.outcome,
     closedAt: input.closedAt,
   }));
+  const transitionToPostIpoStructuring = vi.fn(
+    async (input: { caseId: string }): Promise<TransitionedToPostIpoStructuring> => ({
+      caseId: input.caseId,
+      stage: "post_ipo_structuring",
+    }),
+  );
   const reviewEvidence = vi.fn(
     async (input: ReviewEvidenceInput): Promise<ReviewedEvidence> => ({
       evidenceId: input.evidenceId,
@@ -207,6 +215,7 @@ function buildApp(options?: {
     ),
     getApplicantResponseWindowBusinessDays: vi.fn().mockResolvedValue(10),
     getInformationRequestReminderBusinessDays: vi.fn().mockResolvedValue([3, 7]),
+    transitionToPostIpoStructuring,
     publishInformationRequest,
     getOwnedInformationRequest: vi.fn().mockResolvedValue(
       options !== undefined && "ownedRequest" in options
@@ -253,6 +262,7 @@ function buildApp(options?: {
     recordFounderDecision,
     resubmitAfterInformationRequest,
     closeCase,
+    transitionToPostIpoStructuring,
     reviewEvidence,
     withdrawInformationRequest,
     listCaseMessages,
@@ -300,7 +310,34 @@ describe("founder review and information requests", () => {
       applicant_account_id: "acct_owner",
       legal_practice_id: null,
       appraisal_firm_id: null,
+      offering: null,
       submission: { revision_id: "rev_01", revision_number: 1 },
+    });
+  });
+
+  it("surfaces the case's linked offering, including a stuck pre_offering_open handoff signal", async () => {
+    const { app } = buildApp({
+      caseRecord: {
+        ...operationsCase,
+        stage: "pre_offering_open",
+        offering: {
+          offeringId: "offering_01",
+          status: "pre_offering",
+          finalOfferingPublishedAt: new Date("2026-09-05T10:00:00.000Z"),
+        },
+      },
+    });
+
+    const response = await request(app).get("/internal/v1/origination-cases/case_01");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      stage: "pre_offering_open",
+      offering: {
+        offering_id: "offering_01",
+        status: "pre_offering",
+        final_offering_published_at: "2026-09-05T10:00:00.000Z",
+      },
     });
   });
 
@@ -568,6 +605,123 @@ describe("closing a case (withdraw or late-stage reject)", () => {
 
     expect(response.status).toBe(409);
     expect(closeCase).not.toHaveBeenCalled();
+  });
+});
+
+describe("manual retry of the post-IPO structuring handoff", () => {
+  it("denies the internal surface to a customer", async () => {
+    const { app, transitionToPostIpoStructuring } = buildApp({
+      population: "customer",
+      hasAdminRole: true,
+    });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_01/retry-post-ipo-handoff",
+    );
+
+    expect(response.status).toBe(403);
+    expect(transitionToPostIpoStructuring).not.toHaveBeenCalled();
+  });
+
+  it("404s for a case that doesn't exist", async () => {
+    const { app, transitionToPostIpoStructuring } = buildApp({ caseRecord: null });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_missing/retry-post-ipo-handoff",
+    );
+
+    expect(response.status).toBe(404);
+    expect(transitionToPostIpoStructuring).not.toHaveBeenCalled();
+  });
+
+  it("refuses to retry a case with no linked offering yet", async () => {
+    const { app, transitionToPostIpoStructuring } = buildApp({
+      caseRecord: { ...operationsCase, stage: "pre_offering_open", offering: null },
+    });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_01/retry-post-ipo-handoff",
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("origination.post_ipo_handoff_not_ready");
+    expect(transitionToPostIpoStructuring).not.toHaveBeenCalled();
+  });
+
+  it("refuses to retry a case whose offering hasn't reached final_offering_published_at", async () => {
+    const { app, transitionToPostIpoStructuring } = buildApp({
+      caseRecord: {
+        ...operationsCase,
+        stage: "pre_offering_open",
+        offering: {
+          offeringId: "offering_01",
+          status: "pre_offering",
+          finalOfferingPublishedAt: null,
+        },
+      },
+    });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_01/retry-post-ipo-handoff",
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("origination.post_ipo_handoff_not_ready");
+    expect(transitionToPostIpoStructuring).not.toHaveBeenCalled();
+  });
+
+  it("retries the handoff once the same automatic trigger condition is met", async () => {
+    const { app, transitionToPostIpoStructuring } = buildApp({
+      caseRecord: {
+        ...operationsCase,
+        stage: "pre_offering_open",
+        offering: {
+          offeringId: "offering_01",
+          status: "pre_offering",
+          finalOfferingPublishedAt: new Date("2026-09-05T10:00:00.000Z"),
+        },
+      },
+    });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_01/retry-post-ipo-handoff",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({ case_id: "case_01", stage: "post_ipo_structuring" });
+    expect(transitionToPostIpoStructuring).toHaveBeenCalledWith({
+      caseId: "case_01",
+      traceId: expect.any(String),
+      transitionedAt: expect.any(Date),
+    });
+  });
+
+  it("surfaces the existing transition service's own safe no-op when the case already advanced", async () => {
+    const { app, transitionToPostIpoStructuring } = buildApp({
+      caseRecord: {
+        ...operationsCase,
+        stage: "approved_for_final_offering",
+        offering: {
+          offeringId: "offering_01",
+          status: "final_offering",
+          finalOfferingPublishedAt: new Date("2026-09-05T10:00:00.000Z"),
+        },
+      },
+    });
+    transitionToPostIpoStructuring.mockResolvedValueOnce({
+      caseId: "case_01",
+      stage: "approved_for_final_offering",
+    });
+
+    const response = await request(app).post(
+      "/internal/v1/origination-cases/case_01/retry-post-ipo-handoff",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({
+      case_id: "case_01",
+      stage: "approved_for_final_offering",
+    });
   });
 });
 

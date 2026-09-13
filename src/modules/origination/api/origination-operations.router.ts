@@ -9,6 +9,7 @@ import {
   ListCasesForOperationsService,
   PublishInformationRequestService,
   RecordFounderDecisionService,
+  RetryPostIpoStructuringHandoffService,
   ReviewEvidenceService,
   WithdrawInformationRequestService,
 } from "../application/operations-case.service.js";
@@ -39,6 +40,7 @@ import {
   postOperationsCaseMessageBodySchema,
   publishInformationRequestBodySchema,
   publishInformationRequestResponseSchema,
+  retryPostIpoStructuringHandoffResponseSchema,
   reviewEvidenceBodySchema,
   reviewEvidenceResponseSchema,
   withdrawInformationRequestBodySchema,
@@ -57,6 +59,7 @@ export function createOriginationOperationsRouter(
   listCaseMessages: ListCaseMessagesForOperationsService,
   postCaseMessage: PostCaseMessageForOperationsService,
   createStaffCase: CreateStaffOriginationCaseService,
+  retryPostIpoStructuringHandoff: RetryPostIpoStructuringHandoffService,
   reviewEvidence: ReviewEvidenceService,
   withdrawInformationRequest: WithdrawInformationRequestService,
   // Optional: only present once the partner-organizations feature
@@ -145,6 +148,15 @@ export function createOriginationOperationsRouter(
       body,
     });
     response.json(closeCaseResponseSchema.parse(result));
+  });
+
+  router.post("/:case_id/retry-post-ipo-handoff", ...staffOnly, async (request, response) => {
+    const params = caseIdParamsSchema.parse(request.params);
+    const result = await retryPostIpoStructuringHandoff.execute({
+      caseId: params.case_id,
+      traceId: String(response.locals.traceId),
+    });
+    response.json(retryPostIpoStructuringHandoffResponseSchema.parse(result));
   });
 
   // PUT, not POST: a full replace of the evidence document's review state

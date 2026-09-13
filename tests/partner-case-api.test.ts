@@ -81,6 +81,7 @@ function fakeOriginationRepository(overrides: Partial<OriginationRepository> = {
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    transitionToPostIpoStructuring: vi.fn(),
     withdrawInformationRequest: vi.fn(),
     ...overrides,
   };

@@ -74,6 +74,7 @@ function fakeOriginationRepository(): OriginationRepository {
     recordFounderDecision: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    transitionToPostIpoStructuring: vi.fn(),
     withdrawInformationRequest: vi.fn(),
     closeCase: vi.fn(),
     reviewEvidence: vi.fn(),

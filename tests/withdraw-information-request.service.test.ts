@@ -38,6 +38,7 @@ const waitingCaseWithPublishedRequest: OperationsCaseDetail = {
   applicantAccountId: "acct_owner",
   legalPracticeId: null,
   appraisalFirmId: null,
+  offering: null,
   founderReviewNotes: null,
   reviewedByAccountId: null,
   approvedAt: null,
@@ -107,6 +108,7 @@ function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationR
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),
     expireInformationRequest: vi.fn(),
+    transitionToPostIpoStructuring: vi.fn(),
     ...overrides,
   };
 }

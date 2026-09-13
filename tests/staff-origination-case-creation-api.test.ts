@@ -90,6 +90,7 @@ function buildApp(options?: {
     recordFounderDecision: vi.fn().mockResolvedValue(null),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
+    transitionToPostIpoStructuring: vi.fn(),
     withdrawInformationRequest: vi.fn(),
     closeCase: vi.fn().mockResolvedValue(null),
     reviewEvidence: vi.fn(),
