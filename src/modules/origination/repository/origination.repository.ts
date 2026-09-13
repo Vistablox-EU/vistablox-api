@@ -523,11 +523,28 @@ export interface OriginationRepository {
     postedAt: Date;
   }): Promise<CaseMessageRecord | null>;
   listPublishedInformationRequestsForTimers(): Promise<PublishedInformationRequestForTimer[]>;
+  // Same select shape as listPublishedInformationRequestsForTimers above, but
+  // scoped to one specific request (findFirst) rather than a batch findMany
+  // -- used by the manual reminder/force-expire operations routes to look up
+  // a single request before acting on it. Returns null both when the
+  // case/request doesn't exist at all and when it exists but isn't
+  // published -- callers that need to tell those apart (for 404 vs 409) do a
+  // follow-up getCaseForOperations check, same as every other write below.
+  getPublishedInformationRequestForTimer(
+    caseId: string,
+    requestId: string,
+  ): Promise<PublishedInformationRequestForTimer | null>;
   expireInformationRequest(input: {
     requestId: string;
     caseId: string;
     traceId: string;
     expiredAt: Date;
+    // Present only for the manual force-expire operations route; undefined
+    // for the batch job's own caller (ExpireOverdueInformationRequestsService),
+    // which keeps working unchanged. When present, the audit log's changes
+    // payload records { manual_override: true, reason } and actorAccountId
+    // instead of the batch job's system-actor (null) shape.
+    manualOverride?: { reason: string; actorAccountId: string };
   }): Promise<boolean>;
   // Same method PostIpoStructuringHandoffRepository declares for the
   // pg-boss worker path (post-ipo-structuring-handoff.repository.ts) --

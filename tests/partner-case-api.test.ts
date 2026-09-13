@@ -6,6 +6,22 @@ import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type { OriginationRepository, PartnerCaseDetail } from "../src/modules/origination/repository/origination.repository.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
+
+function fakeEmailSender(): EmailSender {
+  return {
+    sendStaffInvitationEmail: vi.fn(),
+    sendApplicantResponseReminderEmail: vi.fn(),
+    sendKycRenewalReminderEmail: vi.fn(),
+    sendReconfirmationReminderEmail: vi.fn(),
+    sendReconfirmationWindowOpenedEmail: vi.fn(),
+    sendAccountRecoveryCaseOpenedEmail: vi.fn(),
+    sendAccountRecoveryApprovedEmail: vi.fn(),
+    sendAccountRecoveryRejectedEmail: vi.fn(),
+    sendAccountRecoveryCompletedEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
+  };
+}
 
 const partnerCase: PartnerCaseDetail = {
   caseId: "case_01",
@@ -80,6 +96,7 @@ function fakeOriginationRepository(overrides: Partial<OriginationRepository> = {
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
+    getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     transitionToPostIpoStructuring: vi.fn(),
     withdrawInformationRequest: vi.fn(),
@@ -152,6 +169,7 @@ function buildApp(options?: {
         accounts,
         sessions,
         originationRepository,
+        emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
       },

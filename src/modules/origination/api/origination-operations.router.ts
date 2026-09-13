@@ -5,12 +5,14 @@ import {
   AssignPartnerOrganizationService,
   CloseCaseService,
   CreateStaffOriginationCaseService,
+  ForceExpireInformationRequestService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
   RecordFounderDecisionService,
   RetryPostIpoStructuringHandoffService,
   ReviewEvidenceService,
+  SendManualReminderService,
   WithdrawInformationRequestService,
 } from "../application/operations-case.service.js";
 import {
@@ -31,6 +33,8 @@ import {
   createStaffCaseBodySchema,
   createStaffCaseResponseSchema,
   evidenceReviewParamsSchema,
+  forceExpireInformationRequestBodySchema,
+  forceExpireInformationRequestResponseSchema,
   founderDecisionBodySchema,
   founderDecisionResponseSchema,
   listCaseMessagesQuerySchema,
@@ -43,6 +47,7 @@ import {
   retryPostIpoStructuringHandoffResponseSchema,
   reviewEvidenceBodySchema,
   reviewEvidenceResponseSchema,
+  sendManualReminderResponseSchema,
   withdrawInformationRequestBodySchema,
   withdrawInformationRequestResponseSchema,
 } from "./origination-operations.schemas.js";
@@ -61,6 +66,8 @@ export function createOriginationOperationsRouter(
   createStaffCase: CreateStaffOriginationCaseService,
   retryPostIpoStructuringHandoff: RetryPostIpoStructuringHandoffService,
   reviewEvidence: ReviewEvidenceService,
+  forceExpireInformationRequest: ForceExpireInformationRequestService,
+  sendManualReminder: SendManualReminderService,
   withdrawInformationRequest: WithdrawInformationRequestService,
   // Optional: only present once the partner-organizations feature
   // (protectedApi.partnerOrganizations) is configured, unlike everything
@@ -105,6 +112,37 @@ export function createOriginationOperationsRouter(
     });
     response.status(201).json(publishInformationRequestResponseSchema.parse(result));
   });
+
+  router.post(
+    "/:case_id/information-requests/:request_id/send-reminder",
+    ...staffOnly,
+    async (request, response) => {
+      const params = informationRequestParamsSchema.parse(request.params);
+      const result = await sendManualReminder.execute({
+        caseId: params.case_id,
+        requestId: params.request_id,
+      });
+      response.json(sendManualReminderResponseSchema.parse(result));
+    },
+  );
+
+  router.post(
+    "/:case_id/information-requests/:request_id/force-expire",
+    ...staffOnly,
+    async (request, response) => {
+      const authContext = requireAuthContext(response.locals.authContext);
+      const params = informationRequestParamsSchema.parse(request.params);
+      const body = forceExpireInformationRequestBodySchema.parse(request.body);
+      const result = await forceExpireInformationRequest.execute({
+        accountId: authContext.accountId,
+        caseId: params.case_id,
+        requestId: params.request_id,
+        traceId: String(response.locals.traceId),
+        body,
+      });
+      response.json(forceExpireInformationRequestResponseSchema.parse(result));
+    },
+  );
 
   router.post(
     "/:case_id/information-requests/:request_id/withdraw",

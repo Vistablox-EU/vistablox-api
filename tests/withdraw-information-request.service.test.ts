@@ -107,6 +107,7 @@ function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationR
     listCaseMessages: vi.fn(),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),
+    getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn(),
     transitionToPostIpoStructuring: vi.fn(),
     ...overrides,

@@ -218,6 +218,35 @@ export const publishInformationRequestResponseSchema = z.object({
   }),
 });
 
+// Manual staff overrides for a single published information request --
+// the always-available complement to the scheduled batch jobs in
+// case-timer.service.ts. Force-expire requires a typed reason (surfaced in
+// the audit log's changes payload); the frontend shows an explicit
+// "cannot be undone" warning before the staff user confirms, which is why
+// the reason is required here rather than optional.
+export const forceExpireInformationRequestBodySchema = z.object({
+  reason: z.string().trim().min(1).max(2000),
+});
+
+export const forceExpireInformationRequestResponseSchema = z.object({
+  data: z.object({
+    request_id: z.string(),
+    case_id: z.string(),
+    status: z.literal("expired"),
+  }),
+});
+
+// No request body: the manual reminder is a fire-and-forget email send with
+// no persisted "sent" marker, matching SendApplicantResponseRemindersService's
+// own lack of one -- so there is nothing to record beyond confirming it ran.
+export const sendManualReminderResponseSchema = z.object({
+  data: z.object({
+    request_id: z.string(),
+    case_id: z.string(),
+    sent: z.literal(true),
+  }),
+});
+
 export const withdrawInformationRequestBodySchema = z.object({
   founder_review_notes: z.string().trim().min(1).max(5000).nullable().default(null),
 });
@@ -326,6 +355,9 @@ export const retryPostIpoStructuringHandoffResponseSchema = z.object({
 export type CreateStaffCaseBody = z.infer<typeof createStaffCaseBodySchema>;
 export type OperationsCaseListQuery = z.infer<typeof operationsCaseListQuerySchema>;
 export type PublishInformationRequestBody = z.infer<typeof publishInformationRequestBodySchema>;
+export type ForceExpireInformationRequestBody = z.infer<
+  typeof forceExpireInformationRequestBodySchema
+>;
 export type WithdrawInformationRequestBody = z.infer<typeof withdrawInformationRequestBodySchema>;
 export type FounderDecisionBody = z.infer<typeof founderDecisionBodySchema>;
 export type CloseCaseBody = z.infer<typeof closeCaseBodySchema>;

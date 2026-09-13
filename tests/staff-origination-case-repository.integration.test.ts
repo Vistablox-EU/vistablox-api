@@ -31,6 +31,7 @@ describe.skipIf(databaseUrl === undefined)(
     let originationRepository: PrismaOriginationRepository;
     const accountRepository = new PrismaAccountRepository(database);
     let createdCaseId = "";
+    let secondCaseId = "";
     let firstEvidenceId = "";
 
     beforeAll(async () => {
@@ -63,7 +64,13 @@ describe.skipIf(databaseUrl === undefined)(
 
     afterAll(async () => {
       await database.auditLog.deleteMany({
-        where: { OR: [{ resourceId: createdCaseId }, { actorAccountId: staffAccountId }] },
+        where: {
+          OR: [
+            { resourceId: createdCaseId },
+            { resourceId: secondCaseId },
+            { actorAccountId: staffAccountId },
+          ],
+        },
       });
       // submission_revisions is append-only (AD-186's trigger rejects UPDATE
       // and DELETE unconditionally), and its FKs to origination_cases and
@@ -383,6 +390,161 @@ describe.skipIf(databaseUrl === undefined)(
 
       const noMatch = await accountRepository.findByEmail(`nobody-${suffix}@example.test`);
       expect(noMatch).toEqual([]);
+    });
+
+    // Manual reminder/force-expire operations routes: getPublishedInformationRequestForTimer
+    // (a findFirst scoped to one request) and expireInformationRequest's new
+    // optional manualOverride, exercised here against the real case created
+    // by the first test above (already "submitted", so it can take a
+    // published information request).
+    describe("published information request timer methods", () => {
+      const publishTraceId = `trace_${suffix}_publish`;
+      const publishedAt = new Date();
+      const dueAt = new Date(publishedAt.getTime() + 7 * 24 * 60 * 60 * 1000);
+      let publishedRequestId = "";
+
+      it("publishes a real information request to exercise the timer methods against it", async () => {
+        const published = await originationRepository.publishInformationRequest({
+          accountId: staffAccountId,
+          caseId: createdCaseId,
+          traceId: publishTraceId,
+          requestBody: "Please provide a newer land registry extract.",
+          publishedAt,
+          dueAt,
+        });
+        expect(published).not.toBeNull();
+        publishedRequestId = published?.requestId ?? "";
+      });
+
+      it("getPublishedInformationRequestForTimer returns the published request scoped to its case", async () => {
+        const found = await originationRepository.getPublishedInformationRequestForTimer(
+          createdCaseId,
+          publishedRequestId,
+        );
+        expect(found).toMatchObject({
+          requestId: publishedRequestId,
+          caseId: createdCaseId,
+          applicantAccountId,
+          applicantContactEmail: sharedEmail,
+        });
+        expect(found?.publishedAt).toBeInstanceOf(Date);
+        expect(found?.dueAt).toBeInstanceOf(Date);
+      });
+
+      it("getPublishedInformationRequestForTimer returns null when the request isn't under that case", async () => {
+        const found = await originationRepository.getPublishedInformationRequestForTimer(
+          `case_wrong_${suffix}`,
+          publishedRequestId,
+        );
+        expect(found).toBeNull();
+      });
+
+      it("getPublishedInformationRequestForTimer returns null for a request id that doesn't exist", async () => {
+        const found = await originationRepository.getPublishedInformationRequestForTimer(
+          createdCaseId,
+          `rfi_missing_${suffix}`,
+        );
+        expect(found).toBeNull();
+      });
+
+      it("expireInformationRequest with manualOverride records manual_override/reason and the staff actor in the audit log", async () => {
+        const reason = "Applicant unresponsive after repeated outreach.";
+        const expired = await originationRepository.expireInformationRequest({
+          requestId: publishedRequestId,
+          caseId: createdCaseId,
+          traceId: publishTraceId,
+          expiredAt: new Date(),
+          manualOverride: { reason, actorAccountId: staffAccountId },
+        });
+        expect(expired).toBe(true);
+
+        const audit = await database.auditLog.findFirst({
+          where: { action: "origination.information_request_expired", resourceId: createdCaseId },
+          orderBy: { createdAt: "desc" },
+        });
+        expect(audit?.actorAccountId).toBe(staffAccountId);
+        expect(audit?.changes).toMatchObject({
+          manual_override: true,
+          reason,
+          request_id: publishedRequestId,
+        });
+
+        // Once expired (no longer "published"), the timer lookup no longer
+        // returns it -- same ambiguous-null the operations service's 404/409
+        // split has to disambiguate against getCaseForOperations.
+        const afterExpiry = await originationRepository.getPublishedInformationRequestForTimer(
+          createdCaseId,
+          publishedRequestId,
+        );
+        expect(afterExpiry).toBeNull();
+      });
+    });
+
+    describe("expireInformationRequest without manualOverride (the batch job's own call shape)", () => {
+      let secondRequestId = "";
+      const secondTraceId = `trace_${suffix}_second`;
+
+      it("sets up a second case with a published request to expire the batch-job way", async () => {
+        const created = await originationRepository.createStaffCase({
+          applicantAccountId,
+          staffAccountId,
+          traceId: secondTraceId,
+          property: {
+            countryCode: "RS",
+            city: null,
+            addressLine: null,
+            landRegistryReference: null,
+            ownerDeclaredValueEur: "200000.00",
+            hasExistingEncumbrance: false,
+            residentialSubtype: null,
+            livingAreaSqM: null,
+            bedrooms: null,
+            bathrooms: null,
+            floor: null,
+            totalFloors: null,
+            yearBuilt: null,
+            condition: null,
+            energyRating: null,
+            rooms: [],
+          },
+          submissionData: { attestations: { staff_created: true } },
+          documents: [
+            { documentType: "ownership_declaration", documentRef: "doc-owner-2", extractDated: null },
+            { documentType: "property_facts_sheet", documentRef: "doc-facts-2", extractDated: null },
+            { documentType: "encumbrance_declaration", documentRef: "doc-enc-2", extractDated: null },
+            { documentType: "photo_set", documentRef: "doc-photos-2", extractDated: null },
+          ],
+        });
+        secondCaseId = created.caseId;
+
+        const published = await originationRepository.publishInformationRequest({
+          accountId: staffAccountId,
+          caseId: secondCaseId,
+          traceId: secondTraceId,
+          requestBody: "Second request, expired without a manual override.",
+          publishedAt: new Date(),
+          dueAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
+        });
+        secondRequestId = published?.requestId ?? "";
+        expect(secondRequestId).not.toBe("");
+      });
+
+      it("records a null actor and no manual-override marker, matching the batch job's own shape", async () => {
+        const expired = await originationRepository.expireInformationRequest({
+          requestId: secondRequestId,
+          caseId: secondCaseId,
+          traceId: secondTraceId,
+          expiredAt: new Date(),
+        });
+        expect(expired).toBe(true);
+
+        const audit = await database.auditLog.findFirst({
+          where: { action: "origination.information_request_expired", resourceId: secondCaseId },
+        });
+        expect(audit?.actorAccountId).toBeNull();
+        expect(audit?.changes).not.toHaveProperty("manual_override");
+        expect(audit?.changes).not.toHaveProperty("reason");
+      });
     });
   },
 );

@@ -11,6 +11,22 @@ import {
   type OwnedOriginationCase,
   type SubmitInitialCaseInput,
 } from "../src/modules/origination/repository/origination.repository.js";
+import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
+
+function fakeEmailSender(): EmailSender {
+  return {
+    sendStaffInvitationEmail: vi.fn(),
+    sendApplicantResponseReminderEmail: vi.fn(),
+    sendKycRenewalReminderEmail: vi.fn(),
+    sendReconfirmationReminderEmail: vi.fn(),
+    sendReconfirmationWindowOpenedEmail: vi.fn(),
+    sendAccountRecoveryCaseOpenedEmail: vi.fn(),
+    sendAccountRecoveryApprovedEmail: vi.fn(),
+    sendAccountRecoveryRejectedEmail: vi.fn(),
+    sendAccountRecoveryCompletedEmail: vi.fn(),
+    sendPasskeyRecoveryEmail: vi.fn(),
+  };
+}
 
 const ownedCase: OwnedOriginationCase = {
   caseId: "case_01",
@@ -126,6 +142,7 @@ function buildApp(options?: {
     resubmitAfterInformationRequest: vi.fn().mockResolvedValue(null),
     recordFounderDecision: vi.fn().mockResolvedValue(null),
     listPublishedInformationRequestsForTimers: vi.fn().mockResolvedValue([]),
+    getPublishedInformationRequestForTimer: vi.fn(),
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     transitionToPostIpoStructuring: vi.fn(),
     withdrawInformationRequest: vi.fn(),
@@ -154,6 +171,7 @@ function buildApp(options?: {
         accounts,
         sessions,
         originationRepository: repository,
+        emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
       },

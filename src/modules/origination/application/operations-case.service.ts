@@ -1,8 +1,10 @@
+import type { EmailSender } from "../../../infrastructure/email/smtp-email-sender.js";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type {
   AssignPartnerOrganizationBody,
   CloseCaseBody,
   CreateStaffCaseBody,
+  ForceExpireInformationRequestBody,
   FounderDecisionBody,
   OperationsCaseListQuery,
   PublishInformationRequestBody,
@@ -29,6 +31,7 @@ import {
   type InformationRequestRecord,
   type OperationsCaseDetail,
   type OriginationRepository,
+  type PublishedInformationRequestForTimer,
 } from "../repository/origination.repository.js";
 import {
   decodeCaseCursor,
@@ -541,6 +544,125 @@ export class AssignPartnerOrganizationService {
       throw error;
     }
   }
+}
+
+// Staff manual override for a single information request -- the
+// always-available complement to ExpireOverdueInformationRequestsService's
+// scheduled batch run (case-timer.service.ts), for when staff can't wait for
+// the next scheduled pass. A thin wrapper around the repository's existing
+// expireInformationRequest, which already enforces
+// stage === "waiting_on_applicant" && status === "published" atomically
+// inside its own transaction -- this does not duplicate that check, only
+// maps its outcome to the right AppError and threads the required reason
+// through as a manual-override audit marker.
+export class ForceExpireInformationRequestService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    accountId: string;
+    caseId: string;
+    requestId: string;
+    traceId: string;
+    body: ForceExpireInformationRequestBody;
+  }) {
+    await resolvePublishedInformationRequestOrThrow(
+      this.repository,
+      input.caseId,
+      input.requestId,
+      "force-expire this information request",
+    );
+
+    const expired = await this.repository.expireInformationRequest({
+      requestId: input.requestId,
+      caseId: input.caseId,
+      traceId: input.traceId,
+      expiredAt: this.clock(),
+      manualOverride: { reason: input.body.reason, actorAccountId: input.accountId },
+    });
+    // A race between the lookup above and this write (e.g. the applicant
+    // responded in between) surfaces as the same conflict a stale lookup
+    // would -- matching every other write in this file's own
+    // check-then-catch-conflict pattern.
+    if (!expired) throw reviewConflictError("force-expire this information request");
+
+    return {
+      data: {
+        request_id: input.requestId,
+        case_id: input.caseId,
+        status: "expired" as const,
+      },
+    };
+  }
+}
+
+// Staff manual override of SendApplicantResponseRemindersService's own
+// reminder-milestone gate (isApplicantReminderDue) -- deliberately bypassing
+// it, since the entire point of a manual send is to act sooner than the
+// schedule would. Pure fire-and-forget, matching the batch job's own total
+// lack of a "sent" marker: no repository write here beyond the lookup.
+export class SendManualReminderService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly emailSender: EmailSender,
+  ) {}
+
+  public async execute(input: { caseId: string; requestId: string }) {
+    const request = await resolvePublishedInformationRequestOrThrow(
+      this.repository,
+      input.caseId,
+      input.requestId,
+      "send a reminder for this information request",
+    );
+    if (request.applicantContactEmail === null) {
+      throw new AppError({
+        code: "origination.applicant_contact_email_missing",
+        title: "Applicant contact email unavailable",
+        status: 409,
+        detail: "The applicant has no contact email on file to send a reminder to.",
+      });
+    }
+
+    await this.emailSender.sendApplicantResponseReminderEmail({
+      to: request.applicantContactEmail,
+      dueAt: request.dueAt,
+    });
+
+    return {
+      data: {
+        request_id: request.requestId,
+        case_id: request.caseId,
+        sent: true as const,
+      },
+    };
+  }
+}
+
+// Shared by both manual-override services above: getPublishedInformationRequestForTimer
+// only returns a row once it exists AND is published, so a null result is
+// ambiguous between "doesn't exist" and "exists but in some other state."
+// Disambiguate with a follow-up getCaseForOperations lookup (already fetches
+// every information request on the case) so a genuinely missing case/request
+// surfaces as 404 and a wrong-state one surfaces as 409, matching this
+// router's other not-found-vs-conflict split.
+async function resolvePublishedInformationRequestOrThrow(
+  repository: OriginationRepository,
+  caseId: string,
+  requestId: string,
+  action: string,
+): Promise<PublishedInformationRequestForTimer> {
+  const request = await repository.getPublishedInformationRequestForTimer(caseId, requestId);
+  if (request !== null) return request;
+
+  const originationCase = await repository.getCaseForOperations(caseId);
+  if (originationCase === null) throw caseNotFoundError();
+  const exists = originationCase.informationRequests.some(
+    (existing) => existing.requestId === requestId,
+  );
+  if (!exists) throw caseNotFoundError();
+  throw reviewConflictError(action);
 }
 
 // Staff-visible manual retry for TransitionCaseToPostIpoStructuringService,
