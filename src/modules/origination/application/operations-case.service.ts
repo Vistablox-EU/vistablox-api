@@ -416,6 +416,8 @@ function toOperationsResponse(input: OperationsCaseDetail) {
   return {
     ...toOwnedCaseResponse(input),
     applicant_account_id: input.applicantAccountId,
+    legal_practice_id: input.legalPracticeId,
+    appraisal_firm_id: input.appraisalFirmId,
     founder_review: {
       notes: input.founderReviewNotes,
       reviewed_by_account_id: input.reviewedByAccountId,
