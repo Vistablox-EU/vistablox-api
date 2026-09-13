@@ -37,7 +37,6 @@ function profileRecord(overrides: Partial<ProfileRecord> = {}): ProfileRecord {
     },
     activitySummary: { reservationCount: 3, activePositionCount: 2 },
     walletStatus: {
-      walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
       requestedAt: new Date("2026-08-10T12:00:00.000Z"),
       registeredAt: new Date("2026-08-11T12:00:00.000Z"),
     },
@@ -159,7 +158,6 @@ describe("profile service", () => {
         },
         wallet: {
           status: "registered",
-          wallet_address: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
           requested_at: "2026-08-10T12:00:00.000Z",
           registered_at: "2026-08-11T12:00:00.000Z",
         },
