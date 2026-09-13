@@ -1,3 +1,8 @@
+import type {
+  TransitionedToPostIpoStructuring,
+  TransitionToPostIpoStructuringInput,
+} from "./post-ipo-structuring-handoff.repository.js";
+
 export interface IntakePrerequisites {
   eligibilityState: string;
   proofOfAddressCurrentUntil: Date | null;
@@ -154,6 +159,21 @@ export interface OperationsCaseDetail extends OwnedOriginationCase {
   ipoValueEur: string | null;
   legalPracticeId: string | null;
   appraisalFirmId: string | null;
+  // The case's own PIV's most recent Offering (Piv -> Offering is a
+  // one-to-many relation in the schema, though nothing in the application
+  // today creates a second Offering for an existing Piv -- see
+  // openOfferingForApprovedCase's reuse-existing-before-create-new logic).
+  // Null until the post-approval origination-to-offering handoff
+  // (AD-145/AD-152) has actually opened one. This is exactly the field the
+  // staff detail view uses to surface a stuck post-IPO handoff: a case
+  // sitting at pre_offering_open whose offering already has
+  // final_offering_published_at set is a case whose automatic handoff job
+  // should have fired but didn't.
+  offering: {
+    offeringId: string;
+    status: string;
+    finalOfferingPublishedAt: Date | null;
+  } | null;
   submission: {
     revisionId: string;
     revisionNumber: number;
@@ -426,6 +446,19 @@ export interface OriginationRepository {
     traceId: string;
     expiredAt: Date;
   }): Promise<boolean>;
+  // Same method PostIpoStructuringHandoffRepository declares for the
+  // pg-boss worker path (post-ipo-structuring-handoff.repository.ts) --
+  // PrismaOriginationRepository already implements both interfaces with the
+  // one method. Re-declared here (not just relied on via that separate
+  // interface) so the HTTP-side staff retry action
+  // (RetryPostIpoStructuringHandoffService, wrapping
+  // TransitionCaseToPostIpoStructuringService) can call it through the same
+  // OriginationRepository handle every other operations service already
+  // uses, instead of threading a second repository reference through
+  // app.ts.
+  transitionToPostIpoStructuring(
+    input: TransitionToPostIpoStructuringInput,
+  ): Promise<TransitionedToPostIpoStructuring>;
 }
 
 export class CaseSubmissionConflictError extends Error {

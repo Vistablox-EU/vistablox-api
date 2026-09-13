@@ -178,6 +178,7 @@ describe.skipIf(databaseUrl === undefined)(
     // Same PgBoss-construction-timing note as the describe block above.
     let boss: PgBoss;
     let originationRepository: PrismaOriginationRepository;
+    let pivId = "";
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
@@ -217,8 +218,46 @@ describe.skipIf(databaseUrl === undefined)(
 
     afterAll(async () => {
       await database.auditLog.deleteMany({ where: { resourceId: caseId } });
+      if (pivId !== "") {
+        await database.offering.deleteMany({ where: { pivId } });
+        await database.piv.deleteMany({ where: { id: pivId } });
+      }
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
+
+    it("getCaseForOperations returns the case's PIV's most recent offering via the same joined query, no separate round-trip", async () => {
+      const tokenIdRows = await database.$queryRaw<{ next_token_id: bigint }[]>`
+        SELECT nextval('origination.piv_token_id_seq') AS next_token_id
+      `;
+      const tokenId = tokenIdRows[0]!.next_token_id.toString();
+      const piv = await database.piv.create({
+        data: {
+          id: `piv_getops_${suffix}`,
+          propertyId,
+          caseId,
+          tokenId,
+        },
+      });
+      pivId = piv.id;
+      const offering = await database.offering.create({
+        data: {
+          id: `offering_getops_${suffix}`,
+          pivId: piv.id,
+          minimumRaiseEur: "300000.00",
+          targetRaiseEur: "300000.00",
+          status: "final_offering",
+          finalOfferingPublishedAt: new Date("2026-09-01T00:00:00.000Z"),
+        },
+      });
+
+      const result = await originationRepository.getCaseForOperations(caseId);
+
+      expect(result?.offering).toEqual({
+        offeringId: offering.id,
+        status: "final_offering",
+        finalOfferingPublishedAt: new Date("2026-09-01T00:00:00.000Z"),
+      });
+    }, 30_000);
 
     it("transitions a pre_offering_open case to post_ipo_structuring, and replaying the job is a safe no-op", async () => {
       const traceId = `trace_post_ipo_${suffix}`;

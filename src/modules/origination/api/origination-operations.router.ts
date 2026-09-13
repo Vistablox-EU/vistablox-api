@@ -9,6 +9,7 @@ import {
   ListCasesForOperationsService,
   PublishInformationRequestService,
   RecordFounderDecisionService,
+  RetryPostIpoStructuringHandoffService,
 } from "../application/operations-case.service.js";
 import {
   ListCaseMessagesForOperationsService,
@@ -31,6 +32,7 @@ import {
   postOperationsCaseMessageBodySchema,
   publishInformationRequestBodySchema,
   publishInformationRequestResponseSchema,
+  retryPostIpoStructuringHandoffResponseSchema,
 } from "./origination-operations.schemas.js";
 
 export function createOriginationOperationsRouter(
@@ -45,6 +47,7 @@ export function createOriginationOperationsRouter(
   listCaseMessages: ListCaseMessagesForOperationsService,
   postCaseMessage: PostCaseMessageForOperationsService,
   createStaffCase: CreateStaffOriginationCaseService,
+  retryPostIpoStructuringHandoff: RetryPostIpoStructuringHandoffService,
   // Optional: only present once the partner-organizations feature
   // (protectedApi.partnerOrganizations) is configured, unlike everything
   // else on this router, which is unconditional. See app.ts.
@@ -113,6 +116,15 @@ export function createOriginationOperationsRouter(
       body,
     });
     response.json(closeCaseResponseSchema.parse(result));
+  });
+
+  router.post("/:case_id/retry-post-ipo-handoff", ...staffOnly, async (request, response) => {
+    const params = caseIdParamsSchema.parse(request.params);
+    const result = await retryPostIpoStructuringHandoff.execute({
+      caseId: params.case_id,
+      traceId: String(response.locals.traceId),
+    });
+    response.json(retryPostIpoStructuringHandoffResponseSchema.parse(result));
   });
 
   if (assignPartnerOrganization !== undefined) {

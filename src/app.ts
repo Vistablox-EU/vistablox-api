@@ -145,7 +145,9 @@ import {
   ListCasesForOperationsService,
   PublishInformationRequestService,
   RecordFounderDecisionService,
+  RetryPostIpoStructuringHandoffService,
 } from "./modules/origination/application/operations-case.service.js";
+import { TransitionCaseToPostIpoStructuringService } from "./modules/origination/application/post-ipo-structuring-handoff.service.js";
 import {
   GetCaseForPartnerService,
   ListCasesForPartnerService,
@@ -830,6 +832,10 @@ export function createApp(dependencies: AppDependencies): Express {
         new ListCaseMessagesForOperationsService(originationRepository),
         new PostCaseMessageForOperationsService(originationRepository),
         new CreateStaffOriginationCaseService(originationRepository),
+        new RetryPostIpoStructuringHandoffService(
+          originationRepository,
+          new TransitionCaseToPostIpoStructuringService(originationRepository),
+        ),
         partnerOrganizationRepository === undefined
           ? undefined
           : new AssignPartnerOrganizationService(originationRepository, partnerOrganizationRepository),

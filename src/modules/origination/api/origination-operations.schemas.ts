@@ -112,6 +112,19 @@ export const operationsCaseDetailResponseSchema = z.object({
     applicant_account_id: z.string(),
     legal_practice_id: z.string().nullable(),
     appraisal_firm_id: z.string().nullable(),
+    // The case's PIV's most recent Offering (null until the post-approval
+    // origination-to-offering handoff has opened one). Lets the staff
+    // detail view surface a stuck post-IPO-structuring handoff: a case at
+    // pre_offering_open whose offering already has
+    // final_offering_published_at set means the automatic job should have
+    // fired but didn't.
+    offering: z
+      .object({
+        offering_id: z.string(),
+        status: z.string(),
+        final_offering_published_at: z.iso.datetime().nullable(),
+      })
+      .nullable(),
     founder_review: z.object({
       notes: z.string().nullable(),
       reviewed_by_account_id: z.string().nullable(),
@@ -237,6 +250,18 @@ export const assignPartnerOrganizationResponseSchema = z.object({
     case_id: z.string(),
     legal_practice_id: z.string().nullable(),
     appraisal_firm_id: z.string().nullable(),
+  }),
+});
+
+// Manual staff retry for the post-approval origination-to-offering handoff
+// (AD-145/AD-152), for the rare case where the automatic pg-boss job
+// dead-lettered or otherwise never ran. Mirrors
+// TransitionedToPostIpoStructuring's own stage union rather than a bare
+// string, since those are the only two reachable outcomes.
+export const retryPostIpoStructuringHandoffResponseSchema = z.object({
+  data: z.object({
+    case_id: z.string(),
+    stage: z.enum(["post_ipo_structuring", "approved_for_final_offering"]),
   }),
 });
 

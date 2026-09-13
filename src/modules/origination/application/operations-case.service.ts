@@ -16,6 +16,7 @@ import {
   evaluateInformationRequestPublication,
 } from "../domain/case-review.policy.js";
 import { evaluateInitialCaseSubmission } from "../domain/case-submission.policy.js";
+import { TransitionCaseToPostIpoStructuringService } from "./post-ipo-structuring-handoff.service.js";
 import type { PartnerOrganizationRepository } from "../repository/partner-organization.repository.js";
 import {
   ApplicantAccountNotFoundError,
@@ -425,12 +426,56 @@ export class AssignPartnerOrganizationService {
   }
 }
 
+// Staff-visible manual retry for TransitionCaseToPostIpoStructuringService,
+// which normally only ever runs as the pg-boss job
+// publishFinalOfferingTerms enqueues (AD-145/AD-152) once a case's
+// ipo_value_eur is fully collected. If that job dead-letters or otherwise
+// never fires, a case is left stuck at pre_offering_open with an offering
+// that already has final_offering_published_at set -- invisible and
+// unrecoverable to staff until now. This wrapper enforces the exact same
+// trigger condition the automatic path uses (never any arbitrary
+// pre_offering_open case) before delegating to the untouched existing
+// service; TransitionCaseToPostIpoStructuringService's own repository call
+// is already a documented safe no-op on replay
+// (post-ipo-structuring-handoff.repository.ts), so a case that already
+// advanced past pre_offering_open surfaces that no-op result rather than an
+// error.
+export class RetryPostIpoStructuringHandoffService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly transitionCaseToPostIpoStructuring: TransitionCaseToPostIpoStructuringService,
+  ) {}
+
+  public async execute(input: { caseId: string; traceId: string }) {
+    const originationCase = await this.repository.getCaseForOperations(input.caseId);
+    if (originationCase === null) throw caseNotFoundError();
+    if (originationCase.offering === null || originationCase.offering.finalOfferingPublishedAt === null) {
+      throw postIpoHandoffNotReadyError();
+    }
+
+    const result = await this.transitionCaseToPostIpoStructuring.execute({
+      case_id: input.caseId,
+      trace_id: input.traceId,
+    });
+    return { data: { case_id: result.caseId, stage: result.stage } };
+  }
+}
+
 function toOperationsResponse(input: OperationsCaseDetail) {
   return {
     ...toOwnedCaseResponse(input),
     applicant_account_id: input.applicantAccountId,
     legal_practice_id: input.legalPracticeId,
     appraisal_firm_id: input.appraisalFirmId,
+    offering:
+      input.offering === null
+        ? null
+        : {
+            offering_id: input.offering.offeringId,
+            status: input.offering.status,
+            final_offering_published_at:
+              input.offering.finalOfferingPublishedAt?.toISOString() ?? null,
+          },
     founder_review: {
       notes: input.founderReviewNotes,
       reviewed_by_account_id: input.reviewedByAccountId,
@@ -499,6 +544,16 @@ function reviewConflictError(action: string, cause?: unknown): AppError {
     status: 409,
     detail: `The case can no longer ${action} from its current stage.`,
     cause,
+  });
+}
+
+function postIpoHandoffNotReadyError(): AppError {
+  return new AppError({
+    code: "origination.post_ipo_handoff_not_ready",
+    title: "Post-IPO structuring handoff not ready",
+    status: 409,
+    detail:
+      "The case's offering has not reached final_offering_published_at, so the automatic post-IPO structuring handoff was never expected to fire for it.",
   });
 }
 

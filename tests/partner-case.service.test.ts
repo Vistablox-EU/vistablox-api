@@ -97,6 +97,7 @@ function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationR
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),
     expireInformationRequest: vi.fn(),
+    transitionToPostIpoStructuring: vi.fn(),
     ...overrides,
   };
 }
