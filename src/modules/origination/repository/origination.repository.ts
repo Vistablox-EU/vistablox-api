@@ -25,6 +25,31 @@ export interface CreatedDraftIntake {
   stage: "draft";
 }
 
+export interface CreateStaffCaseInput {
+  applicantAccountId: string;
+  staffAccountId: string;
+  traceId: string;
+  property: {
+    countryCode: string;
+    city: string | null;
+    addressLine: string | null;
+    landRegistryReference: string | null;
+    ownerDeclaredValueEur: string;
+    hasExistingEncumbrance: boolean;
+  };
+  submissionData: Record<string, unknown>;
+  documents: SubmissionDocumentInput[];
+}
+
+export interface CreatedStaffCase {
+  caseId: string;
+  revisionId: string;
+  revisionNumber: 1;
+  stage: "submitted";
+  submittedAt: Date;
+  applicantAccountId: string;
+}
+
 export interface OriginationCaseCursor {
   createdAt: Date;
   id: string;
@@ -263,7 +288,19 @@ export interface RecordAppraisalInput {
 
 export interface OriginationRepository {
   getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites>;
+  // Just the platform-setting half of getIntakePrerequisites, with no
+  // accountId and no KYC read -- for the staff create-and-submit path,
+  // which re-derives only the value floor and deliberately never calls
+  // evaluateIntakeEntry (staff bypasses the self-KYC/proof-of-address gate).
+  getMinimumPropertyValueEur(): Promise<string>;
   createDraftIntake(input: CreateDraftIntakeInput): Promise<CreatedDraftIntake>;
+  // Staff-initiated equivalent of createDraftIntake + submitInitialCase
+  // combined into one transaction (a case created without a revision would
+  // be permanently stuck: canRecordFounderDecision and
+  // evaluateInformationRequestPublication both require hasCurrentRevision).
+  // Throws ApplicantAccountNotFoundError if applicantAccountId doesn't
+  // resolve to a real account.
+  createStaffCase(input: CreateStaffCaseInput): Promise<CreatedStaffCase>;
   listOwnedCases(input: {
     accountId: string;
     limit: number;
@@ -362,6 +399,13 @@ export class CaseSubmissionConflictError extends Error {
   public constructor(public readonly currentStage: string) {
     super(`Case cannot be initially submitted from stage ${currentStage}`);
     this.name = "CaseSubmissionConflictError";
+  }
+}
+
+export class ApplicantAccountNotFoundError extends Error {
+  public constructor(public readonly applicantAccountId: string) {
+    super(`No account exists with id ${applicantAccountId}`);
+    this.name = "ApplicantAccountNotFoundError";
   }
 }
 

@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-import { originationCaseStageSchema, ownedCaseSchema } from "./origination.schemas.js";
+import {
+  originationCaseStageSchema,
+  ownedCaseSchema,
+  submissionDocumentTypeSchema,
+} from "./origination.schemas.js";
 
 // The two human-postable lanes REAL_ESTATE_INTAKE_LIFECYCLE.md's Thread
 // Rules define (system_timeline is system-generated, not a lane a caller
@@ -15,6 +19,48 @@ export const listCaseMessagesQuerySchema = z.object({
 export const postOperationsCaseMessageBodySchema = z.object({
   lane: threadLaneSchema,
   body: z.string().trim().min(1).max(5000),
+});
+
+// Staff create-and-submit: the applicant is picked via GET
+// /internal/v1/accounts?email=, staff attests eligibility out-of-band (no
+// self-KYC/proof-of-address gate here), and the case goes straight to
+// "submitted" in one action -- same shape as the owner-facing
+// createDraftIntakeBodySchema + submitInitialCaseBodySchema combined, plus
+// the new applicant_account_id field neither of those has.
+export const createStaffCaseBodySchema = z.object({
+  applicant_account_id: z.string().min(1),
+  intake_terms_accepted: z.literal(true),
+  one_title_confirmed: z.literal(true),
+  property: z.object({
+    property_type: z.literal("residential"),
+    country_code: z.string().length(2).transform((value) => value.toUpperCase()),
+    city: z.string().trim().min(1).max(200).nullable().default(null),
+    address_line: z.string().trim().min(1).max(500).nullable().default(null),
+    land_registry_reference: z.string().trim().min(1).max(200).nullable().default(null),
+    owner_declared_value_eur: z.string().regex(/^\d{1,13}\.\d{2}$/),
+    has_existing_encumbrance: z.boolean().default(false),
+  }),
+  documents: z
+    .array(
+      z.object({
+        document_type: submissionDocumentTypeSchema,
+        document_ref: z.string().trim().min(1).max(500),
+        extract_dated: z.iso.datetime().nullable().default(null),
+      }),
+    )
+    .min(1)
+    .max(50),
+});
+
+export const createStaffCaseResponseSchema = z.object({
+  data: z.object({
+    case_id: z.string(),
+    revision_id: z.string(),
+    revision_number: z.literal(1),
+    stage: z.literal("submitted"),
+    submitted_at: z.iso.datetime(),
+    applicant_account_id: z.string(),
+  }),
 });
 
 export const operationsCaseListQuerySchema = z.object({
@@ -170,6 +216,7 @@ export const assignPartnerOrganizationResponseSchema = z.object({
   }),
 });
 
+export type CreateStaffCaseBody = z.infer<typeof createStaffCaseBodySchema>;
 export type OperationsCaseListQuery = z.infer<typeof operationsCaseListQuerySchema>;
 export type PublishInformationRequestBody = z.infer<typeof publishInformationRequestBodySchema>;
 export type FounderDecisionBody = z.infer<typeof founderDecisionBodySchema>;

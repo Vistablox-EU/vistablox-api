@@ -12,6 +12,8 @@ import { pinoHttp } from "pino-http";
 import type { DatabaseProbe } from "./infrastructure/database/database-probe.js";
 import type { EmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import type { AccountRepository } from "./modules/account/repository/account.repository.js";
+import { createAccountSearchRouter } from "./modules/account/api/account.router.js";
+import { SearchAccountsByEmailService } from "./modules/account/application/search-accounts.service.js";
 import {
   createRequireAuthentication,
   type DpopEnforcementOptions,
@@ -138,6 +140,7 @@ import { SubmitInitialCaseService } from "./modules/origination/application/subm
 import {
   AssignPartnerOrganizationService,
   CloseCaseService,
+  CreateStaffOriginationCaseService,
   GetCaseForOperationsService,
   ListCasesForOperationsService,
   PublishInformationRequestService,
@@ -795,6 +798,15 @@ export function createApp(dependencies: AppDependencies): Express {
         new PostOwnCaseMessageService(originationRepository),
       ),
     );
+    app.use(
+      "/internal/v1/accounts",
+      createAccountSearchRouter(
+        requireAuthentication,
+        requireAdminOperations,
+        requireStaffWebAuthn,
+        new SearchAccountsByEmailService(dependencies.protectedApi.accounts),
+      ),
+    );
     const partnerOrganizationRepository = dependencies.protectedApi.partnerOrganizations?.repository;
     app.use(
       "/internal/v1/origination-cases",
@@ -809,6 +821,7 @@ export function createApp(dependencies: AppDependencies): Express {
         new CloseCaseService(originationRepository),
         new ListCaseMessagesForOperationsService(originationRepository),
         new PostCaseMessageForOperationsService(originationRepository),
+        new CreateStaffOriginationCaseService(originationRepository),
         partnerOrganizationRepository === undefined
           ? undefined
           : new AssignPartnerOrganizationService(originationRepository, partnerOrganizationRepository),

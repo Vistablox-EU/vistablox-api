@@ -58,6 +58,8 @@ function fakeOriginationRepository(): OriginationRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
+    getMinimumPropertyValueEur: vi.fn(),
+    createStaffCase: vi.fn(),
     listOwnedCases: vi.fn().mockResolvedValue([]),
     getOwnedCase: vi.fn().mockResolvedValue(null),
     submitInitialCase: vi.fn(),
@@ -124,6 +126,7 @@ function buildApp(options?: {
   };
   const accounts: AccountRepository = {
     findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_customer", status: "active" }),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn().mockResolvedValue(false),
     hasAnyActiveStaffRole: vi.fn().mockResolvedValue(false),
     provision: vi.fn(),

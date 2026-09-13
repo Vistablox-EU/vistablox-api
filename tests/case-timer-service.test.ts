@@ -28,6 +28,8 @@ function repository(overrides: Partial<OriginationRepository> = {}): Origination
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
+    getMinimumPropertyValueEur: vi.fn(),
+    createStaffCase: vi.fn(),
     listOwnedCases: vi.fn(),
     getOwnedCase: vi.fn(),
     submitInitialCase: vi.fn(),

@@ -19,6 +19,7 @@ function buildApp(rateLimiter?: RequestHandler) {
   const sessions: SessionResolver = { resolve: vi.fn().mockResolvedValue(identity) };
   const accounts: AccountRepository = {
     findByBetterAuthUserId: vi.fn().mockResolvedValue({ accountId: "acct_01", status: "active" }),
+    findByEmail: vi.fn(),
     hasActiveStaffRole: vi.fn(),
     hasAnyActiveStaffRole: vi.fn(),
     provision: vi.fn(),

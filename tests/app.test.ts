@@ -145,6 +145,8 @@ function fakeOriginationRepository(): OriginationRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
+    getMinimumPropertyValueEur: vi.fn(),
+    createStaffCase: vi.fn(),
     listOwnedCases: vi.fn().mockResolvedValue([]),
     getOwnedCase: vi.fn().mockResolvedValue(null),
     submitInitialCase: vi.fn(),
@@ -447,6 +449,7 @@ describe("VistaBlox API", () => {
     const sessions: SessionResolver = { resolve: vi.fn().mockResolvedValue(null) };
     const accounts: AccountRepository = {
       findByBetterAuthUserId: vi.fn().mockResolvedValue(null),
+      findByEmail: vi.fn(),
       hasActiveStaffRole: vi.fn().mockResolvedValue(false),
       hasAnyActiveStaffRole: vi.fn().mockResolvedValue(false),
       provision: vi.fn(),

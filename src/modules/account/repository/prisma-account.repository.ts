@@ -4,6 +4,7 @@ import type { DatabaseClient } from "../../../infrastructure/database/prisma.js"
 import type {
   AccountRepository,
   AccountStatus,
+  AccountSummary,
   LocalAccountContext,
   LoginMethodType,
 } from "./account.repository.js";
@@ -22,6 +23,19 @@ export class PrismaAccountRepository implements AccountRepository {
     return account === null
       ? null
       : { accountId: account.id, status: asAccountStatus(account.status) };
+  }
+
+  public async findByEmail(email: string): Promise<AccountSummary[]> {
+    const accounts = await this.database.account.findMany({
+      where: { protectedContactEmail: { equals: email, mode: "insensitive" } },
+      select: { id: true, protectedContactEmail: true, status: true },
+      orderBy: { createdAt: "asc" },
+    });
+    return accounts.map((account) => ({
+      accountId: account.id,
+      email: account.protectedContactEmail,
+      status: asAccountStatus(account.status),
+    }));
   }
 
   public async hasActiveStaffRole(
