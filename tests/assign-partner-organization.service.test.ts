@@ -42,6 +42,7 @@ function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationR
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),
     expireInformationRequest: vi.fn(),
+    withdrawInformationRequest: vi.fn(),
     ...overrides,
   };
 }

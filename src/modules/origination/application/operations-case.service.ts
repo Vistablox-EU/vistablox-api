@@ -6,6 +6,7 @@ import type {
   FounderDecisionBody,
   OperationsCaseListQuery,
   PublishInformationRequestBody,
+  WithdrawInformationRequestBody,
 } from "../api/origination-operations.schemas.js";
 import { originationCaseStageSchema } from "../api/origination.schemas.js";
 import {
@@ -13,6 +14,7 @@ import {
   canAssignPartnerOrganization,
   canCloseCase,
   canRecordFounderDecision,
+  canWithdrawInformationRequest,
   evaluateInformationRequestPublication,
 } from "../domain/case-review.policy.js";
 import { evaluateInitialCaseSubmission } from "../domain/case-submission.policy.js";
@@ -119,6 +121,69 @@ export class PublishInformationRequestService {
     } catch (error) {
       if (error instanceof CaseReviewConflictError) {
         throw reviewConflictError("publish an information request", error);
+      }
+      throw error;
+    }
+  }
+}
+
+// A targeted walk-back for a single mistakenly-published information
+// request, distinct from CloseCaseService below: this reverts only the one
+// request and puts the case back to reviewing the same submission revision
+// it was already on, instead of terminating the whole case.
+export class WithdrawInformationRequestService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    accountId: string;
+    caseId: string;
+    requestId: string;
+    traceId: string;
+    body: WithdrawInformationRequestBody;
+  }) {
+    const originationCase = await this.repository.getCaseForOperations(input.caseId);
+    if (originationCase === null) throw caseNotFoundError();
+
+    const request = originationCase.informationRequests.find(
+      (candidate) => candidate.requestId === input.requestId,
+    );
+    if (request === undefined) throw caseNotFoundError();
+
+    if (
+      !canWithdrawInformationRequest({
+        caseStage: originationCase.stage,
+        requestStatus: request.status,
+      })
+    ) {
+      throw reviewConflictError("withdraw this information request");
+    }
+
+    const withdrawnAt = this.clock();
+    try {
+      const withdrawn = await this.repository.withdrawInformationRequest({
+        accountId: input.accountId,
+        caseId: input.caseId,
+        requestId: input.requestId,
+        traceId: input.traceId,
+        founderReviewNotes: input.body.founder_review_notes,
+        withdrawnAt,
+      });
+      if (withdrawn === null) throw caseNotFoundError();
+      return {
+        data: {
+          request_id: withdrawn.requestId,
+          case_id: withdrawn.caseId,
+          status: withdrawn.status,
+          resolved_at: withdrawn.resolvedAt.toISOString(),
+          stage: withdrawn.stage,
+        },
+      };
+    } catch (error) {
+      if (error instanceof CaseReviewConflictError) {
+        throw reviewConflictError("withdraw this information request", error);
       }
       throw error;
     }

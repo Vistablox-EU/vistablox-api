@@ -5,6 +5,7 @@ import {
   canCloseCase,
   canRecordFounderDecision,
   canRecordPartnerWriteback,
+  canWithdrawInformationRequest,
   evaluateInformationRequestPublication,
   isApplicantReminderDue,
   isInformationRequestOverdue,
@@ -52,6 +53,21 @@ describe("origination founder-review policy", () => {
     for (const stage of ["post_ipo_structuring", "approved_for_final_offering", "rejected", "withdrawn", "expired"]) {
       expect(canCloseCase({ stage, outcome: "withdrawn" })).toBe(false);
     }
+  });
+
+  it("allows withdrawing an information request only from waiting_on_applicant while it is still published", () => {
+    expect(
+      canWithdrawInformationRequest({ caseStage: "waiting_on_applicant", requestStatus: "published" }),
+    ).toBe(true);
+    expect(
+      canWithdrawInformationRequest({ caseStage: "submitted", requestStatus: "published" }),
+    ).toBe(false);
+    expect(
+      canWithdrawInformationRequest({ caseStage: "waiting_on_applicant", requestStatus: "answered" }),
+    ).toBe(false);
+    expect(
+      canWithdrawInformationRequest({ caseStage: "waiting_on_applicant", requestStatus: "withdrawn" }),
+    ).toBe(false);
   });
 
   it("allows a late-stage reject only from pre-offering open, distinct from the submitted-stage initial review", () => {
