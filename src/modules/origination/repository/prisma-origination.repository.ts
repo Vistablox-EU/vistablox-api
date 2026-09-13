@@ -389,6 +389,8 @@ export class PrismaOriginationRepository
         ipoPeriodDays: true,
         ipoEndAt: true,
         ipoValueEur: true,
+        legalPracticeId: true,
+        appraisalFirmId: true,
         currentSubmissionRevision: {
           select: {
             id: true,
@@ -439,6 +441,8 @@ export class PrismaOriginationRepository
       ipoPeriodDays: originationCase.ipoPeriodDays,
       ipoEndAt: originationCase.ipoEndAt,
       ipoValueEur: originationCase.ipoValueEur?.toFixed(2) ?? null,
+      legalPracticeId: originationCase.legalPracticeId,
+      appraisalFirmId: originationCase.appraisalFirmId,
       submission:
         originationCase.currentSubmissionRevision === null
           ? null

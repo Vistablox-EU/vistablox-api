@@ -121,6 +121,8 @@ export interface OperationsCaseDetail extends OwnedOriginationCase {
   ipoPeriodDays: number | null;
   ipoEndAt: Date | null;
   ipoValueEur: string | null;
+  legalPracticeId: string | null;
+  appraisalFirmId: string | null;
   submission: {
     revisionId: string;
     revisionNumber: number;

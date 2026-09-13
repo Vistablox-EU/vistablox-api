@@ -53,6 +53,8 @@ const operationsCase: OperationsCaseDetail = {
     hasExistingEncumbrance: false,
   },
   applicantAccountId: "acct_owner",
+  legalPracticeId: null,
+  appraisalFirmId: null,
   founderReviewNotes: null,
   reviewedByAccountId: null,
   approvedAt: null,
@@ -252,7 +254,27 @@ describe("founder review and information requests", () => {
     expect(response.body.data).toMatchObject({
       case_id: "case_01",
       applicant_account_id: "acct_owner",
+      legal_practice_id: null,
+      appraisal_firm_id: null,
       submission: { revision_id: "rev_01", revision_number: 1 },
+    });
+  });
+
+  it("surfaces the case's currently assigned legal practice and appraisal firm on page load", async () => {
+    const { app } = buildApp({
+      caseRecord: {
+        ...operationsCase,
+        legalPracticeId: "practice_01",
+        appraisalFirmId: "firm_01",
+      },
+    });
+
+    const response = await request(app).get("/internal/v1/origination-cases/case_01");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      legal_practice_id: "practice_01",
+      appraisal_firm_id: "firm_01",
     });
   });
 

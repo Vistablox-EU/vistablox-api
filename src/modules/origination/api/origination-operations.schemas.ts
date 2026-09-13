@@ -88,6 +88,8 @@ const operationsInformationRequestSchema = z.object({
 export const operationsCaseDetailResponseSchema = z.object({
   data: ownedCaseSchema.extend({
     applicant_account_id: z.string(),
+    legal_practice_id: z.string().nullable(),
+    appraisal_firm_id: z.string().nullable(),
     founder_review: z.object({
       notes: z.string().nullable(),
       reviewed_by_account_id: z.string().nullable(),
