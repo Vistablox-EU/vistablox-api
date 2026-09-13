@@ -100,6 +100,26 @@ services:
       DIDIT_ENVIRONMENT: ${DIDIT_ENVIRONMENT}
       RESERVATION_FUNDING_RAIL_ENABLED: ${RESERVATION_FUNDING_RAIL_ENABLED:-false}
       EMAIL_VERIFICATION_ENABLED: ${EMAIL_VERIFICATION_ENABLED:-false}
+      # Optional on-chain settlement integration (AD-163/AD-256/AD-241) --
+      # pre-existing gap, this anchor never passed any of these through even
+      # though environment.ts has supported them for a while. All empty
+      # until deployed contracts + a funded testnet operator key exist for
+      # this environment; loadEnvironment() treats CHAIN_NETWORK/CHAIN_RPC_URL/
+      # CHAIN_OPERATOR_PRIVATE_KEY/VISTABLOX_PROPERTY_CONTRACT_ADDRESS/
+      # VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS/EURC_TOKEN_ADDRESS/
+      # PIV_TREASURY_ADDRESS as all-together-or-none. Testnet-scoped per
+      # AD-234 (production blockchain settlement stays dormant pending a
+      # written-counsel memo).
+      CHAIN_NETWORK: ${CHAIN_NETWORK:-}
+      CHAIN_RPC_URL: ${CHAIN_RPC_URL:-}
+      CHAIN_OPERATOR_PRIVATE_KEY: ${CHAIN_OPERATOR_PRIVATE_KEY:-}
+      VISTABLOX_PROPERTY_CONTRACT_ADDRESS: ${VISTABLOX_PROPERTY_CONTRACT_ADDRESS:-}
+      VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS: ${VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS:-}
+      EURC_TOKEN_ADDRESS: ${EURC_TOKEN_ADDRESS:-}
+      PIV_TREASURY_ADDRESS: ${PIV_TREASURY_ADDRESS:-}
+      # AD-241's wallet registry, independently configurable of the CHAIN_*
+      # bundle above -- see environment.ts's own comment on this var for why.
+      VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: ${VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       SMTP_HOST: maildev
       SMTP_PORT: "1025"
