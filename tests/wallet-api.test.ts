@@ -12,6 +12,8 @@ import type { PivTokenHoldingsReader } from "../src/modules/settlement/repositor
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
+const TEST_REGISTRY_ADDRESS = "0x1234567890123456789012345678901234567890";
+
 const eligibleKyc = {
   accountId: "acct_01",
   diditReference: null,
@@ -64,6 +66,7 @@ function buildApp(options?: {
       new RegisterWalletService(
         repository,
         kycEligibilityReader,
+        TEST_REGISTRY_ADDRESS,
         () => new Date("2026-09-02T10:00:00.000Z"),
       ),
     ),
@@ -88,6 +91,7 @@ describe("POST /v1/investor-profile/wallet", () => {
       data: {
         wallet_address: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
         registration_commitment: "commitment_01",
+        registry_contract_address: TEST_REGISTRY_ADDRESS,
         status: "pending",
         requested_at: "2026-09-02T10:00:00.000Z",
         registered_at: null,
@@ -174,7 +178,7 @@ describe("GET /v1/investor-profile/wallet", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
-        new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }),
+        new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         balanceService,
       ),
     );
@@ -252,7 +256,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
-        new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }),
+        new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         undefined,
         transferService,
       ),

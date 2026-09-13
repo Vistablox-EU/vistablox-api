@@ -50,11 +50,16 @@ async function main() {
   const escrowAddress = await escrow.getAddress();
   await escrow.grantRole(await escrow.CAMPAIGN_MANAGER_ROLE(), deployer.address);
 
+  // No constructor args, no roles -- fully permissionless by design (AD-241).
+  const registry = await ethers.deployContract("VistaBloxWalletRegistry", [], deployer);
+  const registryAddress = await registry.getAddress();
+
   console.log("VistaBloxProperty deployed to:", propertyAddress);
   console.log("VistaBloxIpoEscrow deployed to:", escrowAddress, "(EURC:", eurcAddress + ")");
-  console.log("Deployer granted all operational roles on both contracts:", deployer.address);
+  console.log("VistaBloxWalletRegistry deployed to:", registryAddress);
+  console.log("Deployer granted all operational roles on Property + Escrow:", deployer.address);
 
-  return { propertyAddress, escrowAddress, eurcAddress };
+  return { propertyAddress, escrowAddress, eurcAddress, registryAddress };
 }
 
 main().catch((err) => {

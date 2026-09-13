@@ -12,12 +12,28 @@ export class RegisterWalletService {
   public constructor(
     private readonly repository: WalletRepository,
     private readonly kycEligibilityReader: KycEligibilityReader,
+    // undefined until VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS is set --
+    // independently configurable from the rest of the chain-settlement
+    // bundle, see environment.ts.
+    private readonly registryContractAddress: string | undefined,
     private readonly clock: () => Date = () => new Date(),
+    // A 0x-prefixed 32-byte hex string: must be usable directly as the
+    // VistaBloxWalletRegistry.register(bytes32) argument the mobile app
+    // signs and broadcasts (ON_CHAIN_SETTLEMENT.md's Address Registration
+    // flow, step 5-6), not an arbitrary opaque string format.
     private readonly generateCommitment: () => string = () =>
-      randomBytes(32).toString("base64url"),
+      `0x${randomBytes(32).toString("hex")}`,
   ) {}
 
   public async execute(input: { accountId: string; walletAddress: string }) {
+    if (this.registryContractAddress === undefined) {
+      throw new AppError({
+        code: "wallet.on_chain_registration_unavailable",
+        title: "Wallet registration unavailable",
+        status: 503,
+        detail: "On-chain wallet registration is not yet configured for this environment.",
+      });
+    }
     const now = this.clock();
     const kyc = await this.kycEligibilityReader.getEligibilitySnapshot(input.accountId);
     // AD-241: wallet provisioning happens right at KYC approval, before any
@@ -44,7 +60,7 @@ export class RegisterWalletService {
         registrationCommitment: this.generateCommitment(),
         requestedAt: now,
       });
-      return { data: toWalletPayload(wallet) };
+      return { data: toWalletPayload(wallet, this.registryContractAddress) };
     } catch (error) {
       if (error instanceof WalletAddressConflictError) {
         throw walletConflictError(error.reason);
@@ -72,10 +88,13 @@ function walletConflictError(reason: "address_mismatch" | "address_claimed"): Ap
   });
 }
 
-function toWalletPayload(wallet: RegisteredWallet) {
+function toWalletPayload(wallet: RegisteredWallet, registryContractAddress: string | undefined) {
   return {
     wallet_address: wallet.walletAddress,
     registration_commitment: wallet.registrationCommitment,
+    // Guaranteed non-null here: execute() already rejects with a 503
+    // before reaching this point when the registry isn't configured.
+    registry_contract_address: registryContractAddress as string,
     status: wallet.registeredAt === null ? ("pending" as const) : ("registered" as const),
     requested_at: wallet.requestedAt.toISOString(),
     registered_at: wallet.registeredAt?.toISOString() ?? null,
