@@ -10,12 +10,19 @@ import {
   PublishInformationRequestService,
   RecordFounderDecisionService,
   RetryPostIpoStructuringHandoffService,
+  ReviewEvidenceService,
+  WithdrawInformationRequestService,
 } from "../application/operations-case.service.js";
 import {
   ListCaseMessagesForOperationsService,
   PostCaseMessageForOperationsService,
 } from "../application/case-message.service.js";
-import { caseIdParamsSchema, listCaseMessagesResponseSchema, postCaseMessageResponseSchema } from "./origination.schemas.js";
+import {
+  caseIdParamsSchema,
+  informationRequestParamsSchema,
+  listCaseMessagesResponseSchema,
+  postCaseMessageResponseSchema,
+} from "./origination.schemas.js";
 import {
   assignPartnerOrganizationBodySchema,
   assignPartnerOrganizationResponseSchema,
@@ -23,6 +30,7 @@ import {
   closeCaseResponseSchema,
   createStaffCaseBodySchema,
   createStaffCaseResponseSchema,
+  evidenceReviewParamsSchema,
   founderDecisionBodySchema,
   founderDecisionResponseSchema,
   listCaseMessagesQuerySchema,
@@ -33,6 +41,10 @@ import {
   publishInformationRequestBodySchema,
   publishInformationRequestResponseSchema,
   retryPostIpoStructuringHandoffResponseSchema,
+  reviewEvidenceBodySchema,
+  reviewEvidenceResponseSchema,
+  withdrawInformationRequestBodySchema,
+  withdrawInformationRequestResponseSchema,
 } from "./origination-operations.schemas.js";
 
 export function createOriginationOperationsRouter(
@@ -48,6 +60,8 @@ export function createOriginationOperationsRouter(
   postCaseMessage: PostCaseMessageForOperationsService,
   createStaffCase: CreateStaffOriginationCaseService,
   retryPostIpoStructuringHandoff: RetryPostIpoStructuringHandoffService,
+  reviewEvidence: ReviewEvidenceService,
+  withdrawInformationRequest: WithdrawInformationRequestService,
   // Optional: only present once the partner-organizations feature
   // (protectedApi.partnerOrganizations) is configured, unlike everything
   // else on this router, which is unconditional. See app.ts.
@@ -92,6 +106,24 @@ export function createOriginationOperationsRouter(
     response.status(201).json(publishInformationRequestResponseSchema.parse(result));
   });
 
+  router.post(
+    "/:case_id/information-requests/:request_id/withdraw",
+    ...staffOnly,
+    async (request, response) => {
+      const authContext = requireAuthContext(response.locals.authContext);
+      const params = informationRequestParamsSchema.parse(request.params);
+      const body = withdrawInformationRequestBodySchema.parse(request.body);
+      const result = await withdrawInformationRequest.execute({
+        accountId: authContext.accountId,
+        caseId: params.case_id,
+        requestId: params.request_id,
+        traceId: String(response.locals.traceId),
+        body,
+      });
+      response.json(withdrawInformationRequestResponseSchema.parse(result));
+    },
+  );
+
   router.post("/:case_id/decisions", ...staffOnly, async (request, response) => {
     const authContext = requireAuthContext(response.locals.authContext);
     const params = caseIdParamsSchema.parse(request.params);
@@ -125,6 +157,25 @@ export function createOriginationOperationsRouter(
       traceId: String(response.locals.traceId),
     });
     response.json(retryPostIpoStructuringHandoffResponseSchema.parse(result));
+  });
+
+  // PUT, not POST: a full replace of the evidence document's review state
+  // (status + review_notes together), not an append -- unlike every other
+  // subresource action on this router. Purely advisory: this never gates
+  // canRecordFounderDecision or anything else, and is reviewable at any
+  // case stage (no stage restriction, unlike /decisions and /close above).
+  router.put("/:case_id/evidence/:evidence_id/review", ...staffOnly, async (request, response) => {
+    const authContext = requireAuthContext(response.locals.authContext);
+    const params = evidenceReviewParamsSchema.parse(request.params);
+    const body = reviewEvidenceBodySchema.parse(request.body);
+    const result = await reviewEvidence.execute({
+      accountId: authContext.accountId,
+      caseId: params.case_id,
+      evidenceId: params.evidence_id,
+      traceId: String(response.locals.traceId),
+      body,
+    });
+    response.json(reviewEvidenceResponseSchema.parse(result));
   });
 
   if (assignPartnerOrganization !== undefined) {

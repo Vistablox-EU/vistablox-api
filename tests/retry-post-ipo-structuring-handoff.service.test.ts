@@ -79,6 +79,8 @@ function fakeRepository(overrides: Partial<OriginationRepository> = {}): Origina
     resubmitAfterInformationRequest: vi.fn(),
     recordFounderDecision: vi.fn(),
     closeCase: vi.fn(),
+    reviewEvidence: vi.fn(),
+    withdrawInformationRequest: vi.fn(),
     listCaseMessages: vi.fn(),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),

@@ -6,6 +6,8 @@ import type {
   FounderDecisionBody,
   OperationsCaseListQuery,
   PublishInformationRequestBody,
+  ReviewEvidenceBody,
+  WithdrawInformationRequestBody,
 } from "../api/origination-operations.schemas.js";
 import { originationCaseStageSchema } from "../api/origination.schemas.js";
 import {
@@ -13,6 +15,7 @@ import {
   canAssignPartnerOrganization,
   canCloseCase,
   canRecordFounderDecision,
+  canWithdrawInformationRequest,
   evaluateInformationRequestPublication,
 } from "../domain/case-review.policy.js";
 import { evaluateInitialCaseSubmission } from "../domain/case-submission.policy.js";
@@ -21,6 +24,8 @@ import type { PartnerOrganizationRepository } from "../repository/partner-organi
 import {
   ApplicantAccountNotFoundError,
   CaseReviewConflictError,
+  EvidenceCaseMismatchError,
+  EvidenceNotFoundError,
   type InformationRequestRecord,
   type OperationsCaseDetail,
   type OriginationRepository,
@@ -126,6 +131,69 @@ export class PublishInformationRequestService {
   }
 }
 
+// A targeted walk-back for a single mistakenly-published information
+// request, distinct from CloseCaseService below: this reverts only the one
+// request and puts the case back to reviewing the same submission revision
+// it was already on, instead of terminating the whole case.
+export class WithdrawInformationRequestService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    accountId: string;
+    caseId: string;
+    requestId: string;
+    traceId: string;
+    body: WithdrawInformationRequestBody;
+  }) {
+    const originationCase = await this.repository.getCaseForOperations(input.caseId);
+    if (originationCase === null) throw caseNotFoundError();
+
+    const request = originationCase.informationRequests.find(
+      (candidate) => candidate.requestId === input.requestId,
+    );
+    if (request === undefined) throw caseNotFoundError();
+
+    if (
+      !canWithdrawInformationRequest({
+        caseStage: originationCase.stage,
+        requestStatus: request.status,
+      })
+    ) {
+      throw reviewConflictError("withdraw this information request");
+    }
+
+    const withdrawnAt = this.clock();
+    try {
+      const withdrawn = await this.repository.withdrawInformationRequest({
+        accountId: input.accountId,
+        caseId: input.caseId,
+        requestId: input.requestId,
+        traceId: input.traceId,
+        founderReviewNotes: input.body.founder_review_notes,
+        withdrawnAt,
+      });
+      if (withdrawn === null) throw caseNotFoundError();
+      return {
+        data: {
+          request_id: withdrawn.requestId,
+          case_id: withdrawn.caseId,
+          status: withdrawn.status,
+          resolved_at: withdrawn.resolvedAt.toISOString(),
+          stage: withdrawn.stage,
+        },
+      };
+    } catch (error) {
+      if (error instanceof CaseReviewConflictError) {
+        throw reviewConflictError("withdraw this information request", error);
+      }
+      throw error;
+    }
+  }
+}
+
 export class RecordFounderDecisionService {
   public constructor(
     private readonly repository: OriginationRepository,
@@ -188,6 +256,55 @@ export class RecordFounderDecisionService {
       if (error instanceof CaseReviewConflictError) {
         throw reviewConflictError("record a founder decision", error);
       }
+      throw error;
+    }
+  }
+}
+
+// Purely advisory: nothing today reads documentary_screening_evidence.status
+// for any decision (canRecordFounderDecision included), and this doesn't
+// change that -- it only lets staff record what they found. No case-stage
+// restriction either, by the same design call: reviewable at any stage. So,
+// unlike RecordFounderDecisionService above, there's no domain-policy check
+// here -- existence and case-ownership validation both happen inside
+// repository.reviewEvidence's own transaction.
+export class ReviewEvidenceService {
+  public constructor(
+    private readonly repository: OriginationRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
+
+  public async execute(input: {
+    accountId: string;
+    caseId: string;
+    evidenceId: string;
+    traceId: string;
+    body: ReviewEvidenceBody;
+  }) {
+    const reviewedAt = this.clock();
+    try {
+      const reviewed = await this.repository.reviewEvidence({
+        accountId: input.accountId,
+        caseId: input.caseId,
+        evidenceId: input.evidenceId,
+        traceId: input.traceId,
+        status: input.body.status,
+        reviewNotes: input.body.review_notes,
+        reviewedAt,
+      });
+      return {
+        data: {
+          evidence_id: reviewed.evidenceId,
+          case_id: reviewed.caseId,
+          status: reviewed.status,
+          reviewed_by_account_id: reviewed.reviewedByAccountId,
+          reviewed_at: reviewed.reviewedAt.toISOString(),
+          review_notes: reviewed.reviewNotes,
+        },
+      };
+    } catch (error) {
+      if (error instanceof EvidenceNotFoundError) throw evidenceNotFoundError();
+      if (error instanceof EvidenceCaseMismatchError) throw evidenceCaseMismatchError(error);
       throw error;
     }
   }
@@ -503,6 +620,9 @@ function toOperationsResponse(input: OperationsCaseDetail) {
               document_ref: evidence.documentRef,
               extract_dated: evidence.extractDated?.toISOString() ?? null,
               uploaded_at: evidence.uploadedAt.toISOString(),
+              reviewed_by_account_id: evidence.reviewedByAccountId,
+              reviewed_at: evidence.reviewedAt?.toISOString() ?? null,
+              review_notes: evidence.reviewNotes,
             })),
           },
     information_requests: input.informationRequests.map(toInformationRequestResponse),
@@ -554,6 +674,25 @@ function postIpoHandoffNotReadyError(): AppError {
     status: 409,
     detail:
       "The case's offering has not reached final_offering_published_at, so the automatic post-IPO structuring handoff was never expected to fire for it.",
+  });
+}
+
+function evidenceNotFoundError(): AppError {
+  return new AppError({
+    code: "origination.evidence_not_found",
+    title: "Evidence not found",
+    status: 404,
+    detail: "The requested evidence document was not found.",
+  });
+}
+
+function evidenceCaseMismatchError(cause?: unknown): AppError {
+  return new AppError({
+    code: "origination.evidence_case_mismatch",
+    title: "Evidence does not belong to this case",
+    status: 409,
+    detail: "The requested evidence document does not belong to the given case.",
+    cause,
   });
 }
 

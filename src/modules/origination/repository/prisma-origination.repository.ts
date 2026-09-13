@@ -6,7 +6,12 @@ import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
-import { ApplicantAccountNotFoundError, CaseSubmissionConflictError } from "./origination.repository.js";
+import {
+  ApplicantAccountNotFoundError,
+  CaseSubmissionConflictError,
+  EvidenceCaseMismatchError,
+  EvidenceNotFoundError,
+} from "./origination.repository.js";
 import type {
   PostIpoStructuringHandoffRepository,
   TransitionedToPostIpoStructuring,
@@ -37,9 +42,12 @@ import type {
   RecordedFounderDecision,
   RecordLegalStructuringInput,
   ResubmittedCase,
+  ReviewedEvidence,
+  ReviewEvidenceInput,
   SubmitInitialCaseInput,
   SubmittedCase,
   ThreadLane,
+  WithdrawnInformationRequest,
 } from "./origination.repository.js";
 import { CaseReviewConflictError } from "./origination.repository.js";
 
@@ -470,6 +478,9 @@ export class PrismaOriginationRepository
                 documentRef: true,
                 extractDated: true,
                 uploadedAt: true,
+                reviewedByAccountId: true,
+                reviewedAt: true,
+                reviewNotes: true,
               },
             },
           },
@@ -532,6 +543,9 @@ export class PrismaOriginationRepository
                 documentRef: evidence.documentRef,
                 extractDated: evidence.extractDated,
                 uploadedAt: evidence.uploadedAt,
+                reviewedByAccountId: evidence.reviewedByAccountId,
+                reviewedAt: evidence.reviewedAt,
+                reviewNotes: evidence.reviewNotes,
               })),
             },
       informationRequests: originationCase.informationRequests.map(toInformationRequest),
@@ -1061,6 +1075,91 @@ export class PrismaOriginationRepository
     });
   }
 
+  // Targeted counterpart to expireInformationRequest above: same
+  // $transaction + row-lock + existence/status recheck shape, but instead
+  // of expiring the request and terminating the case, it withdraws just the
+  // request and hands the case back to "submitted" -- the same revert
+  // resubmitAfterInformationRequest below performs on a normal answer,
+  // copied verbatim here since staff withdrawing a mistaken RFI must leave
+  // the case exactly where a correct resubmission would have. Unlike
+  // resubmitAfterInformationRequest, currentSubmissionRevisionId is left
+  // untouched: there is no new revision, the case resumes reviewing the one
+  // it was already on.
+  public async withdrawInformationRequest(input: {
+    accountId: string;
+    caseId: string;
+    requestId: string;
+    traceId: string;
+    founderReviewNotes: string | null;
+    withdrawnAt: Date;
+  }): Promise<WithdrawnInformationRequest | null> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ case_id: string }>>`
+        SELECT case_id
+        FROM origination.origination_cases
+        WHERE case_id = ${input.caseId}
+        FOR UPDATE
+      `;
+      if (locked.length === 0) return null;
+
+      const current = await transaction.originationCase.findUniqueOrThrow({
+        where: { id: input.caseId },
+        select: {
+          stage: true,
+          informationRequests: {
+            where: { id: input.requestId },
+            take: 1,
+            select: { id: true, status: true },
+          },
+        },
+      });
+      const request = current.informationRequests[0];
+      if (current.stage !== "waiting_on_applicant" || request?.status !== "published") {
+        throw new CaseReviewConflictError(current.stage, "withdraw this information request");
+      }
+
+      await transaction.informationRequest.update({
+        where: { id: input.requestId },
+        data: {
+          status: "withdrawn",
+          resolvedAt: input.withdrawnAt,
+          resolutionType: "withdrawn",
+        },
+      });
+      await transaction.originationCase.update({
+        where: { id: input.caseId },
+        data: {
+          stage: "submitted",
+          updatedAt: input.withdrawnAt,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "origination.information_request_withdrawn",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            request_id: input.requestId,
+            previous_stage: "waiting_on_applicant",
+            new_stage: "submitted",
+            founder_review_notes: input.founderReviewNotes,
+          },
+          createdAt: input.withdrawnAt,
+        },
+      });
+      return {
+        requestId: input.requestId,
+        caseId: input.caseId,
+        status: "withdrawn",
+        resolvedAt: input.withdrawnAt,
+        stage: "submitted",
+      };
+    });
+  }
+
   public async getOwnedInformationRequest(
     accountId: string,
     caseId: string,
@@ -1290,6 +1389,61 @@ export class PrismaOriginationRepository
         stage,
         decidedAt: input.decidedAt,
         ipoEndAt: input.decision === "approve" ? input.ipoEndAt : null,
+      };
+    });
+  }
+
+  // Purely advisory (nothing reads documentary_screening_evidence.status
+  // for any decision) and reviewable at any case stage, so this locks and
+  // validates the evidence row itself rather than the case row every other
+  // write above locks -- there's no case-stage recheck to protect. Throws
+  // EvidenceNotFoundError if no row exists with that id at all, or
+  // EvidenceCaseMismatchError if it exists under a different case.
+  public async reviewEvidence(input: ReviewEvidenceInput): Promise<ReviewedEvidence> {
+    return this.database.$transaction(async (transaction) => {
+      const locked = await transaction.$queryRaw<Array<{ evidence_id: string; case_id: string }>>`
+        SELECT evidence_id, case_id
+        FROM origination.documentary_screening_evidence
+        WHERE evidence_id = ${input.evidenceId}
+        FOR UPDATE
+      `;
+      const row = locked[0];
+      if (row === undefined) throw new EvidenceNotFoundError(input.evidenceId);
+      if (row.case_id !== input.caseId) {
+        throw new EvidenceCaseMismatchError(input.evidenceId, input.caseId);
+      }
+
+      await transaction.documentaryScreeningEvidence.update({
+        where: { id: input.evidenceId },
+        data: {
+          status: input.status,
+          reviewedByAccountId: input.accountId,
+          reviewedAt: input.reviewedAt,
+          reviewNotes: input.reviewNotes,
+        },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          actorAccountId: input.accountId,
+          action: "origination.evidence_reviewed",
+          resourceType: "origination_case",
+          resourceId: input.caseId,
+          changes: {
+            trace_id: input.traceId,
+            evidence_id: input.evidenceId,
+            status: input.status,
+            review_notes: input.reviewNotes,
+          },
+        },
+      });
+      return {
+        evidenceId: input.evidenceId,
+        caseId: input.caseId,
+        status: input.status,
+        reviewedByAccountId: input.accountId,
+        reviewedAt: input.reviewedAt,
+        reviewNotes: input.reviewNotes,
       };
     });
   }
