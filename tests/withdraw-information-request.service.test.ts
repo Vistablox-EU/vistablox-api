@@ -102,6 +102,7 @@ function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationR
     }),
     recordFounderDecision: vi.fn(),
     closeCase: vi.fn(),
+    reviewEvidence: vi.fn(),
     listCaseMessages: vi.fn(),
     postCaseMessage: vi.fn(),
     listPublishedInformationRequestsForTimers: vi.fn(),

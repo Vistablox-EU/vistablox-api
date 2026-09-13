@@ -9,6 +9,8 @@ import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-k
 import { PrismaAccountRepository } from "../src/modules/account/repository/prisma-account.repository.js";
 import {
   ApplicantAccountNotFoundError,
+  EvidenceCaseMismatchError,
+  EvidenceNotFoundError,
 } from "../src/modules/origination/repository/origination.repository.js";
 import { PrismaOriginationRepository } from "../src/modules/origination/repository/prisma-origination.repository.js";
 
@@ -29,6 +31,7 @@ describe.skipIf(databaseUrl === undefined)(
     let originationRepository: PrismaOriginationRepository;
     const accountRepository = new PrismaAccountRepository(database);
     let createdCaseId = "";
+    let firstEvidenceId = "";
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
@@ -135,6 +138,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
       expect(evidence).toHaveLength(4);
       expect(evidence.every((item) => item.status === "pending")).toBe(true);
+      firstEvidenceId = evidence[0]?.id ?? "";
 
       const audit = await database.auditLog.findFirst({
         where: { action: "origination.case_created_by_staff", resourceId: created.caseId },
@@ -280,6 +284,96 @@ describe.skipIf(databaseUrl === undefined)(
           ],
         }),
       ).rejects.toThrow(ApplicantAccountNotFoundError);
+    });
+
+    it("records a staff review decision on a submitted evidence document", async () => {
+      // Guards the dependency on test 1 above having actually set this:
+      // an empty id here would make the EvidenceNotFoundError test below
+      // pass for the wrong reason (no row matches "") rather than because
+      // reviewEvidence itself correctly rejects a missing id.
+      expect(firstEvidenceId).not.toBe("");
+
+      const reviewedAt = new Date();
+      const reviewed = await originationRepository.reviewEvidence({
+        accountId: staffAccountId,
+        caseId: createdCaseId,
+        evidenceId: firstEvidenceId,
+        traceId: `trace_${suffix}_review`,
+        status: "accepted",
+        reviewNotes: "Registry extract matches the declared owner.",
+        reviewedAt,
+      });
+
+      expect(reviewed).toMatchObject({
+        evidenceId: firstEvidenceId,
+        caseId: createdCaseId,
+        status: "accepted",
+        reviewedByAccountId: staffAccountId,
+        reviewNotes: "Registry extract matches the declared owner.",
+      });
+
+      const row = await database.documentaryScreeningEvidence.findUniqueOrThrow({
+        where: { id: firstEvidenceId },
+      });
+      expect(row.status).toBe("accepted");
+      expect(row.reviewedByAccountId).toBe(staffAccountId);
+      expect(row.reviewNotes).toBe("Registry extract matches the declared owner.");
+      expect(row.reviewedAt).not.toBeNull();
+
+      const audit = await database.auditLog.findFirst({
+        where: { action: "origination.evidence_reviewed", resourceId: createdCaseId },
+      });
+      expect(audit?.actorAccountId).toBe(staffAccountId);
+      expect(audit?.changes).toMatchObject({
+        evidence_id: firstEvidenceId,
+        status: "accepted",
+      });
+    });
+
+    it("throws EvidenceNotFoundError for an evidence id that doesn't exist", async () => {
+      await expect(
+        originationRepository.reviewEvidence({
+          accountId: staffAccountId,
+          caseId: createdCaseId,
+          evidenceId: `evidence_missing_${suffix}`,
+          traceId: `trace_${suffix}_missing_evidence`,
+          status: "accepted",
+          reviewNotes: null,
+          reviewedAt: new Date(),
+        }),
+      ).rejects.toThrow(EvidenceNotFoundError);
+    });
+
+    it("throws EvidenceCaseMismatchError when the evidence belongs to a different case", async () => {
+      await expect(
+        originationRepository.reviewEvidence({
+          accountId: staffAccountId,
+          caseId: `case_wrong_${suffix}`,
+          evidenceId: firstEvidenceId,
+          traceId: `trace_${suffix}_mismatched_case`,
+          status: "accepted",
+          reviewNotes: null,
+          reviewedAt: new Date(),
+        }),
+      ).rejects.toThrow(EvidenceCaseMismatchError);
+    });
+
+    // Forces "rejected" with nulled reviewer fields directly, bypassing
+    // reviewEvidence entirely -- violates the CHECK regardless of the row's
+    // current status (pending or already-reviewed by the test above), so
+    // this doesn't actually depend on that test having run first.
+    it("refuses a review write inconsistent with documentary_screening_evidence_review_consistency_check, defense-in-depth beneath the service layer", async () => {
+      await expect(
+        database.documentaryScreeningEvidence.update({
+          where: { id: firstEvidenceId },
+          data: {
+            status: "rejected",
+            reviewedByAccountId: null,
+            reviewedAt: null,
+            reviewNotes: null,
+          },
+        }),
+      ).rejects.toThrow(/documentary_screening_evidence_review_consistency_check/);
     });
 
     it("finds every account sharing an email, case-insensitively, and excludes others", async () => {

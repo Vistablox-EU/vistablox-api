@@ -92,6 +92,7 @@ function buildApp(options?: {
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     withdrawInformationRequest: vi.fn(),
     closeCase: vi.fn().mockResolvedValue(null),
+    reviewEvidence: vi.fn(),
     listCaseMessages: vi.fn().mockResolvedValue([]),
     postCaseMessage: vi.fn().mockResolvedValue(null),
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),

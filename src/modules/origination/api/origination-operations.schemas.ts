@@ -20,6 +20,11 @@ export const listCaseMessagesQuerySchema = z.object({
   lane: threadLaneSchema,
 });
 
+export const evidenceReviewParamsSchema = z.object({
+  case_id: z.string().min(1),
+  evidence_id: z.string().min(1),
+});
+
 export const postOperationsCaseMessageBodySchema = z.object({
   lane: threadLaneSchema,
   body: z.string().trim().min(1).max(5000),
@@ -107,6 +112,12 @@ const operationsInformationRequestSchema = z.object({
   resolving_revision_id: z.string().nullable(),
 });
 
+// The full evidence review vocabulary the documentary_screening_evidence_
+// status_check CHECK constraint already fixes (added in
+// 20260831170000_origination_review_workflow, unchanged since): "pending" is
+// the only value that arrives without a review ever having happened.
+const evidenceStatusSchema = z.enum(["pending", "mandatory_missing", "accepted", "rejected"]);
+
 export const operationsCaseDetailResponseSchema = z.object({
   data: ownedCaseSchema.extend({
     applicant_account_id: z.string(),
@@ -134,15 +145,48 @@ export const operationsCaseDetailResponseSchema = z.object({
           z.object({
             evidence_id: z.string(),
             document_type: z.string(),
-            status: z.string(),
+            status: evidenceStatusSchema,
             document_ref: z.string(),
             extract_dated: z.iso.datetime().nullable(),
             uploaded_at: z.iso.datetime(),
+            reviewed_by_account_id: z.string().nullable(),
+            reviewed_at: z.iso.datetime().nullable(),
+            review_notes: z.string().nullable(),
           }),
         ),
       })
       .nullable(),
     information_requests: z.array(operationsInformationRequestSchema),
+  }),
+});
+
+// This is purely advisory: nothing today reads evidence status for any
+// decision (canRecordFounderDecision included), and this endpoint doesn't
+// change that -- it only lets staff record what they found. No case-stage
+// restriction either, by the same design call: reviewable at any stage.
+export const reviewEvidenceBodySchema = z.discriminatedUnion("status", [
+  z.object({
+    status: z.literal("accepted"),
+    review_notes: z.string().trim().max(2000).nullable().default(null),
+  }),
+  z.object({
+    status: z.literal("rejected"),
+    review_notes: z.string().trim().min(1).max(2000),
+  }),
+  z.object({
+    status: z.literal("mandatory_missing"),
+    review_notes: z.string().trim().min(1).max(2000),
+  }),
+]);
+
+export const reviewEvidenceResponseSchema = z.object({
+  data: z.object({
+    evidence_id: z.string(),
+    case_id: z.string(),
+    status: z.enum(["accepted", "rejected", "mandatory_missing"]),
+    reviewed_by_account_id: z.string(),
+    reviewed_at: z.iso.datetime(),
+    review_notes: z.string().nullable(),
   }),
 });
 
@@ -263,3 +307,4 @@ export type CloseCaseBody = z.infer<typeof closeCaseBodySchema>;
 export type AssignPartnerOrganizationBody = z.infer<typeof assignPartnerOrganizationBodySchema>;
 export type ListCaseMessagesQuery = z.infer<typeof listCaseMessagesQuerySchema>;
 export type PostOperationsCaseMessageBody = z.infer<typeof postOperationsCaseMessageBodySchema>;
+export type ReviewEvidenceBody = z.infer<typeof reviewEvidenceBodySchema>;

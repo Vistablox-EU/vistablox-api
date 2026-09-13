@@ -11,8 +11,14 @@ import type {
   OperationsCaseDetail,
   OriginationRepository,
   PublishedInformationRequest,
+  ReviewedEvidence,
+  ReviewEvidenceInput,
   SubmitInitialCaseInput,
   WithdrawnInformationRequest,
+} from "../src/modules/origination/repository/origination.repository.js";
+import {
+  EvidenceCaseMismatchError,
+  EvidenceNotFoundError,
 } from "../src/modules/origination/repository/origination.repository.js";
 
 const validDocuments = [
@@ -138,6 +144,16 @@ function buildApp(options?: {
     stage: input.outcome,
     closedAt: input.closedAt,
   }));
+  const reviewEvidence = vi.fn(
+    async (input: ReviewEvidenceInput): Promise<ReviewedEvidence> => ({
+      evidenceId: input.evidenceId,
+      caseId: input.caseId,
+      status: input.status,
+      reviewedByAccountId: input.accountId,
+      reviewedAt: input.reviewedAt,
+      reviewNotes: input.reviewNotes,
+    }),
+  );
   const withdrawInformationRequest = vi.fn(
     async (input: {
       caseId: string;
@@ -204,6 +220,7 @@ function buildApp(options?: {
     expireInformationRequest: vi.fn().mockResolvedValue(false),
     withdrawInformationRequest,
     closeCase,
+    reviewEvidence,
     listCaseMessages,
     postCaseMessage,
     getCasePartnerAssignment: vi.fn().mockResolvedValue(null),
@@ -236,6 +253,7 @@ function buildApp(options?: {
     recordFounderDecision,
     resubmitAfterInformationRequest,
     closeCase,
+    reviewEvidence,
     withdrawInformationRequest,
     listCaseMessages,
     postCaseMessage,
@@ -550,6 +568,157 @@ describe("closing a case (withdraw or late-stage reject)", () => {
 
     expect(response.status).toBe(409);
     expect(closeCase).not.toHaveBeenCalled();
+  });
+});
+
+describe("reviewing a submitted evidence document (PUT, full-replace)", () => {
+  it("denies the internal surface to a customer", async () => {
+    const { app, reviewEvidence } = buildApp({ population: "customer", hasAdminRole: true });
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "accepted", review_notes: null });
+
+    expect(response.status).toBe(403);
+    expect(reviewEvidence).not.toHaveBeenCalled();
+  });
+
+  it("denies staff without an active admin operations assignment", async () => {
+    const { app, reviewEvidence } = buildApp({ hasAdminRole: false });
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "accepted", review_notes: null });
+
+    expect(response.status).toBe(403);
+    expect(reviewEvidence).not.toHaveBeenCalled();
+  });
+
+  it("accepts evidence with an explicit review note", async () => {
+    const { app, reviewEvidence } = buildApp();
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "accepted", review_notes: "Registry extract matches the declared owner." });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({
+      evidence_id: "ev_01",
+      case_id: "case_01",
+      status: "accepted",
+      reviewed_by_account_id: "acct_founder",
+      review_notes: "Registry extract matches the declared owner.",
+    });
+    expect(reviewEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "acct_founder",
+        caseId: "case_01",
+        evidenceId: "ev_01",
+        status: "accepted",
+        reviewNotes: "Registry extract matches the declared owner.",
+      }),
+    );
+  });
+
+  // Asserts PUT's full-replace semantics, not just a default: reviewNotes
+  // reaches the repository as an explicit null rather than being omitted,
+  // so a later re-review can't silently keep an old note around (the
+  // repository writes all four review fields unconditionally on every
+  // call for exactly this reason).
+  it("accepts evidence with no review note (defaults to null)", async () => {
+    const { app, reviewEvidence } = buildApp();
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "accepted" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.review_notes).toBeNull();
+    expect(reviewEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "accepted", reviewNotes: null }),
+    );
+  });
+
+  it("rejects evidence given a review note", async () => {
+    const { app, reviewEvidence } = buildApp();
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "rejected", review_notes: "Document is illegible." });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.status).toBe("rejected");
+    expect(reviewEvidence).toHaveBeenCalledWith(
+      expect.objectContaining({ status: "rejected", reviewNotes: "Document is illegible." }),
+    );
+  });
+
+  it("422s a rejection missing its required review note", async () => {
+    const { app, reviewEvidence } = buildApp();
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "rejected" });
+
+    expect(response.status).toBe(422);
+    expect(reviewEvidence).not.toHaveBeenCalled();
+  });
+
+  it("marks evidence mandatory_missing given a review note", async () => {
+    const { app, reviewEvidence } = buildApp();
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "mandatory_missing", review_notes: "Applicant never uploaded this document." });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.status).toBe("mandatory_missing");
+  });
+
+  it("422s a mandatory_missing status missing its required review note", async () => {
+    const { app, reviewEvidence } = buildApp();
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "mandatory_missing" });
+
+    expect(response.status).toBe(422);
+    expect(reviewEvidence).not.toHaveBeenCalled();
+  });
+
+  it("422s an unrecognized status value", async () => {
+    const { app, reviewEvidence } = buildApp();
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_01/review")
+      .send({ status: "pending" });
+
+    expect(response.status).toBe(422);
+    expect(reviewEvidence).not.toHaveBeenCalled();
+  });
+
+  it("404s reviewing evidence that doesn't exist", async () => {
+    const { app, reviewEvidence } = buildApp();
+    reviewEvidence.mockRejectedValueOnce(new EvidenceNotFoundError("ev_missing"));
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_missing/review")
+      .send({ status: "accepted", review_notes: null });
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe("origination.evidence_not_found");
+  });
+
+  it("409s reviewing evidence that belongs to a different case", async () => {
+    const { app, reviewEvidence } = buildApp();
+    reviewEvidence.mockRejectedValueOnce(new EvidenceCaseMismatchError("ev_other", "case_01"));
+
+    const response = await request(app)
+      .put("/internal/v1/origination-cases/case_01/evidence/ev_other/review")
+      .send({ status: "accepted", review_notes: null });
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("origination.evidence_case_mismatch");
   });
 });
 

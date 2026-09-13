@@ -167,9 +167,60 @@ export interface OperationsCaseDetail extends OwnedOriginationCase {
       documentRef: string;
       extractDated: Date | null;
       uploadedAt: Date;
+      reviewedByAccountId: string | null;
+      reviewedAt: Date | null;
+      reviewNotes: string | null;
     }>;
   } | null;
   informationRequests: InformationRequestRecord[];
+}
+
+// The three terminal outcomes a review can record -- "pending" isn't
+// reviewable-into, it's only ever the starting value nothing has touched
+// yet (documentary_screening_evidence_status_check and this migration's
+// _review_consistency_check both enforce that pairing at the DB level).
+export type EvidenceReviewStatus = "accepted" | "rejected" | "mandatory_missing";
+
+export interface ReviewEvidenceInput {
+  accountId: string;
+  caseId: string;
+  evidenceId: string;
+  traceId: string;
+  status: EvidenceReviewStatus;
+  reviewNotes: string | null;
+  reviewedAt: Date;
+}
+
+export interface ReviewedEvidence {
+  evidenceId: string;
+  caseId: string;
+  status: EvidenceReviewStatus;
+  reviewedByAccountId: string;
+  reviewedAt: Date;
+  reviewNotes: string | null;
+}
+
+// Thrown by reviewEvidence when no evidence row exists with the given id at
+// all -- maps to a 404 at the service layer.
+export class EvidenceNotFoundError extends Error {
+  public constructor(public readonly evidenceId: string) {
+    super(`No evidence exists with id ${evidenceId}`);
+    this.name = "EvidenceNotFoundError";
+  }
+}
+
+// Thrown by reviewEvidence when the evidence row exists but under a
+// different case than the one in the URL -- a distinct condition from
+// EvidenceNotFoundError above, and mapped to a 409 rather than a 404 since,
+// behind staffOnly, this never needs to hide the row's existence.
+export class EvidenceCaseMismatchError extends Error {
+  public constructor(
+    public readonly evidenceId: string,
+    public readonly caseId: string,
+  ) {
+    super(`Evidence ${evidenceId} does not belong to case ${caseId}`);
+    this.name = "EvidenceCaseMismatchError";
+  }
 }
 
 export interface PublishedInformationRequest extends InformationRequestRecord {
@@ -432,6 +483,13 @@ export interface OriginationRepository {
     input: FounderDecisionInput,
   ): Promise<RecordedFounderDecision | null>;
   closeCase(input: CloseCaseInput): Promise<ClosedCase | null>;
+  // Purely advisory (nothing reads evidence status for any decision, and
+  // this doesn't change that) and reviewable at any case stage, so there's
+  // no accompanying policy check here the way canRecordFounderDecision
+  // gates recordFounderDecision above. Throws EvidenceNotFoundError if no
+  // row exists with that id at all, or EvidenceCaseMismatchError if it
+  // exists under a different case than caseId.
+  reviewEvidence(input: ReviewEvidenceInput): Promise<ReviewedEvidence>;
   // Ownership/existence scoping happens one level up (getOwnedCase for the
   // applicant-lane owner routes, getCaseForOperations for staff), matching
   // how every other write here separates that check from the write itself
