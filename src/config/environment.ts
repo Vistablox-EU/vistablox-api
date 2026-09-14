@@ -236,12 +236,11 @@ const environmentSchema = z
       .enum(["true", "false"])
       .default("false")
       .transform((value) => value === "true"),
-    // Optional on-chain settlement integration (AD-163/AD-256): mint/burn on
-    // the shared VistaBloxProperty contract and open/finalize IPO escrow
-    // campaigns on VistaBloxIpoEscrow. Same "all together or none" shape as
-    // the Coinbase CDP / Didit integrations above -- there is no deployed
-    // contract address for any environment yet, so this simply doesn't run
-    // until every value below is configured together.
+    // Base on-chain connectivity, all-or-none together (see the .refine()
+    // below): required for the property/IPO-escrow settlement bundle
+    // (AD-163/AD-256) below AND, independently, for confirming wallet
+    // registrations (worker.ts's confirmWalletRegistrations), which needs
+    // live chain access but not the settlement bundle itself.
     CHAIN_NETWORK: z.preprocess(
       emptyStringToUndefined,
       z.enum(["base", "base-sepolia"]).optional(),
@@ -254,6 +253,10 @@ const environmentSchema = z
         .regex(/^0x[0-9a-fA-F]{64}$/, "CHAIN_OPERATOR_PRIVATE_KEY must be a 0x-prefixed 32-byte hex key")
         .optional(),
     ),
+    // Mint/burn on the shared VistaBloxProperty contract and open/finalize
+    // IPO escrow campaigns on VistaBloxIpoEscrow (AD-163/AD-256) -- these
+    // four, all-or-none together per the .refine() below, layered on top of
+    // (never instead of) the base CHAIN_* connectivity above.
     VISTABLOX_PROPERTY_CONTRACT_ADDRESS: optionalEthAddress(),
     VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS: optionalEthAddress(),
     EURC_TOKEN_ADDRESS: optionalEthAddress(),
@@ -365,23 +368,47 @@ const environmentSchema = z
   )
   .refine(
     (environment) => {
-      const values = [
+      const baseChainValues = [
         environment.CHAIN_NETWORK,
         environment.CHAIN_RPC_URL,
         environment.CHAIN_OPERATOR_PRIVATE_KEY,
+      ];
+      return (
+        baseChainValues.every((value) => value === undefined) ||
+        baseChainValues.every((value) => value !== undefined)
+      );
+    },
+    {
+      message:
+        "CHAIN_NETWORK, CHAIN_RPC_URL, and CHAIN_OPERATOR_PRIVATE_KEY must be configured together",
+      path: ["CHAIN_NETWORK"],
+    },
+  )
+  .refine(
+    (environment) => {
+      // The property/IPO-escrow settlement bundle: still all-or-none among
+      // themselves, and still requires the base CHAIN_* connectivity above,
+      // but NOT the other way around -- confirmWalletRegistrations
+      // (worker.ts) needs only base connectivity plus
+      // VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS (its own, independently
+      // optional field below), not this bundle. See chain-client.ts's
+      // ChainSettlementConfig for the corresponding optional fields.
+      const settlementValues = [
         environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS,
         environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS,
         environment.EURC_TOKEN_ADDRESS,
         environment.PIV_TREASURY_ADDRESS,
       ];
-      return (
-        values.every((value) => value === undefined) ||
-        values.every((value) => value !== undefined)
-      );
+      const settlementAllUndefined = settlementValues.every((value) => value === undefined);
+      const settlementAllDefined = settlementValues.every((value) => value !== undefined);
+      if (!settlementAllUndefined && !settlementAllDefined) return false;
+      if (settlementAllDefined && environment.CHAIN_NETWORK === undefined) return false;
+      return true;
     },
     {
-      message: "All on-chain settlement settings must be configured together",
-      path: ["CHAIN_NETWORK"],
+      message:
+        "VISTABLOX_PROPERTY_CONTRACT_ADDRESS, VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS, EURC_TOKEN_ADDRESS, and PIV_TREASURY_ADDRESS must be configured together, and only alongside CHAIN_NETWORK/CHAIN_RPC_URL/CHAIN_OPERATOR_PRIVATE_KEY",
+      path: ["VISTABLOX_PROPERTY_CONTRACT_ADDRESS"],
     },
   )
   .refine(

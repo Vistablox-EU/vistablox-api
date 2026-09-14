@@ -164,7 +164,11 @@ export class FinalizeIpoEscrowCampaignsService {
       unitCount: costBasisToUnitCount(costBasisEur),
       costBasisEur,
       activatedAt: this.clock(),
-      tokenContractAddress: this.chain.config.propertyContractAddress,
+      // Non-null: propertyContractAddress is optional on ChainSettlementConfig
+      // only so wallet-registry-only consumers can skip it (see
+      // chain-client.ts) -- worker.ts never constructs this service without
+      // the whole property/IPO-escrow bundle configured together.
+      tokenContractAddress: this.chain.config.propertyContractAddress!,
       tokenId: tokenId.toString(),
       chainTxHash: mintHash,
     });

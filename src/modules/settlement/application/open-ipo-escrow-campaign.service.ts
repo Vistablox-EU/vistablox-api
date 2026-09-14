@@ -52,7 +52,11 @@ export class OpenIpoEscrowCampaignService {
       tokenId,
       BigInt(parsed.target_amount_eurc),
       BigInt(parsed.deadline_unix),
-      this.chain.config.pivTreasuryAddress,
+      // Non-null: pivTreasuryAddress is optional on ChainSettlementConfig
+      // only so wallet-registry-only consumers can skip it (see
+      // chain-client.ts) -- worker.ts never constructs this service without
+      // the whole property/IPO-escrow bundle configured together.
+      this.chain.config.pivTreasuryAddress!,
     ]);
 
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
