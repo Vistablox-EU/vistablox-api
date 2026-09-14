@@ -168,30 +168,37 @@ const runOperatingDistributionSweep = environment.OPERATING_DISTRIBUTION_ENABLED
   ? new RunOperatingDistributionSweepService(operatingDistributionRepository, calculateOperatingDistribution)
   : undefined;
 
-// Optional on-chain settlement integration (AD-163/AD-256), same
-// all-configured-together-or-none gate environment.ts's own refine already
-// enforces -- mirrors coinbaseCdpClient's construction just above.
+// Base chain connectivity, gating ChainClients construction itself. The
+// property/IPO-escrow settlement bundle below and walletRegistry are each
+// independently optional on top of this -- see chain-client.ts's
+// ChainSettlementConfig and the .property/.ipoEscrow/.walletRegistry
+// getters it guards individually, so a consumer needing only one of them
+// (confirmWalletRegistrations, below) isn't gated on the others being
+// configured too.
 const chainClients =
   environment.CHAIN_NETWORK === undefined ||
   environment.CHAIN_RPC_URL === undefined ||
-  environment.CHAIN_OPERATOR_PRIVATE_KEY === undefined ||
-  environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS === undefined ||
-  environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS === undefined ||
-  environment.EURC_TOKEN_ADDRESS === undefined ||
-  environment.PIV_TREASURY_ADDRESS === undefined
+  environment.CHAIN_OPERATOR_PRIVATE_KEY === undefined
     ? undefined
     : createChainClients({
         network: environment.CHAIN_NETWORK,
         rpcUrl: environment.CHAIN_RPC_URL,
         operatorPrivateKey: environment.CHAIN_OPERATOR_PRIVATE_KEY as `0x${string}`,
-        propertyContractAddress: environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS as `0x${string}`,
-        ipoEscrowContractAddress: environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS as `0x${string}`,
-        eurcTokenAddress: environment.EURC_TOKEN_ADDRESS as `0x${string}`,
-        pivTreasuryAddress: environment.PIV_TREASURY_ADDRESS as `0x${string}`,
-        // Independently optional (see environment.ts / chain-client.ts) --
-        // threaded through here too so the wallet-registry accessor doesn't
-        // throw for a worker that has the rest of CHAIN_* configured but not
-        // this.
+        // Each spread below is omitted entirely (not set to `undefined`)
+        // when its env var is absent -- tsconfig's exactOptionalPropertyTypes
+        // treats those as different things for an optional field.
+        ...(environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS === undefined
+          ? {}
+          : { propertyContractAddress: environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS as `0x${string}` }),
+        ...(environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS === undefined
+          ? {}
+          : { ipoEscrowContractAddress: environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS as `0x${string}` }),
+        ...(environment.EURC_TOKEN_ADDRESS === undefined
+          ? {}
+          : { eurcTokenAddress: environment.EURC_TOKEN_ADDRESS as `0x${string}` }),
+        ...(environment.PIV_TREASURY_ADDRESS === undefined
+          ? {}
+          : { pivTreasuryAddress: environment.PIV_TREASURY_ADDRESS as `0x${string}` }),
         ...(environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS === undefined
           ? {}
           : {
@@ -199,11 +206,23 @@ const chainClients =
                 environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS as `0x${string}`,
             }),
       });
+// The property/IPO-escrow settlement bundle (AD-163/AD-256), still
+// all-configured-together-or-none per environment.ts's own refine --
+// separate from chainClients's own base-connectivity gate above, since
+// confirmWalletRegistrations below needs none of these four.
+const settlementBundleConfigured =
+  chainClients !== undefined &&
+  environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS !== undefined &&
+  environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS !== undefined &&
+  environment.EURC_TOKEN_ADDRESS !== undefined &&
+  environment.PIV_TREASURY_ADDRESS !== undefined;
 const openIpoEscrowCampaign =
-  chainClients === undefined ? undefined : new OpenIpoEscrowCampaignService(chainClients);
+  chainClients === undefined || !settlementBundleConfigured
+    ? undefined
+    : new OpenIpoEscrowCampaignService(chainClients);
 const settlementRepository = chainClients === undefined ? undefined : new PrismaSettlementRepository(database);
 const finalizeIpoEscrowCampaigns =
-  chainClients === undefined || settlementRepository === undefined
+  chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
     : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients);
 const confirmWalletRegistrations =

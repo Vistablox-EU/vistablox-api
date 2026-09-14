@@ -22,10 +22,16 @@ export interface ChainSettlementConfig {
   network: "base" | "base-sepolia";
   rpcUrl: string;
   operatorPrivateKey: Hex;
-  propertyContractAddress: Address;
-  ipoEscrowContractAddress: Address;
-  eurcTokenAddress: Address;
-  pivTreasuryAddress: Address;
+  // Optional: the property/IPO-escrow settlement bundle (still
+  // all-configured-together-or-none, per environment.ts's own refine) is a
+  // separate concern from base chain connectivity. A consumer that only
+  // needs walletRegistry (below) can construct a ChainClients without
+  // these; the .property/.ipoEscrow getters throw a clear error if
+  // accessed without them, the same way .walletRegistry already does.
+  propertyContractAddress?: Address;
+  ipoEscrowContractAddress?: Address;
+  eurcTokenAddress?: Address;
+  pivTreasuryAddress?: Address;
   // Optional: independently configured (see environment.ts), not part of
   // the rest of this bundle -- neither should gate the other.
   walletRegistryContractAddress?: Address;
@@ -64,6 +70,11 @@ export class ChainClients {
   }
 
   public get property() {
+    if (this.config.propertyContractAddress === undefined) {
+      throw new Error(
+        "VISTABLOX_PROPERTY_CONTRACT_ADDRESS is not configured -- cannot access the property contract.",
+      );
+    }
     return getContract({
       address: this.config.propertyContractAddress,
       abi: vistaBloxPropertyAbi,
@@ -72,6 +83,11 @@ export class ChainClients {
   }
 
   public get ipoEscrow() {
+    if (this.config.ipoEscrowContractAddress === undefined) {
+      throw new Error(
+        "VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS is not configured -- cannot access the IPO escrow contract.",
+      );
+    }
     return getContract({
       address: this.config.ipoEscrowContractAddress,
       abi: vistaBloxIpoEscrowAbi,
