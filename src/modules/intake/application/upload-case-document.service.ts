@@ -49,6 +49,39 @@ export class UploadCaseDocumentService {
     }
   }
 
+  public async deleteRoom(input: { caseId: string; roomId: string; actorAccountId: string; traceId?: string; reason?: string }): Promise<void> {
+    const documents = await this.database.$transaction(async (transaction) => {
+      const room = await transaction.propertyRoom.findFirst({
+        where: { id: input.roomId, property: { cases: { some: { id: input.caseId } } } },
+        select: { id: true, roomType: true, sizeSqM: true },
+      });
+      if (room === null) throw new AppError({ code: "intake.room_not_found", title: "Room not found", status: 404, detail: "The selected room does not belong to this intake case." });
+
+      const roomDocuments = await transaction.storedDocument.findMany({
+        where: { roomId: input.roomId },
+        select: { id: true, objectKey: true, deletedAt: true, variants: { select: { id: true, objectKey: true, deletedAt: true } } },
+      });
+      const now = new Date();
+      const retentionUntil = new Date(now.getTime() + DELETED_DOCUMENT_RETENTION_DAYS * 24 * 60 * 60 * 1000);
+      await transaction.storedDocument.updateMany({
+        where: { roomId: input.roomId, deletedAt: null },
+        data: { deletedAt: now, deletedByAccountId: input.actorAccountId, deletionReason: input.reason ?? "room_deleted", retentionUntil },
+      });
+      await transaction.storedDocument.updateMany({ where: { roomId: input.roomId }, data: { roomId: null } });
+      await transaction.propertyRoom.delete({ where: { id: input.roomId } });
+      await transaction.auditLog.create({ data: { id: `audit_${randomUUID()}`, actorAccountId: input.actorAccountId, action: "intake.room_deleted", resourceType: "intake_case", resourceId: input.caseId, changes: { room_id: input.roomId, room_type: room.roomType, size_sq_m: room.sizeSqM.toString(), photo_count: roomDocuments.filter((document) => document.deletedAt === null).length, reason: input.reason ?? "room_deleted" } } });
+      await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:room-deleted:${input.roomId}:${input.traceId ?? "unknown"}`, eventType: "room_deleted", actorType: "staff", actorAccountId: input.actorAccountId, traceId: input.traceId ?? null, relatedResourceType: "property_room", relatedResourceId: input.roomId, metadata: { room_id: input.roomId, room_type: room.roomType, size_sq_m: room.sizeSqM.toString(), photo_count: roomDocuments.filter((document) => document.deletedAt === null).length }, occurredAt: now });
+      return roomDocuments;
+    });
+
+    for (const document of documents) {
+      if (document.deletedAt === null) await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: document.objectKey })).catch(() => undefined);
+      for (const variant of document.variants) {
+        if (variant.deletedAt === null) await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: variant.objectKey })).catch(() => undefined);
+      }
+    }
+  }
+
   public async execute(input: { caseId: string; documentType: string; revisionNumber: number; roomId?: string; body: AsyncIterable<Buffer>; contentType: string; originalFilename: string; actorAccountId?: string; traceId?: string }): Promise<Record<string, unknown>> {
     if (!ALLOWED_DOCUMENT_TYPES.has(input.documentType)) throw new AppError({ code: "intake.document_type_unsupported", title: "Unsupported document", status: 422, detail: "This document type is not supported." });
     if (!ALLOWED.has(input.contentType)) throw new AppError({ code: "intake.document_mime_unsupported", title: "Unsupported document", status: 422, detail: "This file type is not supported." });

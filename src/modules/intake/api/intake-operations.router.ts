@@ -188,6 +188,13 @@ export function createIntakeOperationsRouter(
       await uploadDocument.setRepresentative({ caseId: params.case_id, roomId: params.room_id, documentId, actorAccountId: authContext.accountId, traceId: String(response.locals.traceId) });
       response.status(204).send();
     });
+    router.delete("/:case_id/rooms/:room_id", ...staffOnly, async (request, response) => {
+      const params = roomParamsSchema.parse(request.params);
+      const authContext = requireAuthContext(response.locals.authContext);
+      const body = deleteRoomPhotoBodySchema.parse(request.body ?? {});
+      await uploadDocument.deleteRoom({ caseId: params.case_id, roomId: params.room_id, actorAccountId: authContext.accountId, traceId: String(response.locals.traceId), ...(body.reason === undefined ? {} : { reason: body.reason }) });
+      response.status(204).send();
+    });
     router.delete("/:case_id/rooms/:room_id/photos/:document_id", ...staffOnly, async (request, response) => {
       const params = roomPhotoParamsSchema.parse(request.params);
       const authContext = requireAuthContext(response.locals.authContext);

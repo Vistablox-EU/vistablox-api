@@ -33,6 +33,7 @@ const eventLabels: Record<string, string> = {
   room_photo_uploaded: "Room photo uploaded",
   room_photo_representative_selected: "Representative room photo selected",
   room_photo_deleted: "Room photo deleted",
+  room_deleted: "Room removed",
   offering_funding_target_reached: "Funding target reached",
   offering_funding_target_no_longer_met: "Funding target no longer met",
   offering_reconfirmation_window_opened: "Reconfirmation window opened",
