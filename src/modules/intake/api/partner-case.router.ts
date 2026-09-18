@@ -3,6 +3,7 @@ import { Router, type RequestHandler } from "express";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type {
   GetCaseForPartnerService,
+  GetPartnerCaseHistoryService,
   ListCasesForPartnerService,
   RecordAppraisalService,
   RecordLegalStructuringService,
@@ -16,6 +17,8 @@ import {
   recordAppraisalResponseSchema,
   recordLegalStructuringBodySchema,
   recordLegalStructuringResponseSchema,
+  partnerCaseHistoryQuerySchema,
+  partnerCaseHistoryResponseSchema,
 } from "./partner-case.schemas.js";
 
 // Twin of partner-organization.router.ts's createLegalPracticeRouter /
@@ -33,6 +36,7 @@ export function createLegalPartnerCaseRouter(
   listCases: ListCasesForPartnerService,
   getCase: GetCaseForPartnerService,
   recordLegalStructuring: RecordLegalStructuringService,
+  history?: GetPartnerCaseHistoryService,
 ): Router {
   const router = Router();
   const roleGated = [requireAuthentication, requireLegalPartner, requireStaffWebAuthn];
@@ -48,6 +52,12 @@ export function createLegalPartnerCaseRouter(
     const params = caseIdParamsSchema.parse(request.params);
     const result = await getCase.execute(params.case_id);
     response.json(partnerCaseDetailResponseSchema.parse(result));
+  });
+
+  if (history !== undefined) router.get("/:case_id/history", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
+    const params = caseIdParamsSchema.parse(request.params);
+    const query = partnerCaseHistoryQuerySchema.parse(request.query);
+    response.json(partnerCaseHistoryResponseSchema.parse(await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) })));
   });
 
   router.patch("/:case_id", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
@@ -74,6 +84,7 @@ export function createAppraisalPartnerCaseRouter(
   listCases: ListCasesForPartnerService,
   getCase: GetCaseForPartnerService,
   recordAppraisal: RecordAppraisalService,
+  history?: GetPartnerCaseHistoryService,
 ): Router {
   const router = Router();
   const roleGated = [requireAuthentication, requireAppraisalPartner, requireStaffWebAuthn];
@@ -89,6 +100,12 @@ export function createAppraisalPartnerCaseRouter(
     const params = caseIdParamsSchema.parse(request.params);
     const result = await getCase.execute(params.case_id);
     response.json(partnerCaseDetailResponseSchema.parse(result));
+  });
+
+  if (history !== undefined) router.get("/:case_id/history", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
+    const params = caseIdParamsSchema.parse(request.params);
+    const query = partnerCaseHistoryQuerySchema.parse(request.query);
+    response.json(partnerCaseHistoryResponseSchema.parse(await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) })));
   });
 
   router.patch("/:case_id", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {

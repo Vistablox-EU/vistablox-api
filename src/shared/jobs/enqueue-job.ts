@@ -22,8 +22,8 @@ export async function enqueueTransactionalJob(
   queueName: string,
   data: Record<string, unknown>,
   traceId: string,
-): Promise<void> {
-  await boss.send(
+): Promise<string | null> {
+  return boss.send(
     queueName,
     { ...data, trace_id: traceId },
     {

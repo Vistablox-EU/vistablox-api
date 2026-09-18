@@ -154,11 +154,13 @@ import {
   WithdrawInformationRequestService,
 } from "./modules/intake/application/operations-case.service.js";
 import { GetOperationsReadinessService, type OperationsReadinessRepository } from "./modules/intake/application/get-operations-readiness.service.js";
+import { GetIntakeCaseHistoryService, GetIntakeWorkflowService } from "./modules/intake/application/get-intake-workflow.service.js";
 import type { UploadCaseDocumentService } from "./modules/intake/application/upload-case-document.service.js";
 import type { GetCaseDocumentService } from "./modules/intake/application/get-case-document.service.js";
 import { TransitionCaseToPostIpoStructuringService } from "./modules/intake/application/post-ipo-structuring-handoff.service.js";
 import {
   GetCaseForPartnerService,
+  GetPartnerCaseHistoryService,
   ListCasesForPartnerService,
   RecordAppraisalService,
   RecordLegalStructuringService,
@@ -853,6 +855,9 @@ export function createApp(dependencies: AppDependencies): Express {
       ),
     );
     const partnerOrganizationRepository = dependencies.protectedApi.partnerOrganizations?.repository;
+    const operationsReadiness = new GetOperationsReadinessService(
+      intakeRepository as unknown as OperationsReadinessRepository,
+    );
     app.use(
       "/internal/v1/intake-cases",
       createIntakeOperationsRouter(
@@ -875,7 +880,7 @@ export function createApp(dependencies: AppDependencies): Express {
         new ForceExpireInformationRequestService(intakeRepository),
         new SendManualReminderService(intakeRepository, dependencies.protectedApi.emailSender),
         new WithdrawInformationRequestService(intakeRepository),
-        new GetOperationsReadinessService(intakeRepository as unknown as OperationsReadinessRepository),
+        operationsReadiness,
         dependencies.protectedApi.documentUpload,
         dependencies.protectedApi.documentDownload,
         partnerOrganizationRepository === undefined
@@ -883,6 +888,11 @@ export function createApp(dependencies: AppDependencies): Express {
           : new AssignPartnerOrganizationService(intakeRepository, partnerOrganizationRepository),
         new CreateStaffDraftCaseService(intakeRepository),
         new SubmitStaffDraftCaseService(intakeRepository),
+        new GetIntakeWorkflowService(
+          intakeRepository as Required<Pick<typeof intakeRepository, "getIntakeWorkflowSnapshot" | "listIntakeCaseHistory">>,
+          operationsReadiness,
+        ),
+        new GetIntakeCaseHistoryService(intakeRepository as Required<Pick<typeof intakeRepository, "getIntakeWorkflowSnapshot" | "listIntakeCaseHistory">>),
       ),
     );
     if (partnerOrganizationRepository !== undefined) {
@@ -930,6 +940,7 @@ export function createApp(dependencies: AppDependencies): Express {
         ),
         getCaseForPartner,
         new RecordLegalStructuringService(intakeRepository),
+        new GetPartnerCaseHistoryService(intakeRepository as Required<Pick<IntakeRepository, "listIntakeCaseHistory">>, "legal_partner"),
       ),
     );
     app.use(
@@ -946,6 +957,7 @@ export function createApp(dependencies: AppDependencies): Express {
         ),
         getCaseForPartner,
         new RecordAppraisalService(intakeRepository),
+        new GetPartnerCaseHistoryService(intakeRepository as Required<Pick<IntakeRepository, "listIntakeCaseHistory">>, "appraisal_partner"),
       ),
     );
   }

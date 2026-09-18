@@ -28,6 +28,7 @@ import {
   intakeRoomTypeLabels,
   intakeStageLabels,
 } from "../presentation/intake-labels.js";
+import { decodeHistoryCursor, encodeHistoryCursor } from "./get-intake-workflow.service.js";
 
 export class ListCasesForPartnerService {
   public constructor(
@@ -82,6 +83,49 @@ export class GetCaseForPartnerService {
     const intakeCase = await this.repository.getCaseForPartner(caseId);
     if (intakeCase === null) throw caseNotFoundError();
     return { data: toPartnerCaseResponse(intakeCase) };
+  }
+}
+
+export class GetPartnerCaseHistoryService {
+  public constructor(
+    private readonly repository: Required<Pick<IntakeRepository, "listIntakeCaseHistory">>,
+    private readonly role: "legal_partner" | "appraisal_partner",
+  ) {}
+
+  public async execute(input: { caseId: string; limit: number; after?: string }) {
+    const page = await this.repository.listIntakeCaseHistory({
+      caseId: input.caseId,
+      limit: Math.min(input.limit + 20, 100),
+      ...(input.after === undefined ? {} : { after: decodeHistoryCursor(input.after) }),
+    });
+    const visibleTypes = new Set([
+      "partner_assignment_changed",
+      "case_post_ipo_structuring_started",
+      "case_approved_for_final_offering",
+      "handoff_queued",
+      "handoff_started",
+      "handoff_succeeded",
+      ...(this.role === "legal_partner" ? ["legal_structuring_updated", "legal_execution_requested", "legal_execution_confirmed", "legal_execution_completed", "legal_execution_failed"] : ["appraisal_updated"]),
+    ]);
+    const events = page.events.filter((event) => visibleTypes.has(event.eventType)).slice(0, input.limit);
+    const last = events.at(-1);
+    return {
+      data: events.map((event) => ({
+        event_id: event.eventId,
+        event_sequence: event.eventSequence,
+        event_type: event.eventType,
+        event_label: event.eventType.replaceAll("_", " ").replace(/^./, (character) => character.toUpperCase()),
+        workflow_type: event.workflowType,
+        workflow_version: event.workflowVersion,
+        occurred_at: event.occurredAt.toISOString(),
+        actor: { type: event.actorType, account_id: event.actorAccountId },
+        stage_transition: event.fromStage === null || event.toStage === null ? null : { from: event.fromStage, to: event.toStage },
+        related_resource: event.relatedResourceType === null || event.relatedResourceId === null ? null : { type: event.relatedResourceType, id: event.relatedResourceId },
+        source: event.eventSource,
+        details: event.metadata,
+      })),
+      page: { next_cursor: page.hasNextPage && last !== undefined ? encodeHistoryCursor(last) : null },
+    };
   }
 }
 

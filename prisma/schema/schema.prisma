@@ -281,6 +281,7 @@ model IntakeCase {
   exclusivityCommencedAt        DateTime? @map("exclusivity_commenced_at") @db.Timestamptz(6)
   createdAt                     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   updatedAt                     DateTime  @default(now()) @map("updated_at") @db.Timestamptz(6)
+  workflowEventSequence         Int       @default(0) @map("workflow_event_sequence")
 
   property                  Property                       @relation(fields: [propertyId], references: [id])
   applicant                 Account                        @relation("CaseApplicant", fields: [applicantAccountId], references: [id])
@@ -296,6 +297,7 @@ model IntakeCase {
   threads                   CaseThread[]
   executionEvents           LegalExecutionEvent[]
   pivs                      Piv[]
+  lifecycleEvents           IntakeCaseEvent[]
 
   @@index([propertyId], map: "idx_cases_property")
   @@index([applicantAccountId], map: "idx_cases_applicant")
@@ -304,6 +306,40 @@ model IntakeCase {
   @@index([appraisalFirmId], map: "idx_cases_appraisal_firm")
   @@index([stage], map: "idx_cases_stage")
   @@map("intake_cases")
+  @@schema("intake")
+}
+
+model IntakeCaseEvent {
+  id                   String    @id @map("event_id")
+  caseId               String    @map("case_id")
+  eventSequence        Int       @map("event_sequence")
+  eventKey             String    @unique @map("event_key")
+  eventType            String    @map("event_type")
+  workflowType         String    @map("workflow_type")
+  workflowVersion      Int       @map("workflow_version")
+  fromStage            String?   @map("from_stage")
+  toStage              String?   @map("to_stage")
+  actorType            String    @map("actor_type")
+  actorAccountId       String?   @map("actor_account_id")
+  traceId              String?   @map("trace_id")
+  causationEventId     String?   @map("causation_event_id")
+  relatedResourceType  String?   @map("related_resource_type")
+  relatedResourceId    String?   @map("related_resource_id")
+  metadata             Json      @default("{}") @db.JsonB
+  occurredAt           DateTime  @map("occurred_at") @db.Timestamptz(6)
+  recordedAt           DateTime  @default(now()) @map("recorded_at") @db.Timestamptz(6)
+  eventSource          String    @default("live") @map("event_source")
+  sourceAuditLogId     String?   @unique @map("source_audit_log_id")
+  sourceJobId          String?   @map("source_job_id")
+
+  case IntakeCase @relation(fields: [caseId], references: [id])
+
+  @@unique([caseId, eventSequence])
+  @@index([caseId, eventSequence(sort: Desc)])
+  @@index([caseId, occurredAt(sort: Desc), id(sort: Desc)])
+  @@index([eventType, occurredAt(sort: Desc)])
+  @@index([relatedResourceType, relatedResourceId, occurredAt(sort: Desc)])
+  @@map("intake_case_events")
   @@schema("intake")
 }
 

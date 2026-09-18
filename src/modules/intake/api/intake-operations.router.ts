@@ -20,6 +20,7 @@ import {
 import type { GetOperationsReadinessService } from "../application/get-operations-readiness.service.js";
 import type { UploadCaseDocumentService } from "../application/upload-case-document.service.js";
 import type { GetCaseDocumentService } from "../application/get-case-document.service.js";
+import type { GetIntakeCaseHistoryService, GetIntakeWorkflowService } from "../application/get-intake-workflow.service.js";
 import {
   ListCaseMessagesForOperationsService,
   PostCaseMessageForOperationsService,
@@ -63,6 +64,9 @@ import {
   sendManualReminderResponseSchema,
   withdrawInformationRequestBodySchema,
   withdrawInformationRequestResponseSchema,
+  intakeWorkflowResponseSchema,
+  intakeHistoryQuerySchema,
+  intakeCaseHistoryResponseSchema,
 } from "./intake-operations.schemas.js";
 
 export function createIntakeOperationsRouter(
@@ -91,6 +95,8 @@ export function createIntakeOperationsRouter(
   assignPartnerOrganization?: AssignPartnerOrganizationService,
   createStaffDraftCase?: CreateStaffDraftCaseService,
   submitStaffDraftCase?: SubmitStaffDraftCaseService,
+  workflow?: GetIntakeWorkflowService,
+  history?: GetIntakeCaseHistoryService,
 ): Router {
   const router = Router();
   const staffOnly = [
@@ -153,28 +159,40 @@ export function createIntakeOperationsRouter(
     response.json(result);
   });
 
+  if (workflow !== undefined) router.get("/:case_id/workflow", ...staffOnly, async (request, response) => {
+    const params = caseIdParamsSchema.parse(request.params);
+    response.json(intakeWorkflowResponseSchema.parse(await workflow.execute(params.case_id)));
+  });
+
+  if (history !== undefined) router.get("/:case_id/history", ...staffOnly, async (request, response) => {
+    const params = caseIdParamsSchema.parse(request.params);
+    const query = intakeHistoryQuerySchema.parse(request.query);
+    response.json(intakeCaseHistoryResponseSchema.parse(await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) })));
+  });
+
   if (uploadDocument !== undefined) {
     router.post("/:case_id/documents", ...staffOnly, async (request, response) => {
       const params = caseIdParamsSchema.parse(request.params);
+      const authContext = requireAuthContext(response.locals.authContext);
       const documentType = String(request.header("x-document-type") ?? "").trim();
       const roomIdHeader = request.header("x-room-id");
       const revisionNumber = Number(request.header("x-revision-number") ?? "1");
       const contentType = request.header("content-type")?.split(";", 1)[0] ?? "application/octet-stream";
-      const result = await uploadDocument.execute({ caseId: params.case_id, documentType, revisionNumber, ...(roomIdHeader === undefined ? {} : { roomId: String(roomIdHeader).trim() }), body: request, contentType, originalFilename: String(request.header("x-original-filename") ?? "document") });
+      const result = await uploadDocument.execute({ caseId: params.case_id, documentType, revisionNumber, ...(roomIdHeader === undefined ? {} : { roomId: String(roomIdHeader).trim() }), body: request, contentType, originalFilename: String(request.header("x-original-filename") ?? "document"), actorAccountId: authContext.accountId, traceId: String(response.locals.traceId) });
       response.status(201).json({ data: result });
     });
     router.patch("/:case_id/rooms/:room_id/representative-photo", ...staffOnly, async (request, response) => {
       const params = roomParamsSchema.parse(request.params);
       const authContext = requireAuthContext(response.locals.authContext);
       const { document_id: documentId } = setRepresentativePhotoBodySchema.parse(request.body);
-      await uploadDocument.setRepresentative({ caseId: params.case_id, roomId: params.room_id, documentId, actorAccountId: authContext.accountId });
+      await uploadDocument.setRepresentative({ caseId: params.case_id, roomId: params.room_id, documentId, actorAccountId: authContext.accountId, traceId: String(response.locals.traceId) });
       response.status(204).send();
     });
     router.delete("/:case_id/rooms/:room_id/photos/:document_id", ...staffOnly, async (request, response) => {
       const params = roomPhotoParamsSchema.parse(request.params);
       const authContext = requireAuthContext(response.locals.authContext);
       const body = deleteRoomPhotoBodySchema.parse(request.body ?? {});
-      await uploadDocument.deletePhoto({ caseId: params.case_id, roomId: params.room_id, documentId: params.document_id, actorAccountId: authContext.accountId, ...(body.reason === undefined ? {} : { reason: body.reason }) });
+      await uploadDocument.deletePhoto({ caseId: params.case_id, roomId: params.room_id, documentId: params.document_id, actorAccountId: authContext.accountId, traceId: String(response.locals.traceId), ...(body.reason === undefined ? {} : { reason: body.reason }) });
       response.status(204).send();
     });
   }

@@ -29,6 +29,29 @@ export const partnerCaseListResponseSchema = z.object({
 
 export const partnerCaseDetailResponseSchema = z.object({ data: partnerCaseSchema });
 
+export const partnerCaseHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  after: z.string().min(1).optional(),
+});
+
+export const partnerCaseHistoryResponseSchema = z.object({
+  data: z.array(z.object({
+    event_id: z.string(),
+    event_sequence: z.number().int().positive(),
+    event_type: z.string(),
+    event_label: z.string(),
+    workflow_type: z.string(),
+    workflow_version: z.number().int().nonnegative(),
+    occurred_at: z.iso.datetime(),
+    actor: z.object({ type: z.string(), account_id: z.string().nullable() }),
+    stage_transition: z.object({ from: z.string(), to: z.string() }).nullable(),
+    related_resource: z.object({ type: z.string(), id: z.string() }).nullable(),
+    source: z.enum(["live", "legacy_audit"]),
+    details: z.unknown(),
+  })),
+  page: z.object({ next_cursor: z.string().nullable() }),
+});
+
 export const recordLegalStructuringBodySchema = z
   .object({
     legal_document_refs: z.array(z.string().trim().min(1).max(500)).max(50).optional(),

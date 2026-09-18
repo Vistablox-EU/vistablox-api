@@ -5,6 +5,7 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import { objectKey } from "../../../infrastructure/storage/storage-buckets.js";
 import type { MalwareScanner } from "../../../infrastructure/antivirus/clamav-scanner.js";
 import { submissionEvidenceTypes } from "../domain/case-submission.policy.js";
+import { appendIntakeCaseEvent } from "../repository/intake-case-event.repository.js";
 import { Jimp } from "jimp";
 
 const MAX_BYTES = 100 * 1024 * 1024;
@@ -17,7 +18,7 @@ ALLOWED_DOCUMENT_TYPES.add("room_photo");
 export class UploadCaseDocumentService {
   public constructor(private readonly database: DatabaseClient, private readonly storage: S3Client, private readonly bucket: string, private readonly scanner: MalwareScanner) {}
 
-  public async setRepresentative(input: { caseId: string; roomId: string; documentId: string; actorAccountId: string }): Promise<void> {
+  public async setRepresentative(input: { caseId: string; roomId: string; documentId: string; actorAccountId: string; traceId?: string }): Promise<void> {
     await this.database.$transaction(async (transaction) => {
       const photo = await transaction.storedDocument.findFirst({ where: { id: input.documentId, caseId: input.caseId, roomId: input.roomId, documentType: "room_photo", uploadStatus: "accepted", deletedAt: null }, select: { id: true } });
       if (photo === null) throw new AppError({ code: "intake.room_photo_not_found", title: "Room photo not found", status: 404, detail: "The selected room photo does not exist." });
@@ -25,10 +26,11 @@ export class UploadCaseDocumentService {
       if (room === null) throw new AppError({ code: "intake.room_not_found", title: "Room not found", status: 404, detail: "The selected room does not belong to this intake case." });
       await transaction.propertyRoom.update({ where: { id: input.roomId }, data: { preferredPhotoId: input.documentId } });
       await transaction.auditLog.create({ data: { id: `audit_${randomUUID()}`, actorAccountId: input.actorAccountId, action: "intake.room_photo_representative_selected", resourceType: "intake_case", resourceId: input.caseId, changes: { room_id: input.roomId, document_id: input.documentId } } });
+      await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:room-photo-representative:${input.documentId}:${input.traceId ?? "unknown"}`, eventType: "room_photo_representative_selected", actorType: "staff", actorAccountId: input.actorAccountId, traceId: input.traceId ?? null, relatedResourceType: "stored_document", relatedResourceId: input.documentId, metadata: { room_id: input.roomId }, occurredAt: new Date() });
     });
   }
 
-  public async deletePhoto(input: { caseId: string; roomId: string; documentId: string; actorAccountId: string; reason?: string }): Promise<void> {
+  public async deletePhoto(input: { caseId: string; roomId: string; documentId: string; actorAccountId: string; traceId?: string; reason?: string }): Promise<void> {
     const documents = await this.database.$transaction(async (transaction) => {
       const photo = await transaction.storedDocument.findFirst({ where: { id: input.documentId, caseId: input.caseId, roomId: input.roomId, documentType: "room_photo", uploadStatus: "accepted", deletedAt: null }, select: { id: true, objectKey: true, variants: { select: { objectKey: true } } } });
       if (photo === null) return null;
@@ -37,6 +39,7 @@ export class UploadCaseDocumentService {
       await transaction.storedDocument.updateMany({ where: { OR: [{ id: input.documentId }, { sourceDocumentId: input.documentId }], deletedAt: null }, data: { deletedAt: now, deletedByAccountId: input.actorAccountId, deletionReason: input.reason ?? "staff_deleted", retentionUntil } });
       await transaction.propertyRoom.updateMany({ where: { id: input.roomId, preferredPhotoId: input.documentId }, data: { preferredPhotoId: null } });
       await transaction.auditLog.create({ data: { id: `audit_${randomUUID()}`, actorAccountId: input.actorAccountId, action: "intake.room_photo_deleted", resourceType: "intake_case", resourceId: input.caseId, changes: { room_id: input.roomId, document_id: input.documentId, reason: input.reason ?? "staff_deleted" } } });
+      await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:room-photo-deleted:${input.documentId}:${input.traceId ?? "unknown"}`, eventType: "room_photo_deleted", actorType: "staff", actorAccountId: input.actorAccountId, traceId: input.traceId ?? null, relatedResourceType: "stored_document", relatedResourceId: input.documentId, metadata: { room_id: input.roomId }, occurredAt: now });
       return photo;
     });
     if (documents !== null) {
@@ -46,7 +49,7 @@ export class UploadCaseDocumentService {
     }
   }
 
-  public async execute(input: { caseId: string; documentType: string; revisionNumber: number; roomId?: string; body: AsyncIterable<Buffer>; contentType: string; originalFilename: string }): Promise<Record<string, unknown>> {
+  public async execute(input: { caseId: string; documentType: string; revisionNumber: number; roomId?: string; body: AsyncIterable<Buffer>; contentType: string; originalFilename: string; actorAccountId?: string; traceId?: string }): Promise<Record<string, unknown>> {
     if (!ALLOWED_DOCUMENT_TYPES.has(input.documentType)) throw new AppError({ code: "intake.document_type_unsupported", title: "Unsupported document", status: 422, detail: "This document type is not supported." });
     if (!ALLOWED.has(input.contentType)) throw new AppError({ code: "intake.document_mime_unsupported", title: "Unsupported document", status: 422, detail: "This file type is not supported." });
     if (input.documentType === "room_photo" && input.contentType !== "image/jpeg" && input.contentType !== "image/png" && input.contentType !== "image/webp") throw new AppError({ code: "intake.document_mime_unsupported", title: "Unsupported image", status: 422, detail: "Room photos must be JPEG, PNG, or WebP images." });
@@ -89,6 +92,9 @@ export class UploadCaseDocumentService {
           if (count >= 5) throw new AppError({ code: "intake.room_photo_limit_reached", title: "Room photo limit reached", status: 409, detail: "Each room may have at most five active photos." });
         }
         await transaction.storedDocument.create({ data: { id: documentId, bucket: this.bucket, objectKey: key, documentType: input.documentType, caseId: input.caseId, roomId: input.roomId ?? null, contentType: input.contentType, sizeBytes: BigInt(size), sha256Checksum: checksum, uploadStatus: "accepted", classification: "private" } });
+        if (input.actorAccountId !== undefined) {
+          await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:document-uploaded:${documentId}`, eventType: input.documentType === "room_photo" ? "room_photo_uploaded" : "property_document_uploaded", actorType: "staff", actorAccountId: input.actorAccountId, traceId: input.traceId ?? null, relatedResourceType: "stored_document", relatedResourceId: documentId, metadata: { document_type: input.documentType, revision_number: input.revisionNumber, room_id: input.roomId ?? null }, occurredAt: new Date() });
+        }
         if (thumbnailRef !== null && thumbnail !== null) {
           const thumbnailBytes = thumbnail;
           await transaction.storedDocument.create({ data: { id: `${documentId}_thumbnail`, bucket: this.bucket, objectKey: thumbnailRef, documentType: "room_photo_thumbnail", sourceDocumentId: documentId, variantType: "thumbnail", caseId: input.caseId, roomId: input.roomId ?? null, contentType: "image/jpeg", sizeBytes: BigInt(thumbnailBytes.length), sha256Checksum: createHash("sha256").update(thumbnailBytes).digest("hex"), uploadStatus: "accepted", classification: "private" } });

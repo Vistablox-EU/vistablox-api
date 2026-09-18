@@ -246,6 +246,51 @@ export interface OperationsReadinessSnapshot {
   };
 }
 
+export interface IntakeWorkflowSnapshot {
+  caseId: string;
+  stage: string;
+  createdAt: Date;
+  updatedAt: Date;
+  currentRevisionNumber: number | null;
+  reviewedByAccountId: string | null;
+  approvedAt: Date | null;
+  rejectedAt: Date | null;
+  ipoPeriodDays: number | null;
+  ipoEndAt: Date | null;
+  ipoValueEur: string | null;
+  rejectionReasonCode: string | null;
+  legalPracticeId: string | null;
+  appraisalFirmId: string | null;
+  legalStructuringCompletedAt: Date | null;
+  appraisalCompletedAt: Date | null;
+  postIpoStructuringCompletedAt: Date | null;
+  offering: { offeringId: string; status: string; targetRaiseEur: string; finalOfferingPublishedAt: Date | null } | null;
+  informationRequests: Array<{
+    requestId: string;
+    status: string;
+    publishedAt: Date | null;
+    dueAt: Date | null;
+    resolvedAt: Date | null;
+  }>;
+}
+
+export interface IntakeCaseHistoryEvent {
+  eventId: string;
+  eventSequence: number;
+  eventType: string;
+  workflowType: string;
+  workflowVersion: number;
+  fromStage: string | null;
+  toStage: string | null;
+  actorType: string;
+  actorAccountId: string | null;
+  occurredAt: Date;
+  eventSource: string;
+  relatedResourceType: string | null;
+  relatedResourceId: string | null;
+  metadata: unknown;
+}
+
 // The three terminal outcomes a review can record -- "pending" isn't
 // reviewable-into, it's only ever the starting value nothing has touched
 // yet (documentary_screening_evidence_status_check and this migration's
@@ -451,6 +496,8 @@ export interface RecordAppraisalInput {
 }
 
 export interface IntakeRepository {
+  getIntakeWorkflowSnapshot?(caseId: string): Promise<IntakeWorkflowSnapshot | null>;
+  listIntakeCaseHistory?(input: { caseId: string; limit: number; after?: { occurredAt: Date; eventId: string } }): Promise<{ events: IntakeCaseHistoryEvent[]; hasNextPage: boolean }>;
   getIntakePrerequisites(accountId: string): Promise<IntakePrerequisites>;
   // Just the platform-setting half of getIntakePrerequisites, with no
   // accountId and no KYC read -- for the staff create-and-submit path,

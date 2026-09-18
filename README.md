@@ -214,11 +214,15 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `POST` | `/v1/intake-cases/:case_id/messages` | Post to the `applicant` lane on the owner's own case |
 | `GET` | `/internal/v1/intake-cases?stage=submitted&limit=20&after=...` | WebAuthn-protected founder operations case queue |
 | `GET` | `/internal/v1/intake-cases/:case_id` | Founder review detail, current revision, evidence, and request history |
+| `GET` | `/internal/v1/intake-cases/:case_id/workflow` | Backend-owned stage-specific workflow projection and readiness actions |
+| `GET` | `/internal/v1/intake-cases/:case_id/history` | Cursor-paginated immutable intake lifecycle history |
 | `POST` | `/internal/v1/intake-cases/:case_id/information-requests` | Publish an owner request and start the configured response window |
 | `POST` | `/internal/v1/intake-cases/:case_id/decisions` | Approve with IPO terms or reject a submitted case |
 | `POST` | `/internal/v1/intake-cases/:case_id/close` | Withdraw (any pre-terminal stage) or late-stage reject (`pre_offering_open` only) a case |
 | `GET` | `/internal/v1/intake-cases/:case_id/messages?lane=internal_case\|applicant` | Read either discussion lane on any case |
 | `POST` | `/internal/v1/intake-cases/:case_id/messages` | Post to either lane on any case, as the founder |
+| `GET` | `/internal/v1/legal-partner/cases/:case_id/history` | Assigned legal partner's filtered post-IPO case history |
+| `GET` | `/internal/v1/appraisal-partner/cases/:case_id/history` | Assigned appraisal partner's filtered post-IPO case history |
 
 All errors follow the documented envelope: `type`, `code`, `title`, `status`, `detail`, `trace_id`, and optional `field_errors`.
 

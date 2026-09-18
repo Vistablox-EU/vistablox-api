@@ -141,6 +141,63 @@ export const operationsCaseListResponseSchema = z.object({
   page: z.object({ next_cursor: z.string().nullable() }),
 });
 
+const workflowTypeSchema = z.enum([
+  "draft_submission", "operations_review", "applicant_information", "ipo",
+  "post_ipo_structuring", "final_offering", "terminal",
+]);
+const workflowStageSchema = intakeCaseStageSchema;
+
+export const intakeWorkflowResponseSchema = z.object({
+  data: z.object({
+    case_id: z.string(),
+    stage: workflowStageSchema,
+    stage_label: z.string(),
+    workflow_type: workflowTypeSchema,
+    workflow_version: z.number().int().positive(),
+    terminal: z.boolean(),
+    stage_sequence: z.array(z.object({ stage: workflowStageSchema, label: z.string() })),
+    created_at: z.iso.datetime(),
+    updated_at: z.iso.datetime(),
+    workflow: z.object({
+      current_revision_number: z.number().int().positive().nullable(),
+      active_information_request: z.object({
+        request_id: z.string(),
+        status: z.string(),
+        published_at: z.iso.datetime().nullable(),
+        due_at: z.iso.datetime().nullable(),
+      }).nullable(),
+      information_request_count: z.number().int().nonnegative(),
+      workflow_type: workflowTypeSchema,
+    }).passthrough(),
+    allowed_actions: z.array(z.string()),
+    allowed_action_labels: z.array(z.string()),
+    blockers: z.array(z.object({ code: z.string(), severity: z.enum(["blocking", "warning"]), blocks_actions: z.array(z.string()), message: z.string(), metadata: z.record(z.string(), z.unknown()).optional() })),
+  }),
+});
+
+export const intakeHistoryQuerySchema = z.object({
+  limit: z.coerce.number().int().min(1).max(100).default(25),
+  after: z.string().min(1).optional(),
+});
+
+export const intakeCaseHistoryResponseSchema = z.object({
+  data: z.array(z.object({
+    event_id: z.string(),
+    event_sequence: z.number().int().positive(),
+    event_type: z.string(),
+    event_label: z.string(),
+    workflow_type: workflowTypeSchema,
+    workflow_version: z.number().int().nonnegative(),
+    occurred_at: z.iso.datetime(),
+    actor: z.object({ type: z.string(), account_id: z.string().nullable() }),
+    stage_transition: z.object({ from: intakeCaseStageSchema, from_label: z.string(), to: intakeCaseStageSchema, to_label: z.string() }).nullable(),
+    related_resource: z.object({ type: z.string(), id: z.string() }).nullable(),
+    source: z.enum(["live", "legacy_audit"]),
+    details: z.unknown(),
+  })),
+  page: z.object({ next_cursor: z.string().nullable() }),
+});
+
 const operationsInformationRequestSchema = z.object({
   request_id: z.string(),
   status: z.enum(["proposed", "published", "answered", "withdrawn", "expired"]),

@@ -6,6 +6,7 @@ import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
+import { appendIntakeCaseEvent } from "./intake-case-event.repository.js";
 import {
   ApplicantAccountNotFoundError,
   CaseSubmissionConflictError,
@@ -164,6 +165,16 @@ export class PrismaIntakeRepository
           },
         },
       });
+      await appendIntakeCaseEvent(transaction, {
+        caseId,
+        eventKey: `case:${caseId}:created:draft`,
+        eventType: "case_created",
+        actorType: "applicant",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        metadata: { property_id: propertyId, stage: "draft" },
+        occurredAt: new Date(),
+      });
     });
 
     return { caseId, propertyId, stage: "draft" };
@@ -274,6 +285,28 @@ export class PrismaIntakeRepository
             stage: "submitted",
           },
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId,
+        eventKey: `case:${caseId}:created:staff`,
+        eventType: "case_created",
+        actorType: "staff",
+        actorAccountId: input.staffAccountId,
+        traceId: input.traceId,
+        metadata: { property_id: propertyId, revision_id: revisionId, stage: "submitted" },
+        occurredAt: submittedAt,
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId,
+        eventKey: `case:${caseId}:submitted:${revisionId}`,
+        eventType: "case_submitted",
+        actorType: "staff",
+        actorAccountId: input.staffAccountId,
+        traceId: input.traceId,
+        fromStage: "draft",
+        toStage: "submitted",
+        metadata: { revision_id: revisionId, revision_number: 1 },
+        occurredAt: submittedAt,
       });
 
       return {
@@ -399,6 +432,18 @@ export class PrismaIntakeRepository
             revision_number: 1,
           },
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:submitted:${revisionId}`,
+        eventType: "case_submitted",
+        actorType: "applicant",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        fromStage: "draft",
+        toStage: "submitted",
+        metadata: { revision_id: revisionId, revision_number: 1 },
+        occurredAt: submittedAt,
       });
 
       return {
@@ -726,6 +771,117 @@ export class PrismaIntakeRepository
     };
   }
 
+  public async getIntakeWorkflowSnapshot(caseId: string) {
+    const row = await this.database.intakeCase.findUnique({
+      where: { id: caseId },
+      select: {
+        id: true,
+        stage: true,
+        createdAt: true,
+        updatedAt: true,
+        reviewedByAccountId: true,
+        approvedAt: true,
+        rejectedAt: true,
+        ipoPeriodDays: true,
+        ipoEndAt: true,
+        ipoValueEur: true,
+        rejectionReasonCode: true,
+        legalPracticeId: true,
+        appraisalFirmId: true,
+        legalStructuringCompletedAt: true,
+        appraisalCompletedAt: true,
+        postIpoStructuringCompletedAt: true,
+        currentSubmissionRevision: { select: { revisionNumber: true } },
+        informationRequests: {
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          select: { id: true, status: true, publishedAt: true, dueAt: true, resolvedAt: true },
+        },
+        pivs: {
+          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          take: 1,
+          select: {
+            offerings: {
+              orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+              take: 1,
+              select: { id: true, status: true, targetRaiseEur: true, finalOfferingPublishedAt: true },
+            },
+          },
+        },
+      },
+    });
+    if (row === null) return null;
+    return {
+      caseId: row.id,
+      stage: row.stage,
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      currentRevisionNumber: row.currentSubmissionRevision?.revisionNumber ?? null,
+      reviewedByAccountId: row.reviewedByAccountId,
+      approvedAt: row.approvedAt,
+      rejectedAt: row.rejectedAt,
+      ipoPeriodDays: row.ipoPeriodDays,
+      ipoEndAt: row.ipoEndAt,
+      ipoValueEur: row.ipoValueEur?.toFixed(2) ?? null,
+      rejectionReasonCode: row.rejectionReasonCode,
+      legalPracticeId: row.legalPracticeId,
+      appraisalFirmId: row.appraisalFirmId,
+      legalStructuringCompletedAt: row.legalStructuringCompletedAt,
+      appraisalCompletedAt: row.appraisalCompletedAt,
+      postIpoStructuringCompletedAt: row.postIpoStructuringCompletedAt,
+      offering: row.pivs[0]?.offerings[0] === undefined ? null : {
+        offeringId: row.pivs[0].offerings[0].id,
+        status: row.pivs[0].offerings[0].status,
+        targetRaiseEur: row.pivs[0].offerings[0].targetRaiseEur.toFixed(2),
+        finalOfferingPublishedAt: row.pivs[0].offerings[0].finalOfferingPublishedAt,
+      },
+      informationRequests: row.informationRequests.map((request) => ({
+        requestId: request.id,
+        status: request.status,
+        publishedAt: request.publishedAt,
+        dueAt: request.dueAt,
+        resolvedAt: request.resolvedAt,
+      })),
+    };
+  }
+
+  public async listIntakeCaseHistory(input: { caseId: string; limit: number; after?: { occurredAt: Date; eventId: string } }) {
+    const events = await this.database.intakeCaseEvent.findMany({
+      where: {
+        caseId: input.caseId,
+        ...(input.after === undefined
+          ? {}
+          : {
+              OR: [
+                { occurredAt: { lt: input.after.occurredAt } },
+                { occurredAt: input.after.occurredAt, id: { lt: input.after.eventId } },
+              ],
+            }),
+      },
+      orderBy: [{ occurredAt: "desc" }, { id: "desc" }],
+      take: input.limit + 1,
+    });
+    const hasNextPage = events.length > input.limit;
+    return {
+      hasNextPage,
+      events: (hasNextPage ? events.slice(0, input.limit) : events).map((event) => ({
+        eventId: event.id,
+        eventSequence: event.eventSequence,
+        eventType: event.eventType,
+        workflowType: event.workflowType,
+        workflowVersion: event.workflowVersion,
+        fromStage: event.fromStage,
+        toStage: event.toStage,
+        actorType: event.actorType,
+        actorAccountId: event.actorAccountId,
+        occurredAt: event.occurredAt,
+        eventSource: event.eventSource,
+        relatedResourceType: event.relatedResourceType,
+        relatedResourceId: event.relatedResourceId,
+        metadata: event.metadata,
+      })),
+    };
+  }
+
   public async assignPartnerOrganization(
     input: AssignPartnerOrganizationInput,
   ): Promise<AssignedPartnerOrganization | null> {
@@ -783,6 +939,16 @@ export class PrismaIntakeRepository
           },
           createdAt: input.assignedAt,
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:partner-assignment:${input.assignedAt.toISOString()}:${updated.legalPracticeId ?? "none"}:${updated.appraisalFirmId ?? "none"}`,
+        eventType: "partner_assignment_changed",
+        actorType: "staff",
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        metadata: { legal_practice_id: updated.legalPracticeId, appraisal_firm_id: updated.appraisalFirmId },
+        occurredAt: input.assignedAt,
       });
       return {
         caseId: updated.id,
@@ -856,6 +1022,16 @@ export class PrismaIntakeRepository
           },
           createdAt: input.transitionedAt,
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:post-ipo-structuring:${input.traceId}`,
+        eventType: "case_post_ipo_structuring_started",
+        actorType: "system",
+        traceId: input.traceId,
+        fromStage: "pre_offering_open",
+        toStage: "post_ipo_structuring",
+        occurredAt: input.transitionedAt,
       });
       return { caseId: input.caseId, stage: "post_ipo_structuring" };
     });
@@ -985,6 +1161,17 @@ export class PrismaIntakeRepository
           createdAt: input.recordedAt,
         },
       });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:legal-structuring:${input.recordedAt.toISOString()}:${input.traceId}`,
+        eventType: bothComplete ? "case_approved_for_final_offering" : "legal_structuring_updated",
+        actorType: "partner",
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        ...(bothComplete ? { fromStage: "post_ipo_structuring", toStage: "approved_for_final_offering" } : {}),
+        metadata: { legal_structuring_completed_at: detail.legalStructuringCompletedAt?.toISOString() ?? null },
+        occurredAt: input.recordedAt,
+      });
       if (bothComplete) {
         await transaction.auditLog.create({
           data: postIpoStructuringCompleteAuditData(input),
@@ -1065,6 +1252,17 @@ export class PrismaIntakeRepository
           },
           createdAt: input.recordedAt,
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:appraisal:${input.recordedAt.toISOString()}:${input.traceId}`,
+        eventType: bothComplete ? "case_approved_for_final_offering" : "appraisal_updated",
+        actorType: "partner",
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        ...(bothComplete ? { fromStage: "post_ipo_structuring", toStage: "approved_for_final_offering" } : {}),
+        metadata: { appraisal_completed_at: detail.appraisalCompletedAt?.toISOString() ?? null },
+        occurredAt: input.recordedAt,
       });
       if (bothComplete) {
         await transaction.auditLog.create({
@@ -1175,6 +1373,20 @@ export class PrismaIntakeRepository
             due_at: input.dueAt.toISOString(),
           },
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:information-request:${request.id}:published`,
+        eventType: "case_information_requested",
+        actorType: "staff",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        fromStage: "submitted",
+        toStage: "waiting_on_applicant",
+        relatedResourceType: "information_request",
+        relatedResourceId: request.id,
+        metadata: { due_at: input.dueAt.toISOString() },
+        occurredAt: input.publishedAt,
       });
       return {
         ...toInformationRequest(request),
@@ -1323,6 +1535,20 @@ export class PrismaIntakeRepository
           createdAt: input.expiredAt,
         },
       });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:information-request:${input.requestId}:expired`,
+        eventType: "case_expired",
+        actorType: input.manualOverride?.actorAccountId === undefined ? "system" : "staff",
+        actorAccountId: input.manualOverride?.actorAccountId ?? null,
+        traceId: input.traceId,
+        fromStage: "waiting_on_applicant",
+        toStage: "expired",
+        relatedResourceType: "information_request",
+        relatedResourceId: input.requestId,
+        metadata: { manual_override: input.manualOverride !== undefined },
+        occurredAt: input.expiredAt,
+      });
       return true;
     });
   }
@@ -1407,6 +1633,19 @@ export class PrismaIntakeRepository
           },
           createdAt: input.withdrawnAt,
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:information-request:${input.requestId}:withdrawn`,
+        eventType: "case_information_request_withdrawn",
+        actorType: "staff",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        fromStage: "waiting_on_applicant",
+        toStage: "submitted",
+        relatedResourceType: "information_request",
+        relatedResourceId: input.requestId,
+        occurredAt: input.withdrawnAt,
       });
       return {
         requestId: input.requestId,
@@ -1546,6 +1785,20 @@ export class PrismaIntakeRepository
           },
         },
       });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:information-request:${input.requestId}:resubmitted:${revisionId}`,
+        eventType: "case_resubmitted",
+        actorType: "applicant",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        fromStage: "waiting_on_applicant",
+        toStage: "submitted",
+        relatedResourceType: "submission_revision",
+        relatedResourceId: revisionId,
+        metadata: { revision_number: revisionNumber },
+        occurredAt: input.submittedAt,
+      });
       return {
         caseId: input.caseId,
         revisionId,
@@ -1614,13 +1867,14 @@ export class PrismaIntakeRepository
                 updatedAt: input.decidedAt,
               },
       });
+      let handoffJobId: string | null = null;
       if (input.decision === "approve") {
         // AD-145: intake approval never writes into the offering
         // domain's tables directly — it durably hands off, in this same
         // transaction, to the job that opens the Piv/Offering shell the
         // now-`pre_offering_open` property needs to be browsable and
         // reservation-ready.
-        await enqueueTransactionalJob(
+        handoffJobId = await enqueueTransactionalJob(
           this.pgBoss,
           transaction,
           "case_timers.pre_offering_open_handoff",
@@ -1654,6 +1908,32 @@ export class PrismaIntakeRepository
           },
         },
       });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:founder-decision:${input.decidedAt.toISOString()}`,
+        eventType: "founder_decision_recorded",
+        actorType: "staff",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        fromStage: "submitted",
+        toStage: stage,
+        metadata: input.decision === "approve"
+          ? { ipo_period_days: input.ipoPeriodDays, ipo_end_at: input.ipoEndAt.toISOString(), ipo_value_eur: input.ipoValueEur }
+          : { rejection_reason_code: input.rejectionReasonCode },
+        occurredAt: input.decidedAt,
+      });
+      if (handoffJobId !== null) {
+        await appendIntakeCaseEvent(transaction, {
+          caseId: input.caseId,
+          eventKey: `case:${input.caseId}:handoff-queued:${handoffJobId}`,
+          eventType: "handoff_queued",
+          actorType: "system",
+          traceId: input.traceId,
+          sourceJobId: handoffJobId,
+          metadata: { queue: "case_timers.pre_offering_open_handoff" },
+          occurredAt: input.decidedAt,
+        });
+      }
       return {
         caseId: input.caseId,
         stage,
@@ -1710,6 +1990,18 @@ export class PrismaIntakeRepository
             review_notes: input.reviewNotes,
           },
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:evidence:${input.evidenceId}:${input.reviewedAt.toISOString()}`,
+        eventType: "case_evidence_reviewed",
+        actorType: "staff",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        relatedResourceType: "evidence",
+        relatedResourceId: input.evidenceId,
+        metadata: { status: input.status },
+        occurredAt: input.reviewedAt,
       });
       return {
         evidenceId: input.evidenceId,
@@ -1791,6 +2083,18 @@ export class PrismaIntakeRepository
           },
           createdAt: input.closedAt,
         },
+      });
+      await appendIntakeCaseEvent(transaction, {
+        caseId: input.caseId,
+        eventKey: `case:${input.caseId}:closed:${input.closedAt.toISOString()}:${input.outcome}`,
+        eventType: input.outcome === "withdrawn" ? "case_withdrawn" : "case_rejected",
+        actorType: "staff",
+        actorAccountId: input.accountId,
+        traceId: input.traceId,
+        fromStage: current.stage,
+        toStage: input.outcome,
+        metadata: input.outcome === "rejected" ? { rejection_reason_code: input.rejectionReasonCode } : {},
+        occurredAt: input.closedAt,
       });
       return {
         caseId: input.caseId,
