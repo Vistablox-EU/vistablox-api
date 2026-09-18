@@ -793,11 +793,11 @@ export class PrismaIntakeRepository
         postIpoStructuringCompletedAt: true,
         currentSubmissionRevision: { select: { revisionNumber: true } },
         informationRequests: {
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          orderBy: [{ proposedAt: "desc" }, { id: "desc" }],
           select: { id: true, status: true, publishedAt: true, dueAt: true, resolvedAt: true },
         },
         pivs: {
-          orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+          orderBy: [{ id: "desc" }],
           take: 1,
           select: {
             offerings: {
