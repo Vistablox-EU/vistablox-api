@@ -26,6 +26,8 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
           registrationCommitment: true,
           requestedAt: true,
           registeredAt: true,
+          registrationTxHash: true,
+          registrationBlockNumber: true,
         },
       });
       if (existingForAccount !== null && existingForAccount.walletAddress === input.walletAddress) {
@@ -65,6 +67,8 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
           registrationCommitment: true,
           requestedAt: true,
           registeredAt: true,
+          registrationTxHash: true,
+          registrationBlockNumber: true,
         },
       });
       await transaction.auditLog.create({
@@ -97,7 +101,23 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
         registrationCommitment: true,
         requestedAt: true,
         registeredAt: true,
+        registrationTxHash: true,
+        registrationBlockNumber: true,
       },
+    });
+  }
+
+  public async reconcileWalletRegistration(input: { accountId: string; txHash: string; blockNumber: bigint; registeredAt: Date; actorAccountId: string }): Promise<RegisteredWallet> {
+    return this.database.$transaction(async (transaction) => {
+      const wallet = await transaction.walletRegistration.update({
+        where: { accountId: input.accountId },
+        data: { registeredAt: input.registeredAt, registrationTxHash: input.txHash, registrationBlockNumber: input.blockNumber },
+        select: { walletAddress: true, registrationCommitment: true, requestedAt: true, registeredAt: true, registrationTxHash: true, registrationBlockNumber: true },
+      });
+      await transaction.auditLog.create({
+        data: { id: `audit_${ulid()}`, actorAccountId: input.actorAccountId, action: "settlement.wallet_registration_reconciled", resourceType: "wallet_registration", resourceId: input.accountId, changes: { tx_hash: input.txHash, block_number: input.blockNumber.toString(), registered_at: input.registeredAt.toISOString() }, createdAt: input.registeredAt },
+      });
+      return wallet;
     });
   }
 }

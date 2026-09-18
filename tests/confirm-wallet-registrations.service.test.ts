@@ -9,6 +9,7 @@ import type {
 } from "../src/modules/settlement/repository/settlement.repository.js";
 
 const MAX_BLOCK_RANGE_PER_RUN = 2000n;
+const CONFIRMATION_DEPTH = 3n;
 
 interface FakeEvent {
   blockNumber: bigint;
@@ -16,7 +17,7 @@ interface FakeEvent {
   commitment: string;
 }
 
-function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[] }) {
+function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[]; failGetEvents?: boolean }) {
   const getEventsCalls: Array<{ fromBlock: bigint; toBlock: bigint }> = [];
   return {
     chain: {
@@ -27,6 +28,7 @@ function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[] }) {
         getEvents: {
           WalletRegistered: vi.fn(async ({ fromBlock, toBlock }: { fromBlock: bigint; toBlock: bigint }) => {
             getEventsCalls.push({ fromBlock, toBlock });
+            if (options.failGetEvents) throw new Error("RPC log query failed");
             return options.events
               .filter((event) => event.blockNumber >= fromBlock && event.blockNumber <= toBlock)
               .map((event) => ({ args: { wallet: event.wallet, commitment: event.commitment } }));
@@ -46,6 +48,8 @@ function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[] }) {
 class FakeSettlementRepository implements SettlementRepository {
   public readonly confirmedAccountIds: string[] = [];
   public readonly recordedMismatches: WalletRegistrationAddressMismatchInput[] = [];
+  private readonly overdueCount: number;
+  public overdueCutoff: Date | undefined;
   private readonly byCommitment: Map<string, PendingWalletRegistration>;
   private readonly confirmed = new Set<string>();
   private cursor: bigint | null;
@@ -53,9 +57,11 @@ class FakeSettlementRepository implements SettlementRepository {
   public constructor(
     pending: Array<PendingWalletRegistration & { commitment: string }>,
     initialCursor: bigint | null = null,
+    overdueCount = 0,
   ) {
     this.byCommitment = new Map(pending.map((row) => [row.commitment.toLowerCase(), row]));
     this.cursor = initialCursor;
+    this.overdueCount = overdueCount;
   }
 
   public async findPendingWalletRegistrationByCommitment(
@@ -69,6 +75,11 @@ class FakeSettlementRepository implements SettlementRepository {
   public async confirmWalletRegistration(accountId: string): Promise<void> {
     this.confirmed.add(accountId);
     this.confirmedAccountIds.push(accountId);
+  }
+
+  public async countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number> {
+    this.overdueCutoff = cutoff;
+    return this.overdueCount;
   }
 
   public async recordWalletRegistrationAddressMismatch(
@@ -127,16 +138,38 @@ describe("ConfirmWalletRegistrationsService", () => {
     expect(repository.confirmedAccountIds).toEqual(["acct_01"]);
   });
 
-  it("starts watching from the current block, not genesis, on the very first run", async () => {
+  it("reports registrations pending longer than the operational threshold", async () => {
+    const { chain } = makeFakeChain({ latestBlock: 100n, events: [] });
+    const repository = new FakeSettlementRepository([], 10n, 2);
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => new Date("2026-09-16T10:00:00Z"));
+
+    const summary = await service.execute();
+
+    expect(summary.pendingRegistrationsOverdue).toBe(2);
+  });
+
+  it("uses the configured overdue threshold and reports it in the summary", async () => {
+    const { chain } = makeFakeChain({ latestBlock: 100n, events: [] });
+    const repository = new FakeSettlementRepository([], 10n, 1);
+    const now = new Date("2026-09-16T10:00:00Z");
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => now, 15 * 60_000);
+
+    const summary = await service.execute();
+
+    expect(repository.overdueCutoff?.toISOString()).toBe("2026-09-16T09:45:00.000Z");
+    expect(summary.pendingWarnAfterMinutes).toBe(15);
+  });
+
+  it("starts watching from the latest confirmed block, not the mutable chain head, on the very first run", async () => {
     const { chain, getEventsCalls } = makeFakeChain({ latestBlock: 500n, events: [] });
     const repository = new FakeSettlementRepository([], null);
     const service = new ConfirmWalletRegistrationsService(repository, chain as never);
 
     const summary = await service.execute();
 
-    expect(getEventsCalls).toEqual([{ fromBlock: 500n, toBlock: 500n }]);
-    expect(summary.fromBlock).toBe("500");
-    expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(500n);
+    expect(getEventsCalls).toEqual([{ fromBlock: 500n - CONFIRMATION_DEPTH, toBlock: 500n - CONFIRMATION_DEPTH }]);
+    expect(summary.fromBlock).toBe("497");
+    expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(497n);
   });
 
   it("counts an event with no matching pending registration as unmatched, without confirming anything", async () => {
@@ -190,20 +223,63 @@ describe("ConfirmWalletRegistrationsService", () => {
 
     const summary = await service.execute();
 
-    const expectedToBlock = 1n + MAX_BLOCK_RANGE_PER_RUN;
-    expect(getEventsCalls).toEqual([{ fromBlock: 1n, toBlock: expectedToBlock }]);
+    const expectedToBlock = MAX_BLOCK_RANGE_PER_RUN;
+    expect(getEventsCalls).toEqual([{ fromBlock: 0n, toBlock: expectedToBlock }]);
     expect(summary.toBlock).toBe(expectedToBlock.toString());
     expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(expectedToBlock);
   });
 
-  it("no-ops without calling getEvents when the cursor has already caught up to the latest block", async () => {
+  it("rescans the recent overlap even when the cursor has caught up to the safe head", async () => {
     const { chain, getEventsCalls } = makeFakeChain({ latestBlock: 50n, events: [] });
     const repository = new FakeSettlementRepository([], 50n);
     const service = new ConfirmWalletRegistrationsService(repository, chain as never);
 
     const summary = await service.execute();
 
-    expect(getEventsCalls).toEqual([]);
+    expect(getEventsCalls).toEqual([{ fromBlock: 19n, toBlock: 47n }]);
     expect(summary.eventsFound).toBe(0);
+  });
+
+  it("rescans the cursor overlap so an event missed during RPC indexing is recovered", async () => {
+    const { chain, getEventsCalls } = makeFakeChain({
+      latestBlock: 120n,
+      events: [{ blockNumber: 95n, wallet: "0xABC", commitment: "0xc1" }],
+    });
+    const repository = new FakeSettlementRepository(
+      [{ accountId: "acct_01", walletAddress: "0xabc", commitment: "0xc1" }],
+      100n,
+    );
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => new Date());
+
+    await service.execute();
+
+    expect(getEventsCalls[0]!.fromBlock).toBe(69n);
+    expect(getEventsCalls[0]!.toBlock).toBe(117n);
+    expect(repository.confirmedAccountIds).toEqual(["acct_01"]);
+  });
+
+  it("does not advance the cursor when the RPC log query fails", async () => {
+    const { chain } = makeFakeChain({ latestBlock: 120n, events: [], failGetEvents: true });
+    const repository = new FakeSettlementRepository([], 100n);
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never);
+
+    await expect(service.execute()).rejects.toThrow("RPC log query failed");
+    expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(100n);
+  });
+
+  it("is idempotent when an overlapping range returns the same event twice", async () => {
+    const event = { blockNumber: 95n, wallet: "0xABC", commitment: "0xc1" };
+    const { chain } = makeFakeChain({ latestBlock: 120n, events: [event, event] });
+    const repository = new FakeSettlementRepository(
+      [{ accountId: "acct_01", walletAddress: "0xabc", commitment: "0xc1" }],
+      100n,
+    );
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => new Date());
+
+    const summary = await service.execute();
+
+    expect(summary.eventsFound).toBe(2);
+    expect(summary.registrationsConfirmed).toBe(1);
+    expect(repository.confirmedAccountIds).toEqual(["acct_01"]);
   });
 });

@@ -55,7 +55,7 @@ export interface PublishDisclosurePackResult {
  * through a separate amendment/consent path this codebase does not build.
  *
  * document_ref is a trusted, already-uploaded storage reference, the same
- * shape origination's own document intake already uses
+ * shape intake's own document intake already uses
  * (submissionDocumentTypeSchema/document_ref) — this codebase has no file
  * upload path for any document kind, disclosure documents included; the
  * underlying file reaching storage is a process this API does not perform.

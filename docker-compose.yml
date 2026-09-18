@@ -50,6 +50,20 @@ services:
       timeout: 5s
       retries: 10
 
+  clamav:
+    image: clamav/clamav:1.4.6
+    volumes:
+      - clamav-data:/var/lib/clamav
+      - ./infrastructure/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    mem_limit: 2g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 3 --config-file=/etc/clamav/clamd.conf || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
   storage-init:
     build:
       context: .
@@ -61,7 +75,11 @@ services:
       MINIO_USE_SSL: "false"
       MINIO_ACCESS_KEY: vistablox-local
       MINIO_SECRET_KEY: vistablox-local-secret
-      MINIO_DOCUMENT_BUCKET: vistablox-documents
+      MINIO_QUARANTINE_BUCKET: vistablox-quarantine
+      MINIO_PRIVATE_BUCKET: vistablox-private
+      MINIO_KYC_BUCKET: vistablox-kyc
+      MINIO_DISCLOSURES_BUCKET: vistablox-disclosures
+      MINIO_AUDIT_BUCKET: vistablox-audit
     depends_on:
       minio:
         condition: service_healthy
@@ -97,6 +115,8 @@ services:
       SMTP_PASSWORD: vistablox
       SMTP_FROM: VistaBlox <no-reply@vistablox.local>
       <<: *minio-client-environment
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
     depends_on:
       postgres:
         condition: service_healthy
@@ -106,6 +126,8 @@ services:
         condition: service_completed_successfully
       storage-init:
         condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
     healthcheck:
       test:
         [
@@ -145,3 +167,4 @@ services:
 volumes:
   postgres-data:
   minio-data:
+  clamav-data:

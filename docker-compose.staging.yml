@@ -1,9 +1,11 @@
 services:
   vistablox-db-server:
     image: postgres:18-alpine
+    env_file:
+      - .env.staging
     environment:
       POSTGRES_USER: vistablox
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.staging}
       POSTGRES_DB: vistablox-db
     # No `ports:` here on purpose -- this stays reachable only from other
     # services on the compose network (api/worker/migrate), never published
@@ -26,6 +28,71 @@ services:
     ports:
       - "1080:1080"
 
+  # Private, persistent S3-compatible storage for disclosure and operational
+  # documents. No host port is published: only services on this Compose
+  # network can reach the object store; the API remains the authorization and
+  # download boundary.
+  minio:
+    build:
+      context: .
+      dockerfile: infrastructure/minio/Dockerfile
+    # The S3 API remains private, while the management console is reachable
+    # only from this host's browser. Use SSH port forwarding for remote admin.
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set in .env.staging}
+      MINIO_ROOT_PASSWORD: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set in .env.staging}
+    ports:
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - staging-minio-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  clamav:
+    image: clamav/clamav:1.4.6
+    volumes:
+      - staging-clamav-data:/var/lib/clamav
+      - ./infrastructure/clamav/clamd.conf:/etc/clamav/clamd.conf:ro
+    mem_limit: 2g
+    cpus: 1.0
+    healthcheck:
+      test: ["CMD-SHELL", "clamdscan --ping 3 --config-file=/etc/clamav/clamd.conf || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 90s
+
+  # One-shot bucket provisioning. Keeping this separate makes startup
+  # idempotent and ensures the API never races bucket creation.
+  storage-init:
+    build:
+      context: .
+      target: api
+    command: ["node", "dist/infrastructure/storage/ensure-minio-bucket.js"]
+    env_file:
+      - .env.staging
+    environment:
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set in .env.staging}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set in .env.staging}
+      MINIO_QUARANTINE_BUCKET: ${MINIO_QUARANTINE_BUCKET:-vistablox-quarantine}
+      MINIO_PRIVATE_BUCKET: ${MINIO_PRIVATE_BUCKET:-vistablox-private}
+      MINIO_KYC_BUCKET: ${MINIO_KYC_BUCKET:-vistablox-kyc}
+      MINIO_DISCLOSURES_BUCKET: ${MINIO_DISCLOSURES_BUCKET:-vistablox-disclosures}
+      MINIO_AUDIT_BUCKET: ${MINIO_AUDIT_BUCKET:-vistablox-audit}
+      CLAMAV_HOST: clamav
+      CLAMAV_PORT: "3310"
+    depends_on:
+      minio:
+        condition: service_healthy
+    restart: "no"
+
   migrate:
     build:
       context: .
@@ -35,8 +102,10 @@ services:
     # restart this forever (unless-stopped ignores exit code, so even a
     # clean exit-0 with nothing to migrate gets relaunched).
     restart: "no"
+    env_file:
+      - .env.staging
     environment:
-      DIRECT_DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD}@vistablox-db-server:5432/vistablox-db
+      DIRECT_DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.staging}@vistablox-db-server:5432/vistablox-db
     depends_on:
       vistablox-db-server:
         condition: service_healthy
@@ -45,16 +114,25 @@ services:
     build:
       context: .
       target: api
-    # The one port Coolify's proxy actually routes to (api.vistablox.io -> this).
+    # Kept published for local diagnostics; Traefik serves the public API over
+    # the shared external `proxy` network below.
     ports:
       - "3000:3000"
+    networks:
+      - default
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=proxy
+      - traefik.http.routers.vistablox-api.rule=Host(`api.vistablox.io`)
+      - traefik.http.routers.vistablox-api.entrypoints=websecure
+      - traefik.http.routers.vistablox-api.tls.certresolver=cloudflare
+      - traefik.http.services.vistablox-api.loadbalancer.server.port=3000
+    env_file:
+      - .env.staging
     environment: &app-environment
-      DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD}@vistablox-db-server:5432/vistablox-db
-      BETTER_AUTH_URL: ${BETTER_AUTH_URL}
-      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
-      AUTH_TRUSTED_ORIGINS: ${AUTH_TRUSTED_ORIGINS}
-      DPOP_PHASE1_CUTOVER_AT: ${DPOP_PHASE1_CUTOVER_AT:-}
-      WEBAUTHN_RP_NAME: ${WEBAUTHN_RP_NAME:-VistaBlox}
+      DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.staging}@vistablox-db-server:5432/vistablox-db
+      DIRECT_DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.staging}@vistablox-db-server:5432/vistablox-db
       # Pinned so moving BETTER_AUTH_URL can never silently change it --
       # every enrolled passkey (customer and staff) is bound to this exact
       # value. The default keeps it pinned even if the Coolify var is
@@ -121,6 +199,19 @@ services:
       # bundle above -- see environment.ts's own comment on this var for why.
       VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: ${VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS:-}
       LOG_LEVEL: ${LOG_LEVEL:-info}
+      # The staging object store is the Compose-local MinIO service. These
+      # values intentionally override any external endpoint left in the
+      # shared .env.staging template.
+      MINIO_ENDPOINT: minio
+      MINIO_PORT: "9000"
+      MINIO_USE_SSL: "false"
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY:?MINIO_ACCESS_KEY must be set in .env.staging}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY:?MINIO_SECRET_KEY must be set in .env.staging}
+      MINIO_QUARANTINE_BUCKET: ${MINIO_QUARANTINE_BUCKET:-vistablox-quarantine}
+      MINIO_PRIVATE_BUCKET: ${MINIO_PRIVATE_BUCKET:-vistablox-private}
+      MINIO_KYC_BUCKET: ${MINIO_KYC_BUCKET:-vistablox-kyc}
+      MINIO_DISCLOSURES_BUCKET: ${MINIO_DISCLOSURES_BUCKET:-vistablox-disclosures}
+      MINIO_AUDIT_BUCKET: ${MINIO_AUDIT_BUCKET:-vistablox-audit}
       SMTP_HOST: maildev
       SMTP_PORT: "1025"
       SMTP_SECURE: "false"
@@ -132,6 +223,11 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      storage-init:
+        condition: service_completed_successfully
+      clamav:
+        condition: service_healthy
+    restart: unless-stopped
     healthcheck:
       test:
         [
@@ -149,6 +245,8 @@ services:
     build:
       context: .
       target: worker
+    env_file:
+      - .env.staging
     environment:
       <<: *app-environment
     depends_on:
@@ -156,6 +254,30 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+    restart: unless-stopped
+    # The worker has no public listener. Its internal loopback-only probe is
+    # ready only after pg-boss has started, every queue exists, schedules are
+    # registered, and consumers are attached; its heartbeat then detects a
+    # stalled event loop instead of merely proving PID 1 still exists.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3001/health/ready').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
 volumes:
   staging-postgres-data:
+  staging-minio-data:
+  staging-clamav-data:
+
+networks:
+  proxy:
+    external: true
+    name: proxy

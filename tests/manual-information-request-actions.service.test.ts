@@ -4,12 +4,12 @@ import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.
 import {
   ForceExpireInformationRequestService,
   SendManualReminderService,
-} from "../src/modules/origination/application/operations-case.service.js";
+} from "../src/modules/intake/application/operations-case.service.js";
 import type {
   OperationsCaseDetail,
-  OriginationRepository,
+  IntakeRepository,
   PublishedInformationRequestForTimer,
-} from "../src/modules/origination/repository/origination.repository.js";
+} from "../src/modules/intake/repository/intake.repository.js";
 
 const now = new Date("2026-09-13T12:00:00.000Z");
 
@@ -68,7 +68,7 @@ function fakeCaseDetail(overrides: Partial<OperationsCaseDetail> = {}): Operatio
   };
 }
 
-function fakeRepository(overrides: Partial<OriginationRepository> = {}): OriginationRepository {
+function fakeRepository(overrides: Partial<IntakeRepository> = {}): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -164,7 +164,7 @@ describe("ForceExpireInformationRequestService", () => {
         traceId: "trace_2",
         body: { reason: "Doesn't matter." },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
     expect(repository.expireInformationRequest).not.toHaveBeenCalled();
   });
 
@@ -183,7 +183,7 @@ describe("ForceExpireInformationRequestService", () => {
         traceId: "trace_3",
         body: { reason: "Doesn't matter." },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
     expect(repository.expireInformationRequest).not.toHaveBeenCalled();
   });
 
@@ -218,7 +218,7 @@ describe("ForceExpireInformationRequestService", () => {
         traceId: "trace_4",
         body: { reason: "Trying to expire an already-answered request." },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
     expect(repository.expireInformationRequest).not.toHaveBeenCalled();
   });
 
@@ -234,7 +234,7 @@ describe("ForceExpireInformationRequestService", () => {
         traceId: "trace_5",
         body: { reason: "Race condition." },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
   });
 });
 
@@ -265,7 +265,7 @@ describe("SendManualReminderService", () => {
 
     await expect(
       service.execute({ caseId: "case_missing", requestId: "rfi_01" }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
     expect(emailSender.sendApplicantResponseReminderEmail).not.toHaveBeenCalled();
   });
 
@@ -295,7 +295,7 @@ describe("SendManualReminderService", () => {
 
     await expect(
       service.execute({ caseId: "case_01", requestId: "rfi_01" }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
     expect(emailSender.sendApplicantResponseReminderEmail).not.toHaveBeenCalled();
   });
 
@@ -310,7 +310,7 @@ describe("SendManualReminderService", () => {
 
     await expect(
       service.execute({ caseId: "case_01", requestId: "rfi_01" }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.applicant_contact_email_missing" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.applicant_contact_email_missing" });
     expect(emailSender.sendApplicantResponseReminderEmail).not.toHaveBeenCalled();
   });
 });

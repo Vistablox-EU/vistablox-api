@@ -110,6 +110,7 @@ describe("IdentityDisplayProfileProvider", () => {
       givenName: "Carmen",
       familyName: "Silva",
       fullDisplayName: "Carmen Silva",
+      idDocumentCountryCode: null,
       syncedAt: now,
     });
   });

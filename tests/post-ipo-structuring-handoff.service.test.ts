@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { TransitionCaseToPostIpoStructuringService } from "../src/modules/origination/application/post-ipo-structuring-handoff.service.js";
-import type { PostIpoStructuringHandoffRepository } from "../src/modules/origination/repository/post-ipo-structuring-handoff.repository.js";
+import { TransitionCaseToPostIpoStructuringService } from "../src/modules/intake/application/post-ipo-structuring-handoff.service.js";
+import type { PostIpoStructuringHandoffRepository } from "../src/modules/intake/repository/post-ipo-structuring-handoff.repository.js";
 
 const now = new Date("2026-09-08T20:00:00.000Z");
 

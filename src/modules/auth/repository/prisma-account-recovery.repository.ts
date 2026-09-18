@@ -55,6 +55,12 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
     return found === null ? null : toCaseRecord(found);
   }
 
+  public async countOpenCasesBefore(cutoff: Date): Promise<number> {
+    return this.database.accountRecoveryCase.count({
+      where: { status: "open", createdAt: { lt: cutoff } },
+    });
+  }
+
   public async openCase(input: {
     accountId: string;
     actorAccountId: string;

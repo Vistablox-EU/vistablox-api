@@ -185,10 +185,13 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.string().min(8).optional(),
     ),
-    MINIO_DOCUMENT_BUCKET: z.preprocess(
-      emptyStringToUndefined,
-      z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional(),
-    ),
+    MINIO_QUARANTINE_BUCKET: optionalNonEmptyString(),
+    MINIO_PRIVATE_BUCKET: optionalNonEmptyString(),
+    MINIO_KYC_BUCKET: optionalNonEmptyString(),
+    MINIO_DISCLOSURES_BUCKET: z.preprocess(emptyStringToUndefined, z.string().regex(/^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/).optional()),
+    MINIO_AUDIT_BUCKET: optionalNonEmptyString(),
+    CLAMAV_HOST: optionalNonEmptyString(),
+    CLAMAV_PORT: z.coerce.number().int().min(1).max(65_535).default(3_310),
     // Required outright, not optional-together -- there is no "KYC disabled"
     // mode: /v1/kyc's session creation, the Didit webhook, and account
     // recovery's own re-verification flow all reuse this one configuration
@@ -276,6 +279,10 @@ const environmentSchema = z
     // WalletRegistered event) does need live chain access, so that job
     // additionally requires the CHAIN_* bundle above to be configured.
     VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: optionalEthAddress(),
+    WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(5),
+    KYC_CREATING_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
+    KYC_OPEN_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(10080).default(60),
+    ACCOUNT_RECOVERY_ALERT_AFTER_HOURS: z.coerce.number().int().min(1).max(720).default(24),
   })
   .refine(
     (environment) => {
@@ -283,7 +290,7 @@ const environmentSchema = z
         environment.MINIO_ENDPOINT,
         environment.MINIO_ACCESS_KEY,
         environment.MINIO_SECRET_KEY,
-        environment.MINIO_DOCUMENT_BUCKET,
+        environment.MINIO_DISCLOSURES_BUCKET,
       ];
       return (
         values.every((value) => value === undefined) ||

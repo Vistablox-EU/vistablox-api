@@ -6,6 +6,7 @@ export interface ProtectedDisplayProfile {
   givenName: string;
   familyName: string;
   fullDisplayName: string;
+  idDocumentCountryCode?: string | null;
   syncedAt: Date;
 }
 

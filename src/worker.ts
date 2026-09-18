@@ -12,9 +12,9 @@ import { createLogger } from "./infrastructure/logging/logger.js";
 import {
   ExpireOverdueInformationRequestsService,
   SendApplicantResponseRemindersService,
-} from "./modules/origination/application/case-timer.service.js";
-import { TransitionCaseToPostIpoStructuringService } from "./modules/origination/application/post-ipo-structuring-handoff.service.js";
-import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
+} from "./modules/intake/application/case-timer.service.js";
+import { TransitionCaseToPostIpoStructuringService } from "./modules/intake/application/post-ipo-structuring-handoff.service.js";
+import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
 import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prisma-device-challenge.repository.js";
@@ -43,10 +43,16 @@ import { PrismaSettlementRepository } from "./modules/settlement/repository/pris
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
+import { WorkerHeartbeat } from "./shared/health/worker-heartbeat.js";
+import { WorkerMetrics } from "./shared/health/worker-metrics.js";
+import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
+const metrics = new WorkerMetrics();
+const heartbeat = new WorkerHeartbeat(undefined, metrics);
+await heartbeat.start();
 const dpopReplayRepository = new PrismaDpopReplayRepository(database);
 const deviceChallengeRepository = new PrismaDeviceChallengeRepository(database);
 const emailSender = new SmtpEmailSender({
@@ -62,7 +68,7 @@ boss.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
 });
 
-// origination/offering read identity.kyc_eligibility directly via a shared
+// intake/offering read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository.
 const kycRepository = new PrismaKycRepository(database, boss);
 // Unconditional -- Didit config has no disabled mode any more (Stage 4).
@@ -72,8 +78,18 @@ const diditClient = new HttpDiditClient({
   timeoutMs: 4_000,
 });
 const runKycRenewalTimer = new RunKycRenewalTimerService(kycRepository, emailSender);
-const expireStuckSessionCreations = new ExpireStuckSessionCreationsService(kycRepository);
-const reconcileStuckOpenSessions = new ReconcileStuckOpenSessionsService(kycRepository, diditClient);
+const expireStuckSessionCreations = new ExpireStuckSessionCreationsService(
+  kycRepository,
+  () => new Date(),
+  environment.KYC_CREATING_ALERT_AFTER_MINUTES * 60_000,
+);
+const reconcileStuckOpenSessions = new ReconcileStuckOpenSessionsService(
+  kycRepository,
+  diditClient,
+  () => new Date(),
+  environment.KYC_OPEN_ALERT_AFTER_MINUTES * 60_000,
+);
+const accountRecoveryRepository = new PrismaAccountRecoveryRepository(database);
 // Mirrors server.ts's own best-effort protected-profile-cache wiring, a
 // separate client on the same PROFILE_CACHE_URL Redis instance -- this
 // process needs its own copy of it only so ProcessDiditWebhookService's
@@ -131,13 +147,13 @@ const processDiditWebhook = new ProcessDiditWebhookService(
 );
 
 const offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
-const originationRepository = new PrismaOriginationRepository(database, boss, kycRepository);
+const intakeRepository = new PrismaIntakeRepository(database, boss, kycRepository);
 const sendApplicantReminders = new SendApplicantResponseRemindersService(
-  originationRepository,
+  intakeRepository,
   emailSender,
 );
-const expireOverdueRequests = new ExpireOverdueInformationRequestsService(originationRepository);
-const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(originationRepository);
+const expireOverdueRequests = new ExpireOverdueInformationRequestsService(intakeRepository);
+const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(intakeRepository);
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
@@ -230,7 +246,12 @@ const confirmWalletRegistrations =
   settlementRepository === undefined ||
   environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS === undefined
     ? undefined
-    : new ConfirmWalletRegistrationsService(settlementRepository, chainClients);
+    : new ConfirmWalletRegistrationsService(
+        settlementRepository,
+        chainClients,
+        () => new Date(),
+        environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000,
+      );
 
 const RETRY_OPTIONS = JOB_RETRY_OPTIONS;
 
@@ -285,6 +306,7 @@ await boss.createQueue("maintenance.device_challenge_prune");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.kyc_stuck_session_expiry");
 await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
+await boss.createQueue("maintenance.account_recovery_alert");
 // Reversal (undoing the KYC microservice split): the Didit webhook's own
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
 // The webhook itself is received and durably enqueued by server.ts/app.ts.
@@ -386,6 +408,10 @@ await boss.schedule("maintenance.kyc_stuck_session_reconciliation", "0 * * * *",
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
+await boss.schedule("maintenance.account_recovery_alert", "*/15 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
 
 await boss.work("case_timers.applicant_reminders", async () => {
   await runJob("case_timers.applicant_reminders", () => sendApplicantReminders.execute());
@@ -448,11 +474,36 @@ if (confirmWalletRegistrations !== undefined) {
   await boss.work("settlement.confirm_wallet_registrations", async () => {
     const traceId = `req_${ulid()}`;
     try {
+      metrics.increment("vistablox_worker_wallet_registration_runs_total");
       const summary = await confirmWalletRegistrations.execute();
+      metrics.set("vistablox_worker_wallet_registration_pending_overdue", summary.pendingRegistrationsOverdue);
+      metrics.increment(
+        "vistablox_worker_wallet_registration_confirmed_total",
+        summary.registrationsConfirmed,
+      );
+      metrics.increment(
+        "vistablox_worker_wallet_registration_unmatched_events_total",
+        summary.unmatchedEvents,
+      );
+      metrics.increment(
+        "vistablox_worker_wallet_registration_address_mismatches_total",
+        summary.addressMismatches.length,
+      );
       logger.info(
         { trace_id: traceId, job: "settlement.confirm_wallet_registrations", ...summary },
         "case timer job completed",
       );
+      if (summary.pendingRegistrationsOverdue > 0) {
+        logger.warn(
+          {
+            trace_id: traceId,
+            job: "settlement.confirm_wallet_registrations",
+            pending_registrations_overdue: summary.pendingRegistrationsOverdue,
+            threshold_minutes: summary.pendingWarnAfterMinutes,
+          },
+          "wallet registrations pending beyond approval threshold",
+        );
+      }
       if (summary.addressMismatches.length > 0) {
         logger.warn(
           {
@@ -464,6 +515,7 @@ if (confirmWalletRegistrations !== undefined) {
         );
       }
     } catch (error) {
+      metrics.increment("vistablox_worker_wallet_registration_failures_total");
       logger.error(
         { err: error, trace_id: traceId, job: "settlement.confirm_wallet_registrations" },
         "case timer job failed",
@@ -592,14 +644,24 @@ await boss.work("maintenance.kyc_renewal", async () => {
   await runJob("maintenance.kyc_renewal", (traceId) => runKycRenewalTimer.execute(traceId));
 });
 await boss.work("maintenance.kyc_stuck_session_expiry", async () => {
-  await runJob("maintenance.kyc_stuck_session_expiry", (traceId) =>
-    expireStuckSessionCreations.execute(traceId),
-  );
+  const summary = await expireStuckSessionCreations.execute(`req_${ulid()}`);
+  metrics.set("vistablox_worker_kyc_creating_overdue", summary.overdue);
+  if (summary.overdue > 0) logger.warn({ job: "maintenance.kyc_stuck_session_expiry", overdue_sessions: summary.overdue, threshold_minutes: environment.KYC_CREATING_ALERT_AFTER_MINUTES }, "KYC session creations stuck beyond threshold");
+  logger.info({ job: "maintenance.kyc_stuck_session_expiry", ...summary }, "maintenance job completed");
 });
 await boss.work("maintenance.kyc_stuck_session_reconciliation", async () => {
-  await runJob("maintenance.kyc_stuck_session_reconciliation", (traceId) =>
-    reconcileStuckOpenSessions.execute(traceId),
+  const summary = await reconcileStuckOpenSessions.execute(`req_${ulid()}`);
+  metrics.set("vistablox_worker_kyc_open_overdue", summary.overdue);
+  if (summary.overdue > 0) logger.warn({ job: "maintenance.kyc_stuck_session_reconciliation", overdue_sessions: summary.overdue, threshold_minutes: environment.KYC_OPEN_ALERT_AFTER_MINUTES }, "KYC sessions awaiting provider resolution beyond threshold");
+  logger.info({ job: "maintenance.kyc_stuck_session_reconciliation", ...summary }, "maintenance job completed");
+});
+await boss.work("maintenance.account_recovery_alert", async () => {
+  const overdue = await accountRecoveryRepository.countOpenCasesBefore(
+    new Date(Date.now() - environment.ACCOUNT_RECOVERY_ALERT_AFTER_HOURS * 3_600_000),
   );
+  metrics.set("vistablox_worker_account_recovery_overdue", overdue);
+  if (overdue > 0) logger.warn({ job: "maintenance.account_recovery_alert", overdue_cases: overdue, threshold_hours: environment.ACCOUNT_RECOVERY_ALERT_AFTER_HOURS }, "account recovery cases open beyond review threshold");
+  logger.info({ job: "maintenance.account_recovery_alert", checked: overdue, acted: 0 }, "maintenance job completed");
 });
 await boss.work("provider_events.didit_webhook", async (jobs) => {
   for (const job of jobs) {
@@ -624,9 +686,11 @@ await boss.work("provider_events.didit_webhook", async (jobs) => {
 });
 
 logger.info("VistaBlox worker started");
+heartbeat.markReady();
 
 async function shutdown(signal: NodeJS.Signals): Promise<void> {
   logger.info({ signal }, "worker shutting down");
+  await heartbeat.stop();
   try {
     await boss.stop();
   } catch (error: unknown) {

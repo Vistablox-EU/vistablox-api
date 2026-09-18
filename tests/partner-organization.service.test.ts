@@ -7,12 +7,12 @@ import {
   ListLegalPracticesService,
   UpdateAppraisalFirmStatusService,
   UpdateLegalPracticeStatusService,
-} from "../src/modules/origination/application/partner-organization.service.js";
+} from "../src/modules/intake/application/partner-organization.service.js";
 import type {
   AppraisalFirmRecord,
   LegalPracticeRecord,
   PartnerOrganizationRepository,
-} from "../src/modules/origination/repository/partner-organization.repository.js";
+} from "../src/modules/intake/repository/partner-organization.repository.js";
 
 const now = new Date("2026-09-05T12:00:00.000Z");
 
@@ -118,7 +118,7 @@ describe("partner organization services", () => {
         actorAccountId: "acct_admin",
         traceId: "trace_3",
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.legal_practice_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.legal_practice_not_found" });
   });
 
   it("creates an appraisal firm and returns its wire payload", async () => {
@@ -171,6 +171,6 @@ describe("partner organization services", () => {
         actorAccountId: "acct_admin",
         traceId: "trace_5",
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.appraisal_firm_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.appraisal_firm_not_found" });
   });
 });

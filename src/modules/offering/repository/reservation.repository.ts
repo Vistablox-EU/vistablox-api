@@ -53,8 +53,8 @@ export interface PendingPurchaseReservationForTimer {
 
 /**
  * The one place that performs AD-146's atomic, transaction-scoped capacity
- * check: createReservation locks the offering row (matching the origination
- * FOR UPDATE pattern in PrismaOriginationRepository.submitInitialCase) and
+ * check: createReservation locks the offering row (matching the intake
+ * FOR UPDATE pattern in PrismaIntakeRepository.submitInitialCase) and
  * re-verifies both the offering's status and its remaining capacity against
  * fresh data before writing — a passing advisory read
  * (reservation-eligibility.policy.ts) is never treated as sufficient on its

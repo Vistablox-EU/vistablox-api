@@ -34,6 +34,7 @@ export class IdentityDisplayProfileProvider implements ProtectedDisplayProfilePr
         givenName: result.data.given_name,
         familyName: result.data.family_name,
         fullDisplayName: result.data.full_display_name,
+        idDocumentCountryCode: result.data.id_document_country_code,
         syncedAt: new Date(result.data.synced_at),
       };
     } catch (error) {

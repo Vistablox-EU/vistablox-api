@@ -8,7 +8,7 @@ import type { ReconfirmationWindowOpenedNotificationRepository } from "../reposi
 // (case_timers.offering_reconfirmation_window_opened, AD-145/AD-152). Parsed
 // defensively here since a pg-boss payload is untyped JSON once round-tripped
 // through Postgres — the same pattern openOfferingForApprovedCaseJobSchema
-// already uses for the origination handoff.
+// already uses for the intake handoff.
 export const notifyReconfirmationWindowOpenedJobSchema = z.object({
   offering_id: z.string().trim().min(1),
   reservation_ids: z.array(z.string().trim().min(1)).min(1),

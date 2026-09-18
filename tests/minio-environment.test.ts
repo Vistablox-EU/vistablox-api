@@ -31,13 +31,21 @@ describe("MinIO environment", () => {
         MINIO_USE_SSL: "false",
         MINIO_ACCESS_KEY: "access-key",
         MINIO_SECRET_KEY: "secret-key",
-        MINIO_DOCUMENT_BUCKET: "vistablox-documents",
+        MINIO_QUARANTINE_BUCKET: "vistablox-quarantine",
+        MINIO_PRIVATE_BUCKET: "vistablox-private",
+        MINIO_KYC_BUCKET: "vistablox-kyc",
+        MINIO_DISCLOSURES_BUCKET: "vistablox-disclosures",
+        MINIO_AUDIT_BUCKET: "vistablox-audit",
       }),
     ).toMatchObject({
       MINIO_ENDPOINT: "minio",
       MINIO_PORT: 9000,
       MINIO_USE_SSL: false,
-      MINIO_DOCUMENT_BUCKET: "vistablox-documents",
+      MINIO_QUARANTINE_BUCKET: "vistablox-quarantine",
+      MINIO_PRIVATE_BUCKET: "vistablox-private",
+      MINIO_KYC_BUCKET: "vistablox-kyc",
+      MINIO_DISCLOSURES_BUCKET: "vistablox-disclosures",
+      MINIO_AUDIT_BUCKET: "vistablox-audit",
     });
   });
 

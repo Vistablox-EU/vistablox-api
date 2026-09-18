@@ -7,13 +7,15 @@ import { evaluateProofOfAddressOutcome } from "../domain/proof-of-address-policy
 import { isSessionStuck } from "../domain/stuck-session.policy.js";
 import type { KycRepository } from "../repository/kyc.repository.js";
 
+export type StuckSessionJobSummary = JobRunSummary & { overdue: number };
+
 // Nothing user-facing happens between reserveSessionStart and
 // completeSessionStart/failSessionStart — they run back to back within the
 // same request — so anything beyond a few minutes here is a crash, never a
 // legitimately slow one. Matches case_timers.reservation_unfunded_expiry's
 // own 15-minute reasoning style for an analogous "this should resolve in
 // seconds, so minutes means something went wrong" window.
-const CREATING_TIMEOUT_MS = 15 * 60 * 1000;
+export const KYC_CREATING_STUCK_TIMEOUT_MS = 15 * 60 * 1000;
 
 /**
  * docs/didit-kyc.md's stuck-session-start gap, timeout half: a crash (or a
@@ -31,15 +33,16 @@ export class ExpireStuckSessionCreationsService {
   public constructor(
     private readonly repository: KycRepository,
     private readonly clock: () => Date = () => new Date(),
+    private readonly timeoutMs = KYC_CREATING_STUCK_TIMEOUT_MS,
   ) {}
 
-  public async execute(traceId: string): Promise<JobRunSummary> {
+  public async execute(traceId: string): Promise<StuckSessionJobSummary> {
     const now = this.clock();
     const stuck = await this.repository.listStuckSessionCreationsForTimer();
 
     let acted = 0;
     for (const session of stuck) {
-      const due = isSessionStuck({ updatedAt: session.updatedAt, now, timeoutMs: CREATING_TIMEOUT_MS });
+      const due = isSessionStuck({ updatedAt: session.updatedAt, now, timeoutMs: this.timeoutMs });
       if (!due) continue;
       if (session.kind === "baseline") {
         await this.repository.failSessionStart({
@@ -58,7 +61,12 @@ export class ExpireStuckSessionCreationsService {
       }
       acted += 1;
     }
-    return { checked: stuck.length, acted };
+    const result = { checked: stuck.length, acted } as StuckSessionJobSummary;
+    Object.defineProperty(result, "overdue", {
+      value: stuck.filter((session) => isSessionStuck({ updatedAt: session.updatedAt, now, timeoutMs: this.timeoutMs })).length,
+      enumerable: false,
+    });
+    return result;
   }
 }
 
@@ -68,7 +76,7 @@ export class ExpireStuckSessionCreationsService {
 // normally finishes in minutes, so an hour is already generous headroom
 // before the first re-check, not a "give up" cutoff: a session found still
 // genuinely pending is simply left alone and re-checked on the next run.
-const OPEN_RECONCILIATION_THRESHOLD_MS = 60 * 60 * 1000;
+export const KYC_OPEN_RECONCILIATION_THRESHOLD_MS = 60 * 60 * 1000;
 
 // Statuses evaluateStatusOutcome/evaluateProofOfAddressOutcome both treat as
 // "nothing new to report" — re-querying Didit and finding one of these back
@@ -98,9 +106,10 @@ export class ReconcileStuckOpenSessionsService {
     private readonly repository: KycRepository,
     private readonly didit: DiditClient,
     private readonly clock: () => Date = () => new Date(),
+    private readonly timeoutMs = KYC_OPEN_RECONCILIATION_THRESHOLD_MS,
   ) {}
 
-  public async execute(traceId: string): Promise<JobRunSummary> {
+  public async execute(traceId: string): Promise<StuckSessionJobSummary> {
     const now = this.clock();
     const stuck = await this.repository.listStuckOpenSessionsForTimer();
 
@@ -109,7 +118,7 @@ export class ReconcileStuckOpenSessionsService {
       const due = isSessionStuck({
         updatedAt: session.updatedAt,
         now,
-        timeoutMs: OPEN_RECONCILIATION_THRESHOLD_MS,
+        timeoutMs: this.timeoutMs,
       });
       if (!due) continue;
 
@@ -155,6 +164,11 @@ export class ReconcileStuckOpenSessionsService {
       }
       acted += 1;
     }
-    return { checked: stuck.length, acted };
+    const result = { checked: stuck.length, acted } as StuckSessionJobSummary;
+    Object.defineProperty(result, "overdue", {
+      value: stuck.filter((session) => isSessionStuck({ updatedAt: session.updatedAt, now, timeoutMs: this.timeoutMs })).length,
+      enumerable: false,
+    });
+    return result;
   }
 }

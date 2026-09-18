@@ -69,6 +69,10 @@ export const requestWalletTransferResponseSchema = z.object({
 export const walletAccountIdParamsSchema = z.object({
   account_id: z.string().min(1),
 });
+export const reconcileWalletRegistrationBodySchema = z.object({
+  transaction_hash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+});
+export const reconcileWalletRegistrationResponseSchema = z.object({ data: z.object({ account_id: z.string(), wallet_address: z.string(), status: z.literal("registered"), registration_tx_hash: z.string(), registration_block_number: z.string(), requested_at: dateTime, registered_at: dateTime }) });
 
 // Staff-only view (admin_operations + staff WebAuthn, same gate as the
 // equivalent KYC operations read) of the same wallet_registrations row the

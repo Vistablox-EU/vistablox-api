@@ -5,7 +5,7 @@ generator client {
 
 datasource db {
   provider = "postgresql"
-  schemas  = ["account", "identity", "origination", "offering", "money", "settlement", "audit", "platform", "rental", "auth"]
+  schemas  = ["account", "identity", "intake", "offering", "money", "settlement", "audit", "platform", "rental", "auth"]
 }
 
 model Account {
@@ -31,8 +31,8 @@ model Account {
   secondaryRecoveryReviews       AccountRecoveryCase[]       @relation("SecondaryRecoveryReviewer")
   kycEligibility                 KycEligibility?
   kycHistory                     KycEligibilityHistory[]
-  originationCases               OriginationCase[]           @relation("CaseApplicant")
-  reviewedCases                  OriginationCase[]           @relation("FounderCaseReviewer")
+  intakeCases               IntakeCase[]           @relation("CaseApplicant")
+  reviewedCases                  IntakeCase[]           @relation("FounderCaseReviewer")
   submittedRevisions             SubmissionRevision[]
   workstreamEvents               WorkstreamAssignmentEvent[] @relation("WorkstreamActor")
   targetReviewerEvents           WorkstreamAssignmentEvent[] @relation("WorkstreamTargetReviewer")
@@ -75,6 +75,44 @@ model AccountPreferences {
 
   @@map("account_preferences")
   @@schema("account")
+}
+
+/// Canonical metadata for every object stored in MinIO. Authorization is
+/// evaluated from this row and domain state; object listings are never used.
+model StoredDocument {
+  id               String    @id @map("document_id")
+  bucket           String
+  objectKey        String    @map("object_key")
+  versionId        String?   @map("version_id")
+  documentType     String    @map("document_type")
+  caseId           String?   @map("case_id")
+  roomId           String?   @map("room_id")
+  accountId        String?   @map("account_id")
+  offeringId       String?   @map("offering_id")
+  contentType      String    @map("content_type")
+  sizeBytes        BigInt    @map("size_bytes")
+  sha256Checksum   String    @map("sha256_checksum")
+  uploadStatus     String    @default("quarantined") @map("upload_status")
+  classification   String    @default("private")
+  retentionUntil   DateTime? @map("retention_until") @db.Timestamptz(6)
+  createdAt        DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  deletedAt        DateTime? @map("deleted_at") @db.Timestamptz(6)
+  deletedByAccountId String? @map("deleted_by_account_id")
+  deletionReason   String?   @map("deletion_reason")
+  sourceDocumentId String?   @map("source_document_id")
+  variantType      String?   @map("variant_type")
+  room             PropertyRoom? @relation("RoomPhotos", fields: [roomId], references: [id])
+  sourceDocument   StoredDocument? @relation("DocumentVariants", fields: [sourceDocumentId], references: [id])
+  variants         StoredDocument[] @relation("DocumentVariants")
+
+  @@unique([bucket, objectKey, versionId])
+  @@unique([sourceDocumentId, variantType], map: "stored_documents_source_variant_key")
+  @@index([caseId], map: "idx_stored_documents_case")
+  @@index([roomId, uploadStatus, deletedAt, createdAt], map: "idx_stored_documents_room_status_created")
+  @@index([accountId], map: "idx_stored_documents_account")
+  @@index([offeringId], map: "idx_stored_documents_offering")
+  @@map("stored_documents")
+  @@schema("platform")
 }
 
 model KycEligibility {
@@ -141,12 +179,12 @@ model Property {
   energyRating           String?  @map("energy_rating")
   createdAt              DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  cases OriginationCase[]
+  cases IntakeCase[]
   piv   Piv?
   rooms PropertyRoom[]
 
   @@map("properties")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model PropertyRoom {
@@ -155,12 +193,14 @@ model PropertyRoom {
   roomType   String   @map("room_type")
   sizeSqM    Decimal  @map("size_sq_m") @db.Decimal(6, 2)
   createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+  preferredPhotoId String? @map("preferred_photo_id")
 
   property Property @relation(fields: [propertyId], references: [id])
+  photos   StoredDocument[] @relation("RoomPhotos")
 
   @@index([propertyId], map: "idx_property_rooms_property")
   @@map("property_rooms")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model LegalPractice {
@@ -170,12 +210,12 @@ model LegalPractice {
   status      String @default("active")
 
   staffRoles       StaffRoleAssignment[]
-  cases            OriginationCase[]
+  cases            IntakeCase[]
   targetEvents     WorkstreamAssignmentEvent[]
   staffInvitations StaffInvitation[]
 
   @@map("legal_practices")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model AppraisalFirm {
@@ -185,12 +225,12 @@ model AppraisalFirm {
   status      String @default("active")
 
   staffRoles       StaffRoleAssignment[]
-  cases            OriginationCase[]
+  cases            IntakeCase[]
   targetEvents     WorkstreamAssignmentEvent[]
   staffInvitations StaffInvitation[]
 
   @@map("appraisal_firms")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model CorridorClearance {
@@ -207,10 +247,10 @@ model CorridorClearance {
 
   @@unique([countryCode, structurePattern, distributionPosture])
   @@map("corridor_clearances")
-  @@schema("origination")
+  @@schema("intake")
 }
 
-model OriginationCase {
+model IntakeCase {
   id                            String    @id @map("case_id")
   propertyId                    String    @map("property_id")
   applicantAccountId            String    @map("applicant_account_id")
@@ -263,8 +303,8 @@ model OriginationCase {
   @@index([legalPracticeId], map: "idx_cases_legal_practice")
   @@index([appraisalFirmId], map: "idx_cases_appraisal_firm")
   @@index([stage], map: "idx_cases_stage")
-  @@map("origination_cases")
-  @@schema("origination")
+  @@map("intake_cases")
+  @@schema("intake")
 }
 
 model SubmissionRevision {
@@ -276,8 +316,8 @@ model SubmissionRevision {
   submissionData       Json     @map("submission_data") @db.JsonB
   reason               String
 
-  case              OriginationCase                @relation("CaseRevisions", fields: [caseId], references: [id])
-  currentForCases   OriginationCase[]              @relation("CurrentSubmissionRevision")
+  case              IntakeCase                @relation("CaseRevisions", fields: [caseId], references: [id])
+  currentForCases   IntakeCase[]              @relation("CurrentSubmissionRevision")
   submittedBy       Account                        @relation(fields: [submittedByAccountId], references: [id])
   evidence          DocumentaryScreeningEvidence[]
   resolvingRequests InformationRequest[]
@@ -285,7 +325,7 @@ model SubmissionRevision {
   @@unique([caseId, revisionNumber])
   @@index([submittedByAccountId], map: "idx_revisions_submitted_by")
   @@map("submission_revisions")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model DocumentaryScreeningEvidence {
@@ -301,14 +341,14 @@ model DocumentaryScreeningEvidence {
   reviewedAt           DateTime? @map("reviewed_at") @db.Timestamptz(6)
   reviewNotes          String?   @map("review_notes")
 
-  case               OriginationCase    @relation(fields: [caseId], references: [id])
+  case               IntakeCase    @relation(fields: [caseId], references: [id])
   submissionRevision SubmissionRevision @relation(fields: [submissionRevisionId], references: [id])
   reviewer           Account?           @relation("EvidenceReviewer", fields: [reviewedByAccountId], references: [id])
 
   @@index([caseId], map: "idx_evidence_case")
   @@index([submissionRevisionId], map: "idx_evidence_revision")
   @@map("documentary_screening_evidence")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model WorkstreamAssignmentEvent {
@@ -322,7 +362,7 @@ model WorkstreamAssignmentEvent {
   targetReviewerAccountId String?  @map("target_reviewer_account_id")
   occurredAt              DateTime @default(now()) @map("occurred_at") @db.Timestamptz(6)
 
-  case                OriginationCase @relation(fields: [caseId], references: [id])
+  case                IntakeCase @relation(fields: [caseId], references: [id])
   actor               Account?        @relation("WorkstreamActor", fields: [actorAccountId], references: [id])
   targetLegalPractice LegalPractice?  @relation(fields: [targetLegalPracticeId], references: [id])
   targetAppraisalFirm AppraisalFirm?  @relation(fields: [targetAppraisalFirmId], references: [id])
@@ -334,7 +374,7 @@ model WorkstreamAssignmentEvent {
   @@index([targetReviewerAccountId], map: "idx_workstream_events_target_reviewer")
   @@index([caseId, workstream, occurredAt(sort: Desc)], map: "idx_workstream_events_case_stream")
   @@map("workstream_assignment_events")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model CaseIntegrityFlag {
@@ -348,7 +388,7 @@ model CaseIntegrityFlag {
   resolvedAt          DateTime? @map("resolved_at") @db.Timestamptz(6)
   resolutionNote      String?   @map("resolution_note")
 
-  case       OriginationCase @relation(fields: [caseId], references: [id])
+  case       IntakeCase @relation(fields: [caseId], references: [id])
   raisedBy   Account?        @relation("IntegrityFlagRaiser", fields: [raisedByAccountId], references: [id])
   resolvedBy Account?        @relation("IntegrityFlagResolver", fields: [resolvedByAccountId], references: [id])
 
@@ -356,7 +396,7 @@ model CaseIntegrityFlag {
   @@index([raisedByAccountId], map: "idx_integrity_flags_raised_by")
   @@index([resolvedByAccountId], map: "idx_integrity_flags_resolved_by")
   @@map("case_integrity_flags")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model InformationRequest {
@@ -374,7 +414,7 @@ model InformationRequest {
   resolutionType       String?   @map("resolution_type")
   resolvingRevisionId  String?   @map("resolving_revision_id")
 
-  case              OriginationCase     @relation(fields: [caseId], references: [id])
+  case              IntakeCase     @relation(fields: [caseId], references: [id])
   proposedBy        Account             @relation("InformationRequestProposer", fields: [proposedByAccountId], references: [id])
   publishedBy       Account?            @relation("InformationRequestPublisher", fields: [publishedByAccountId], references: [id])
   resolvingRevision SubmissionRevision? @relation(fields: [resolvingRevisionId], references: [id])
@@ -385,7 +425,7 @@ model InformationRequest {
   @@index([publishedByAccountId], map: "idx_info_requests_published_by")
   @@index([resolvingRevisionId], map: "idx_info_requests_resolving_revision")
   @@map("information_requests")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model CaseThread {
@@ -393,13 +433,13 @@ model CaseThread {
   caseId String @map("case_id")
   lane   String
 
-  case     OriginationCase @relation(fields: [caseId], references: [id])
+  case     IntakeCase @relation(fields: [caseId], references: [id])
   messages CaseMessage[]
 
   @@unique([caseId, lane], map: "case_threads_case_id_lane_key")
   @@index([caseId], map: "idx_case_threads_case")
   @@map("case_threads")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model CaseMessage {
@@ -415,7 +455,7 @@ model CaseMessage {
   @@index([threadId, createdAt], map: "idx_case_messages_thread_created")
   @@index([authorAccountId], map: "idx_case_messages_author")
   @@map("case_messages")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model LegalExecutionEvent {
@@ -428,13 +468,13 @@ model LegalExecutionEvent {
   outcomeDocumentRef   String?   @map("outcome_document_ref")
   loggedAt             DateTime? @map("logged_at") @db.Timestamptz(6)
 
-  case        OriginationCase @relation(fields: [caseId], references: [id])
+  case        IntakeCase @relation(fields: [caseId], references: [id])
   requestedBy Account         @relation(fields: [requestedByAccountId], references: [id])
 
   @@index([caseId], map: "idx_execution_events_case")
   @@index([requestedByAccountId], map: "idx_execution_events_requested_by")
   @@map("legal_execution_events")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model Piv {
@@ -453,7 +493,7 @@ model Piv {
   tokenId             Decimal?  @unique @map("token_id") @db.Decimal(78, 0)
 
   property               Property                @relation(fields: [propertyId], references: [id])
-  case                   OriginationCase         @relation(fields: [caseId], references: [id])
+  case                   IntakeCase         @relation(fields: [caseId], references: [id])
   corridorClearance      CorridorClearance?      @relation(fields: [corridorClearanceId], references: [id])
   offerings              Offering[]
   positions              PositionLedger[]
@@ -464,7 +504,7 @@ model Piv {
   @@index([caseId], map: "idx_pivs_case")
   @@index([tokenId], map: "idx_pivs_token_id")
   @@map("pivs")
-  @@schema("origination")
+  @@schema("intake")
 }
 
 model Offering {
@@ -619,6 +659,8 @@ model WalletRegistration {
   registrationCommitment String    @map("registration_commitment")
   requestedAt            DateTime  @default(now()) @map("requested_at") @db.Timestamptz(6)
   registeredAt           DateTime? @map("registered_at") @db.Timestamptz(6)
+  registrationTxHash     String?   @map("registration_tx_hash")
+  registrationBlockNumber BigInt?  @map("registration_block_number")
 
   account Account @relation(fields: [accountId], references: [id])
 

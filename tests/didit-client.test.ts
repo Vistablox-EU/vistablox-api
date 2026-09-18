@@ -73,6 +73,7 @@ describe("Didit HTTP client", () => {
             first_name: " Carmen ",
             last_name: " Silva ",
             full_name: " Carmen Silva ",
+            country: "hr",
             document_number: "SECRET",
             warnings: [],
           },
@@ -111,7 +112,7 @@ describe("Didit HTTP client", () => {
       verificationUrl: null,
       expiresAt: null,
       idVerifications: [
-        { status: "Approved", dateOfBirth: "1990-04-15", warnings: [] },
+        { status: "Approved", dateOfBirth: "1990-04-15", documentCountryCode: "HR", warnings: [] },
       ],
       livenessChecks: [{ status: "Approved", warnings: [] }],
       faceMatches: [{ status: "Approved", warnings: [] }],
@@ -128,6 +129,7 @@ describe("Didit HTTP client", () => {
         givenName: "Carmen",
         familyName: "Silva",
         fullDisplayName: "Carmen Silva",
+        idDocumentCountryCode: "HR",
       },
     });
     expect(JSON.stringify(result)).not.toContain("SECRET");

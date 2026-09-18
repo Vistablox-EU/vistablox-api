@@ -104,7 +104,7 @@ export class SmtpEmailSender implements EmailSender {
     await this.transporter.sendMail({
       from: this.options.from,
       to: email.to,
-      subject: "Response needed on your VistaBlox origination case",
+      subject: "Response needed on your VistaBlox intake case",
       text: `VistaBlox is waiting on your response to an information request. Please respond before ${dueAt}, or the request will expire.`,
       html: `<p>VistaBlox is waiting on your response to an information request.</p><p>Please respond before ${escapeHtml(dueAt)}, or the request will expire.</p>`,
     });

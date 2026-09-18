@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { AssignPartnerOrganizationService } from "../src/modules/origination/application/operations-case.service.js";
-import { CaseReviewConflictError } from "../src/modules/origination/repository/origination.repository.js";
-import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
-import type { PartnerOrganizationRepository } from "../src/modules/origination/repository/partner-organization.repository.js";
+import { AssignPartnerOrganizationService } from "../src/modules/intake/application/operations-case.service.js";
+import { CaseReviewConflictError } from "../src/modules/intake/repository/intake.repository.js";
+import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
+import type { PartnerOrganizationRepository } from "../src/modules/intake/repository/partner-organization.repository.js";
 
 const now = new Date("2026-09-08T12:00:00.000Z");
 
-function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationRepository {
+function fakeCases(overrides: Partial<IntakeRepository> = {}): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -113,7 +113,7 @@ describe("assign partner organization service", () => {
         traceId: "trace_2",
         body: { legal_practice_id: "legal_practice_01" },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
     expect(cases.assignPartnerOrganization).not.toHaveBeenCalled();
   });
 
@@ -146,7 +146,7 @@ describe("assign partner organization service", () => {
         traceId: "trace_4",
         body: { legal_practice_id: "legal_practice_01" },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
   });
 
   it("404s when the legal practice does not exist", async () => {
@@ -162,7 +162,7 @@ describe("assign partner organization service", () => {
         traceId: "trace_5",
         body: { legal_practice_id: "legal_practice_missing" },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.legal_practice_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.legal_practice_not_found" });
   });
 
   it("refuses to assign a suspended appraisal firm", async () => {
@@ -180,7 +180,7 @@ describe("assign partner organization service", () => {
         traceId: "trace_6",
         body: { appraisal_firm_id: "appraisal_firm_01" },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.appraisal_firm_not_active" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.appraisal_firm_not_active" });
     expect(fakeCases().assignPartnerOrganization).not.toHaveBeenCalled();
   });
 
@@ -199,6 +199,6 @@ describe("assign partner organization service", () => {
         traceId: "trace_7",
         body: { legal_practice_id: "legal_practice_01" },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
   });
 });

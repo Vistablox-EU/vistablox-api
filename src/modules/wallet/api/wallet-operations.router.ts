@@ -1,9 +1,12 @@
 import { Router, type RequestHandler } from "express";
 
 import type { GetWalletAccountForOperationsService } from "../application/get-wallet-account-for-operations.service.js";
+import type { ReconcileWalletRegistrationService } from "../application/reconcile-wallet-registration.service.js";
 import {
   operationsWalletAccountResponseSchema,
   walletAccountIdParamsSchema,
+  reconcileWalletRegistrationBodySchema,
+  reconcileWalletRegistrationResponseSchema,
 } from "./wallet.schemas.js";
 
 // Calls the concrete service directly, in-process, mirroring
@@ -15,6 +18,7 @@ export function createWalletOperationsRouter(
   requireAdminOperations: RequestHandler,
   requireStaffWebAuthn: RequestHandler,
   getAccountForOperations: GetWalletAccountForOperationsService,
+  reconcile?: ReconcileWalletRegistrationService,
 ): Router {
   const router = Router();
   const staffOnly = [requireAuthentication, requireAdminOperations, requireStaffWebAuthn];
@@ -24,6 +28,15 @@ export function createWalletOperationsRouter(
     const result = await getAccountForOperations.execute(params.account_id);
     response.setHeader("Cache-Control", "no-store");
     response.json(operationsWalletAccountResponseSchema.parse(result));
+  });
+  if (reconcile !== undefined) router.post("/:account_id/reconcile", ...staffOnly, async (request, response) => {
+    const context = response.locals.authContext;
+    if (context === undefined) throw new Error("Authentication context missing");
+    const params = walletAccountIdParamsSchema.parse(request.params);
+    const body = reconcileWalletRegistrationBodySchema.parse(request.body);
+    const result = await reconcile.execute({ accountId: params.account_id, txHash: body.transaction_hash, actorAccountId: context.accountId });
+    response.setHeader("Cache-Control", "no-store");
+    response.json(reconcileWalletRegistrationResponseSchema.parse(result));
   });
 
   return router;

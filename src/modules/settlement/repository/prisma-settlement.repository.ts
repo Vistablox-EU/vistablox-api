@@ -108,6 +108,12 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     });
   }
 
+  public async countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number> {
+    return this.database.walletRegistration.count({
+      where: { registeredAt: null, requestedAt: { lt: cutoff } },
+    });
+  }
+
   public async confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void> {
     await this.database.walletRegistration.update({
       where: { accountId },

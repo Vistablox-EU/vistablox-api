@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { WithdrawInformationRequestService } from "../src/modules/origination/application/operations-case.service.js";
+import { WithdrawInformationRequestService } from "../src/modules/intake/application/operations-case.service.js";
 import {
   CaseReviewConflictError,
   type OperationsCaseDetail,
-  type OriginationRepository,
-} from "../src/modules/origination/repository/origination.repository.js";
+  type IntakeRepository,
+} from "../src/modules/intake/repository/intake.repository.js";
 
 const now = new Date("2026-09-08T12:00:00.000Z");
 
@@ -71,7 +71,7 @@ const waitingCaseWithPublishedRequest: OperationsCaseDetail = {
   ],
 };
 
-function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationRepository {
+function fakeCases(overrides: Partial<IntakeRepository> = {}): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -156,7 +156,7 @@ describe("withdraw information request service", () => {
         traceId: "trace_2",
         body: { founder_review_notes: null },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
     expect(cases.withdrawInformationRequest).not.toHaveBeenCalled();
   });
 
@@ -172,7 +172,7 @@ describe("withdraw information request service", () => {
         traceId: "trace_3",
         body: { founder_review_notes: null },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
     expect(cases.withdrawInformationRequest).not.toHaveBeenCalled();
   });
 
@@ -192,7 +192,7 @@ describe("withdraw information request service", () => {
         traceId: "trace_4",
         body: { founder_review_notes: null },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
     expect(cases.withdrawInformationRequest).not.toHaveBeenCalled();
   });
 
@@ -215,7 +215,7 @@ describe("withdraw information request service", () => {
         traceId: "trace_5",
         body: { founder_review_notes: null },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
     expect(cases.withdrawInformationRequest).not.toHaveBeenCalled();
   });
 
@@ -237,7 +237,7 @@ describe("withdraw information request service", () => {
         traceId: "trace_6",
         body: { founder_review_notes: null },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
   });
 
   it("404s when the repository reports the case vanished", async () => {
@@ -252,6 +252,6 @@ describe("withdraw information request service", () => {
         traceId: "trace_7",
         body: { founder_review_notes: null },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
   });
 });

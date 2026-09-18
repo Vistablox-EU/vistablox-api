@@ -52,6 +52,7 @@ export interface DiditFeatureSummary {
 
 export interface DiditIdentitySummary extends DiditFeatureSummary {
   dateOfBirth: string | null;
+  documentCountryCode?: string | null;
 }
 
 export interface DiditAmlSummary extends DiditFeatureSummary {
@@ -67,6 +68,7 @@ export interface DiditVerifiedDisplayProfile {
   givenName: string;
   familyName: string;
   fullDisplayName: string;
+  idDocumentCountryCode?: string | null;
 }
 
 export interface DiditDecisionSummary {

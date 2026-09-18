@@ -22,7 +22,7 @@ import {
 } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
 import type { KycRepository } from "../src/modules/identity/repository/kyc.repository.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
-import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
+import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
 import type {
   ListPublicOfferingsInput,
   OfferingRepository,
@@ -157,7 +157,7 @@ function fakeEmailSender(): EmailSender {
   };
 }
 
-function fakeOriginationRepository(): OriginationRepository {
+function fakeIntakeRepository(): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -487,7 +487,7 @@ describe("VistaBlox API", () => {
       protectedApi: {
         accounts,
         sessions,
-        originationRepository: fakeOriginationRepository(),
+        intakeRepository: fakeIntakeRepository(),
         emailSender: fakeEmailSender(),
         staffWebAuthnRepository: {
           listCredentials: vi.fn().mockResolvedValue([]),

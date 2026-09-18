@@ -1,0 +1,3 @@
+creation_rules:
+  - path_regex: ^secrets/staging\.env$
+    age: age1j85rrsdfaveu2n3yyxjlt0rf24e6acgmhgjgsnyh6an27yhsp9eskykn9a

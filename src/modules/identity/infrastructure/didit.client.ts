@@ -31,6 +31,9 @@ const identitySchema = featureSchema.extend({
   first_name: z.string().nullable().optional(),
   last_name: z.string().nullable().optional(),
   full_name: z.string().nullable().optional(),
+  country: z.string().nullable().optional(),
+  issuing_country: z.string().nullable().optional(),
+  document_country: z.string().nullable().optional(),
 });
 const amlSchema = featureSchema.extend({ total_hits: z.number().int().min(0).nullable().optional() });
 const proofOfAddressSchema = featureSchema.extend({
@@ -126,6 +129,9 @@ export class HttpDiditClient implements DiditClient {
       idVerifications: (parsed.data.id_verifications ?? []).map((feature) => ({
         status: feature.status,
         dateOfBirth: feature.date_of_birth ?? null,
+        documentCountryCode: normalizeCountryCode(
+          feature.document_country ?? feature.issuing_country ?? feature.country,
+        ),
         warnings: toWarnings(feature.warnings),
       })),
       livenessChecks: (parsed.data.liveness_checks ?? []).map(toFeature),
@@ -229,7 +235,15 @@ function toVerifiedDisplayProfile(
     givenName,
     familyName,
     fullDisplayName: nonEmpty(identity.full_name) ?? `${givenName} ${familyName}`,
+    idDocumentCountryCode: normalizeCountryCode(
+      identity.document_country ?? identity.issuing_country ?? identity.country,
+    ),
   };
+}
+
+function normalizeCountryCode(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toUpperCase() ?? "";
+  return /^[A-Z]{2}$/.test(normalized) ? normalized : null;
 }
 
 function nonEmpty(value: string | null | undefined): string | null {

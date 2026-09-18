@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   evaluateIntakeEntry,
   type IntakeEntryPolicyInput,
-} from "../src/modules/origination/domain/intake-entry.policy.js";
+} from "../src/modules/intake/domain/intake-entry.policy.js";
 
 const validInput: IntakeEntryPolicyInput = {
   eligibilityState: "eligible",

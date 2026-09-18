@@ -10,9 +10,9 @@ import {
   isApplicantReminderDue,
   isInformationRequestOverdue,
   isPostIpoStructuringComplete,
-} from "../src/modules/origination/domain/case-review.policy.js";
+} from "../src/modules/intake/domain/case-review.policy.js";
 
-describe("origination founder-review policy", () => {
+describe("intake founder-review policy", () => {
   it("allows an information request only for a submitted revision without an active request", () => {
     expect(
       evaluateInformationRequestPublication({

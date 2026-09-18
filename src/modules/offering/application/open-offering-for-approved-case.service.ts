@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-import type { OfferingOriginationHandoffRepository } from "../repository/offering-origination-handoff.repository.js";
+import type { OfferingIntakeHandoffRepository } from "../repository/offering-intake-handoff.repository.js";
 
-// The job payload shape enqueued by PrismaOriginationRepository.recordFounderDecision
+// The job payload shape enqueued by PrismaIntakeRepository.recordFounderDecision
 // (approve branch) via the shared enqueue path (AD-145/AD-152). Parsed
 // defensively here since a pg-boss payload is untyped JSON once round-tripped
 // through Postgres.
@@ -15,7 +15,7 @@ export const openOfferingForApprovedCaseJobSchema = z.object({
 
 export class OpenOfferingForApprovedCaseService {
   public constructor(
-    private readonly repository: OfferingOriginationHandoffRepository,
+    private readonly repository: OfferingIntakeHandoffRepository,
     private readonly clock: () => Date = () => new Date(),
   ) {}
 

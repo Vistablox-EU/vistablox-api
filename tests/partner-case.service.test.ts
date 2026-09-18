@@ -5,10 +5,10 @@ import {
   ListCasesForPartnerService,
   RecordAppraisalService,
   RecordLegalStructuringService,
-} from "../src/modules/origination/application/partner-case.service.js";
+} from "../src/modules/intake/application/partner-case.service.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import { CaseReviewConflictError } from "../src/modules/origination/repository/origination.repository.js";
-import type { OriginationRepository, PartnerCaseDetail } from "../src/modules/origination/repository/origination.repository.js";
+import { CaseReviewConflictError } from "../src/modules/intake/repository/intake.repository.js";
+import type { IntakeRepository, PartnerCaseDetail } from "../src/modules/intake/repository/intake.repository.js";
 
 const now = new Date("2026-09-08T12:00:00.000Z");
 
@@ -58,7 +58,7 @@ function fakeAccounts(organizationId: string | null = "legal_practice_01"): Acco
   };
 }
 
-function fakeCases(overrides: Partial<OriginationRepository> = {}): OriginationRepository {
+function fakeCases(overrides: Partial<IntakeRepository> = {}): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -171,7 +171,7 @@ describe("GetCaseForPartnerService", () => {
 
     await expect(service.execute("case_missing")).rejects.toMatchObject({
       status: 404,
-      code: "origination.case_not_found",
+      code: "intake.case_not_found",
     });
   });
 });
@@ -210,7 +210,7 @@ describe("RecordLegalStructuringService", () => {
         traceId: "trace_2",
         body: { mark_completed: true },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
     expect(cases.recordLegalStructuring).not.toHaveBeenCalled();
   });
 
@@ -229,7 +229,7 @@ describe("RecordLegalStructuringService", () => {
         traceId: "trace_3",
         body: { mark_completed: true },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
     expect(cases.recordLegalStructuring).not.toHaveBeenCalled();
   });
 
@@ -248,7 +248,7 @@ describe("RecordLegalStructuringService", () => {
         traceId: "trace_4",
         body: { mark_completed: true },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
   });
 });
 
@@ -285,7 +285,7 @@ describe("RecordAppraisalService", () => {
         traceId: "trace_6",
         body: { mark_completed: true },
       }),
-    ).rejects.toMatchObject({ status: 404, code: "origination.case_not_found" });
+    ).rejects.toMatchObject({ status: 404, code: "intake.case_not_found" });
   });
 
   it("409s before the case has reached post_ipo_structuring", async () => {
@@ -303,7 +303,7 @@ describe("RecordAppraisalService", () => {
         traceId: "trace_7",
         body: { mark_completed: true },
       }),
-    ).rejects.toMatchObject({ status: 409, code: "origination.review_transition_conflict" });
+    ).rejects.toMatchObject({ status: 409, code: "intake.review_transition_conflict" });
     expect(cases.recordAppraisal).not.toHaveBeenCalled();
   });
 });

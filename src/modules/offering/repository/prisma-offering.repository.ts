@@ -18,10 +18,10 @@ import type {
   DisclosureDocumentRepository,
 } from "./disclosure-document.repository.js";
 import type {
-  OfferingOriginationHandoffRepository,
+  OfferingIntakeHandoffRepository,
   OpenedOffering,
   OpenOfferingForApprovedCaseInput,
-} from "./offering-origination-handoff.repository.js";
+} from "./offering-intake-handoff.repository.js";
 import type {
   AdvanceReservationCapitalStateInput,
   CreateReservationInput,
@@ -73,7 +73,7 @@ export class PrismaOfferingRepository
   implements
     OfferingRepository,
     DisclosureDocumentRepository,
-    OfferingOriginationHandoffRepository,
+    OfferingIntakeHandoffRepository,
     FinalizeOfferingRepository,
     MaterialityRepository,
     DisclosurePackRepository,
@@ -112,13 +112,13 @@ export class PrismaOfferingRepository
         return { pivId: existingPiv.id, offeringId: offering.id };
       }
 
-      const originationCase = await transaction.originationCase.findUniqueOrThrow({
+      const intakeCase = await transaction.intakeCase.findUniqueOrThrow({
         where: { id: input.caseId },
         select: { ipoEndAt: true },
       });
-      if (originationCase.ipoEndAt === null) {
+      if (intakeCase.ipoEndAt === null) {
         throw new Error(
-          `Origination case ${input.caseId} has no ipo_end_at set; cannot open an IPO escrow campaign without a deadline.`,
+          `Intake case ${input.caseId} has no ipo_end_at set; cannot open an IPO escrow campaign without a deadline.`,
         );
       }
 
@@ -128,7 +128,7 @@ export class PrismaOfferingRepository
       // instead, at Piv creation, via the dedicated sequence
       // (20260904090000_add_piv_token_id_sequence).
       const tokenIdRows = await transaction.$queryRaw<{ next_token_id: bigint | string }[]>`
-        SELECT nextval('origination.piv_token_id_seq') AS next_token_id
+        SELECT nextval('intake.piv_token_id_seq') AS next_token_id
       `;
       const tokenId = BigInt(tokenIdRows[0]!.next_token_id);
 
@@ -171,7 +171,7 @@ export class PrismaOfferingRepository
       // AD-256: durably hand off, in this same transaction, to the job that
       // opens this Piv's IPO escrow campaign on-chain -- the same
       // enqueue-in-transaction pattern AD-145 already uses one step earlier
-      // (origination approval -> this method). Only reached on first
+      // (intake approval -> this method). Only reached on first
       // creation of a Piv: the existingPiv branch above (a replay of this
       // job) must not re-open an already-open campaign, which the escrow
       // contract itself would reject anyway (CampaignAlreadyOpened).
@@ -183,7 +183,7 @@ export class PrismaOfferingRepository
           piv_id: piv.id,
           token_id: tokenId.toString(),
           target_amount_eurc: toEurcMicros(input.ipoValueEur).toString(),
-          deadline_unix: Math.floor(originationCase.ipoEndAt.getTime() / 1_000),
+          deadline_unix: Math.floor(intakeCase.ipoEndAt.getTime() / 1_000),
         },
         input.traceId,
       );
@@ -483,7 +483,7 @@ export class PrismaOfferingRepository
     return this.database.$transaction(async (transaction) => {
       // AD-146: lock the offering row so concurrent reservation attempts
       // against the same offering serialize, matching the FOR UPDATE
-      // pattern PrismaOriginationRepository.submitInitialCase already uses.
+      // pattern PrismaIntakeRepository.submitInitialCase already uses.
       const locked = await transaction.$queryRaw<
         Array<{ offering_id: string; status: string; target_raise_eur: string }>
       >`
@@ -687,7 +687,7 @@ export class PrismaOfferingRepository
           offering.final_offering_published_at,
           piv.case_id
         FROM offering.offerings AS offering
-        JOIN origination.pivs AS piv ON piv.piv_id = offering.piv_id
+        JOIN intake.pivs AS piv ON piv.piv_id = offering.piv_id
         WHERE offering.offering_id = ${input.offeringId}
         FOR UPDATE OF offering
       `;

@@ -13,6 +13,7 @@ const cachedProfileSchema = z.object({
   given_name: z.string().min(1),
   family_name: z.string().min(1),
   full_display_name: z.string().min(1),
+  id_document_country_code: z.string().regex(/^[A-Z]{2}$/).nullable().optional(),
   didit_profile_last_synced_at: z.iso.datetime(),
 }).strict();
 
@@ -39,6 +40,7 @@ export class RedisProtectedProfileCache implements ProtectedProfileCache {
       givenName: parsed.data.given_name,
       familyName: parsed.data.family_name,
       fullDisplayName: parsed.data.full_display_name,
+      idDocumentCountryCode: parsed.data.id_document_country_code ?? null,
       syncedAt: new Date(parsed.data.didit_profile_last_synced_at),
     };
   }
@@ -55,6 +57,7 @@ export class RedisProtectedProfileCache implements ProtectedProfileCache {
         given_name: profile.givenName,
         family_name: profile.familyName,
         full_display_name: profile.fullDisplayName,
+        id_document_country_code: profile.idDocumentCountryCode,
         didit_profile_last_synced_at: profile.syncedAt.toISOString(),
       }),
     );

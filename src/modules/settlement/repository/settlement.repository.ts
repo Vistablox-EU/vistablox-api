@@ -45,6 +45,7 @@ export interface SettlementRepository {
   hasPosition(pivId: string, accountId: string): Promise<boolean>;
   recordEscrowMintedPosition(input: RecordEscrowMintedPositionInput): Promise<{ positionId: string }>;
   findPendingWalletRegistrationByCommitment(commitment: string): Promise<PendingWalletRegistration | null>;
+  countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number>;
   confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void>;
   getLastProcessedWalletRegistryBlock(): Promise<bigint | null>;
   setLastProcessedWalletRegistryBlock(block: bigint): Promise<void>;

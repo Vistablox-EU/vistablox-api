@@ -128,7 +128,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
         ownerDeclaredValueEur: "500000.00",
       },
     });
-    await database.originationCase.create({
+    await database.intakeCase.create({
       data: {
         id: caseId,
         propertyId,
@@ -276,7 +276,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
     });
     await database.offering.deleteMany({ where: { id: offeringId } });
     await database.piv.deleteMany({ where: { id: pivId } });
-    await database.originationCase.deleteMany({ where: { id: caseId } });
+    await database.intakeCase.deleteMany({ where: { id: caseId } });
     await database.property.deleteMany({ where: { id: propertyId } });
     await database.walletRegistration.deleteMany({
       where: { accountId: { in: [accountId, otherAccountId] } },

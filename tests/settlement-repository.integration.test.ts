@@ -62,7 +62,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
           ownerDeclaredValueEur: "100000.00",
         },
       });
-      await database.originationCase.create({
+      await database.intakeCase.create({
         data: {
           id: caseId,
           propertyId: propId,
@@ -93,7 +93,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       where: { pivId: { in: [pastPivId, untokenizedPivId, futurePivId] } },
     });
     await database.piv.deleteMany({ where: { id: { in: [pastPivId, untokenizedPivId, futurePivId] } } });
-    await database.originationCase.deleteMany({
+    await database.intakeCase.deleteMany({
       where: { id: { in: [pastCaseId, untokenizedCaseId, futureCaseId] } },
     });
     await database.property.deleteMany({

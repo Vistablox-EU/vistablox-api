@@ -4,7 +4,7 @@ import {
   evaluateCaseResubmission,
   evaluateInitialCaseSubmission,
   requiredInitialEvidenceTypes,
-} from "../src/modules/origination/domain/case-submission.policy.js";
+} from "../src/modules/intake/domain/case-submission.policy.js";
 
 describe("initial case submission policy", () => {
   it("allows a draft with exactly one of every required evidence type", () => {

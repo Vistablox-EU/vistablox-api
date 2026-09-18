@@ -6,8 +6,8 @@ import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
-import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
-import type { PartnerOrganizationRepository } from "../src/modules/origination/repository/partner-organization.repository.js";
+import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
+import type { PartnerOrganizationRepository } from "../src/modules/intake/repository/partner-organization.repository.js";
 
 function fakeEmailSender(): EmailSender {
   return {
@@ -24,9 +24,9 @@ function fakeEmailSender(): EmailSender {
   };
 }
 
-function fakeOriginationRepository(
-  overrides: Partial<OriginationRepository> = {},
-): OriginationRepository {
+function fakeIntakeRepository(
+  overrides: Partial<IntakeRepository> = {},
+): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -110,7 +110,7 @@ function buildApp(options?: {
   population?: "customer" | "staff_partner";
   hasAdminRole?: boolean;
   includePartnerOrganizations?: boolean;
-  originationRepository?: OriginationRepository;
+  intakeRepository?: IntakeRepository;
 }) {
   const sessions: SessionResolver = {
     resolve: vi.fn().mockResolvedValue({
@@ -128,7 +128,7 @@ function buildApp(options?: {
     syncVerifiedContactEmail: vi.fn(),
     getActivePartnerOrganizationId: vi.fn().mockResolvedValue(null),
   };
-  const originationRepository = options?.originationRepository ?? fakeOriginationRepository();
+  const intakeRepository = options?.intakeRepository ?? fakeIntakeRepository();
 
   return {
     app: createApp({
@@ -142,7 +142,7 @@ function buildApp(options?: {
       protectedApi: {
         accounts,
         sessions,
-        originationRepository,
+        intakeRepository,
         emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
@@ -151,16 +151,16 @@ function buildApp(options?: {
           : {}),
       },
     }),
-    originationRepository,
+    intakeRepository,
   };
 }
 
-describe("POST /internal/v1/origination-cases/:case_id/partner-assignment", () => {
+describe("POST /internal/v1/intake-cases/:case_id/partner-assignment", () => {
   it("is not registered at all when partnerOrganizations isn't configured", async () => {
     const { app } = buildApp({ includePartnerOrganizations: false });
 
     const response = await request(app)
-      .post("/internal/v1/origination-cases/case_01/partner-assignment")
+      .post("/internal/v1/intake-cases/case_01/partner-assignment")
       .send({ legal_practice_id: "legal_practice_01" });
 
     expect(response.status).toBe(404);
@@ -170,17 +170,17 @@ describe("POST /internal/v1/origination-cases/:case_id/partner-assignment", () =
     const { app } = buildApp({ population: "customer" });
 
     const response = await request(app)
-      .post("/internal/v1/origination-cases/case_01/partner-assignment")
+      .post("/internal/v1/intake-cases/case_01/partner-assignment")
       .send({ legal_practice_id: "legal_practice_01" });
 
     expect(response.status).toBe(403);
   });
 
   it("assigns a legal practice to the case", async () => {
-    const { app, originationRepository } = buildApp();
+    const { app, intakeRepository } = buildApp();
 
     const response = await request(app)
-      .post("/internal/v1/origination-cases/case_01/partner-assignment")
+      .post("/internal/v1/intake-cases/case_01/partner-assignment")
       .send({ legal_practice_id: "legal_practice_01" });
 
     expect(response.status).toBe(200);
@@ -189,7 +189,7 @@ describe("POST /internal/v1/origination-cases/:case_id/partner-assignment", () =
       legal_practice_id: "legal_practice_01",
       appraisal_firm_id: null,
     });
-    expect(originationRepository.assignPartnerOrganization).toHaveBeenCalledWith(
+    expect(intakeRepository.assignPartnerOrganization).toHaveBeenCalledWith(
       expect.objectContaining({ caseId: "case_01", legalPracticeId: "legal_practice_01" }),
     );
   });
@@ -198,7 +198,7 @@ describe("POST /internal/v1/origination-cases/:case_id/partner-assignment", () =
     const { app } = buildApp();
 
     const response = await request(app)
-      .post("/internal/v1/origination-cases/case_01/partner-assignment")
+      .post("/internal/v1/intake-cases/case_01/partner-assignment")
       .send({});
 
     expect(response.status).toBe(422);
@@ -206,7 +206,7 @@ describe("POST /internal/v1/origination-cases/:case_id/partner-assignment", () =
 
   it("409s when the case has not reached an eligible stage", async () => {
     const { app } = buildApp({
-      originationRepository: fakeOriginationRepository({
+      intakeRepository: fakeIntakeRepository({
         getCasePartnerAssignment: vi
           .fn()
           .mockResolvedValue({ stage: "pre_offering_open", legalPracticeId: null, appraisalFirmId: null }),
@@ -214,10 +214,10 @@ describe("POST /internal/v1/origination-cases/:case_id/partner-assignment", () =
     });
 
     const response = await request(app)
-      .post("/internal/v1/origination-cases/case_01/partner-assignment")
+      .post("/internal/v1/intake-cases/case_01/partner-assignment")
       .send({ legal_practice_id: "legal_practice_01" });
 
     expect(response.status).toBe(409);
-    expect(response.body.code).toBe("origination.review_transition_conflict");
+    expect(response.body.code).toBe("intake.review_transition_conflict");
   });
 });

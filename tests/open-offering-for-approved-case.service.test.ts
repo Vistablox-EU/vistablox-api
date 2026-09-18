@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { OpenOfferingForApprovedCaseService } from "../src/modules/offering/application/open-offering-for-approved-case.service.js";
-import type { OfferingOriginationHandoffRepository } from "../src/modules/offering/repository/offering-origination-handoff.repository.js";
+import type { OfferingIntakeHandoffRepository } from "../src/modules/offering/repository/offering-intake-handoff.repository.js";
 
 const now = new Date("2026-09-01T20:00:00.000Z");
 
 describe("OpenOfferingForApprovedCaseService", () => {
   it("parses the job payload and opens the offering", async () => {
-    const repository: OfferingOriginationHandoffRepository = {
+    const repository: OfferingIntakeHandoffRepository = {
       openOfferingForApprovedCase: vi
         .fn()
         .mockResolvedValue({ pivId: "piv_01", offeringId: "offering_01" }),
@@ -32,7 +32,7 @@ describe("OpenOfferingForApprovedCaseService", () => {
   });
 
   it("rejects a malformed job payload without calling the repository", async () => {
-    const repository: OfferingOriginationHandoffRepository = {
+    const repository: OfferingIntakeHandoffRepository = {
       openOfferingForApprovedCase: vi.fn(),
     };
     const service = new OpenOfferingForApprovedCaseService(repository, () => now);

@@ -18,7 +18,7 @@ import type {
 } from "../src/modules/identity/repository/kyc.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
-import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
+import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
 
 const workflowId = "269214fe-77f7-4b1a-a028-b70e861d73c1";
 const callbackUrl = "https://app.vistablox.io/kyc/complete";
@@ -76,8 +76,8 @@ function fakeDiditClient(): DiditClient {
   return { createSession: vi.fn(), getDecision: vi.fn() };
 }
 
-// origination routes are mounted unconditionally, so createApp requires a
-// full OriginationRepository even though this file never exercises them.
+// intake routes are mounted unconditionally, so createApp requires a
+// full IntakeRepository even though this file never exercises them.
 function fakeEmailSender(): EmailSender {
   return {
     sendStaffInvitationEmail: vi.fn(),
@@ -93,7 +93,7 @@ function fakeEmailSender(): EmailSender {
   };
 }
 
-function fakeOriginationRepository(): OriginationRepository {
+function fakeIntakeRepository(): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -191,7 +191,7 @@ function buildApp(options?: {
       protectedApi: {
         accounts,
         sessions,
-        originationRepository: fakeOriginationRepository(),
+        intakeRepository: fakeIntakeRepository(),
         emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),

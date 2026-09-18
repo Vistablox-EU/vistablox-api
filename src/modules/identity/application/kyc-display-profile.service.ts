@@ -20,9 +20,10 @@ export class GetKycDisplayProfileService {
   public async execute(accountId: string): Promise<{
     data: {
       given_name: string;
-      family_name: string;
-      full_display_name: string;
-      synced_at: string;
+  family_name: string;
+  full_display_name: string;
+  id_document_country_code: string | null;
+  synced_at: string;
     } | null;
   }> {
     const snapshot = await this.eligibilityReader.getEligibilitySnapshot(accountId);
@@ -70,6 +71,7 @@ export class GetKycDisplayProfileService {
 
     const refreshed: ProtectedDisplayProfile = {
       ...decision.verifiedDisplayProfile,
+      idDocumentCountryCode: decision.verifiedDisplayProfile.idDocumentCountryCode ?? null,
       syncedAt: this.clock(),
     };
     const stored = await this.trySet(cache, accountId, refreshed);
@@ -116,6 +118,7 @@ function toResponse(profile: ProtectedDisplayProfile | null): {
   given_name: string;
   family_name: string;
   full_display_name: string;
+  id_document_country_code: string | null;
   synced_at: string;
 } | null {
   if (profile === null) return null;
@@ -123,6 +126,7 @@ function toResponse(profile: ProtectedDisplayProfile | null): {
     given_name: profile.givenName,
     family_name: profile.familyName,
     full_display_name: profile.fullDisplayName,
+    id_document_country_code: profile.idDocumentCountryCode ?? null,
     synced_at: profile.syncedAt.toISOString(),
   };
 }

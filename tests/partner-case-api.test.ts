@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
-import type { OriginationRepository, PartnerCaseDetail } from "../src/modules/origination/repository/origination.repository.js";
+import type { IntakeRepository, PartnerCaseDetail } from "../src/modules/intake/repository/intake.repository.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 
 function fakeEmailSender(): EmailSender {
@@ -57,7 +57,7 @@ const partnerCase: PartnerCaseDetail = {
   postIpoStructuringCompletedAt: null,
 };
 
-function fakeOriginationRepository(overrides: Partial<OriginationRepository> = {}): OriginationRepository {
+function fakeIntakeRepository(overrides: Partial<IntakeRepository> = {}): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -131,7 +131,7 @@ function buildApp(options?: {
   role?: "legal_partner" | "appraisal_partner" | "admin_operations" | "none";
   organizationId?: string | null;
   mfaVerified?: boolean;
-  originationRepository?: OriginationRepository;
+  intakeRepository?: IntakeRepository;
 }) {
   const role = options?.role ?? "legal_partner";
   const sessions: SessionResolver = {
@@ -154,7 +154,7 @@ function buildApp(options?: {
       Promise.resolve(checkedRole === role ? (options?.organizationId ?? "legal_practice_01") : null),
     ),
   };
-  const originationRepository = options?.originationRepository ?? fakeOriginationRepository();
+  const intakeRepository = options?.intakeRepository ?? fakeIntakeRepository();
 
   return {
     app: createApp({
@@ -168,13 +168,13 @@ function buildApp(options?: {
       protectedApi: {
         accounts,
         sessions,
-        originationRepository,
+        intakeRepository,
         emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
       },
     }),
-    originationRepository,
+    intakeRepository,
   };
 }
 
@@ -229,7 +229,7 @@ describe("GET /internal/v1/legal-partner/cases/:case_id", () => {
   it("denies a case assigned to a different legal practice", async () => {
     const { app } = buildApp({
       organizationId: "legal_practice_01",
-      originationRepository: fakeOriginationRepository({
+      intakeRepository: fakeIntakeRepository({
         getCasePartnerAssignment: vi
           .fn()
           .mockResolvedValue({ stage: "post_ipo_structuring", legalPracticeId: "legal_practice_02", appraisalFirmId: null }),
@@ -244,7 +244,7 @@ describe("GET /internal/v1/legal-partner/cases/:case_id", () => {
 
   it("denies a case that has not reached an accessible stage", async () => {
     const { app } = buildApp({
-      originationRepository: fakeOriginationRepository({
+      intakeRepository: fakeIntakeRepository({
         getCasePartnerAssignment: vi
           .fn()
           .mockResolvedValue({ stage: "pre_offering_open", legalPracticeId: "legal_practice_01", appraisalFirmId: null }),
@@ -259,7 +259,7 @@ describe("GET /internal/v1/legal-partner/cases/:case_id", () => {
 
 describe("PATCH /internal/v1/legal-partner/cases/:case_id", () => {
   it("records legal document refs and completion", async () => {
-    const { app, originationRepository } = buildApp();
+    const { app, intakeRepository } = buildApp();
 
     const response = await request(app)
       .patch("/internal/v1/legal-partner/cases/case_01")
@@ -267,7 +267,7 @@ describe("PATCH /internal/v1/legal-partner/cases/:case_id", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data.legal_document_refs).toEqual(["documents/deed.pdf"]);
-    expect(originationRepository.recordLegalStructuring).toHaveBeenCalledWith(
+    expect(intakeRepository.recordLegalStructuring).toHaveBeenCalledWith(
       expect.objectContaining({ caseId: "case_01", legalDocumentRefs: ["documents/deed.pdf"], markCompleted: true }),
     );
   });
@@ -292,7 +292,7 @@ describe("PATCH /internal/v1/legal-partner/cases/:case_id", () => {
 
   it("409s once the case has already advanced to approved_for_final_offering", async () => {
     const { app } = buildApp({
-      originationRepository: fakeOriginationRepository({
+      intakeRepository: fakeIntakeRepository({
         getCasePartnerAssignment: vi
           .fn()
           .mockResolvedValue({ stage: "approved_for_final_offering", legalPracticeId: "legal_practice_01", appraisalFirmId: null }),
@@ -304,7 +304,7 @@ describe("PATCH /internal/v1/legal-partner/cases/:case_id", () => {
       .send({ mark_completed: true });
 
     expect(response.status).toBe(409);
-    expect(response.body.code).toBe("origination.review_transition_conflict");
+    expect(response.body.code).toBe("intake.review_transition_conflict");
   });
 
   it("denies an appraisal partner writing through the legal endpoint", async () => {
@@ -333,7 +333,7 @@ describe("GET /internal/v1/appraisal-partner/cases", () => {
 
 describe("PATCH /internal/v1/appraisal-partner/cases/:case_id", () => {
   it("records the appraisal value opinion and documents", async () => {
-    const { app, originationRepository } = buildApp({ role: "appraisal_partner", organizationId: "appraisal_firm_01" });
+    const { app, intakeRepository } = buildApp({ role: "appraisal_partner", organizationId: "appraisal_firm_01" });
 
     const response = await request(app)
       .patch("/internal/v1/appraisal-partner/cases/case_01")
@@ -341,7 +341,7 @@ describe("PATCH /internal/v1/appraisal-partner/cases/:case_id", () => {
 
     expect(response.status).toBe(200);
     expect(response.body.data.appraisal_value_opinion_eur).toBe("520000.00");
-    expect(originationRepository.recordAppraisal).toHaveBeenCalledWith(
+    expect(intakeRepository.recordAppraisal).toHaveBeenCalledWith(
       expect.objectContaining({
         caseId: "case_01",
         appraisalValueOpinionEur: "520000.00",

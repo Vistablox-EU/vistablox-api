@@ -42,7 +42,7 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
     private readonly pgBoss: PgBoss,
   ) {}
 
-  // Backs KycEligibilityReader for consumers outside identity (origination,
+  // Backs KycEligibilityReader for consumers outside identity (intake,
   // offering, profile, wallet) — a separate projection from getForAccount
   // below rather than a shared one, so this module's internal
   // KycEligibilityRecord shape (operationalSubstatus etc.) can keep

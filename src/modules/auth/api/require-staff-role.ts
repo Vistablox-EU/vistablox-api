@@ -48,7 +48,7 @@ export function createRequireAppraisalPartner(accounts: AccountRepository): Requ
 // AD-153's role check only -- "this account holds an active legal_partner /
 // appraisal_partner assignment somewhere." It says nothing about *which*
 // case the account may act on; that's a separate, resource-scoped check
-// (AD-166, require-partner-case-assignment.ts in the origination module),
+// (AD-166, require-partner-case-assignment.ts in the intake module),
 // since a partner's practice/firm being assigned to a specific case is a
 // different question than the role existing at all.
 function createRequirePartnerRole(

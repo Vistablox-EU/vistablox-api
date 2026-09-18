@@ -45,6 +45,7 @@ export interface AccountRecoveryRepository {
   findTargetForRecovery(accountId: string): Promise<RecoveryCaseTarget | null>;
   findOpenCaseForAccount(accountId: string): Promise<AccountRecoveryCaseRecord | null>;
   findCase(caseId: string): Promise<AccountRecoveryCaseRecord | null>;
+  countOpenCasesBefore?(cutoff: Date): Promise<number>;
   openCase(input: {
     accountId: string;
     actorAccountId: string;

@@ -109,6 +109,7 @@ describe("GetKycDisplayProfileService", () => {
         given_name: "Carmen",
         family_name: "Silva",
         full_display_name: "Carmen Silva",
+        id_document_country_code: null,
         synced_at: now.toISOString(),
       },
     });
@@ -116,6 +117,7 @@ describe("GetKycDisplayProfileService", () => {
       givenName: "Carmen",
       familyName: "Silva",
       fullDisplayName: "Carmen Silva",
+      idDocumentCountryCode: null,
       syncedAt: now,
     });
   });
@@ -143,6 +145,7 @@ describe("GetKycDisplayProfileService", () => {
         given_name: "Carmen",
         family_name: "Silva",
         full_display_name: "Carmen Silva",
+        id_document_country_code: null,
         synced_at: stale.syncedAt.toISOString(),
       },
     });

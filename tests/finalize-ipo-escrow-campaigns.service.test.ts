@@ -96,6 +96,10 @@ class FakeSettlementRepository implements SettlementRepository {
     return this.candidates;
   }
 
+  public async countPendingWalletRegistrationsBefore(): Promise<number> {
+    return 0;
+  }
+
   public async resolveAccountIdForWallet(walletAddress: string): Promise<string | null> {
     return this.walletToAccount.get(walletAddress) ?? null;
   }

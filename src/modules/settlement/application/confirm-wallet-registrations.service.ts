@@ -9,6 +9,18 @@ import type { SettlementRepository } from "../repository/settlement.repository.j
 // fully catch up rather than failing outright.
 const MAX_BLOCK_RANGE_PER_RUN = 2000n;
 
+// Re-read a small tail of the previous range on every run. RPC providers can
+// briefly return incomplete logs while a block is being indexed, and a
+// worker restart between reading logs and persisting the cursor must not turn
+// that transient gap into a permanently pending wallet.
+export const WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS = 32n;
+
+// Never finalize a registration from a block that may still be re-organized.
+// Base has a short confirmation time; three blocks is deliberately modest
+// while still keeping the mobile UX responsive.
+export const WALLET_REGISTRY_CONFIRMATION_DEPTH = 3n;
+export const WALLET_REGISTRY_PENDING_WARN_AFTER_MS = 5 * 60 * 1000;
+
 interface WalletRegisteredEventArgs {
   wallet?: string;
   commitment?: string;
@@ -21,6 +33,8 @@ export interface ConfirmWalletRegistrationsSummary {
   registrationsConfirmed: number;
   unmatchedEvents: number;
   addressMismatches: string[];
+  pendingRegistrationsOverdue: number;
+  pendingWarnAfterMinutes: number;
 }
 
 /**
@@ -40,32 +54,46 @@ export class ConfirmWalletRegistrationsService {
     private readonly repository: SettlementRepository,
     private readonly chain: ChainClients,
     private readonly clock: () => Date = () => new Date(),
+    private readonly pendingWarnAfterMs = WALLET_REGISTRY_PENDING_WARN_AFTER_MS,
   ) {}
 
   public async execute(): Promise<ConfirmWalletRegistrationsSummary> {
     const latestBlock = await this.chain.publicClient.getBlockNumber();
     const cursor = await this.repository.getLastProcessedWalletRegistryBlock();
-    // No cursor yet: start watching from now rather than genesis. There is
-    // no pre-existing wallet registration to recover (this contract has no
-    // history before this deploy), and scanning from block 0 would blow
-    // past most RPC providers' eth_getLogs range cap on the very first run.
-    const fromBlock = cursor === null ? latestBlock : cursor + 1n;
+    const now = this.clock();
+    const pendingRegistrationsOverdue = await this.repository.countPendingWalletRegistrationsBefore(
+      new Date(now.getTime() - this.pendingWarnAfterMs),
+    );
+    const safeLatestBlock = latestBlock - WALLET_REGISTRY_CONFIRMATION_DEPTH;
+    // No cursor yet: start at the latest *safe* block rather than the head.
+    // Subsequent runs overlap the cursor tail so an indexed-log race or
+    // crash cannot strand a registration forever.
+    const fromBlock =
+      cursor === null
+        ? safeLatestBlock
+        : cursor > WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS
+          ? cursor - WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS + 1n
+          : 0n;
 
     const summary: ConfirmWalletRegistrationsSummary = {
       fromBlock: fromBlock.toString(),
-      toBlock: latestBlock.toString(),
+      toBlock: safeLatestBlock.toString(),
       eventsFound: 0,
       registrationsConfirmed: 0,
       unmatchedEvents: 0,
       addressMismatches: [],
+      pendingRegistrationsOverdue,
+      pendingWarnAfterMinutes: Math.round(this.pendingWarnAfterMs / 60_000),
     };
 
-    if (fromBlock > latestBlock) {
+    if (safeLatestBlock < 0n || fromBlock > safeLatestBlock) {
       return summary;
     }
 
     const toBlock =
-      latestBlock - fromBlock > MAX_BLOCK_RANGE_PER_RUN ? fromBlock + MAX_BLOCK_RANGE_PER_RUN : latestBlock;
+      safeLatestBlock - fromBlock > MAX_BLOCK_RANGE_PER_RUN
+        ? fromBlock + MAX_BLOCK_RANGE_PER_RUN
+        : safeLatestBlock;
     summary.toBlock = toBlock.toString();
 
     const events = (await this.chain.walletRegistry.getEvents.WalletRegistered!({

@@ -6,12 +6,12 @@ import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
-import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
+import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
 import type {
   AppraisalFirmRecord,
   LegalPracticeRecord,
   PartnerOrganizationRepository,
-} from "../src/modules/origination/repository/partner-organization.repository.js";
+} from "../src/modules/intake/repository/partner-organization.repository.js";
 
 const legalPractice: LegalPracticeRecord = {
   id: "legal_practice_01",
@@ -43,8 +43,8 @@ function fakePartnerOrganizationRepository(
   };
 }
 
-// origination routes are mounted unconditionally, so createApp requires a
-// full OriginationRepository even though this file never exercises them.
+// intake routes are mounted unconditionally, so createApp requires a
+// full IntakeRepository even though this file never exercises them.
 function fakeEmailSender(): EmailSender {
   return {
     sendStaffInvitationEmail: vi.fn(),
@@ -60,7 +60,7 @@ function fakeEmailSender(): EmailSender {
   };
 }
 
-function fakeOriginationRepository(): OriginationRepository {
+function fakeIntakeRepository(): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -157,7 +157,7 @@ function buildApp(options?: {
       protectedApi: {
         accounts,
         sessions,
-        originationRepository: fakeOriginationRepository(),
+        intakeRepository: fakeIntakeRepository(),
         emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),
@@ -247,7 +247,7 @@ describe("legal practices admin API", () => {
       .send({ status: "suspended" });
 
     expect(response.status).toBe(404);
-    expect(response.body.code).toBe("origination.legal_practice_not_found");
+    expect(response.body.code).toBe("intake.legal_practice_not_found");
   });
 });
 

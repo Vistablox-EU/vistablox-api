@@ -49,7 +49,7 @@ import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-a
 import { BetterAuthLoginMethodUnlinker } from "./modules/auth/infrastructure/better-auth-login-method-unlinker.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
-import { PrismaOriginationRepository } from "./modules/origination/repository/prisma-origination.repository.js";
+import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import {
@@ -70,11 +70,18 @@ import { jktFingerprint, type DpopLogger } from "./modules/auth/application/dpop
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { createChainReader } from "./infrastructure/blockchain/chain-client.js";
 import { ViemWalletChainReader } from "./infrastructure/blockchain/chain-wallet-reader.js";
+import { ViemWalletRegistrationVerifier } from "./infrastructure/blockchain/wallet-registration-verifier.js";
+import { ReconcileWalletRegistrationService } from "./modules/wallet/application/reconcile-wallet-registration.service.js";
 import { PrismaInvestorActivityRepository } from "./modules/investor-activity/repository/prisma-investor-activity.repository.js";
 import {
   MinioDisclosureDocumentStore,
   UnavailableDisclosureDocumentStore,
 } from "./infrastructure/storage/minio-disclosure-document.store.js";
+import { S3Client } from "@aws-sdk/client-s3";
+import { UploadCaseDocumentService } from "./modules/intake/application/upload-case-document.service.js";
+import { GetCaseDocumentService } from "./modules/intake/application/get-case-document.service.js";
+import { ClamAvScanner } from "./infrastructure/antivirus/clamav-scanner.js";
+import { PrismaPartnerOrganizationRepository } from "./modules/intake/repository/prisma-partner-organization.repository.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
@@ -92,12 +99,13 @@ await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
 await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
 await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
 await jobQueue.createQueue("provider_events.didit_webhook");
-// Reversal (undoing the KYC microservice split): origination, offering,
+// Reversal (undoing the KYC microservice split): intake, offering,
 // profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
 const kycRepository = new PrismaKycRepository(database, jobQueue);
 const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
-const originationRepository = new PrismaOriginationRepository(database, jobQueue, kycRepository);
+const intakeRepository = new PrismaIntakeRepository(database, jobQueue, kycRepository);
+const partnerOrganizationRepository = new PrismaPartnerOrganizationRepository(database);
 const accountRepository = new PrismaAccountRepository(database);
 const staffWebAuthnRepository = new PrismaStaffWebAuthnRepository(database);
 const staffInvitationRepository = new PrismaStaffInvitationRepository(database);
@@ -358,7 +366,7 @@ const accountRecovery = {
 // Reversal (undoing the KYC microservice split): identity's own
 // application services, constructed directly in-process again -- these
 // used to live only in src/kyc-server.ts. kycRepository is the same shared
-// instance origination/offering/profile/wallet already read through
+// instance intake/offering/profile/wallet already read through
 // (Stage 1a above); diditClient is the same one account recovery uses.
 const getKycStatus = new GetKycStatusService(kycRepository, diditClient);
 const startKycSession = new StartKycSessionService(
@@ -435,16 +443,37 @@ const disclosureDocumentStore =
   environment.MINIO_ENDPOINT !== undefined &&
   environment.MINIO_ACCESS_KEY !== undefined &&
   environment.MINIO_SECRET_KEY !== undefined &&
-  environment.MINIO_DOCUMENT_BUCKET !== undefined
+  environment.MINIO_DISCLOSURES_BUCKET !== undefined
     ? new MinioDisclosureDocumentStore({
         endPoint: environment.MINIO_ENDPOINT,
         port: environment.MINIO_PORT,
         useSSL: environment.MINIO_USE_SSL,
         accessKey: environment.MINIO_ACCESS_KEY,
         secretKey: environment.MINIO_SECRET_KEY,
-        bucket: environment.MINIO_DOCUMENT_BUCKET,
+        bucket: environment.MINIO_DISCLOSURES_BUCKET,
       })
     : new UnavailableDisclosureDocumentStore();
+const documentUploadService =
+  environment.MINIO_ENDPOINT !== undefined &&
+  environment.MINIO_ACCESS_KEY !== undefined &&
+  environment.MINIO_SECRET_KEY !== undefined &&
+  environment.MINIO_PRIVATE_BUCKET !== undefined
+    ? new UploadCaseDocumentService(
+        database,
+        new S3Client({
+          endpoint: `${environment.MINIO_USE_SSL ? "https" : "http"}://${environment.MINIO_ENDPOINT}:${environment.MINIO_PORT}`,
+          region: "us-east-1",
+          forcePathStyle: true,
+          credentials: { accessKeyId: environment.MINIO_ACCESS_KEY, secretAccessKey: environment.MINIO_SECRET_KEY },
+        }),
+        environment.MINIO_PRIVATE_BUCKET,
+        environment.CLAMAV_HOST === undefined ? new ClamAvScanner("127.0.0.1", environment.CLAMAV_PORT) : new ClamAvScanner(environment.CLAMAV_HOST, environment.CLAMAV_PORT),
+      )
+    : undefined;
+const documentDownloadService =
+  environment.MINIO_ENDPOINT !== undefined && environment.MINIO_ACCESS_KEY !== undefined && environment.MINIO_SECRET_KEY !== undefined && environment.MINIO_PRIVATE_BUCKET !== undefined
+    ? new GetCaseDocumentService(database, new S3Client({ endpoint: `${environment.MINIO_USE_SSL ? "https" : "http"}://${environment.MINIO_ENDPOINT}:${environment.MINIO_PORT}`, region: "us-east-1", forcePathStyle: true, credentials: { accessKeyId: environment.MINIO_ACCESS_KEY, secretAccessKey: environment.MINIO_SECRET_KEY } }), environment.MINIO_PRIVATE_BUCKET)
+    : undefined;
 
 const walletRepository = new PrismaWalletRepository(database);
 // Dormant unless the CHAIN_* env group is configured -- same all-or-none
@@ -511,7 +540,10 @@ const app = createApp({
         ? {}
         : { phase1CutoverAt: environment.DPOP_PHASE1_CUTOVER_AT }),
     },
-    originationRepository,
+    intakeRepository,
+    partnerOrganizations: { repository: partnerOrganizationRepository },
+    ...(documentUploadService === undefined ? {} : { documentUpload: documentUploadService }),
+    ...(documentDownloadService === undefined ? {} : { documentDownload: documentDownloadService }),
     emailSender,
     offeringOperations: { repository: offeringRepository },
     staffWebAuthnRepository,
@@ -548,12 +580,23 @@ const app = createApp({
           safe_account: false,
         },
         mobileAuthPlatforms: mobileAuthPlatformFlags(mobilePlatformPolicy),
+        ...(environment.CHAIN_NETWORK !== undefined && environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS !== undefined
+          ? { deploymentIdentity: {
+              environment: environment.NODE_ENV,
+              chainId: environment.CHAIN_NETWORK === "base" ? 8453 : 84532,
+              network: environment.CHAIN_NETWORK,
+              registryAddress: environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS,
+            } }
+          : {}),
       },
     },
     wallet: {
       repository: walletRepository,
       kycEligibilityReader: kycRepository,
       walletRegistryContractAddress: environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS,
+      ...(environment.CHAIN_NETWORK !== undefined && environment.CHAIN_RPC_URL !== undefined && environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS !== undefined
+        ? { walletRegistrationReconciler: new ReconcileWalletRegistrationService(walletRepository, new ViemWalletRegistrationVerifier(environment.CHAIN_NETWORK, environment.CHAIN_RPC_URL, environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS as `0x${string}`)) }
+        : {}),
       ...(walletBalances === undefined ? {} : { balances: walletBalances }),
     },
     investorActivity: {
@@ -583,6 +626,7 @@ const app = createApp({
       startSession: startKycSession,
       startProofOfAddressSession,
       getAccountForOperations: getKycAccountForOperations,
+      getDisplayProfile: getKycDisplayProfile,
       webhookVerifier,
       receiveWebhook,
     },

@@ -3,6 +3,8 @@ export interface RegisteredWallet {
   registrationCommitment: string;
   requestedAt: Date;
   registeredAt: Date | null;
+  registrationTxHash?: string | null;
+  registrationBlockNumber?: bigint | null;
 }
 
 export class WalletAddressConflictError extends Error {
@@ -19,6 +21,7 @@ export interface WalletRepository {
     requestedAt: Date;
   }): Promise<RegisteredWallet>;
   findByAccountId(accountId: string): Promise<RegisteredWallet | null>;
+  reconcileWalletRegistration?(input: { accountId: string; txHash: string; blockNumber: bigint; registeredAt: Date; actorAccountId: string }): Promise<RegisteredWallet>;
 }
 
 // Read-only boundary port for wallet registration status, for modules

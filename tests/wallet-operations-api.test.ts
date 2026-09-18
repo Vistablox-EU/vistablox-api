@@ -10,7 +10,7 @@ import { requestContext } from "../src/shared/http/request-context.js";
 
 // This router implements no auth/authorization logic itself -- it only
 // composes whatever guard middleware it's given, exactly like every other
-// operations router (see origination-operations.router.ts). Guard behavior
+// operations router (see intake-operations.router.ts). Guard behavior
 // itself is covered by require-staff-role.test.ts; these stand in as
 // pass-through/deny stubs so this file can focus on the service wiring and
 // response shape.

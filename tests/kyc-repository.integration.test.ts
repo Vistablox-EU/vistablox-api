@@ -24,7 +24,7 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
   // PgBoss's constructor eagerly validates its connection string, so it
   // must not be constructed at describe-body scope (matches every other
   // integration test file's own PrismaOfferingRepository/
-  // PrismaOriginationRepository wiring): that body runs even when skipIf
+  // PrismaIntakeRepository wiring): that body runs even when skipIf
   // skips every test, and databaseUrl is undefined in that case.
   let boss: PgBoss;
   let repository: PrismaKycRepository;
@@ -247,7 +247,7 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
 
     // AD-145/AD-062: the enqueued job's own durable row *is* the receipt —
     // assert it directly against pgboss.job, the same technique
-    // origination-offering-handoff.integration.test.ts and
+    // intake-offering-handoff.integration.test.ts and
     // investor-offering-repository.integration.test.ts already use for
     // their own AD-145 handoffs.
     const enqueued = await authPool.query<{ name: string; data: typeof input }>(

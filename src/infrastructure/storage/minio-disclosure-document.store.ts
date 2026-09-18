@@ -43,12 +43,8 @@ export class MinioDisclosureDocumentStore implements DisclosureDocumentStore {
   public async get(documentReference: string): Promise<StoredDisclosureDocument | null> {
     const objectName = toObjectName(documentReference);
     try {
-      const object = await this.client.send(
-        new GetObjectCommand({
-          Bucket: this.options.bucket,
-          Key: objectName,
-        }),
-      );
+      let object;
+      object = await this.client.send(new GetObjectCommand({ Bucket: this.options.bucket, Key: objectName }));
       if (!(object.Body instanceof Readable) || object.ContentLength === undefined) {
         object.Body?.transformToWebStream().cancel().catch(() => {});
         throw invalidStorageResponseError();

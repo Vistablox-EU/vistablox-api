@@ -4,11 +4,11 @@ import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.
 import {
   ExpireOverdueInformationRequestsService,
   SendApplicantResponseRemindersService,
-} from "../src/modules/origination/application/case-timer.service.js";
+} from "../src/modules/intake/application/case-timer.service.js";
 import type {
-  OriginationRepository,
+  IntakeRepository,
   PublishedInformationRequestForTimer,
-} from "../src/modules/origination/repository/origination.repository.js";
+} from "../src/modules/intake/repository/intake.repository.js";
 
 function request(
   overrides: Partial<PublishedInformationRequestForTimer> = {},
@@ -24,7 +24,7 @@ function request(
   };
 }
 
-function repository(overrides: Partial<OriginationRepository> = {}): OriginationRepository {
+function repository(overrides: Partial<IntakeRepository> = {}): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),

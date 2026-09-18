@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { RetryPostIpoStructuringHandoffService } from "../src/modules/origination/application/operations-case.service.js";
-import { TransitionCaseToPostIpoStructuringService } from "../src/modules/origination/application/post-ipo-structuring-handoff.service.js";
+import { RetryPostIpoStructuringHandoffService } from "../src/modules/intake/application/operations-case.service.js";
+import { TransitionCaseToPostIpoStructuringService } from "../src/modules/intake/application/post-ipo-structuring-handoff.service.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 import type {
   OperationsCaseDetail,
-  OriginationRepository,
-} from "../src/modules/origination/repository/origination.repository.js";
-import type { PostIpoStructuringHandoffRepository } from "../src/modules/origination/repository/post-ipo-structuring-handoff.repository.js";
+  IntakeRepository,
+} from "../src/modules/intake/repository/intake.repository.js";
+import type { PostIpoStructuringHandoffRepository } from "../src/modules/intake/repository/post-ipo-structuring-handoff.repository.js";
 
 const now = new Date("2026-09-08T20:00:00.000Z");
 
@@ -54,7 +54,7 @@ const baseCase: OperationsCaseDetail = {
   informationRequests: [],
 };
 
-function fakeRepository(overrides: Partial<OriginationRepository> = {}): OriginationRepository {
+function fakeRepository(overrides: Partial<IntakeRepository> = {}): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -117,7 +117,7 @@ describe("RetryPostIpoStructuringHandoffService", () => {
       .catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(AppError);
-    expect(failure).toMatchObject({ code: "origination.case_not_found", status: 404 });
+    expect(failure).toMatchObject({ code: "intake.case_not_found", status: 404 });
     expect(handoffRepository.transitionToPostIpoStructuring).not.toHaveBeenCalled();
   });
 
@@ -133,7 +133,7 @@ describe("RetryPostIpoStructuringHandoffService", () => {
       .catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(AppError);
-    expect(failure).toMatchObject({ code: "origination.post_ipo_handoff_not_ready", status: 409 });
+    expect(failure).toMatchObject({ code: "intake.post_ipo_handoff_not_ready", status: 409 });
     expect(handoffRepository.transitionToPostIpoStructuring).not.toHaveBeenCalled();
   });
 
@@ -156,7 +156,7 @@ describe("RetryPostIpoStructuringHandoffService", () => {
       .catch((error: unknown) => error);
 
     expect(failure).toBeInstanceOf(AppError);
-    expect(failure).toMatchObject({ code: "origination.post_ipo_handoff_not_ready", status: 409 });
+    expect(failure).toMatchObject({ code: "intake.post_ipo_handoff_not_ready", status: 409 });
     expect(handoffRepository.transitionToPostIpoStructuring).not.toHaveBeenCalled();
   });
 

@@ -1,5 +1,5 @@
 // Read-only boundary port for KYC eligibility state, for modules outside
-// identity (origination, offering, profile, wallet) that gate their own
+// identity (intake, offering, profile, wallet) that gate their own
 // logic on an account's KYC status. Deliberately separate from
 // KycRepository (kyc.repository.ts): that interface is identity's own
 // internal read/write contract for the session state machine and carries

@@ -32,6 +32,7 @@ export interface AppConfig {
   minAppVersion: { ios: string; android: string };
   features: AppConfigFeatures;
   mobileAuthPlatforms: { android: boolean; ios: boolean };
+  deploymentIdentity?: { environment: string; chainId: number; network: "base" | "base-sepolia"; registryAddress: string };
 }
 
 // The device-auth plugin's endpoints, added to createBetterAuth's plugins
@@ -106,6 +107,12 @@ export function createAppConfigRouter(
           min_app_version: appConfig.minAppVersion,
           features: appConfig.features,
           mobile_auth_platforms: appConfig.mobileAuthPlatforms,
+          ...(appConfig.deploymentIdentity === undefined ? {} : { deployment_identity: {
+            environment: appConfig.deploymentIdentity.environment,
+            chain_id: appConfig.deploymentIdentity.chainId,
+            network: appConfig.deploymentIdentity.network,
+            registry_address: appConfig.deploymentIdentity.registryAddress,
+          } }),
         },
       }),
     );

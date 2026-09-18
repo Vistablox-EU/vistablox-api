@@ -13,6 +13,12 @@ export const appConfigResponseSchema = z.object({
       safe_account: z.boolean(),
     }),
     mobile_auth_platforms: z.object({ android: z.boolean(), ios: z.boolean() }),
+    deployment_identity: z.object({
+      environment: z.string(),
+      chain_id: z.number().int().positive(),
+      network: z.enum(["base", "base-sepolia"]),
+      registry_address: z.string(),
+    }).optional(),
   }),
 });
 

@@ -12,7 +12,7 @@ import type {
   StaffAccountRosterEntry,
   StaffRoleAssignmentRecord,
 } from "../src/modules/auth/repository/staff-account-lifecycle.repository.js";
-import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
+import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 
 const now = new Date("2026-09-01T12:00:00.000Z");
@@ -64,8 +64,8 @@ function fakeAdministrator(): StaffAccountAdministrator {
   };
 }
 
-// origination routes are mounted unconditionally, so createApp requires a
-// full OriginationRepository even though this file never exercises them.
+// intake routes are mounted unconditionally, so createApp requires a
+// full IntakeRepository even though this file never exercises them.
 function fakeEmailSender(): EmailSender {
   return {
     sendStaffInvitationEmail: vi.fn(),
@@ -81,7 +81,7 @@ function fakeEmailSender(): EmailSender {
   };
 }
 
-function fakeOriginationRepository(): OriginationRepository {
+function fakeIntakeRepository(): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -179,7 +179,7 @@ function buildApp(options?: {
       protectedApi: {
         accounts,
         sessions,
-        originationRepository: fakeOriginationRepository(),
+        intakeRepository: fakeIntakeRepository(),
         emailSender: fakeEmailSender(),
         staffWebAuthnRepository: fakeStaffWebAuthnRepository(options?.mfaVerified ?? true),
         staffWebAuthnCeremony: fakeStaffWebAuthnCeremony(),

@@ -3,8 +3,8 @@ import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import { createRequirePartnerCaseAssignment } from "../src/modules/origination/api/require-partner-case-assignment.js";
-import type { OriginationRepository } from "../src/modules/origination/repository/origination.repository.js";
+import { createRequirePartnerCaseAssignment } from "../src/modules/intake/api/require-partner-case-assignment.js";
+import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -22,7 +22,7 @@ function fakeAccounts(activeOrganizationId: string | null): AccountRepository {
 
 function fakeCases(
   assignment: { stage: string; legalPracticeId: string | null; appraisalFirmId: string | null } | null,
-): OriginationRepository {
+): IntakeRepository {
   return {
     getIntakePrerequisites: vi.fn(),
     createDraftIntake: vi.fn(),
@@ -61,7 +61,7 @@ function fakeCases(
 function buildApp(
   role: "legal_partner" | "appraisal_partner",
   accounts: AccountRepository,
-  cases: OriginationRepository,
+  cases: IntakeRepository,
 ) {
   const app = express();
   app.use(requestContext);

@@ -97,7 +97,7 @@ describe.skipIf(databaseUrl === undefined)(
           ownerDeclaredValueEur: "600000.00",
         },
       });
-      await database.originationCase.create({
+      await database.intakeCase.create({
         data: {
           id: caseId,
           propertyId,
@@ -255,7 +255,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.disclosurePack.deleteMany({ where: { offeringId } });
       await database.offering.deleteMany({ where: { id: offeringId } });
       await database.piv.deleteMany({ where: { id: pivId } });
-      await database.originationCase.deleteMany({ where: { id: caseId } });
+      await database.intakeCase.deleteMany({ where: { id: caseId } });
       await database.property.deleteMany({ where: { id: propertyId } });
       await database.walletRegistration.deleteMany({ where: { accountId } });
       await database.kycEligibility.deleteMany({ where: { accountId } });
@@ -399,7 +399,7 @@ describe.skipIf(databaseUrl === undefined)(
           ownerDeclaredValueEur: "600000.00",
         },
       });
-      await database.originationCase.create({
+      await database.intakeCase.create({
         data: {
           id: caseId,
           propertyId,
@@ -446,7 +446,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
       await database.piv.deleteMany({ where: { id: { in: pivIds } } });
-      await database.originationCase.deleteMany({ where: { id: { in: caseIds } } });
+      await database.intakeCase.deleteMany({ where: { id: { in: caseIds } } });
       await database.property.deleteMany({ where: { id: { in: propertyIds } } });
       await database.account.deleteMany({ where: { id: accountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
@@ -730,7 +730,7 @@ describe.skipIf(databaseUrl === undefined)(
           ownerDeclaredValueEur: "600000.00",
         },
       });
-      await database.originationCase.create({
+      await database.intakeCase.create({
         data: {
           id: caseId,
           propertyId,
@@ -785,7 +785,7 @@ describe.skipIf(databaseUrl === undefined)(
       // already exist or that send() fails against a queue that doesn't.
       await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
       // publishFinalOfferingTerms also unconditionally hands off to
-      // origination (AD-145/AD-248) once a case's funding target is
+      // intake (AD-145/AD-248) once a case's funding target is
       // reached — same "queue must already exist" requirement.
       await boss.createQueue("case_timers.post_ipo_structuring_handoff");
       await authPool.query(
@@ -852,7 +852,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
       await database.piv.deleteMany({ where: { id: { in: pivIds } } });
-      await database.originationCase.deleteMany({ where: { id: { in: caseIds } } });
+      await database.intakeCase.deleteMany({ where: { id: { in: caseIds } } });
       await database.property.deleteMany({ where: { id: { in: propertyIds } } });
       await database.walletRegistration.deleteMany({ where: { accountId: fundedAccountId } });
       await database.account.deleteMany({
@@ -991,7 +991,7 @@ describe.skipIf(databaseUrl === undefined)(
       // AD-145: the handoff must be durably queued in the same transaction
       // as the state change, not sent synchronously — assert the row exists
       // in pgboss.job directly, the same technique
-      // origination-offering-handoff.integration.test.ts already uses for
+      // intake-offering-handoff.integration.test.ts already uses for
       // case_timers.pre_offering_open_handoff.
       const enqueued = await authPool.query<{
         name: string;
@@ -1042,7 +1042,7 @@ describe.skipIf(databaseUrl === undefined)(
 
       // Replaying the same job payload (as pg-boss would on a retry) must
       // not double-email the investor or create a second audit row — the
-      // same replay-safety origination's own handoff test already checks.
+      // same replay-safety intake's own handoff test already checks.
       const replayed = await notifyService.execute(enqueued.rows[0]?.data);
       expect(replayed).toEqual({ checked: 1, acted: 0 });
       expect(
@@ -2083,7 +2083,7 @@ describe.skipIf(databaseUrl === undefined)(
 );
 
 describe.skipIf(databaseUrl === undefined)(
-  "origination approval offering handoff PostgreSQL integration",
+  "intake approval offering handoff PostgreSQL integration",
   () => {
     const suffix = randomUUID();
     const accountId = `account_handoff_${suffix}`;
@@ -2119,7 +2119,7 @@ describe.skipIf(databaseUrl === undefined)(
           ownerDeclaredValueEur: "220000.00",
         },
       });
-      await database.originationCase.create({
+      await database.intakeCase.create({
         data: {
           id: caseId,
           propertyId,
@@ -2147,7 +2147,7 @@ describe.skipIf(databaseUrl === undefined)(
         await database.offering.deleteMany({ where: { pivId } });
         await database.piv.deleteMany({ where: { id: pivId } });
       }
-      await database.originationCase.deleteMany({ where: { id: caseId } });
+      await database.intakeCase.deleteMany({ where: { id: caseId } });
       await database.property.deleteMany({ where: { id: propertyId } });
       await database.account.deleteMany({ where: { id: accountId } });
       await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
