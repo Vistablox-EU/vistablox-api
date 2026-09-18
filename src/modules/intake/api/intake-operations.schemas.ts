@@ -9,6 +9,7 @@ import {
   roomTypeSchema,
   submissionDocumentTypeSchema,
 } from "./intake.schemas.js";
+import { reversalCommandSchema, reversalReasonCodeSchema } from "../domain/intake-reversal.policy.js";
 
 // The two human-postable lanes REAL_ESTATE_INTAKE_LIFECYCLE.md's Thread
 // Rules define (system_timeline is system-generated, not a lane a caller
@@ -40,6 +41,20 @@ export const setRepresentativePhotoBodySchema = z.object({
 export const deleteRoomPhotoBodySchema = z.object({
   reason: z.string().trim().min(1).max(500).optional(),
 }).default({});
+
+export const reversalCommandParamsSchema = z.object({ case_id: z.string().trim().min(1) });
+export const reversalOperationParamsSchema = z.object({ case_id: z.string().trim().min(1), operation_id: z.string().trim().min(1) });
+export const reversalRequestBodySchema = z.object({ reason_code: reversalReasonCodeSchema, reason: z.string().trim().min(1).max(500) });
+export const reversalCommandSchemaForApi = reversalCommandSchema;
+export const reversalPreviewResponseSchema = z.object({
+  data: z.object({
+    case_id: z.string(), stage: intakeCaseStageSchema, workflow_event_sequence: z.number().int().nonnegative(),
+    latest_transition: z.object({ event_id: z.string(), from_stage: intakeCaseStageSchema, to_stage: intakeCaseStageSchema }).nullable(),
+    correction_in_progress: z.boolean(), available: z.boolean(),
+    actions: z.array(z.object({ action: reversalCommandSchema, label: z.string(), target_stage: intakeCaseStageSchema, requires_reason: z.boolean(), requires_second_approval: z.boolean(), execution_mode: z.enum(["synchronous", "asynchronous"]), impact_summary: z.string(), blockers: z.array(z.string()) })),
+  }),
+});
+export const reversalOperationResponseSchema = z.object({ data: z.object({ operation_id: z.string(), case_id: z.string(), command: reversalCommandSchema, from_stage: intakeCaseStageSchema, to_stage: intakeCaseStageSchema, status: z.enum(["requested", "pending_approval", "approved", "executing", "completed", "failed", "cancelled"]), reason_code: reversalReasonCodeSchema, requested_by_account_id: z.string(), approved_by_account_id: z.string().nullable(), reversal_of_event_id: z.string().nullable(), completed_at: z.iso.datetime().nullable(), failed_at: z.iso.datetime().nullable(), failure_code: z.string().nullable(), failure_detail: z.string().nullable() }) });
 
 export const postOperationsCaseMessageBodySchema = z.object({
   lane: threadLaneSchema,

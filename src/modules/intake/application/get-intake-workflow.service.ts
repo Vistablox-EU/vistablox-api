@@ -38,6 +38,11 @@ const eventLabels: Record<string, string> = {
   offering_funding_target_no_longer_met: "Funding target no longer met",
   offering_reconfirmation_window_opened: "Reconfirmation window opened",
   offering_reconfirmation_window_closed: "Reconfirmation window closed",
+  case_stage_reverted: "Case stage corrected",
+  correction_requested: "Correction requested",
+  correction_approved: "Correction approved",
+  correction_failed: "Correction failed",
+  correction_completed: "Correction completed",
 };
 const actionLabels: Record<string, string> = {
   review_evidence: "Review evidence",

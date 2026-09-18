@@ -21,6 +21,7 @@ import type { GetOperationsReadinessService } from "../application/get-operation
 import type { UploadCaseDocumentService } from "../application/upload-case-document.service.js";
 import type { GetCaseDocumentService } from "../application/get-case-document.service.js";
 import type { GetIntakeCaseHistoryService, GetIntakeWorkflowService } from "../application/get-intake-workflow.service.js";
+import { ApproveIntakeReversalService, GetIntakeReversalOperationService, GetIntakeReversalPreviewService, RequestIntakeReversalService } from "../application/intake-reversal.service.js";
 import {
   ListCaseMessagesForOperationsService,
   PostCaseMessageForOperationsService,
@@ -67,6 +68,11 @@ import {
   intakeWorkflowResponseSchema,
   intakeHistoryQuerySchema,
   intakeCaseHistoryResponseSchema,
+  reversalCommandParamsSchema,
+  reversalOperationParamsSchema,
+  reversalRequestBodySchema,
+  reversalPreviewResponseSchema,
+  reversalOperationResponseSchema,
 } from "./intake-operations.schemas.js";
 
 export function createIntakeOperationsRouter(
@@ -97,6 +103,10 @@ export function createIntakeOperationsRouter(
   submitStaffDraftCase?: SubmitStaffDraftCaseService,
   workflow?: GetIntakeWorkflowService,
   history?: GetIntakeCaseHistoryService,
+  reversalPreview?: GetIntakeReversalPreviewService,
+  requestReversal?: RequestIntakeReversalService,
+  approveReversal?: ApproveIntakeReversalService,
+  getReversalOperation?: GetIntakeReversalOperationService,
 ): Router {
   const router = Router();
   const staffOnly = [
@@ -168,6 +178,40 @@ export function createIntakeOperationsRouter(
     const params = caseIdParamsSchema.parse(request.params);
     const query = intakeHistoryQuerySchema.parse(request.query);
     response.json(intakeCaseHistoryResponseSchema.parse(await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) })));
+  });
+
+  if (reversalPreview !== undefined) router.get("/:case_id/reversal-preview", ...staffOnly, async (request, response) => {
+    const params = reversalCommandParamsSchema.parse(request.params);
+    response.json(reversalPreviewResponseSchema.parse(await reversalPreview.execute(params.case_id)));
+  });
+
+  if (requestReversal !== undefined) {
+    const commands: Array<[string, string]> = [
+      ["return-to-draft", "return_to_draft"],
+      ["reopen-pre-offering", "reopen_pre_offering"],
+      ["reopen-structuring", "reopen_structuring"],
+      ["reopen-final-offering-review", "reopen_final_offering_review"],
+    ];
+    for (const [path, command] of commands) router.post(`/:case_id/commands/${path}`, ...staffOnly, async (request, response) => {
+      const params = reversalCommandParamsSchema.parse(request.params);
+      const authContext = requireAuthContext(response.locals.authContext);
+      const body = reversalRequestBodySchema.parse(request.body);
+      const expectedStage = String(request.header("if-match-stage") ?? "");
+      const expectedSequence = Number(request.header("if-match-workflow-sequence") ?? "NaN");
+      const idempotencyKey = String(request.header("idempotency-key") ?? "").trim();
+      if (expectedStage.length === 0 || !Number.isInteger(expectedSequence) || idempotencyKey.length === 0) throw new AppError({ code: "intake.reversal_headers_required", title: "Correction headers required", status: 422, detail: "If-Match-Stage, If-Match-Workflow-Sequence, and Idempotency-Key are required." });
+      response.json(reversalOperationResponseSchema.parse(await requestReversal.execute({ caseId: params.case_id, command, accountId: authContext.accountId, traceId: String(response.locals.traceId), idempotencyKey, expectedStage, expectedWorkflowEventSequence: expectedSequence, reasonCode: body.reason_code, reason: body.reason })));
+    });
+  }
+
+  if (approveReversal !== undefined) router.post("/:case_id/reversal-operations/:operation_id/approve", ...staffOnly, async (request, response) => {
+    const params = reversalOperationParamsSchema.parse(request.params);
+    const authContext = requireAuthContext(response.locals.authContext);
+    response.json(reversalOperationResponseSchema.parse(await approveReversal.execute({ caseId: params.case_id, operationId: params.operation_id, accountId: authContext.accountId, traceId: String(response.locals.traceId) })));
+  });
+  if (getReversalOperation !== undefined) router.get("/:case_id/reversal-operations/:operation_id", ...staffOnly, async (request, response) => {
+    const params = reversalOperationParamsSchema.parse(request.params);
+    response.json(reversalOperationResponseSchema.parse(await getReversalOperation.execute({ caseId: params.case_id, operationId: params.operation_id })));
   });
 
   if (uploadDocument !== undefined) {

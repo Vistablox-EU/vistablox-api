@@ -291,6 +291,51 @@ export interface IntakeCaseHistoryEvent {
   metadata: unknown;
 }
 
+export interface IntakeReversalSnapshot {
+  caseId: string;
+  stage: string;
+  workflowEventSequence: number;
+  latestTransition: { eventId: string; fromStage: string; toStage: string } | null;
+  activeInformationRequest: boolean;
+  offering: {
+    offeringId: string;
+    status: string;
+    finalOfferingPublishedAt: Date | null;
+    reservationCount: number;
+    fundedReservationCount: number;
+    disclosurePackPublished: boolean;
+    reconfirmationOpen: boolean;
+    finalizedReservationCount: number;
+  } | null;
+  legalExecutionCompleted: boolean;
+  appraisalCompleted: boolean;
+  correctionInProgress: boolean;
+}
+
+export interface IntakeReversalOperationRecord {
+  operationId: string;
+  caseId: string;
+  command: string;
+  fromStage: string;
+  toStage: string;
+  status: string;
+  reasonCode: string;
+  reason: string;
+  requestedByAccountId: string;
+  approvedByAccountId: string | null;
+  expectedStage: string;
+  expectedWorkflowEventSequence: number;
+  reversalOfEventId: string | null;
+  idempotencyKey: string;
+  createdAt: Date;
+  approvedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failedAt: Date | null;
+  failureCode: string | null;
+  failureDetail: string | null;
+}
+
 // The three terminal outcomes a review can record -- "pending" isn't
 // reviewable-into, it's only ever the starting value nothing has touched
 // yet (documentary_screening_evidence_status_check and this migration's
@@ -676,6 +721,25 @@ export interface IntakeRepository {
   transitionToPostIpoStructuring(
     input: TransitionToPostIpoStructuringInput,
   ): Promise<TransitionedToPostIpoStructuring>;
+  getIntakeReversalSnapshot(caseId: string): Promise<IntakeReversalSnapshot | null>;
+  createReversalOperation(input: {
+    caseId: string;
+    command: string;
+    fromStage: string;
+    toStage: string;
+    status: string;
+    reasonCode: string;
+    reason: string;
+    requestedByAccountId: string;
+    expectedStage: string;
+    expectedWorkflowEventSequence: number;
+    reversalOfEventId: string | null;
+    idempotencyKey: string;
+    traceId: string;
+  }): Promise<IntakeReversalOperationRecord>;
+  getReversalOperation(caseId: string, operationId: string): Promise<IntakeReversalOperationRecord | null>;
+  approveReversalOperation(input: { caseId: string; operationId: string; approverAccountId: string; approvedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
+  executeReversalOperation(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
 }
 
 export class CaseSubmissionConflictError extends Error {

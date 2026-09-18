@@ -22,6 +22,7 @@ export interface AppendIntakeCaseEventInput {
   eventSource?: "live" | "legacy_audit";
   sourceAuditLogId?: string | null;
   sourceJobId?: string | null;
+  reversalOfEventId?: string | null;
   workflowVersion?: number;
 }
 
@@ -94,6 +95,7 @@ async function appendWithWorkflow(
       eventSource: input.eventSource ?? "live",
       sourceAuditLogId: input.sourceAuditLogId ?? null,
       sourceJobId: input.sourceJobId ?? null,
+      reversalOfEventId: input.reversalOfEventId ?? null,
     },
   });
   return eventId;

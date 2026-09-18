@@ -57,6 +57,8 @@ model Account {
   resolvedClosureRequests        AccountClosureRequest[] @relation("ClosureRequestResolver")
   devices                        Device[]
   reviewedEvidence                DocumentaryScreeningEvidence[] @relation("EvidenceReviewer")
+  intakeReversalRequests          IntakeCaseReversalOperation[] @relation("IntakeReversalRequester")
+  intakeReversalApprovals         IntakeCaseReversalOperation[] @relation("IntakeReversalApprover")
 
   @@map("accounts")
   @@schema("account")
@@ -298,6 +300,7 @@ model IntakeCase {
   executionEvents           LegalExecutionEvent[]
   pivs                      Piv[]
   lifecycleEvents           IntakeCaseEvent[]
+  reversalOperations        IntakeCaseReversalOperation[]
 
   @@index([propertyId], map: "idx_cases_property")
   @@index([applicantAccountId], map: "idx_cases_applicant")
@@ -331,6 +334,7 @@ model IntakeCaseEvent {
   eventSource          String    @default("live") @map("event_source")
   sourceAuditLogId     String?   @unique @map("source_audit_log_id")
   sourceJobId          String?   @map("source_job_id")
+  reversalOfEventId    String?   @unique @map("reversal_of_event_id")
 
   case IntakeCase @relation(fields: [caseId], references: [id])
 
@@ -340,6 +344,42 @@ model IntakeCaseEvent {
   @@index([eventType, occurredAt(sort: Desc)])
   @@index([relatedResourceType, relatedResourceId, occurredAt(sort: Desc)])
   @@map("intake_case_events")
+  @@schema("intake")
+}
+
+model IntakeCaseReversalOperation {
+  id                            String    @id @map("operation_id")
+  caseId                        String    @map("case_id")
+  command                       String
+  fromStage                     String    @map("from_stage")
+  toStage                       String    @map("to_stage")
+  status                        String
+  reasonCode                    String    @map("reason_code")
+  reason                        String
+  requestedByAccountId          String    @map("requested_by_account_id")
+  approvedByAccountId           String?   @map("approved_by_account_id")
+  expectedStage                 String    @map("expected_stage")
+  expectedWorkflowEventSequence Int       @map("expected_workflow_event_sequence")
+  reversalOfEventId             String?   @map("reversal_of_event_id")
+  idempotencyKey                String    @map("idempotency_key")
+  traceId                       String    @map("trace_id")
+  metadata                      Json      @default("{}") @db.JsonB
+  failureCode                   String?   @map("failure_code")
+  failureDetail                 String?   @map("failure_detail")
+  createdAt                     DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  approvedAt                    DateTime? @map("approved_at") @db.Timestamptz(6)
+  startedAt                     DateTime? @map("started_at") @db.Timestamptz(6)
+  completedAt                   DateTime? @map("completed_at") @db.Timestamptz(6)
+  failedAt                      DateTime? @map("failed_at") @db.Timestamptz(6)
+
+  case        IntakeCase @relation(fields: [caseId], references: [id])
+  requestedBy Account    @relation("IntakeReversalRequester", fields: [requestedByAccountId], references: [id])
+  approvedBy  Account?   @relation("IntakeReversalApprover", fields: [approvedByAccountId], references: [id])
+
+  @@unique([caseId, idempotencyKey])
+  @@index([caseId, createdAt(sort: Desc)])
+  @@index([status, createdAt(sort: Desc)])
+  @@map("intake_case_reversal_operations")
   @@schema("intake")
 }
 

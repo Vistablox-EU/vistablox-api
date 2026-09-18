@@ -34,6 +34,8 @@ import type {
   IntakePrerequisites,
   OperationsCaseDetail,
   IntakeCaseCursor,
+  IntakeReversalOperationRecord,
+  IntakeReversalSnapshot,
   IntakeRepository,
   OwnedIntakeCase,
   PartnerCaseDetail,
@@ -73,6 +75,114 @@ export class PrismaIntakeRepository
     private readonly pgBoss: PgBoss,
     private readonly kycEligibilityReader: KycEligibilityReader,
   ) {}
+
+  public async getIntakeReversalSnapshot(caseId: string): Promise<IntakeReversalSnapshot | null> {
+    const row = await this.database.intakeCase.findUnique({
+      where: { id: caseId },
+      include: {
+        informationRequests: { where: { status: "published" }, select: { id: true }, take: 1 },
+        lifecycleEvents: { where: { fromStage: { not: null }, toStage: { not: null }, reversalOfEventId: null }, orderBy: { eventSequence: "desc" }, take: 1, select: { id: true, fromStage: true, toStage: true } },
+        pivs: {
+          orderBy: { id: "desc" },
+          take: 1,
+          select: {
+            offerings: {
+              orderBy: { createdAt: "desc" },
+              take: 1,
+              select: {
+                id: true,
+                status: true,
+                finalOfferingPublishedAt: true,
+                disclosurePacks: { select: { id: true }, take: 1 },
+                reservations: {
+                  select: {
+                    reservationStage: true,
+                    moneyEvents: { orderBy: [{ recordedAt: "desc" }, { id: "desc" }], take: 1, select: { capitalState: true } },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    });
+    if (row === null) return null;
+    const offering = row.pivs[0]?.offerings[0];
+    const reservations = offering?.reservations ?? [];
+    const fundedStates = new Set(["eurc_reserved", "reconfirmation_pending", "eurc_finalized"]);
+    return {
+      caseId: row.id,
+      stage: row.stage,
+      workflowEventSequence: row.workflowEventSequence,
+      latestTransition: row.lifecycleEvents[0]?.fromStage !== null && row.lifecycleEvents[0]?.toStage !== null && row.lifecycleEvents[0] !== undefined ? { eventId: row.lifecycleEvents[0].id, fromStage: row.lifecycleEvents[0].fromStage as string, toStage: row.lifecycleEvents[0].toStage as string } : null,
+      activeInformationRequest: row.informationRequests.length > 0,
+      offering: offering === undefined ? null : {
+        offeringId: offering.id,
+        status: offering.status,
+        finalOfferingPublishedAt: offering.finalOfferingPublishedAt,
+        reservationCount: reservations.filter((reservation) => !["cancelled", "lapsed"].includes(reservation.reservationStage)).length,
+        fundedReservationCount: reservations.filter((reservation) => fundedStates.has(reservation.moneyEvents[0]?.capitalState ?? "")).length,
+        disclosurePackPublished: offering.disclosurePacks.length > 0,
+        reconfirmationOpen: reservations.some((reservation) => reservation.reservationStage === "awaiting_reconfirmation"),
+        finalizedReservationCount: reservations.filter((reservation) => reservation.reservationStage === "finalized").length,
+      },
+      legalExecutionCompleted: row.legalExecutionEventRefs.length > 0,
+      appraisalCompleted: row.appraisalCompletedAt !== null,
+      correctionInProgress: await this.database.intakeCaseReversalOperation.count({ where: { caseId, status: { in: ["requested", "pending_approval", "approved", "executing"] } } }) > 0,
+    };
+  }
+
+  public async createReversalOperation(input: { caseId: string; command: string; fromStage: string; toStage: string; status: string; reasonCode: string; reason: string; requestedByAccountId: string; expectedStage: string; expectedWorkflowEventSequence: number; reversalOfEventId: string | null; idempotencyKey: string; traceId: string }): Promise<IntakeReversalOperationRecord> {
+    const existing = await this.database.intakeCaseReversalOperation.findUnique({ where: { caseId_idempotencyKey: { caseId: input.caseId, idempotencyKey: input.idempotencyKey } } });
+    if (existing !== null) return toReversalOperationRecord(existing);
+    return this.database.$transaction(async (transaction) => {
+      await transaction.$queryRaw`SELECT case_id FROM intake.intake_cases WHERE case_id = ${input.caseId} FOR UPDATE`;
+      const created = await transaction.intakeCaseReversalOperation.create({ data: { id: `rev_${ulid()}`, ...input, expectedWorkflowEventSequence: input.expectedWorkflowEventSequence + 1, metadata: {} } });
+      const now = new Date();
+      await transaction.auditLog.create({ data: { id: `audit_${ulid()}`, actorAccountId: input.requestedByAccountId, action: "intake.correction_requested", resourceType: "intake_case", resourceId: input.caseId, changes: { operation_id: created.id, command: input.command, reason_code: input.reasonCode, reason: input.reason }, createdAt: now } });
+      await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:correction-requested:${created.id}`, eventType: "correction_requested", actorType: "staff", actorAccountId: input.requestedByAccountId, traceId: input.traceId, relatedResourceType: "intake_case_reversal_operation", relatedResourceId: created.id, metadata: { operation_id: created.id, command: input.command, reason_code: input.reasonCode, reason: input.reason }, occurredAt: now });
+      return toReversalOperationRecord(created);
+    });
+  }
+
+  public async getReversalOperation(caseId: string, operationId: string): Promise<IntakeReversalOperationRecord | null> {
+    const operation = await this.database.intakeCaseReversalOperation.findFirst({ where: { id: operationId, caseId } });
+    return operation === null ? null : toReversalOperationRecord(operation);
+  }
+
+  public async approveReversalOperation(input: { caseId: string; operationId: string; approverAccountId: string; approvedAt: Date }): Promise<IntakeReversalOperationRecord | null> {
+    const operation = await this.database.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId } });
+    if (operation === null) return null;
+    if (operation.requestedByAccountId === input.approverAccountId || operation.status !== "pending_approval") throw new CaseReviewConflictError(operation.fromStage, "approve this reversal");
+    const updated = await this.database.intakeCaseReversalOperation.update({ where: { id: operation.id }, data: { status: "approved", approvedByAccountId: input.approverAccountId, approvedAt: input.approvedAt } });
+    return toReversalOperationRecord(updated);
+  }
+
+  public async executeReversalOperation(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null> {
+    return this.database.$transaction(async (transaction) => {
+      await transaction.$queryRaw`SELECT case_id FROM intake.intake_cases WHERE case_id = ${input.caseId} FOR UPDATE`;
+      const operation = await transaction.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId }, include: { case: { select: { stage: true, workflowEventSequence: true } } } });
+      if (operation === null) return null;
+      if (!["requested", "approved"].includes(operation.status)) return operation as unknown as IntakeReversalOperationRecord;
+      if (operation.case.stage !== operation.expectedStage || operation.case.workflowEventSequence !== operation.expectedWorkflowEventSequence) throw new CaseReviewConflictError(operation.case.stage, "execute this reversal");
+      await transaction.intakeCaseReversalOperation.update({ where: { id: operation.id }, data: { status: "executing", startedAt: input.completedAt } });
+      if (operation.command === "return_to_draft") await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "draft", updatedAt: input.completedAt } });
+      else if (operation.command === "reopen_pre_offering") {
+        const piv = await transaction.piv.findFirst({ where: { caseId: input.caseId }, orderBy: { id: "desc" }, select: { offerings: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true } } } });
+        const offeringId = piv?.offerings[0]?.id;
+        if (offeringId !== undefined) await transaction.offering.update({ where: { id: offeringId }, data: { status: "closed" } });
+        await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "submitted", approvedAt: null, ipoEndAt: null, ipoValueEur: null, updatedAt: input.completedAt } });
+      } else if (operation.command === "reopen_structuring") {
+        await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "pre_offering_open", postIpoStructuringCompletedAt: null, updatedAt: input.completedAt } });
+      } else if (operation.command === "reopen_final_offering_review") {
+        await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "post_ipo_structuring", approvedForFinalOfferingAt: null, postIpoStructuringCompletedAt: null, updatedAt: input.completedAt } });
+      } else throw new CaseReviewConflictError(operation.case.stage, "execute this reversal");
+      await transaction.auditLog.create({ data: { id: `audit_${ulid()}`, actorAccountId: input.actorAccountId, action: `intake.${operation.command}`, resourceType: "intake_case", resourceId: input.caseId, changes: { operation_id: operation.id, from_stage: operation.fromStage, to_stage: operation.toStage, reason_code: operation.reasonCode, reason: operation.reason }, createdAt: input.completedAt } });
+      await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:reversal:${operation.id}:completed`, eventType: "case_stage_reverted", actorType: "staff", actorAccountId: input.actorAccountId, traceId: input.traceId, fromStage: operation.fromStage, toStage: operation.toStage, relatedResourceType: "intake_case_reversal_operation", relatedResourceId: operation.id, reversalOfEventId: operation.reversalOfEventId, metadata: { operation_id: operation.id, command: operation.command, reason_code: operation.reasonCode, reason: operation.reason }, occurredAt: input.completedAt });
+      const updated = await transaction.intakeCaseReversalOperation.update({ where: { id: operation.id }, data: { status: "completed", completedAt: input.completedAt } });
+      return toReversalOperationRecord(updated);
+    });
+  }
 
   public async getIntakePrerequisites(
     accountId: string,
@@ -2179,6 +2289,54 @@ function toCaseMessageRecord(input: {
     authorAccountId: input.authorAccountId,
     body: input.body,
     createdAt: input.createdAt,
+  };
+}
+
+function toReversalOperationRecord(input: {
+  id: string;
+  caseId: string;
+  command: string;
+  fromStage: string;
+  toStage: string;
+  status: string;
+  reasonCode: string;
+  reason: string;
+  requestedByAccountId: string;
+  approvedByAccountId: string | null;
+  expectedStage: string;
+  expectedWorkflowEventSequence: number;
+  reversalOfEventId: string | null;
+  idempotencyKey: string;
+  createdAt: Date;
+  approvedAt: Date | null;
+  startedAt: Date | null;
+  completedAt: Date | null;
+  failedAt: Date | null;
+  failureCode: string | null;
+  failureDetail: string | null;
+}): IntakeReversalOperationRecord {
+  return {
+    operationId: input.id,
+    caseId: input.caseId,
+    command: input.command,
+    fromStage: input.fromStage,
+    toStage: input.toStage,
+    status: input.status,
+    reasonCode: input.reasonCode,
+    reason: input.reason,
+    requestedByAccountId: input.requestedByAccountId,
+    approvedByAccountId: input.approvedByAccountId,
+    expectedStage: input.expectedStage,
+    expectedWorkflowEventSequence: input.expectedWorkflowEventSequence,
+    reversalOfEventId: input.reversalOfEventId,
+    idempotencyKey: input.idempotencyKey,
+    createdAt: input.createdAt,
+    approvedAt: input.approvedAt,
+    startedAt: input.startedAt,
+    completedAt: input.completedAt,
+    failedAt: input.failedAt,
+    failureCode: input.failureCode,
+    failureDetail: input.failureDetail,
   };
 }
 

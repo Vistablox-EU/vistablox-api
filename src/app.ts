@@ -155,6 +155,7 @@ import {
 } from "./modules/intake/application/operations-case.service.js";
 import { GetOperationsReadinessService, type OperationsReadinessRepository } from "./modules/intake/application/get-operations-readiness.service.js";
 import { GetIntakeCaseHistoryService, GetIntakeWorkflowService } from "./modules/intake/application/get-intake-workflow.service.js";
+import { ApproveIntakeReversalService, GetIntakeReversalOperationService, GetIntakeReversalPreviewService, RequestIntakeReversalService } from "./modules/intake/application/intake-reversal.service.js";
 import type { UploadCaseDocumentService } from "./modules/intake/application/upload-case-document.service.js";
 import type { GetCaseDocumentService } from "./modules/intake/application/get-case-document.service.js";
 import { TransitionCaseToPostIpoStructuringService } from "./modules/intake/application/post-ipo-structuring-handoff.service.js";
@@ -893,6 +894,10 @@ export function createApp(dependencies: AppDependencies): Express {
           operationsReadiness,
         ),
         new GetIntakeCaseHistoryService(intakeRepository as Required<Pick<typeof intakeRepository, "getIntakeWorkflowSnapshot" | "listIntakeCaseHistory">>),
+        new GetIntakeReversalPreviewService(intakeRepository),
+        new RequestIntakeReversalService(intakeRepository),
+        new ApproveIntakeReversalService(intakeRepository),
+        new GetIntakeReversalOperationService(intakeRepository),
       ),
     );
     if (partnerOrganizationRepository !== undefined) {
