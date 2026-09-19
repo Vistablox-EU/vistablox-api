@@ -608,6 +608,7 @@ model Reservation {
   id                                 String    @id @map("reservation_id")
   offeringId                         String    @map("offering_id")
   accountId                          String    @map("account_id")
+  clientIdempotencyKey               String?   @map("client_idempotency_key")
   amountEur                          Decimal   @map("amount_eur") @db.Decimal(15, 2)
   reservationStage                   String    @default("initiated") @map("reservation_stage")
   disclosurePackVersionAtReservation String?   @map("disclosure_pack_version_at_reservation")
@@ -622,6 +623,7 @@ model Reservation {
 
   @@index([offeringId, reservationStage], map: "idx_reservations_offering_stage")
   @@index([accountId], map: "idx_reservations_account")
+  @@unique([accountId, offeringId, clientIdempotencyKey], map: "uq_reservations_account_offering_client_key")
   @@map("reservations")
   @@schema("offering")
 }

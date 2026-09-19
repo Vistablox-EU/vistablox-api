@@ -2,6 +2,7 @@ export interface CreateReservationInput {
   reservationId: string;
   offeringId: string;
   accountId: string;
+  clientIdempotencyKey?: string | null;
   amountEur: string;
   disclosurePackVersionAtReservation: string | null;
   traceId: string;
@@ -18,6 +19,7 @@ export type CreateReservationConflict = "offering_not_open" | "capacity_exceeded
 export interface CreateReservationResult {
   reservation: CreatedReservation | null;
   conflict: CreateReservationConflict | null;
+  reused?: boolean;
 }
 
 export interface AdvanceReservationCapitalStateInput {
