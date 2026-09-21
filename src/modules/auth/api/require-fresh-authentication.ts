@@ -13,16 +13,20 @@ export function createRequireFreshAuthentication(
     try {
       const context = response.locals.authContext;
       if (context === undefined) throw freshAuthRequired();
-      const freshAfter = new Date(clock().getTime() - FRESH_AUTH_WINDOW_MS);
+      // Interim rule (device-bound cutover): a customer device-biometric
+      // session is always fresh. Every request already carries a DPoP proof
+      // signed by the biometric-protected hardware key, which is strictly
+      // stronger than the old 5-minute time-based window over a TOTP code.
+      // That window made these routes permanently dead for long-lived device
+      // sessions: no customer factor sets lastFreshAuthAt any more.
       if (
         context.population === "customer" &&
-        context.authenticationLevel === "device_biometric" &&
-        context.sessionCreatedAt !== undefined &&
-        context.sessionCreatedAt >= freshAfter
+        context.authenticationLevel === "device_biometric"
       ) {
         next();
         return;
       }
+      const freshAfter = new Date(clock().getTime() - FRESH_AUTH_WINDOW_MS);
       const verified = await sessions.hasFreshAuthentication?.({
         accountId: context.accountId,
         providerSessionId: context.providerSessionId,

@@ -39,20 +39,7 @@ function appFor(authContext: {
 }
 
 describe("require fresh authentication", () => {
-  it("accepts a device-biometric session created within the fresh-auth window", async () => {
-    const { app, sessions } = appFor({
-      population: "customer",
-      authenticationLevel: "device_biometric",
-      sessionCreatedAt: new Date(NOW.getTime() - 4 * 60_000),
-    });
-
-    const response = await request(app).get("/protected");
-
-    expect(response.status).toBe(200);
-    expect(sessions.hasFreshAuthentication).not.toHaveBeenCalled();
-  });
-
-  it("does not treat an older device-biometric session as fresh", async () => {
+  it("accepts a device-biometric session regardless of session age", async () => {
     const { app, sessions } = appFor({
       population: "customer",
       authenticationLevel: "device_biometric",
@@ -61,13 +48,8 @@ describe("require fresh authentication", () => {
 
     const response = await request(app).get("/protected");
 
-    expect(response.status).toBe(403);
-    expect(response.body.code).toBe("authentication.fresh_auth_required");
-    expect(sessions.hasFreshAuthentication).toHaveBeenCalledWith({
-      accountId: "acct_01",
-      providerSessionId: "session_01",
-      freshAfter: new Date(NOW.getTime() - 5 * 60_000),
-    });
+    expect(response.status).toBe(200);
+    expect(sessions.hasFreshAuthentication).not.toHaveBeenCalled();
   });
 
   it("does not shortcut a staff session's fresh-auth check even at device_biometric level", async () => {
@@ -83,7 +65,7 @@ describe("require fresh authentication", () => {
     expect(sessions.hasFreshAuthentication).toHaveBeenCalled();
   });
 
-  it("falls back to the repository check when the session has no recorded creation time", async () => {
+  it("accepts a device-biometric session with no recorded creation time", async () => {
     const { app, sessions } = appFor({
       population: "customer",
       authenticationLevel: "device_biometric",
@@ -91,7 +73,7 @@ describe("require fresh authentication", () => {
 
     const response = await request(app).get("/protected");
 
-    expect(response.status).toBe(403);
-    expect(sessions.hasFreshAuthentication).toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(sessions.hasFreshAuthentication).not.toHaveBeenCalled();
   });
 });
