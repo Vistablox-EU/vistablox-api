@@ -21,11 +21,16 @@ export function createOfferingOperationsRouter(
   finalizeOffering: FinalizeOfferingService,
   classifyMateriality: ClassifyMaterialityService,
   publishDisclosurePack: PublishDisclosurePackService,
+  requireFinalizeIdempotency?: RequestHandler,
 ): Router {
   const router = Router();
   const staffOnly = [requireAuthentication, requireAdminOperations, requireStaffWebAuthn];
 
-  router.post("/:offering_id/finalize", ...staffOnly, async (request, response) => {
+  router.post(
+    "/:offering_id/finalize",
+    ...staffOnly,
+    ...(requireFinalizeIdempotency === undefined ? [] : [requireFinalizeIdempotency]),
+    async (request, response) => {
     const authContext = requireAuthContext(response.locals.authContext);
     const params = investorOfferingParamsSchema.parse(request.params);
     const body = finalizeOfferingBodySchema.parse(request.body);

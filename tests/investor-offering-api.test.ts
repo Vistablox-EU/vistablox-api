@@ -10,6 +10,8 @@ import { ReconfirmReservationService } from "../src/modules/offering/application
 import type { FinalizeOfferingRepository } from "../src/modules/offering/repository/finalize-offering.repository.js";
 import type { InvestorOfferingDetailRecord, OfferingRepository } from "../src/modules/offering/repository/offering.repository.js";
 import type { CreateReservationResult, ReservationRepository } from "../src/modules/offering/repository/reservation.repository.js";
+import { createIdempotencyMiddleware } from "../src/shared/http/idempotency.js";
+import type { IdempotencyStore, StoredIdempotentResponse } from "../src/infrastructure/idempotency/idempotency-store.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -172,7 +174,13 @@ const reservationEligibleDetail: InvestorOfferingDetailRecord = {
   },
 };
 
-function buildReservationApp(options?: { detail?: InvestorOfferingDetailRecord | null }) {
+function buildReservationApp(options?: {
+  detail?: InvestorOfferingDetailRecord | null;
+  requireIdempotency?: {
+    createReservation: RequestHandler;
+    reconfirmReservation: RequestHandler;
+  };
+}) {
   const offerings: OfferingRepository = {
     listPublic: vi.fn().mockResolvedValue([]),
     getInvestorDetail: vi
@@ -217,6 +225,9 @@ function buildReservationApp(options?: { detail?: InvestorOfferingDetailRecord |
         generateReservationId: () => "reservation_01",
         fundingRailAvailable: true,
       }),
+      undefined,
+      undefined,
+      options?.requireIdempotency,
     ),
   );
   app.use(errorHandler);
@@ -293,6 +304,7 @@ describe("POST /v1/offerings/:offering_id/reservations", () => {
 function buildReconfirmApp(options?: {
   repository?: Partial<FinalizeOfferingRepository>;
   population?: "customer" | "staff_partner";
+  requireIdempotency?: RequestHandler;
 }) {
   const offerings: OfferingRepository = {
     listPublic: vi.fn().mockResolvedValue([]),
@@ -328,6 +340,13 @@ function buildReconfirmApp(options?: {
       undefined,
       undefined,
       new ReconfirmReservationService(finalization, () => new Date("2026-09-05T12:00:00.000Z")),
+      undefined,
+      options?.requireIdempotency === undefined
+        ? undefined
+        : {
+            createReservation: options.requireIdempotency,
+            reconfirmReservation: options.requireIdempotency,
+          },
     ),
   );
   app.use(errorHandler);
@@ -429,5 +448,133 @@ describe("POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm
 
     expect(response.status).toBe(403);
     expect(finalization.reconfirmReservation).not.toHaveBeenCalled();
+  });
+});
+
+function requireIdempotencyFor(
+  store: IdempotencyStore,
+  endpoint: string,
+): RequestHandler {
+  return createIdempotencyMiddleware(store, endpoint);
+}
+
+function memoryIdempotencyStore(): IdempotencyStore {
+  const rows = new Map<string, StoredIdempotentResponse>();
+  return {
+    find: vi.fn(async (idempotencyKey: string, endpoint: string) => {
+      return rows.get(`${idempotencyKey}:${endpoint}`) ?? null;
+    }),
+    save: vi.fn(async (input) => {
+      const key = `${input.idempotencyKey}:${input.endpoint}`;
+      const existing = rows.get(key);
+      if (existing !== undefined) return existing;
+      const saved = {
+        requestBodyHash: input.requestBodyHash,
+        responseStatus: input.responseStatus,
+        responseBody: input.responseBody,
+      };
+      rows.set(key, saved);
+      return saved;
+    }),
+  };
+}
+
+describe("idempotency on reservation writes", () => {
+  it("requires the Idempotency-Key on reservation creation", async () => {
+    const store = memoryIdempotencyStore();
+    const { app, reservations } = buildReservationApp({
+      requireIdempotency: {
+        createReservation: requireIdempotencyFor(store, "offering.reservation.create"),
+        reconfirmReservation: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+      },
+    });
+
+    const response = await request(app)
+      .post("/v1/offerings/offering_01/reservations")
+      .send({ amount_eur: "1000.00" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("idempotency.key_required");
+    expect(reservations.createReservation).not.toHaveBeenCalled();
+  });
+
+  it("replays the cached response for a repeated reservation creation", async () => {
+    const store = memoryIdempotencyStore();
+    const { app, reservations } = buildReservationApp({
+      requireIdempotency: {
+        createReservation: requireIdempotencyFor(store, "offering.reservation.create"),
+        reconfirmReservation: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+      },
+    });
+
+    const first = await request(app)
+      .post("/v1/offerings/offering_01/reservations")
+      .set("Idempotency-Key", "reservation-key-1")
+      .send({ amount_eur: "1000.00" });
+    const replay = await request(app)
+      .post("/v1/offerings/offering_01/reservations")
+      .set("Idempotency-Key", "reservation-key-1")
+      .send({ amount_eur: "1000.00" });
+
+    expect(first.status).toBe(201);
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual(first.body);
+    expect(reservations.createReservation).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects the same key with a different reservation body as a 409", async () => {
+    const store = memoryIdempotencyStore();
+    const { app } = buildReservationApp({
+      requireIdempotency: {
+        createReservation: requireIdempotencyFor(store, "offering.reservation.create"),
+        reconfirmReservation: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+      },
+    });
+
+    await request(app)
+      .post("/v1/offerings/offering_01/reservations")
+      .set("Idempotency-Key", "reservation-key-1")
+      .send({ amount_eur: "1000.00" });
+    const conflict = await request(app)
+      .post("/v1/offerings/offering_01/reservations")
+      .set("Idempotency-Key", "reservation-key-1")
+      .send({ amount_eur: "2000.00" });
+
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe("idempotency.body_mismatch");
+  });
+
+  it("requires the Idempotency-Key on reconfirmation submission", async () => {
+    const store = memoryIdempotencyStore();
+    const { app, finalization } = buildReconfirmApp({
+      requireIdempotency: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+    });
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_01/reconfirm",
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("idempotency.key_required");
+    expect(finalization.reconfirmReservation).not.toHaveBeenCalled();
+  });
+
+  it("replays the cached response for a repeated reconfirmation", async () => {
+    const store = memoryIdempotencyStore();
+    const { app, finalization } = buildReconfirmApp({
+      requireIdempotency: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+    });
+
+    const first = await request(app)
+      .post("/v1/offerings/offering_01/reservations/reservation_01/reconfirm")
+      .set("Idempotency-Key", "reconfirm-key-1");
+    const replay = await request(app)
+      .post("/v1/offerings/offering_01/reservations/reservation_01/reconfirm")
+      .set("Idempotency-Key", "reconfirm-key-1");
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+    expect(finalization.reconfirmReservation).toHaveBeenCalledTimes(1);
   });
 });

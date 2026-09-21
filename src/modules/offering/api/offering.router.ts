@@ -39,6 +39,10 @@ export function createInvestorOfferingRouter(
   createReservation?: CreateReservationService,
   reconfirmReservation?: ReconfirmReservationService,
   requireFreshAuthentication?: RequestHandler,
+  requireIdempotency?: {
+    createReservation: RequestHandler;
+    reconfirmReservation: RequestHandler;
+  },
 ): Router {
   const router = Router();
 
@@ -56,6 +60,7 @@ export function createInvestorOfferingRouter(
   if (createReservation !== undefined) {
     router.post("/:offering_id/reservations", requireAuthentication,
       ...(requireFreshAuthentication === undefined ? [] : [requireFreshAuthentication]),
+      ...(requireIdempotency === undefined ? [] : [requireIdempotency.createReservation]),
       async (request, response) => {
       const context = requireCustomerContext(response.locals.authContext);
       const params = investorOfferingParamsSchema.parse(request.params);
@@ -76,6 +81,7 @@ export function createInvestorOfferingRouter(
       "/:offering_id/reservations/:reservation_id/reconfirm",
       requireAuthentication,
       ...(requireFreshAuthentication === undefined ? [] : [requireFreshAuthentication]),
+      ...(requireIdempotency === undefined ? [] : [requireIdempotency.reconfirmReservation]),
       async (request, response) => {
         const context = requireCustomerContext(response.locals.authContext);
         const params = reservationParamsSchema.parse(request.params);
