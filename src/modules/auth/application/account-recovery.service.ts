@@ -126,6 +126,7 @@ export class RecordPrimaryRecoveryReviewService {
   public constructor(
     private readonly repository: AccountRecoveryRepository,
     private readonly clock: () => Date = () => new Date(),
+    private readonly skipDiditInStaging = false,
   ) {}
 
   public async execute(input: {
@@ -140,6 +141,7 @@ export class RecordPrimaryRecoveryReviewService {
       corroborationCategory: input.corroborationCategory,
       traceId: input.traceId,
       reviewedAt: this.clock(),
+      allowMissingDidit: this.skipDiditInStaging,
     });
     if (updated === null) throw primaryReviewUnavailableError();
     return updated;
@@ -151,6 +153,7 @@ export class DecideAccountRecoveryCaseService {
     private readonly repository: AccountRecoveryRepository,
     private readonly emailSender: EmailSender,
     private readonly clock: () => Date = () => new Date(),
+    private readonly singleReviewerMode = false,
   ) {}
 
   public async execute(input: {
@@ -162,7 +165,9 @@ export class DecideAccountRecoveryCaseService {
   }): Promise<AccountRecoveryCaseRecord> {
     const existingCase = await this.repository.findCase(input.caseId);
     if (existingCase === null) throw caseNotFoundError();
-    if (existingCase.reviewedByPrimary === input.actorAccountId) throw sameReviewerError();
+    if (existingCase.reviewedByPrimary === input.actorAccountId && !this.singleReviewerMode) {
+      throw sameReviewerError();
+    }
 
     const updated = await this.repository.decideCase({
       caseId: input.caseId,
@@ -171,6 +176,7 @@ export class DecideAccountRecoveryCaseService {
       reason: input.reason,
       traceId: input.traceId,
       decidedAt: this.clock(),
+      allowSameReviewer: this.singleReviewerMode,
     });
     if (updated === null) throw decisionUnavailableError();
 

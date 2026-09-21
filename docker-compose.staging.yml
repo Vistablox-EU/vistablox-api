@@ -152,6 +152,8 @@ services:
       # what marks this deployment as staging. Staging-only settings, such as
       # PLAY_INTEGRITY_POLICY=disabled, are accepted here and nowhere else.
       APP_ENV: staging
+      ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: ${ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE:-false}
+      ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING: ${ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING:-false}
       # Device-key auth (Android). "disabled" until a Play Console / Cloud
       # project exists; Android key attestation is enforced regardless, and
       # enrolment needs both ANDROID_ATTESTATION_* values set.

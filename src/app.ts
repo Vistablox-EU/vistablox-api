@@ -344,6 +344,8 @@ export interface AppDependencies {
       workflowId: string;
       callbackUrl: string;
       recoveryRedirectUrl: string;
+      singleReviewerMode: boolean;
+      skipDiditInStaging: boolean;
       // Sent synchronously from the request, mirroring RecoverStaffAccountService's
       // and IssueStaffInvitationService's precedent for staff-initiated admin
       // actions — unlike the customer-facing reminder jobs in worker.ts, a staff
@@ -791,8 +793,17 @@ export function createApp(dependencies: AppDependencies): Express {
             callbackUrl: recovery.callbackUrl,
           }),
           new GetAccountRecoveryCaseService(recovery.repository, recovery.didit),
-          new RecordPrimaryRecoveryReviewService(recovery.repository),
-          new DecideAccountRecoveryCaseService(recovery.repository, recovery.emailSender),
+          new RecordPrimaryRecoveryReviewService(
+            recovery.repository,
+            () => new Date(),
+            recovery.skipDiditInStaging,
+          ),
+          new DecideAccountRecoveryCaseService(
+            recovery.repository,
+            recovery.emailSender,
+            () => new Date(),
+            recovery.singleReviewerMode,
+          ),
           new CompleteAccountRecoveryService(
             recovery.repository,
             recovery.administrator,
