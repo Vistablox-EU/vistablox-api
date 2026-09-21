@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
-import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/prisma-device-challenge.repository.js";
+import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/customer/prisma-device-challenge.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { HttpAndroidAttestationRevocationList } from "../src/modules/auth/infrastructure/http-android-attestation-revocation-list.js";
+import { HttpAndroidAttestationRevocationList } from "../src/modules/auth/infrastructure/customer/http-android-attestation-revocation-list.js";
 
 afterEach(() => {
   vi.unstubAllGlobals();

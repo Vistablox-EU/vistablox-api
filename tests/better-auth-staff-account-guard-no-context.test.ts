@@ -2,7 +2,7 @@ import { betterAuth, type BetterAuthPlugin } from "better-auth";
 import { memoryAdapter } from "better-auth/adapters/memory";
 import { describe, expect, it, vi } from "vitest";
 
-import { createBetterAuthStaffAccountGuardPlugin } from "../src/modules/auth/infrastructure/better-auth-staff-account-guard.plugin.js";
+import { createBetterAuthStaffAccountGuardPlugin } from "../src/modules/auth/infrastructure/staff/better-auth-staff-account-guard.plugin.js";
 
 // A session created with no request context -- outside any authentication
 // endpoint -- is refused. The guard can't see how such a session is being

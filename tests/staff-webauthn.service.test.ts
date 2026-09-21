@@ -1,12 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { StaffWebAuthnCeremony } from "../src/modules/auth/application/staff-webauthn.ceremony.js";
-import { StaffWebAuthnService } from "../src/modules/auth/application/staff-webauthn.service.js";
+import type { StaffWebAuthnCeremony } from "../src/modules/auth/application/staff/staff-webauthn.ceremony.js";
+import { StaffWebAuthnService } from "../src/modules/auth/application/staff/staff-webauthn.service.js";
 import type {
   StaffWebAuthnChallengeRecord,
   StaffWebAuthnCredentialRecord,
   StaffWebAuthnRepository,
-} from "../src/modules/auth/repository/staff-webauthn.repository.js";
+} from "../src/modules/auth/repository/staff/staff-webauthn.repository.js";
 
 const now = new Date("2026-08-31T12:00:00.000Z");
 const credential: StaffWebAuthnCredentialRecord = {

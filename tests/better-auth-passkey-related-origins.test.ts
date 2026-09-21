@@ -6,11 +6,11 @@ import { describe, expect, it } from "vitest";
 
 import { loadEnvironment, resolveWebAuthnSettings } from "../src/config/environment.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
-import type { AuthAuditEvent } from "../src/modules/auth/application/auth-audit-sink.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { BetterAuthStaffAccountAdministrator } from "../src/modules/auth/infrastructure/better-auth-staff-account-administrator.js";
-import { BetterAuthStaffIdentityProvider } from "../src/modules/auth/infrastructure/better-auth-staff-identity.provider.js";
-import { issuePasskeyBootstrap } from "../src/modules/auth/infrastructure/passkey-bootstrap.js";
+import type { AuthAuditEvent } from "../src/modules/auth/application/shared/auth-audit-sink.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { BetterAuthStaffAccountAdministrator } from "../src/modules/auth/infrastructure/staff/better-auth-staff-account-administrator.js";
+import { BetterAuthStaffIdentityProvider } from "../src/modules/auth/infrastructure/staff/better-auth-staff-identity.provider.js";
+import { issuePasskeyBootstrap } from "../src/modules/auth/infrastructure/shared/passkey-bootstrap.js";
 import {
   createSoftwareAuthenticator,
   type SoftwareAuthenticator,

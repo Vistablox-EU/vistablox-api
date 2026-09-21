@@ -5,12 +5,12 @@ import {
   DecideAccountClosureRequestService,
   ListPendingAccountClosureRequestsService,
   RequestAccountClosureService,
-} from "../src/modules/auth/application/account-closure.service.js";
+} from "../src/modules/auth/application/shared/account-closure.service.js";
 import type {
   AccountClosureRepository,
   AccountClosureRequestRecord,
-} from "../src/modules/auth/repository/account-closure.repository.js";
-import type { CustomerAccountAdministrator } from "../src/modules/auth/application/customer-account-administrator.js";
+} from "../src/modules/auth/repository/shared/account-closure.repository.js";
+import type { CustomerAccountAdministrator } from "../src/modules/auth/application/shared/customer-account-administrator.js";
 
 const now = new Date("2026-09-05T12:00:00.000Z");
 

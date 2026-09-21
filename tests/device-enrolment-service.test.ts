@@ -17,22 +17,22 @@ import {
   AndroidAttestationInvalidError,
   type AndroidAttestationRevocationList,
   type PlayIntegrityVerdictDecoder,
-} from "../src/modules/auth/application/android-attestation-verifier.js";
+} from "../src/modules/auth/application/customer/android-attestation-verifier.js";
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
   DeviceChallengeReplayedError,
   MobilePlatformUnsupportedError,
-} from "../src/modules/auth/application/device-auth-errors.js";
-import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/device-auth-jws-verifier.js";
-import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
+} from "../src/modules/auth/application/customer/device-auth-errors.js";
+import { DeviceChallengePurposeMismatchError } from "../src/modules/auth/application/customer/device-auth-jws-verifier.js";
+import { EnrolDeviceService } from "../src/modules/auth/application/customer/device-enrolment.service.js";
 import {
   CHALLENGE_REPLAY_WINDOW_MS,
   ENROLMENT_INSERT_DEADLINE_MS,
 } from "../src/modules/auth/domain/device-challenge-replay.js";
-import { toApiError } from "../src/modules/auth/infrastructure/better-auth-device-auth.plugin.js";
-import type { Device, DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
-import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
+import { toApiError } from "../src/modules/auth/infrastructure/customer/better-auth-device-auth.plugin.js";
+import type { Device, DeviceRepository } from "../src/modules/auth/repository/customer/device.repository.js";
+import type { DeviceChallengeRepository } from "../src/modules/auth/repository/customer/device-challenge.repository.js";
 
 cryptoProvider.set(webcrypto);
 

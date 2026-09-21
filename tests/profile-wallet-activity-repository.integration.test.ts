@@ -8,7 +8,7 @@ import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaProfileRepository } from "../src/modules/profile/repository/prisma-profile.repository.js";
 import { PrismaAccountPreferencesRepository } from "../src/modules/profile/repository/prisma-account-preferences.repository.js";
 import { defaultAccountPreferences } from "../src/modules/profile/repository/account-preferences.repository.js";
-import { PrismaAccountClosureRepository } from "../src/modules/auth/repository/prisma-account-closure.repository.js";
+import { PrismaAccountClosureRepository } from "../src/modules/auth/repository/shared/prisma-account-closure.repository.js";
 import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
 import { PrismaInvestorActivityRepository } from "../src/modules/investor-activity/repository/prisma-investor-activity.repository.js";
 import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";

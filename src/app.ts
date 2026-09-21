@@ -17,38 +17,36 @@ import { SearchAccountsByEmailService } from "./modules/account/application/sear
 import {
   createRequireAuthentication,
   type DpopEnforcementOptions,
-} from "./modules/auth/api/require-authentication.js";
-import { rejectDisabledAuthRoutes } from "./modules/auth/api/reject-disabled-auth.js";
-import { createRequireFreshAuthentication } from "./modules/auth/api/require-fresh-authentication.js";
+} from "./modules/auth/api/shared/require-authentication.js";
+import { rejectDisabledAuthRoutes } from "./modules/auth/api/shared/reject-disabled-auth.js";
+import { createRequireFreshAuthentication } from "./modules/auth/api/customer/require-fresh-authentication.js";
 import {
   createRequireAdminOperations,
   createRequireAppraisalPartner,
   createRequireLegalPartner,
   createRequireStaffIdentity,
   createRequireStaffWebAuthn,
-} from "./modules/auth/api/require-staff-role.js";
-import { createStaffWebAuthnRouter } from "./modules/auth/api/staff-webauthn.router.js";
-import {
-  createInternalStaffInvitationRouter,
-  createPublicStaffInvitationRouter,
-} from "./modules/auth/api/staff-invitation.router.js";
-import { createStaffAccountLifecycleRouter } from "./modules/auth/api/staff-account-lifecycle.router.js";
+} from "./modules/auth/api/staff/require-staff-role.js";
+import { createStaffWebAuthnRouter } from "./modules/auth/api/staff/staff-webauthn.router.js";
+import { createPublicStaffInvitationRouter } from "./modules/auth/api/staff/staff-invitation-accept.router.js";
+import { createInternalStaffInvitationRouter } from "./modules/auth/api/staff/staff-invitation-issue.router.js";
+import { createStaffAccountLifecycleRouter } from "./modules/auth/api/staff/staff-account-lifecycle.router.js";
 import {
   AcceptStaffInvitationService,
   IssueStaffInvitationService,
-} from "./modules/auth/application/staff-invitation.service.js";
-import type { StaffIdentityProvider } from "./modules/auth/application/staff-identity-provider.js";
-import type { StaffInvitationRepository } from "./modules/auth/repository/staff-invitation.repository.js";
+} from "./modules/auth/application/staff/staff-invitation.service.js";
+import type { StaffIdentityProvider } from "./modules/auth/application/staff/staff-identity-provider.js";
+import type { StaffInvitationRepository } from "./modules/auth/repository/staff/staff-invitation.repository.js";
 import {
   GrantStaffRoleService,
   ListStaffAccountsService,
   OffboardStaffAccountService,
   RecoverStaffAccountService,
   RevokeStaffRoleService,
-} from "./modules/auth/application/staff-account-lifecycle.service.js";
-import type { StaffAccountAdministrator } from "./modules/auth/application/staff-account-administrator.js";
-import type { StaffAccountLifecycleRepository } from "./modules/auth/repository/staff-account-lifecycle.repository.js";
-import { createAccountRecoveryRouter } from "./modules/auth/api/account-recovery.router.js";
+} from "./modules/auth/application/staff/staff-account-lifecycle.service.js";
+import type { StaffAccountAdministrator } from "./modules/auth/application/staff/staff-account-administrator.js";
+import type { StaffAccountLifecycleRepository } from "./modules/auth/repository/staff/staff-account-lifecycle.repository.js";
+import { createAccountRecoveryRouter } from "./modules/auth/api/staff/account-recovery.router.js";
 import {
   CompleteAccountRecoveryService,
   CreateRecoveryDiditSessionService,
@@ -56,39 +54,39 @@ import {
   GetAccountRecoveryCaseService,
   OpenAccountRecoveryCaseService,
   RecordPrimaryRecoveryReviewService,
-} from "./modules/auth/application/account-recovery.service.js";
-import type { CustomerAccountAdministrator } from "./modules/auth/application/customer-account-administrator.js";
-import type { AccountRecoveryRepository } from "./modules/auth/repository/account-recovery.repository.js";
-import { createAccountClosureRouter } from "./modules/auth/api/account-closure.router.js";
-import { createAccountClosureOperationsRouter } from "./modules/auth/api/account-closure-operations.router.js";
+} from "./modules/auth/application/staff/account-recovery.service.js";
+import type { CustomerAccountAdministrator } from "./modules/auth/application/shared/customer-account-administrator.js";
+import type { AccountRecoveryRepository } from "./modules/auth/repository/staff/account-recovery.repository.js";
+import { createAccountClosureRouter } from "./modules/auth/api/customer/account-closure.router.js";
+import { createAccountClosureOperationsRouter } from "./modules/auth/api/staff/account-closure-operations.router.js";
 import {
   CancelAccountClosureService,
   DecideAccountClosureRequestService,
   ListPendingAccountClosureRequestsService,
   RequestAccountClosureService,
-} from "./modules/auth/application/account-closure.service.js";
-import type { AccountClosureRepository } from "./modules/auth/repository/account-closure.repository.js";
-import { StaffWebAuthnService } from "./modules/auth/application/staff-webauthn.service.js";
-import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff-webauthn.ceremony.js";
-import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff-webauthn.repository.js";
-import type { SessionResolver } from "./modules/auth/application/session-resolver.js";
-import { createCustomerSessionRouter } from "./modules/auth/api/customer-session.router.js";
+} from "./modules/auth/application/shared/account-closure.service.js";
+import type { AccountClosureRepository } from "./modules/auth/repository/shared/account-closure.repository.js";
+import { StaffWebAuthnService } from "./modules/auth/application/staff/staff-webauthn.service.js";
+import type { StaffWebAuthnCeremony } from "./modules/auth/application/staff/staff-webauthn.ceremony.js";
+import type { StaffWebAuthnRepository } from "./modules/auth/repository/staff/staff-webauthn.repository.js";
+import type { SessionResolver } from "./modules/auth/application/shared/session-resolver.js";
+import { createCustomerSessionRouter } from "./modules/auth/api/customer/customer-session.router.js";
 import {
   createAppConfigRouter,
   createDeviceAuthRouter,
   type AppConfig,
-} from "./modules/auth/api/device-auth.router.js";
-import { createRequireDpopOnly } from "./modules/auth/api/require-dpop-only.js";
-import type { IssueDeviceChallengeService } from "./modules/auth/application/device-challenge-issuance.service.js";
-import type { VistaBloxAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
+} from "./modules/auth/api/customer/device-auth.router.js";
+import { createRequireDpopOnly } from "./modules/auth/api/customer/require-dpop-only.js";
+import type { IssueDeviceChallengeService } from "./modules/auth/application/customer/device-challenge-issuance.service.js";
+import type { VistaBloxAuth } from "./modules/auth/infrastructure/shared/better-auth.factory.js";
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
   RevokeDeviceSessionsService,
   RevokeOwnSessionService,
-} from "./modules/auth/application/customer-session.service.js";
-import type { CustomerSessionRepository } from "./modules/auth/repository/customer-session.repository.js";
-import type { SessionRevoker } from "./modules/auth/application/session-revoker.js";
+} from "./modules/auth/application/customer/customer-session.service.js";
+import type { CustomerSessionRepository } from "./modules/auth/repository/customer/customer-session.repository.js";
+import type { SessionRevoker } from "./modules/auth/application/customer/session-revoker.js";
 import { createHealthRouter } from "./modules/health/health.router.js";
 import {
   createInvestorOfferingRouter,
@@ -196,9 +194,9 @@ import type { ProtectedDisplayProfileProvider } from "./modules/profile/applicat
 import { UpdateAccountPreferencesService } from "./modules/profile/application/update-account-preferences.service.js";
 import type { AccountPreferencesRepository } from "./modules/profile/repository/account-preferences.repository.js";
 import type { ProfileRepository } from "./modules/profile/repository/profile.repository.js";
-import { createLoginMethodsRouter } from "./modules/auth/api/login-methods.router.js";
-import { UnlinkLoginMethodService } from "./modules/auth/application/unlink-login-method.service.js";
-import type { LoginMethodUnlinker } from "./modules/auth/application/login-method-unlinker.js";
+import { createLoginMethodsRouter } from "./modules/auth/api/customer/login-methods.router.js";
+import { UnlinkLoginMethodService } from "./modules/auth/application/customer/unlink-login-method.service.js";
+import type { LoginMethodUnlinker } from "./modules/auth/application/customer/login-method-unlinker.js";
 import { createWalletRouter } from "./modules/wallet/api/wallet.router.js";
 import { createWalletOperationsRouter } from "./modules/wallet/api/wallet-operations.router.js";
 import { RegisterWalletService } from "./modules/wallet/application/register-wallet.service.js";

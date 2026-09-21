@@ -4,10 +4,10 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
-import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/prisma-device-challenge.repository.js";
-import { PrismaDeviceRepository } from "../src/modules/auth/repository/prisma-device.repository.js";
+import { EnrolDeviceService } from "../src/modules/auth/application/customer/device-enrolment.service.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/customer/prisma-device-challenge.repository.js";
+import { PrismaDeviceRepository } from "../src/modules/auth/repository/customer/prisma-device.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const BASE_URL = "http://localhost:3000";
