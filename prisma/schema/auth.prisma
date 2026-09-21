@@ -275,3 +275,31 @@ model DeviceChallenge {
   @@map("device_challenges")
   @@schema("auth")
 }
+
+// Self-service device replacement (AD-271): a short-lived, single-use email
+// code that authorizes revoking the active device + device_key login method so
+// a customer can enrol a new device after a reinstall or new phone, without
+// staff. Only the code HASH is stored, never the plaintext; the plaintext is
+// emailed to account.accounts.protected_contact_email and verified against
+// this hash at spend time. No SMS anywhere in this flow.
+model DeviceReplacementCode {
+  id           String    @id @map("device_replacement_code_id")
+  accountId    String    @map("account_id")
+  // Better Auth session id of the authenticated session that requested the
+  // code, re-bound at verify time so a code issued to one session can't be
+  // spent from another. Nullable: the session id is the caller's concern; this
+  // table just records what it's told.
+  sessionId    String?   @map("session_id")
+  codeHash     String    @map("code_hash")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(6)
+  attemptsUsed Int       @default(0) @map("attempts_used")
+  consumedAt   DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, consumedAt], map: "idx_device_replacement_codes_account")
+  @@index([expiresAt], map: "idx_device_replacement_codes_expiry")
+  @@map("device_replacement_codes")
+  @@schema("auth")
+}

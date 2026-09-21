@@ -90,6 +90,7 @@ function fakeEmailSender(): EmailSender {
     sendAccountRecoveryRejectedEmail: vi.fn(),
     sendAccountRecoveryCompletedEmail: vi.fn(),
     sendPasskeyRecoveryEmail: vi.fn(),
+    sendDeviceReplacementCodeEmail: vi.fn(),
   };
 }
 

@@ -64,6 +64,7 @@ function repository(overrides: Partial<IntakeRepository> = {}): IntakeRepository
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
     sendPasskeyRecoveryEmail: vi.fn(),
+    sendDeviceReplacementCodeEmail: vi.fn(),
     sendStaffInvitationEmail: vi.fn(),
     sendApplicantResponseReminderEmail: vi.fn().mockResolvedValue(undefined),
     sendKycRenewalReminderEmail: vi.fn(),
