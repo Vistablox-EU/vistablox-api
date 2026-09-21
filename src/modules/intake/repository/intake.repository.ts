@@ -721,8 +721,8 @@ export interface IntakeRepository {
   transitionToPostIpoStructuring(
     input: TransitionToPostIpoStructuringInput,
   ): Promise<TransitionedToPostIpoStructuring>;
-  getIntakeReversalSnapshot(caseId: string): Promise<IntakeReversalSnapshot | null>;
-  createReversalOperation(input: {
+  getIntakeReversalSnapshot?(caseId: string): Promise<IntakeReversalSnapshot | null>;
+  createReversalOperation?(input: {
     caseId: string;
     command: string;
     fromStage: string;
@@ -737,9 +737,9 @@ export interface IntakeRepository {
     idempotencyKey: string;
     traceId: string;
   }): Promise<IntakeReversalOperationRecord>;
-  getReversalOperation(caseId: string, operationId: string): Promise<IntakeReversalOperationRecord | null>;
-  approveReversalOperation(input: { caseId: string; operationId: string; approverAccountId: string; approvedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
-  executeReversalOperation(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
+  getReversalOperation?(caseId: string, operationId: string): Promise<IntakeReversalOperationRecord | null>;
+  approveReversalOperation?(input: { caseId: string; operationId: string; approverAccountId: string; approvedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
+  executeReversalOperation?(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
 }
 
 export class CaseSubmissionConflictError extends Error {

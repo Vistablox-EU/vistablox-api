@@ -2,6 +2,18 @@ import { AppError } from "../../../shared/errors/app-error.js";
 import { getReversalAction, reversalCommandSchema, reversalReasonCodeSchema, type ReversalCommand } from "../domain/intake-reversal.policy.js";
 import type { IntakeRepository, IntakeReversalOperationRecord, IntakeReversalSnapshot } from "../repository/intake.repository.js";
 
+// The reversal write/read methods are optional on IntakeRepository (so the
+// many test fake repositories don't have to stub them), but these services
+// always run against a repository that implements them -- same
+// Required<Pick<...>> pattern get-intake-workflow.service.ts already uses for
+// getIntakeWorkflowSnapshot/listIntakeCaseHistory.
+export type ReversalRepository = Required<
+  Pick<
+    IntakeRepository,
+    "getIntakeReversalSnapshot" | "createReversalOperation" | "getReversalOperation" | "approveReversalOperation" | "executeReversalOperation"
+  >
+>;
+
 function mapSnapshot(snapshot: IntakeReversalSnapshot) {
   return {
     stage: snapshot.stage,
@@ -16,7 +28,7 @@ function mapSnapshot(snapshot: IntakeReversalSnapshot) {
 }
 
 export class GetIntakeReversalPreviewService {
-  public constructor(private readonly repository: IntakeRepository) {}
+  public constructor(private readonly repository: ReversalRepository) {}
 
   public async execute(caseId: string) {
     const snapshot = await this.repository.getIntakeReversalSnapshot(caseId);
@@ -42,7 +54,7 @@ function getReversalActions(snapshot: IntakeReversalSnapshot) {
 }
 
 export class RequestIntakeReversalService {
-  public constructor(private readonly repository: IntakeRepository, private readonly clock: () => Date = () => new Date()) {}
+  public constructor(private readonly repository: ReversalRepository, private readonly clock: () => Date = () => new Date()) {}
 
   public async execute(input: { caseId: string; command: string; accountId: string; traceId: string; idempotencyKey: string; expectedStage: string; expectedWorkflowEventSequence: number; reasonCode: string; reason: string }) {
     const command = reversalCommandSchema.parse(input.command);
@@ -60,7 +72,7 @@ export class RequestIntakeReversalService {
 }
 
 export class ApproveIntakeReversalService {
-  public constructor(private readonly repository: IntakeRepository, private readonly clock: () => Date = () => new Date()) {}
+  public constructor(private readonly repository: ReversalRepository, private readonly clock: () => Date = () => new Date()) {}
 
   public async execute(input: { caseId: string; operationId: string; accountId: string; traceId: string }) {
     const operation = await this.repository.approveReversalOperation({ caseId: input.caseId, operationId: input.operationId, approverAccountId: input.accountId, approvedAt: this.clock() });
@@ -71,7 +83,7 @@ export class ApproveIntakeReversalService {
 }
 
 export class GetIntakeReversalOperationService {
-  public constructor(private readonly repository: IntakeRepository) {}
+  public constructor(private readonly repository: ReversalRepository) {}
   public async execute(input: { caseId: string; operationId: string }) {
     const operation = await this.repository.getReversalOperation(input.caseId, input.operationId);
     if (operation === null) throw new AppError({ code: "intake.reversal_operation_not_found", title: "Correction not found", status: 404, detail: "The correction operation does not exist." });
