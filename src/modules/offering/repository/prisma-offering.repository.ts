@@ -3,6 +3,7 @@ import { ulid } from "ulid";
 import { z } from "zod";
 
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
+import type { Prisma } from "../../../generated/prisma/client.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { toCents, toEurcMicros } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
@@ -196,23 +197,36 @@ export class PrismaOfferingRepository
   }
 
   public async listPublic(input: ListPublicOfferingsInput): Promise<PublicOfferingRecord[]> {
+    let afterWhere: Prisma.OfferingWhereInput = {};
+    const after = input.after;
+    if (after !== undefined) {
+      const featured = after.featured;
+      afterWhere = featured === undefined
+        ? {
+            OR: [
+              { createdAt: { lt: after.createdAt } },
+              { createdAt: after.createdAt, id: { lt: after.id } },
+            ] satisfies Prisma.OfferingWhereInput[],
+          }
+        : {
+            OR: [
+              ...(featured === true ? [{ featured: false }] : []),
+              { featured, createdAt: { lt: after.createdAt } },
+              { featured, createdAt: after.createdAt, id: { lt: after.id } },
+            ] satisfies Prisma.OfferingWhereInput[],
+          };
+    }
     const rows = await this.database.offering.findMany({
       where: {
         status: { in: [...publicOfferingStatuses] },
-        ...(input.after === undefined
-          ? {}
-          : {
-              OR: [
-                { createdAt: { lt: input.after.createdAt } },
-                { createdAt: input.after.createdAt, id: { lt: input.after.id } },
-              ],
-            }),
+        ...afterWhere,
       },
-      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+      orderBy: [{ featured: "desc" }, { createdAt: "desc" }, { id: "desc" }],
       take: input.limit,
       select: {
         id: true,
         status: true,
+        featured: true,
         targetRaiseEur: true,
         createdAt: true,
         piv: {
@@ -234,6 +248,7 @@ export class PrismaOfferingRepository
       return {
         id: row.id,
         status: row.status,
+        featured: row.featured,
         targetRaiseEur: row.targetRaiseEur.toFixed(2),
         createdAt: row.createdAt,
         ipoEndAt: row.piv.case.ipoEndAt,

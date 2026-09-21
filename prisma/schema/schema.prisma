@@ -589,6 +589,7 @@ model Offering {
   minimumRaiseEur          Decimal   @map("minimum_raise_eur") @db.Decimal(15, 2)
   targetRaiseEur           Decimal   @map("target_raise_eur") @db.Decimal(15, 2)
   status                   String    @default("pre_offering")
+  featured                 Boolean   @default(false)
   finalOfferingPublishedAt DateTime? @map("final_offering_published_at") @db.Timestamptz(6)
   platformRightsEndAt      DateTime? @map("platform_rights_end_at") @db.Timestamptz(6)
   effectiveRightsEndAt     DateTime? @map("effective_rights_end_at") @db.Timestamptz(6)
