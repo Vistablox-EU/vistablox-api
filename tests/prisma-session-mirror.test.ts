@@ -50,4 +50,43 @@ describe("PrismaSessionMirror", () => {
       data: { lastSeenAt: seenAt },
     });
   });
+
+  it("records lastFreshAuthAt at creation for device-biometric sessions", async () => {
+    const { mirror, sessionCreate } = buildMirror();
+    const createdAt = new Date("2026-09-12T12:00:00.000Z");
+
+    await mirror.recordCreated({
+      betterAuthUserId: "auth_user_01",
+      betterAuthSessionId: "provider_session_01",
+      channel: "mobile",
+      authMethodAtLogin: "device_biometric",
+      userAgent: null,
+      createdAt,
+      idleExpiresAt: new Date("2026-09-12T12:05:00.000Z"),
+      absoluteExpiresAt: new Date("2026-09-12T12:30:00.000Z"),
+    });
+
+    expect(sessionCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ lastFreshAuthAt: createdAt }) }),
+    );
+  });
+
+  it("records no lastFreshAuthAt for an ordinary social session", async () => {
+    const { mirror, sessionCreate } = buildMirror();
+
+    await mirror.recordCreated({
+      betterAuthUserId: "auth_user_01",
+      betterAuthSessionId: "provider_session_01",
+      channel: "web",
+      authMethodAtLogin: "google",
+      userAgent: null,
+      createdAt: new Date("2026-09-12T12:00:00.000Z"),
+      idleExpiresAt: new Date("2026-09-12T12:05:00.000Z"),
+      absoluteExpiresAt: new Date("2026-09-12T12:30:00.000Z"),
+    });
+
+    expect(sessionCreate).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ lastFreshAuthAt: null }) }),
+    );
+  });
 });
