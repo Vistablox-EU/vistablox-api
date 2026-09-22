@@ -18,6 +18,7 @@ import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intak
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
 import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
 import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prisma-device-challenge.repository.js";
+import { PrismaSigningRequestRepository } from "./modules/auth/repository/prisma-signing-request.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
@@ -55,6 +56,7 @@ const heartbeat = new WorkerHeartbeat(undefined, metrics);
 await heartbeat.start();
 const dpopReplayRepository = new PrismaDpopReplayRepository(database);
 const deviceChallengeRepository = new PrismaDeviceChallengeRepository(database);
+const signingRequestRepository = new PrismaSigningRequestRepository(database);
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -303,6 +305,7 @@ if (confirmWalletRegistrations !== undefined) {
 // live only in src/kyc-server.ts.
 await boss.createQueue("maintenance.dpop_replay_prune");
 await boss.createQueue("maintenance.device_challenge_prune");
+await boss.createQueue("maintenance.signing_request_prune");
 await boss.createQueue("maintenance.kyc_renewal");
 await boss.createQueue("maintenance.kyc_stuck_session_expiry");
 await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
@@ -390,6 +393,14 @@ await boss.schedule("maintenance.dpop_replay_prune", "0 * * * *", null, {
   ...RETRY_OPTIONS,
 });
 await boss.schedule("maintenance.device_challenge_prune", "0 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
+// Hourly, same as device_challenge_prune: a signing request's status only
+// needs to read `expired` before the client's next T1 refresh, not on the
+// millisecond its expiry passes -- T2/T3 themselves reject past-expiry
+// requests from the stored data, so the sweep is housekeeping, not a gate.
+await boss.schedule("maintenance.signing_request_prune", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
@@ -637,6 +648,14 @@ await boss.work("maintenance.device_challenge_prune", async () => {
   await runJob("maintenance.device_challenge_prune", async () => {
     // Pruned on the database's clock, not this worker's.
     const acted = await deviceChallengeRepository.pruneExpired();
+    return { checked: acted, acted };
+  });
+});
+await boss.work("maintenance.signing_request_prune", async () => {
+  await runJob("maintenance.signing_request_prune", async () => {
+    // Status flips on the database's clock; T2/T3 also guard past-expiry
+    // requests from the stored data, so this is housekeeping, not a gate.
+    const acted = await signingRequestRepository.markExpired();
     return { checked: acted, acted };
   });
 });

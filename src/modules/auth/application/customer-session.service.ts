@@ -67,12 +67,20 @@ export class RevokeAllOwnSessionsService {
 // Device binding (DPoP) "Remove this phone": ends every one of the caller's
 // own sessions bound to a given key, not just the current one -- the point
 // is removing a specific physical device's access, which may span more than
-// one still-live session for that key.
+// one still-live session for that key. Cancelling the device's pending
+// signing requests alongside (D3, plan section 3.9/3.10) keeps the removed
+// device's inbox from promising actions it can no longer authorize.
 export class RevokeDeviceSessionsService {
-  public constructor(private readonly revoker: SessionRevoker) {}
+  public constructor(
+    private readonly revoker: SessionRevoker,
+    private readonly cancelSigningRequests?: (dpopJkt: string) => Promise<number>,
+  ) {}
 
   public async execute(jkt: string, headers: IncomingHttpHeaders): Promise<{ revokedCount: number }> {
     const revokedCount = await this.revoker.revokeByDpopKey(jkt, headers);
+    // Unconditional: the named key is being removed, whatever its live
+    // sessions were (it may not have had any), so its requests go too.
+    await this.cancelSigningRequests?.(jkt);
     return { revokedCount };
   }
 }
