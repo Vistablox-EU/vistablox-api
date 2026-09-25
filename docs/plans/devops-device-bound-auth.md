@@ -4,7 +4,7 @@
 **Revisions:**
 - r1, 2026-09-11: items a–e (SMTP, recovery link host, push, attestation, keeping the plans).
 - r2, 2026-09-11: Damir's wallet and biometric decisions. Adds wallet infrastructure in §10.
-- r3, 2026-09-11, Damir directly: email goes **direct from the Coolify mail server, with no relay**; **one bundler provider**; the P-256 signer is option 1.
+- r3, 2026-09-11, Damir directly: email goes **direct from the mail server, with no relay**; **one bundler provider**; the P-256 signer is option 1.
 - r4, 2026-09-11, Damir directly: paymaster option A. **Coinbase CDP** sponsors gas (bundler + paymaster).
 - r5, 2026-09-11: aligned with the final backend and mobile plans: native Safe modules (**no Safe7579**, to be confirmed); **eager Safe deployment**, with the mechanism an open question; the CDP key lives server-side only.
 - **r6, 2026-09-11, Damir directly:**
@@ -17,7 +17,7 @@
   - **plans to GitHub as docs PRs: yes**;
   - **ETH reserve per wallet: yes** (§10.3a);
   - **Play Integrity: standard for login, strict for signing**;
-  - **staging on Coolify only for now** (no production work).
+  - **staging only for now** (no production work).
 - **r7, 2026-09-11, Damir directly:**
   - **Safe7579 dropped: confirmed** (native Safe modules only);
   - **Safe deployment: option (a)**, a sponsored UserOp signed by the enrolling device (no VistaBlox deployer key);
@@ -26,7 +26,7 @@
   - **device integrity is enough for the defensive actions** (removing a phone, cancelling a recovery);
   - the maildev ufw rule: later; the DMARC/SPF switch: after the 14-day report window (≈ 2026-09-25).
 
-**Hard rule:** no production changes (DNS, accounts, secrets, deploys) without Damir's explicit go-ahead. Claude cannot create accounts or enter credentials, so account creation is Damir's to do. After a go-ahead, I can make DNS changes (Cloudflare) and Coolify config changes.
+**Hard rule:** no production changes (DNS, accounts, secrets, deploys) without Damir's explicit go-ahead. Account creation is Damir's to do. After a go-ahead, DNS changes (Cloudflare) and hosting config changes can proceed.
 
 **Wallet principle (Damir, r2):**
 - VistaBlox has **zero control** over user wallets: no co-signer, no guardian, no HSM, no VistaBlox key over any user wallet.
@@ -41,9 +41,9 @@ This plan supports the backend plan (`vistablox-api` `docs/plans/device-bound-au
 
 | Area | Finding |
 |---|---|
-| Environments | **Staging only** (Coolify on the laptop), and it stays that way for now (Damir, r6). `api.vistablox.io`, `admin.vistablox.io` and `mx.vistablox.io` → **24.135.205.210** (dynamic residential IP, `cable-24-135-205-210.dynamic.sbb.rs`). Laptop LAN: `192.168.1.245/24`, gateway `192.168.1.1`. |
+| Environments | **Staging only**, and it stays that way for now (Damir, r6). `api.vistablox.io`, `admin.vistablox.io` and `mx.vistablox.io` → **24.135.205.210** (dynamic residential IP, `cable-24-135-205-210.dynamic.sbb.rs`). Laptop LAN: `192.168.1.245/24`, gateway `192.168.1.1`. |
 | DNS | Cloudflare (`kyrie`/`candy.ns.cloudflare.com`). `api.vistablox.io` is not proxied. |
-| Mail server | The Coolify service **`vistablox-mail`** (running, healthy): `docker-mailserver:latest` + `roundcube:latest-apache`. It's the MX for `vistablox.io`. Both images use **floating `:latest` tags**. |
+| Mail server | The **`vistablox-mail`** service (running, healthy): `docker-mailserver:latest` + `roundcube:latest-apache`. It's the MX for `vistablox.io`. Both images use **floating `:latest` tags**. |
 | Outbound SMTP | Port 25 outbound is open. Gmail and iCloud MX greet with `220`; Microsoft (`mx1.hotmail.com`) gave no greeting within 8 s. The acceptance test (§2.5) settles deliverability. |
 | Mail DNS | SPF `v=spf1 mx ~all` (softfail). **DMARC `p=quarantine; pct=100; rua=mailto:damir@vistablox.io`**, so aggregate reports are already flowing. DKIM selector `mail` exists. |
 | Mail (API) | Staging sends into `maildev` (the compose file hardcodes `SMTP_HOST: maildev`, port 1025; web UI on host port 1080). |
@@ -65,7 +65,7 @@ This plan supports the backend plan (`vistablox-api` `docs/plans/device-bound-au
 
 ---
 
-## 2. Email: direct from the Coolify mail server (**decided, r3/r6**)
+## 2. Email: direct from the mail server (**decided, r3/r6**)
 
 ### 2.1 Decision
 - All outbound mail is sent **directly by `vistablox-mail`**, with no relay.
@@ -202,7 +202,7 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
 | `SAFE_*` / module addresses | API + app | no | pinned, bytecode-verified |
 | `ETH_RESERVE_FUNDER_*` | API | **yes (staging: Sepolia test key only)** | §10.3a. Funds VistaBlox's own reserve wallet, never a user wallet key. |
 
-**CDP key handling (decided):** the key lives only in the API's Coolify secrets. The server relays every UserOp and gets `paymasterAndData` from CDP. **The app ships no CDP key.**
+**CDP key handling (decided):** the key lives only in the API's secrets. The server relays every UserOp and gets `paymasterAndData` from CDP. **The app ships no CDP key.**
 
 ---
 
@@ -294,7 +294,7 @@ The link is `https://api.vistablox.io/r/recover#<token>`: single-use, 30 min. Th
   - receives the DKIM-signed reply (IMAP);
   - proves and submits it.
   - It can't forge a proof (`UserOverrideableDKIMRegistry`).
-- **Setup:** self-host on **Base Sepolia** first. The mailbox `recovery@vistablox.io` lives on `vistablox-mail`; the prover and Postgres run on Coolify. The relayer's own submission gas comes from its own small ETH float (Sepolia faucet).
+- **Setup:** self-host on **Base Sepolia** first. The mailbox `recovery@vistablox.io` lives on `vistablox-mail`; the prover and Postgres run on the host. The relayer's own submission gas comes from its own small ETH float (Sepolia faucet).
 - **(V1, critical, auth-dev Phase 0):** can a *different* relayer process the same user's recovery? That decides whether email recovery survives VistaBlox being unreachable.
 - **Contract facts:**
   - `cancelRecovery()` can only be called by the account; `cancelExpiredRecovery` is permissionless;
