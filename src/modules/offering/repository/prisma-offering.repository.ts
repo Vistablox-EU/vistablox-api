@@ -497,7 +497,31 @@ export class PrismaOfferingRepository
       `;
       const offering = locked[0];
       if (offering === undefined || offering.status !== "pre_offering") {
-        return { reservation: null, conflict: "offering_not_open" as const };
+        return { reservation: null, conflict: "offering_not_open" as const, reused: false };
+      }
+
+      // The lock above serializes every reservation for this offering. Check
+      // the client operation key only after acquiring it, so two concurrent
+      // retries cannot both decide it is absent and create separate holds.
+      const clientIdempotencyKey = input.clientIdempotencyKey ?? null;
+      if (clientIdempotencyKey !== null) {
+        const existing = await transaction.reservation.findUnique({
+          where: {
+            accountId_offeringId_clientIdempotencyKey: {
+              accountId: input.accountId,
+              offeringId: input.offeringId,
+              clientIdempotencyKey,
+            },
+          },
+          select: { id: true, createdAt: true },
+        });
+        if (existing !== null) {
+          return {
+            reservation: { reservationId: existing.id, createdAt: existing.createdAt },
+            conflict: null,
+            reused: true,
+          };
+        }
       }
 
       const reservedRows = await transaction.$queryRaw<Array<{ reserved_capacity_eur: string }>>`
@@ -511,7 +535,7 @@ export class PrismaOfferingRepository
       const reservedCapacityEur = reservedRows[0]?.reserved_capacity_eur ?? "0";
       const remainingCents = toCents(offering.target_raise_eur) - toCents(reservedCapacityEur);
       if (toCents(input.amountEur) > (remainingCents > 0n ? remainingCents : 0n)) {
-        return { reservation: null, conflict: "capacity_exceeded" as const };
+        return { reservation: null, conflict: "capacity_exceeded" as const, reused: false };
       }
 
       await transaction.reservation.create({
@@ -519,6 +543,7 @@ export class PrismaOfferingRepository
           id: input.reservationId,
           offeringId: input.offeringId,
           accountId: input.accountId,
+          clientIdempotencyKey,
           amountEur: input.amountEur,
           reservationStage: "initiated",
           disclosurePackVersionAtReservation: input.disclosurePackVersionAtReservation,
@@ -554,6 +579,7 @@ export class PrismaOfferingRepository
       return {
         reservation: { reservationId: input.reservationId, createdAt: input.createdAt },
         conflict: null,
+        reused: false,
       };
     });
   }
