@@ -621,10 +621,11 @@ describe.skipIf(databaseUrl === undefined)(
       expect(capacityAfterExpiry._sum.amountEur).toBeNull();
     });
 
-    it("reports the latest capital state per reservation and finds only eurc_purchase_pending ones for the onramp poll", async () => {
+    it("reports the latest capital state per reservation and finds only eurc_purchase_pending or purchase_failed ones for the onramp poll", async () => {
       const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
       const fundedId = `reservation_${randomUUID()}`;
       const pendingId = `reservation_${randomUUID()}`;
+      const failedId = `reservation_${randomUUID()}`;
       // createReservation itself records an implicit "initiated" money
       // event at recordedAt: createdAt (see recordMoneyEvent's own
       // reasoning below) -- every later event here must be relative to,
@@ -647,6 +648,15 @@ describe.skipIf(databaseUrl === undefined)(
         offeringId,
         accountId,
         amountEur: "300.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(now),
+      });
+      await repository.createReservation({
+        reservationId: failedId,
+        offeringId,
+        accountId,
+        amountEur: "250.00",
         disclosurePackVersionAtReservation: null,
         traceId: `trace_${suffix}`,
         createdAt: new Date(now),
@@ -678,17 +688,85 @@ describe.skipIf(databaseUrl === undefined)(
         amountEurc: null,
         recordedAt: new Date(now + 60_000),
       });
+      await repository.recordMoneyEvent({
+        reservationId: failedId,
+        provider: "coinbase_cdp",
+        providerReference: "channel_03",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "250.00",
+        amountEurc: null,
+        recordedAt: new Date(now + 60_000),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: failedId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_failed",
+        capitalState: "purchase_failed",
+        amountEur: "250.00",
+        amountEurc: null,
+        recordedAt: new Date(now + 300_000),
+      });
 
       const forTimers = await repository.listInitiatedReservationsForTimers();
       expect(forTimers.find((r) => r.reservationId === fundedId)?.latestCapitalState).toBe("eurc_reserved");
       expect(forTimers.find((r) => r.reservationId === pendingId)?.latestCapitalState).toBe(
         "eurc_purchase_pending",
       );
+      expect(forTimers.find((r) => r.reservationId === failedId)?.latestCapitalState).toBe("purchase_failed");
 
       const pendingPurchases = await repository.listPendingPurchaseReservationsForTimers();
       const pendingIds = pendingPurchases.map((r) => r.reservationId);
       expect(pendingIds).toContain(pendingId);
+      expect(pendingIds).toContain(failedId);
       expect(pendingIds).not.toContain(fundedId);
+    });
+
+    it("never lapses an initiated reservation whose latest capital_state is funded, even mid-expiry", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const fundedId = `reservation_${randomUUID()}`;
+      const now = Date.now();
+      await repository.createReservation({
+        reservationId: fundedId,
+        offeringId,
+        accountId,
+        amountEur: "200.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(now),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: fundedId,
+        provider: "coinbase_cdp",
+        providerReference: "channel_01",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "200.00",
+        amountEurc: null,
+        recordedAt: new Date(now + 60_000),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: fundedId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_01",
+        capitalState: "eurc_reserved",
+        amountEur: "200.00",
+        amountEurc: "190.000000",
+        recordedAt: new Date(now + 300_000),
+      });
+
+      const expired = await repository.expireReservation({
+        reservationId: fundedId,
+        traceId: `trace_${suffix}`,
+        expiredAt: new Date(now + 360_000),
+      });
+      expect(expired).toBe(false);
+      expect((await database.reservation.findUnique({ where: { id: fundedId } }))?.reservationStage).toBe(
+        "initiated",
+      );
+      expect(
+        await database.auditLog.count({
+          where: { resourceId: fundedId, action: "offering.reservation_lapsed" },
+        }),
+      ).toBe(0);
     });
   },
 );

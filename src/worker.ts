@@ -172,7 +172,7 @@ const coinbaseCdpClient =
 const pollOnrampTransactions =
   coinbaseCdpClient === undefined
     ? undefined
-    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient);
+    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger);
 
 const operatingDistributionRepository = new PrismaOperatingDistributionRepository(database);
 const calculateOperatingDistribution = new CalculateOperatingDistributionService(
@@ -438,7 +438,7 @@ await boss.work("case_timers.offering_reconfirmation_reminders", async () => {
 });
 if (pollOnrampTransactions !== undefined) {
   await boss.work("case_timers.reservation_onramp_poll", async () => {
-    await runJob("case_timers.reservation_onramp_poll", () => pollOnrampTransactions.execute());
+    await runJob("case_timers.reservation_onramp_poll", (traceId) => pollOnrampTransactions.execute(traceId));
   });
 }
 if (runOperatingDistributionSweep !== undefined) {
