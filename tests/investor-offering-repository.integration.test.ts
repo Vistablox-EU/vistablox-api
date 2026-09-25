@@ -1094,6 +1094,7 @@ describe.skipIf(databaseUrl === undefined)(
       const expectedActed = account?.protectedContactEmail == null ? 0 : 1;
       const email: EmailSender = {
         sendPasskeyRecoveryEmail: vi.fn(),
+        sendDeviceReplacementCodeEmail: vi.fn(),
         sendStaffInvitationEmail: vi.fn(),
         sendApplicantResponseReminderEmail: vi.fn(),
         sendKycRenewalReminderEmail: vi.fn(),

@@ -283,6 +283,14 @@ const environmentSchema = z
     KYC_CREATING_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
     KYC_OPEN_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(10080).default(60),
     ACCOUNT_RECOVERY_ALERT_AFTER_HOURS: z.coerce.number().int().min(1).max(720).default(24),
+    // Self-service device replacement email code (AD-271). The code is emailed
+    // to the account's bound protected_contact_email (no SMS), verified against
+    // a stored hash, single-use, and bound to the requesting session. These
+    // defaults are the accepted values from the device-replacement design doc.
+    DEVICE_REPLACEMENT_CODE_TTL_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
+    DEVICE_REPLACEMENT_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
+    DEVICE_REPLACEMENT_COOLDOWN_HOURS: z.coerce.number().int().min(1).max(720).default(72),
+    DEVICE_REPLACEMENT_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(1).max(60).default(3),
   })
   .refine(
     (environment) => {

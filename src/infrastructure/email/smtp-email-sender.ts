@@ -52,6 +52,12 @@ export interface PasskeyRecoveryEmail {
   population: "customer" | "staff_partner";
 }
 
+export interface DeviceReplacementCodeEmail {
+  to: string;
+  code: string;
+  expiresInMinutes: number;
+}
+
 export interface EmailSender {
   sendStaffInvitationEmail(email: StaffInvitationEmail): Promise<void>;
   sendApplicantResponseReminderEmail(email: ApplicantResponseReminderEmail): Promise<void>;
@@ -63,6 +69,7 @@ export interface EmailSender {
   sendAccountRecoveryRejectedEmail(email: AccountRecoveryDecisionEmail): Promise<void>;
   sendAccountRecoveryCompletedEmail(email: AccountRecoveryCompletedEmail): Promise<void>;
   sendPasskeyRecoveryEmail(email: PasskeyRecoveryEmail): Promise<void>;
+  sendDeviceReplacementCodeEmail(email: DeviceReplacementCodeEmail): Promise<void>;
 }
 
 export interface SmtpEmailSenderOptions {
@@ -196,6 +203,16 @@ export class SmtpEmailSender implements EmailSender {
       subject: "Create a new VistaBlox passkey",
       text: `Complete your VistaBlox ${audience} recovery by creating a new passkey: ${email.recoveryUrl}. This link expires in 15 minutes.`,
       html: `<p>Complete your VistaBlox ${audience} recovery by creating a new passkey.</p><p><a href="${escapeHtml(email.recoveryUrl)}">Create new passkey</a></p><p>This link expires in 15 minutes.</p>`,
+    });
+  }
+
+  public async sendDeviceReplacementCodeEmail(email: DeviceReplacementCodeEmail): Promise<void> {
+    await this.transporter.sendMail({
+      from: this.options.from,
+      to: email.to,
+      subject: "Your VistaBlox device replacement code",
+      text: `Use this one-time code to finish setting up your device in the VistaBlox app: ${email.code}. It expires in ${email.expiresInMinutes} minutes. If you did not request this, contact VistaBlox support.`,
+      html: `<p>Use this one-time code to finish setting up your device in the VistaBlox app:</p><p><strong>${escapeHtml(email.code)}</strong></p><p>It expires in ${email.expiresInMinutes} minutes. If you did not request this, contact VistaBlox support.</p>`,
     });
   }
 }
