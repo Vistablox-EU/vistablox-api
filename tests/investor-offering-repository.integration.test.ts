@@ -470,6 +470,7 @@ describe.skipIf(databaseUrl === undefined)(
       expect(result).toEqual({
         conflict: null,
         reservation: { reservationId, createdAt: new Date("2026-09-02T10:00:00.000Z") },
+        reused: false,
       });
       const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
       expect(reservation).toMatchObject({ offeringId, accountId, reservationStage: "initiated" });
@@ -506,7 +507,7 @@ describe.skipIf(databaseUrl === undefined)(
         createdAt: new Date(),
       });
 
-      expect(result).toEqual({ conflict: "capacity_exceeded", reservation: null });
+      expect(result).toEqual({ conflict: "capacity_exceeded", reservation: null, reused: false });
       expect(await database.reservation.findUnique({ where: { id: rejectedId } })).toBeNull();
     });
 
@@ -523,7 +524,7 @@ describe.skipIf(databaseUrl === undefined)(
         createdAt: new Date(),
       });
 
-      expect(result).toEqual({ conflict: "offering_not_open", reservation: null });
+      expect(result).toEqual({ conflict: "offering_not_open", reservation: null, reused: false });
     });
 
     it("serializes concurrent reservations so combined capacity is never oversold (AD-146)", async () => {
