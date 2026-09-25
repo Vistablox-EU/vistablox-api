@@ -13,6 +13,7 @@ import {
 } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
+import { PrismaIdempotencyStore } from "./infrastructure/idempotency/prisma-idempotency-store.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
@@ -538,6 +539,7 @@ const app = createApp({
   },
   webauthnRelatedOrigins: webauthnSettings.relatedOrigins,
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
+  idempotencyStore: new PrismaIdempotencyStore(database),
   reservationFundingRailEnabled,
   protectedApi: {
     accounts: accountRepository,

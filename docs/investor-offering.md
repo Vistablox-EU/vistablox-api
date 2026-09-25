@@ -22,7 +22,7 @@ The download response uses `Content-Disposition: attachment`, `X-Content-Type-Op
 
 ## Reservation creation
 
-`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
+`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Requires an `Idempotency-Key` header (AD-057/AD-147 — reservation funding initiation is a high-risk write, deduplicated through the shared `audit.idempotency_keys` table under the `offering.reservation.create` endpoint). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
 
 ```json
 {
@@ -73,7 +73,7 @@ See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/B
 
 ### 1. Publishing final terms (founder-triggered)
 
-`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
+`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Requires an `Idempotency-Key` header (AD-057/AD-147 — a finalization-batch action; endpoint `offering.finalize`). Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
 
 ```json
 {
@@ -98,7 +98,7 @@ No position is created here. The transaction also sets `final_offering_published
 
 ### 2. Investor reconfirmation (investor-triggered, during the open window)
 
-`POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm` is each investor's own explicit action, customer-only (same auth as the rest of `offering.router.ts`). Response (`200`):
+`POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm` is each investor's own explicit action, customer-only (same auth as the rest of `offering.router.ts`). Requires an `Idempotency-Key` header (AD-057/AD-147 — investor reconfirmation submission; endpoint `offering.reservation.reconfirm`; the request itself posts no body). Response (`200`):
 
 ```json
 {
