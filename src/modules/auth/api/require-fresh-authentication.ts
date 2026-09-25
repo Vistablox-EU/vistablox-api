@@ -41,6 +41,6 @@ function freshAuthRequired(): AppError {
     code: "authentication.fresh_auth_required",
     title: "Fresh authentication required",
     status: 403,
-    detail: "Confirm with a passkey or authenticator code before continuing.",
+    detail: "Sign with your enrolled device to authorize this action.",
   });
 }

@@ -63,6 +63,7 @@ describe("require fresh authentication", () => {
 
     expect(response.status).toBe(403);
     expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(response.body.detail).toBe("Sign with your enrolled device to authorize this action.");
     expect(sessions.hasFreshAuthentication).toHaveBeenCalledWith({
       accountId: "acct_01",
       providerSessionId: "session_01",
