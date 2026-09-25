@@ -3,22 +3,22 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AndroidAttestationChallengeMismatchError,
   AndroidAttestationInvalidError,
-} from "../src/modules/auth/application/android-attestation-verifier.js";
+} from "../src/modules/auth/application/customer/android-attestation-verifier.js";
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
   DeviceLoginFailedError,
-} from "../src/modules/auth/application/device-auth-errors.js";
+} from "../src/modules/auth/application/customer/device-auth-errors.js";
 import {
   DeviceChallengePurposeMismatchError,
   DeviceJwsDpopMismatchError,
   DeviceJwsInvalidError,
-} from "../src/modules/auth/application/device-auth-jws-verifier.js";
+} from "../src/modules/auth/application/customer/device-auth-jws-verifier.js";
 import {
   accountRestricted,
   logAttestationRejection,
   toApiError,
-} from "../src/modules/auth/infrastructure/better-auth-device-auth.plugin.js";
+} from "../src/modules/auth/infrastructure/customer/better-auth-device-auth.plugin.js";
 
 // Contract section 3.6's table is the source of truth for these -- not a
 // blanket 401. Getting this wrong previously meant every device-auth

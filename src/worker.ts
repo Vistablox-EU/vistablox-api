@@ -16,8 +16,8 @@ import {
 import { TransitionCaseToPostIpoStructuringService } from "./modules/intake/application/post-ipo-structuring-handoff.service.js";
 import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
-import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
-import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prisma-device-challenge.repository.js";
+import { PrismaDpopReplayRepository } from "./modules/auth/repository/shared/prisma-dpop-replay.repository.js";
+import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/customer/prisma-device-challenge.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
@@ -45,7 +45,7 @@ import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 import { WorkerHeartbeat } from "./shared/health/worker-heartbeat.js";
 import { WorkerMetrics } from "./shared/health/worker-metrics.js";
-import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
+import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/staff/prisma-account-recovery.repository.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);

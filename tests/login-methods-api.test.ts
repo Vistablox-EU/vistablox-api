@@ -2,13 +2,13 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createLoginMethodsRouter } from "../src/modules/auth/api/login-methods.router.js";
-import { UnlinkLoginMethodService } from "../src/modules/auth/application/unlink-login-method.service.js";
+import { createLoginMethodsRouter } from "../src/modules/auth/api/customer/login-methods.router.js";
+import { UnlinkLoginMethodService } from "../src/modules/auth/application/customer/unlink-login-method.service.js";
 import {
   LoginMethodNotLinkedError,
   RegistrationLoginMethodLockedError,
   type LoginMethodUnlinker,
-} from "../src/modules/auth/application/login-method-unlinker.js";
+} from "../src/modules/auth/application/customer/login-method-unlinker.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 

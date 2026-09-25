@@ -5,12 +5,12 @@ import {
   RevokeAllOwnSessionsService,
   RevokeDeviceSessionsService,
   RevokeOwnSessionService,
-} from "../src/modules/auth/application/customer-session.service.js";
-import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
+} from "../src/modules/auth/application/customer/customer-session.service.js";
+import type { SessionRevoker } from "../src/modules/auth/application/customer/session-revoker.js";
 import type {
   CustomerSessionRepository,
   CustomerSessionSummary,
-} from "../src/modules/auth/repository/customer-session.repository.js";
+} from "../src/modules/auth/repository/customer/customer-session.repository.js";
 
 function summary(overrides: Partial<CustomerSessionSummary> = {}): CustomerSessionSummary {
   return {

@@ -4,9 +4,9 @@ import type { BetterAuthPlugin } from "better-auth";
 import { APIError } from "better-auth/api";
 import { describe, expect, it, vi } from "vitest";
 
-import type { AuthAuditEvent, AuthAuditSink } from "../src/modules/auth/application/auth-audit-sink.js";
-import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/better-auth-audit.plugin.js";
-import { recordVerifiedLoginDpopJkt } from "../src/modules/auth/infrastructure/device-login-audit-context.js";
+import type { AuthAuditEvent, AuthAuditSink } from "../src/modules/auth/application/shared/auth-audit-sink.js";
+import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/shared/better-auth-audit.plugin.js";
+import { recordVerifiedLoginDpopJkt } from "../src/modules/auth/infrastructure/customer/device-login-audit-context.js";
 
 // E2 (/device/enrol/verify) and L2 (/device/login/verify): session_created
 // when the session row is written, login_succeeded only once the ceremony

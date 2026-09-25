@@ -13,7 +13,7 @@ import {
 } from "../src/modules/identity/application/kyc.service.js";
 import { DiditWebhookVerifier } from "../src/modules/identity/infrastructure/didit-webhook-verifier.js";
 import type { KycRepository } from "../src/modules/identity/repository/kyc.repository.js";
-import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
+import type { SessionResolver } from "../src/modules/auth/application/shared/session-resolver.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
 

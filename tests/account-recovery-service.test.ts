@@ -7,13 +7,13 @@ import {
   GetAccountRecoveryCaseService,
   OpenAccountRecoveryCaseService,
   RecordPrimaryRecoveryReviewService,
-} from "../src/modules/auth/application/account-recovery.service.js";
-import type { CustomerAccountAdministrator } from "../src/modules/auth/application/customer-account-administrator.js";
+} from "../src/modules/auth/application/staff/account-recovery.service.js";
+import type { CustomerAccountAdministrator } from "../src/modules/auth/application/shared/customer-account-administrator.js";
 import type {
   AccountRecoveryCaseRecord,
   AccountRecoveryRepository,
   RecoveryCaseTarget,
-} from "../src/modules/auth/repository/account-recovery.repository.js";
+} from "../src/modules/auth/repository/staff/account-recovery.repository.js";
 import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 

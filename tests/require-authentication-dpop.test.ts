@@ -8,10 +8,10 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createRequireAuthentication,
   type DpopEnforcementOptions,
-} from "../src/modules/auth/api/require-authentication.js";
+} from "../src/modules/auth/api/shared/require-authentication.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import type { AuthenticatedIdentity, SessionResolver } from "../src/modules/auth/application/session-resolver.js";
-import type { DpopReplayRepository } from "../src/modules/auth/repository/dpop-replay.repository.js";
+import type { AuthenticatedIdentity, SessionResolver } from "../src/modules/auth/application/shared/session-resolver.js";
+import type { DpopReplayRepository } from "../src/modules/auth/repository/shared/dpop-replay.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 

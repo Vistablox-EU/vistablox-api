@@ -9,29 +9,29 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 // Only the Android key-attestation chain check is stubbed: this test has no
 // real Android keystore chain. Everything else in E2 runs for real.
 vi.mock("../src/modules/auth/application/android-attestation-verifier.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/modules/auth/application/android-attestation-verifier.js")>();
+  const actual = await importOriginal<typeof import("../src/modules/auth/application/customer/android-attestation-verifier.js")>();
   return { ...actual, verifyAndroidKeyAttestation: vi.fn(async () => undefined) };
 });
 
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaAccountRepository } from "../src/modules/account/repository/prisma-account.repository.js";
-import { createDeviceAuthRouter } from "../src/modules/auth/api/device-auth.router.js";
-import { createRequireDpopOnly } from "../src/modules/auth/api/require-dpop-only.js";
+import { createDeviceAuthRouter } from "../src/modules/auth/api/customer/device-auth.router.js";
+import { createRequireDpopOnly } from "../src/modules/auth/api/customer/require-dpop-only.js";
 import {
   CompleteAccountRecoveryService,
   OpenAccountRecoveryCaseService,
-} from "../src/modules/auth/application/account-recovery.service.js";
-import { IssueDeviceChallengeService } from "../src/modules/auth/application/device-challenge-issuance.service.js";
-import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
-import { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
-import { BetterAuthCustomerAccountAdministrator } from "../src/modules/auth/infrastructure/better-auth-customer-account-administrator.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/prisma-session-mirror.js";
-import { PrismaAccountRecoveryRepository } from "../src/modules/auth/repository/prisma-account-recovery.repository.js";
-import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/prisma-device-challenge.repository.js";
-import { PrismaDeviceRepository } from "../src/modules/auth/repository/prisma-device.repository.js";
-import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/prisma-dpop-replay.repository.js";
+} from "../src/modules/auth/application/staff/account-recovery.service.js";
+import { IssueDeviceChallengeService } from "../src/modules/auth/application/customer/device-challenge-issuance.service.js";
+import { EnrolDeviceService } from "../src/modules/auth/application/customer/device-enrolment.service.js";
+import { LoginDeviceService } from "../src/modules/auth/application/customer/device-login.service.js";
+import { BetterAuthCustomerAccountAdministrator } from "../src/modules/auth/infrastructure/customer/better-auth-customer-account-administrator.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/shared/prisma-session-mirror.js";
+import { PrismaAccountRecoveryRepository } from "../src/modules/auth/repository/staff/prisma-account-recovery.repository.js";
+import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/customer/prisma-device-challenge.repository.js";
+import { PrismaDeviceRepository } from "../src/modules/auth/repository/customer/prisma-device.repository.js";
+import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/shared/prisma-dpop-replay.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 

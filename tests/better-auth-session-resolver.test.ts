@@ -2,10 +2,10 @@ import { APIError } from "better-auth/api";
 import type { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
-import type { AuthenticatedIdentity } from "../src/modules/auth/application/session-resolver.js";
-import type { SessionMirror } from "../src/modules/auth/application/session-mirror.js";
-import { BetterAuthSessionResolver } from "../src/modules/auth/infrastructure/better-auth-session.resolver.js";
-import type { VistaBloxAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
+import type { AuthenticatedIdentity } from "../src/modules/auth/application/shared/session-resolver.js";
+import type { SessionMirror } from "../src/modules/auth/application/shared/session-mirror.js";
+import { BetterAuthSessionResolver } from "../src/modules/auth/infrastructure/shared/better-auth-session.resolver.js";
+import type { VistaBloxAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 
 const NOW = new Date("2026-09-11T12:00:00.000Z");
