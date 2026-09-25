@@ -526,6 +526,12 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.protectedApi.staffWebAuthnRepository,
       dependencies.protectedApi.staffWebAuthnCeremony,
     );
+    const requireFreshAuthentication =
+      dependencies.protectedApi.customerSessions === undefined
+        ? undefined
+        : createRequireFreshAuthentication(
+            dependencies.protectedApi.customerSessions.repository,
+          );
     app.use(
       "/v1/offerings",
       createInvestorOfferingRouter(
@@ -556,11 +562,7 @@ export function createApp(dependencies: AppDependencies): Express {
         dependencies.protectedApi.offeringOperations === undefined
           ? undefined
           : new ReconfirmReservationService(dependencies.protectedApi.offeringOperations.repository),
-        dependencies.protectedApi.customerSessions === undefined
-          ? undefined
-          : createRequireFreshAuthentication(
-              dependencies.protectedApi.customerSessions.repository,
-            ),
+        requireFreshAuthentication,
       ),
     );
     if (dependencies.protectedApi.offeringOperations !== undefined) {
@@ -589,10 +591,16 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     if (dependencies.protectedApi.loginMethods !== undefined) {
       const loginMethods = dependencies.protectedApi.loginMethods;
+      if (requireFreshAuthentication === undefined) {
+        throw new Error(
+          "protectedApi.loginMethods requires fresh-auth middleware to be constructed",
+        );
+      }
       app.use(
         "/v1/auth/login-methods",
         createLoginMethodsRouter(
           requireAuthentication,
+          requireFreshAuthentication,
           new UnlinkLoginMethodService(loginMethods.unlinker),
         ),
       );
@@ -711,10 +719,16 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     if (dependencies.protectedApi.customerSessions !== undefined) {
       const customerSessions = dependencies.protectedApi.customerSessions;
+      if (requireFreshAuthentication === undefined) {
+        throw new Error(
+          "protectedApi.customerSessions requires fresh-auth middleware to be constructed",
+        );
+      }
       app.use(
         "/v1/auth/sessions",
         createCustomerSessionRouter(
           requireAuthentication,
+          requireFreshAuthentication,
           new ListOwnSessionsService(customerSessions.repository),
           new RevokeOwnSessionService(customerSessions.repository, customerSessions.revoker),
           new RevokeAllOwnSessionsService(customerSessions.revoker),

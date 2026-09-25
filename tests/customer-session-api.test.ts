@@ -11,6 +11,7 @@ import {
 } from "../src/modules/auth/application/customer-session.service.js";
 import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
 import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer-session.repository.js";
+import { AppError } from "../src/shared/errors/app-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -18,7 +19,21 @@ function fakeRevoker(overrides: Partial<SessionRevoker> = {}): SessionRevoker {
   return { revoke: vi.fn(), revokeAll: vi.fn(), revokeByDpopKey: vi.fn(), ...overrides };
 }
 
-function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker) {
+function freshAuthRejected(): RequestHandler {
+  const error = new AppError({
+    code: "authentication.fresh_auth_required",
+    title: "Fresh authentication required",
+    status: 403,
+    detail: "Confirm with a passkey or authenticator code before continuing.",
+  });
+  return (_request, _response, next) => next(error);
+}
+
+function buildApp(
+  repository: CustomerSessionRepository,
+  revoker: SessionRevoker,
+  freshAuthentication?: RequestHandler,
+) {
   const app = express();
   const authenticated: RequestHandler = (_request, response, next) => {
     response.locals.authContext = {
@@ -33,6 +48,7 @@ function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker
     "/v1/auth/sessions",
     createCustomerSessionRouter(
       authenticated,
+      freshAuthentication ?? ((_request, _response, next) => next()),
       new ListOwnSessionsService(repository),
       new RevokeOwnSessionService(repository, revoker),
       new RevokeAllOwnSessionsService(revoker),
@@ -142,5 +158,53 @@ describe("customer session API", () => {
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.body).toEqual({ data: { revoked_count: 2 } });
     expect(revokeByDpopKey).toHaveBeenCalledWith("jkt_abc123", expect.any(Object));
+  });
+
+  it("requires fresh authentication before revoking all sessions", async () => {
+    const revokeAll = vi.fn();
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(
+      buildApp(repository, fakeRevoker({ revokeAll }), freshAuthRejected()),
+    ).post("/v1/auth/sessions/revoke-all");
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(revokeAll).not.toHaveBeenCalled();
+  });
+
+  it("requires fresh authentication before revoking a single session", async () => {
+    const revoke = vi.fn();
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(
+      buildApp(repository, fakeRevoker({ revoke }), freshAuthRejected()),
+    ).post("/v1/auth/sessions/sess_01/revoke");
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it("requires fresh authentication before revoking a device key", async () => {
+    const revokeByDpopKey = vi.fn();
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(
+      buildApp(repository, fakeRevoker({ revokeByDpopKey }), freshAuthRejected()),
+    ).post("/v1/auth/sessions/devices/jkt_abc123/revoke");
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(revokeByDpopKey).not.toHaveBeenCalled();
   });
 });
