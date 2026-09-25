@@ -31,6 +31,12 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
  *
  * Deadline enforcement is block-timestamp-based: campaigns run on the order
  * of days to weeks, so validator timestamp drift (seconds) is immaterial.
+ *
+ * The only admin-held control surface is the platform-wide pause (AD-270),
+ * which can freeze but never redirect or seize funds. There is deliberately
+ * no function to change a campaign's treasury address once opened: the PIV's
+ * governed multisig must be deployed and known before openCampaign is
+ * called, not corrected afterward.
  */
 contract VistaBloxIpoEscrow is AccessControl, Pausable, ReentrancyGuard {
     using SafeERC20 for IERC20;
@@ -69,7 +75,6 @@ contract VistaBloxIpoEscrow is AccessControl, Pausable, ReentrancyGuard {
     event CampaignOpened(
         uint256 indexed tokenId, uint256 targetAmount, uint256 deadline, address treasury, address indexed actor
     );
-    event TreasuryUpdated(uint256 indexed tokenId, address indexed newTreasury, address indexed actor);
     event DeadlineExtended(uint256 indexed tokenId, uint256 newDeadline, address indexed actor);
     event Contributed(uint256 indexed tokenId, address indexed contributor, uint256 amount, uint256 newTotalRaised);
     event CampaignFinalized(uint256 indexed tokenId, bool successful, uint256 totalRaised);
@@ -97,7 +102,10 @@ contract VistaBloxIpoEscrow is AccessControl, Pausable, ReentrancyGuard {
 
     /// @dev Opens a property's IPO contribution window. Restricted to
     /// CAMPAIGN_MANAGER_ROLE (the backend, at the same moment the off-chain
-    /// Piv/Offering pair opens).
+    /// Piv/Offering pair opens). `treasury` is final for the campaign's
+    /// lifetime (no update function exists, by design -- AD-270): the PIV's
+    /// governed multisig must be deployed and its address known before
+    /// calling this, not corrected afterward.
     function openCampaign(uint256 tokenId, uint256 targetAmount, uint256 deadline, address treasury)
         external
         onlyRole(CAMPAIGN_MANAGER_ROLE)
@@ -117,17 +125,6 @@ contract VistaBloxIpoEscrow is AccessControl, Pausable, ReentrancyGuard {
         });
 
         emit CampaignOpened(tokenId, targetAmount, deadline, treasury, msg.sender);
-    }
-
-    /// @dev Corrects the destination treasury address (e.g. once the PIV's
-    /// governed multisig is actually deployed) any time before the campaign
-    /// resolves. Restricted to CAMPAIGN_MANAGER_ROLE.
-    function updateTreasury(uint256 tokenId, address newTreasury) external onlyRole(CAMPAIGN_MANAGER_ROLE) {
-        Campaign storage campaign = _campaigns[tokenId];
-        if (campaign.state != CampaignState.Open) revert CampaignNotOpen(tokenId);
-        if (newTreasury == address(0)) revert ZeroAddress();
-        campaign.treasury = newTreasury;
-        emit TreasuryUpdated(tokenId, newTreasury, msg.sender);
     }
 
     /// @dev Reflects a founder decision to extend rather than close an
@@ -251,7 +248,11 @@ contract VistaBloxIpoEscrow is AccessControl, Pausable, ReentrancyGuard {
     }
 
     /// @dev Platform-wide emergency halt across every campaign. Restricted
-    /// to DEFAULT_ADMIN_ROLE.
+    /// to DEFAULT_ADMIN_ROLE. Deliberately retained as the contract's one
+    /// admin control surface (AD-270): it can freeze contribution,
+    /// finalization, sweep, and refund, but cannot redirect, seize, or move
+    /// funds anywhere -- every fund-moving function still resolves to a
+    /// fixed address and amount once unpaused.
     function pause() external onlyRole(DEFAULT_ADMIN_ROLE) {
         _pause();
     }
