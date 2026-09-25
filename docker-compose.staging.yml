@@ -97,10 +97,10 @@ services:
     build:
       context: .
       target: migrate
-    # One-shot: applies pending migrations then exits. Coolify defaults every
-    # service to `restart: unless-stopped` when unset, which would otherwise
-    # restart this forever (unless-stopped ignores exit code, so even a
-    # clean exit-0 with nothing to migrate gets relaunched).
+    # One-shot: applies pending migrations then exits. Compose defaults to
+    # `restart: unless-stopped` when unset, which would otherwise restart
+    # this forever (unless-stopped ignores exit code, so even a clean
+    # exit-0 with nothing to migrate gets relaunched).
     restart: "no"
     env_file:
       - .env.staging
@@ -135,7 +135,7 @@ services:
       DIRECT_DATABASE_URL: postgresql://vistablox:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env.staging}@vistablox-db-server:5432/vistablox-db
       # Pinned so moving BETTER_AUTH_URL can never silently change it --
       # every enrolled passkey (customer and staff) is bound to this exact
-      # value. The default keeps it pinned even if the Coolify var is
+      # value. The default keeps it pinned even if the env var is
       # somehow missing, same reasoning as DPOP_PHASE1_CUTOVER_AT above.
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-api.vistablox.io}
       # Comma-separated exact origins every WebAuthn ceremony accepts. Staging

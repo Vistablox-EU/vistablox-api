@@ -31,7 +31,10 @@ import type {
   PendingPurchaseReservationForTimer,
   ReservationRepository,
 } from "./reservation.repository.js";
-import { FUNDED_CAPITAL_STATES } from "../domain/reservation-eligibility.policy.js";
+import {
+  FUNDED_CAPITAL_STATES,
+  isReservationFunded,
+} from "../domain/reservation-eligibility.policy.js";
 import {
   canPublishFinalOfferingTerms,
   computeEffectiveRightsEndAt,
@@ -619,7 +622,7 @@ export class PrismaOfferingRepository
         LIMIT 1
       ) AS latest_money ON TRUE
       WHERE reservation.reservation_stage = 'initiated'
-        AND latest_money.capital_state = 'eurc_purchase_pending'
+        AND latest_money.capital_state IN ('eurc_purchase_pending', 'purchase_failed')
     `;
     return rows.map((row) => ({
       reservationId: row.reservation_id,
@@ -630,19 +633,31 @@ export class PrismaOfferingRepository
 
   public async expireReservation(input: ExpireReservationInput): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
-      const locked = await transaction.$queryRaw<Array<{ reservation_id: string }>>`
-        SELECT reservation_id
-        FROM offering.reservations
-        WHERE reservation_id = ${input.reservationId}
-        FOR UPDATE
+      const locked = await transaction.$queryRaw<
+        Array<{ reservation_id: string; reservation_stage: string; capital_state: string | null }>
+      >`
+        SELECT reservation.reservation_id, reservation.reservation_stage, latest_money.capital_state
+        FROM offering.reservations AS reservation
+        LEFT JOIN LATERAL (
+          SELECT money_event.capital_state
+          FROM money.money_events AS money_event
+          WHERE money_event.reservation_id = reservation.reservation_id
+          ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+          LIMIT 1
+        ) AS latest_money ON TRUE
+        WHERE reservation.reservation_id = ${input.reservationId}
+        FOR UPDATE OF reservation
       `;
-      if (locked.length === 0) return false;
-
-      const current = await transaction.reservation.findUniqueOrThrow({
-        where: { id: input.reservationId },
-        select: { reservationStage: true },
-      });
-      if (current.reservationStage !== "initiated") return false;
+      const current = locked[0];
+      if (current === undefined) return false;
+      if (current.reservation_stage !== "initiated") return false;
+      // The onramp poll inserts money_events without taking the reservation
+      // row lock, so the capital_state snapshot ExpireUnfundedReservationsService
+      // took at list time can be stale by the instant we hold the lock. Re-read
+      // the latest capital_state under the same lock as the stage flip so money
+      // that has already landed is never swept to 'lapsed' (AD-253 keeps the
+      // two state machines separate on purpose).
+      if (isReservationFunded(current.capital_state)) return false;
 
       await transaction.reservation.update({
         where: { id: input.reservationId },

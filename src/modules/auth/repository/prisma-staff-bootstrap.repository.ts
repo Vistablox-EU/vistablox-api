@@ -16,7 +16,7 @@ export const STAFF_BOOTSTRAP_ADVISORY_LOCK_KEY = 7_311_040_001;
 
 // How long a run waits for another run's lock before giving up, and the
 // transaction's own ceiling. The CLI is interactive: failing after a few
-// seconds with "try again" beats hanging a Coolify terminal.
+// seconds with "try again" beats hanging in the terminal.
 const LOCK_TIMEOUT = "15s";
 const TRANSACTION_TIMEOUT_MS = 30_000;
 

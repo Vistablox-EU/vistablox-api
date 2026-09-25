@@ -2,7 +2,7 @@
 
 `.env.staging` is the sole source of staging configuration, including secrets.
 It is ignored by Git and must remain owner-readable only (`0600`). Do not put
-staging values in Coolify, shell profiles, or `secrets/staging.env`.
+staging values in shell profiles, or `secrets/staging.env`.
 
 Before deploying, ensure `.env.staging` contains every application setting and
 `POSTGRES_PASSWORD`. Compose uses that password only for its private staging

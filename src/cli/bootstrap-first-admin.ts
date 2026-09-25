@@ -4,8 +4,8 @@
  *   npm run staff:bootstrap-first-admin -- --email <email> --display-name <name>
  *   npm run staff:bootstrap-first-admin -- --check
  *
- * Run from a shell inside the API container (Coolify terminal), where the
- * container's own environment is read through the normal loadEnvironment().
+ * Run from a shell inside the API container, where the container's own
+ * environment is read through the normal loadEnvironment().
  * There is deliberately no HTTP equivalent: a "first admin" web endpoint
  * would let whoever reached it first become admin, and would reopen every
  * time the staff roster became empty. Only someone with shell access to the
