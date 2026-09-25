@@ -91,12 +91,13 @@ export class GetInvestorOfferingService {
           structure_pattern: record.issuer.structurePattern,
           incorporated_at: record.issuer.incorporatedAt?.toISOString() ?? null,
         },
-        property: {
+          property: {
           property_id: record.property.propertyId,
           property_type: record.property.propertyType,
           country_code: record.property.countryCode,
-          city: record.property.city,
-          address_line: record.property.addressLine,
+            city: record.property.city,
+            media: null,
+            address_line: record.property.addressLine,
           owner_declared_value_eur: record.property.ownerDeclaredValueEur,
           appraisal_value_opinion_eur: record.property.appraisalValueOpinionEur,
         },

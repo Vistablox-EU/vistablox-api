@@ -90,7 +90,7 @@ describe("authenticated investor offering API", () => {
     expect(response.body).toMatchObject({
       data: {
         id: "offering_01",
-        property: { country_code: "RS", city: "Belgrade" },
+        property: { country_code: "RS", city: "Belgrade", media: null },
         current_disclosure_pack: null,
         reservation: {
           available: false,

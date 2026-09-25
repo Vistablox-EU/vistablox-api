@@ -32,6 +32,7 @@ import type {
 const offering: PublicOfferingRecord = {
   id: "off_01",
   status: "pre_offering",
+  featured: false,
   targetRaiseEur: "250000.00",
   createdAt: new Date("2026-08-31T12:00:00.000Z"),
   ipoEndAt: new Date("2026-10-31T12:00:00.000Z"),
@@ -321,12 +322,14 @@ describe("VistaBlox API", () => {
         {
           id: "off_01",
           status: "pre_offering",
+          featured: false,
           target_raise_eur: "250000.00",
           ipo_end_at: "2026-10-31T12:00:00.000Z",
           property: {
             property_type: "residential",
             country_code: "RS",
             city: "Belgrade",
+            media: null,
           },
         },
       ],
