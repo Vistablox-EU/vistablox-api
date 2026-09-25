@@ -1,0 +1,521 @@
+<mxfile host="draw.io" modified="2026-09-25" agent="diagram-agent" type="device" version="1">
+  <diagram id="vistablox-api-staging-flow" name="VistaBlox API — Staging Environment & Request Flow">
+    <mxGraphModel dx="1422" dy="762" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1400" pageHeight="900" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- Title -->
+        <mxCell id="title" value="VistaBlox API — Staging Environment &amp; Request Flow" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=18;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="450" y="20" width="500" height="35" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== INTERNET / USER DEVICES ==================== -->
+        <mxCell id="internet-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="50" y="80" width="250" height="300" as="geometry" />
+        </mxCell>
+        <mxCell id="internet-title" value="User Devices (Internet)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="100" y="90" width="160" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- Mobile App -->
+        <mxCell id="mobile" value="Mobile App" style="shape=mxgraph.mockup.devices.iphone;strokeColor=#333;fillColor=#f5f5f5;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="80" y="130" width="80" height="120" as="geometry" />
+        </mxCell>
+        <mxCell id="mobile-label" value="(React Native, Expo 57)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="70" y="255" width="110" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Admin Console -->
+        <mxCell id="admin" value="Admin Console" style="shape=mxgraph.mockup.windows.window;strokeColor=#333;fillColor=#f5f5f5;fontSize=11;align=center;" vertex="1" parent="1">
+          <mxGeometry x="175" y="130" width="100" height="80" as="geometry" />
+        </mxCell>
+        <mxCell id="admin-label" value="(React 19, Ant Design 6)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="175" y="215" width="105" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Public visitors -->
+        <mxCell id="public" value="Public Browser" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8eaf6;strokeColor=#283593;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="100" y="280" width="130" height="30" as="geometry" />
+        </mxCell>
+        <mxCell id="public-note" value="Unauthenticated: offering teasers" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="90" y="315" width="155" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== TRAEFIK ==================== -->
+        <mxCell id="traefik-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e0e0;strokeColor=#424242;arcSize=3;" vertex="1" parent="1">
+          <mxGeometry x="360" y="120" width="200" height="160" as="geometry" />
+        </mxCell>
+        <mxCell id="traefik-title" value="Traefik (Reverse Proxy)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=13;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="390" y="130" width="140" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- TLS label -->
+        <mxCell id="tls" value="TLS: Cloudflare DNS-01&#xa;certresolver" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="380" y="160" width="150" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Route labels -->
+        <mxCell id="route-api" value="api.vistablox.io → :3000" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="375" y="200" width="170" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="route-admin" value="admin.vistablox.io → :80" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#c8e6c9;strokeColor=#2e7d32;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="375" y="228" width="170" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== STAGING VPS ==================== -->
+        <mxCell id="vps-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff8e1;strokeColor=#f57f17;arcSize=2;" vertex="1" parent="1">
+          <mxGeometry x="610" y="80" width="730" height="500" as="geometry" />
+        </mxCell>
+        <mxCell id="vps-title" value="Staging VPS (Docker Compose)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=14;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="850" y="90" width="200" height="25" as="geometry" />
+        </mxCell>
+
+        <!-- External networks label -->
+        <mxCell id="ext-network-label" value="External: proxy network" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=2;fontColor=#424242;" vertex="1" parent="1">
+          <mxGeometry x="630" y="125" width="150" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== API CONTAINER ==================== -->
+        <mxCell id="api-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;arcSize=3;" vertex="1" parent="1">
+          <mxGeometry x="630" y="150" width="340" height="380" as="geometry" />
+        </mxCell>
+        <mxCell id="api-title" value="vistablox-api (node:22-alpine, port 3000)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="660" y="158" width="280" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- API Routes -->
+        <mxCell id="api-routes-label" value="API Surfaces" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="645" y="188" width="85" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- /v1 -->
+        <mxCell id="route-v1" value="/v1 — Public API" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="645" y="210" width="140" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="route-v1-desc" value="Offerings, reservations, portfolio, KYC status, onramp" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="650" y="240" width="150" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- /provider/v1 -->
+        <mxCell id="route-provider" value="/provider/v1 — Webhooks" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="645" y="268" width="140" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="route-provider-desc" value="Didit KYC callbacks, Coinbase CDP events" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="650" y="298" width="140" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- /internal/v1 -->
+        <mxCell id="route-internal" value="/internal/v1 — Staff Only" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="645" y="326" width="140" height="28" as="geometry" />
+        </mxCell>
+        <mxCell id="route-internal-desc" value="Intake review, KYC ops, offering management, finalization" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="650" y="356" width="160" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- /health -->
+        <mxCell id="route-health" value="/health/ready — Healthcheck" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e0e0;strokeColor=#424242;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="645" y="384" width="140" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- API Internal modules -->
+        <mxCell id="api-modules-label" value="Internal Modules" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="800" y="188" width="110" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- Auth -->
+        <mxCell id="mod-auth" value="Auth" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#c62828;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="210" width="70" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="mod-auth-desc" value="Better Auth, WebAuthn passkeys, DPOP" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=8;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="800" y="236" width="150" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- KYC -->
+        <mxCell id="mod-kyc" value="KYC" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0288d1;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="256" width="70" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="mod-kyc-desc" value="Didit integration, identity verification" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=8;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="800" y="282" width="140" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Intake -->
+        <mxCell id="mod-intake" value="Intake" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="302" width="70" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="mod-intake-desc" value="Property submission, review, approval" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=8;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="800" y="328" width="145" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Offerings -->
+        <mxCell id="mod-offerings" value="Offerings" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#f57c00;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="348" width="70" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="mod-offerings-desc" value="IPO, reservations, reconfirmation (168h), finalization" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=8;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="800" y="374" width="155" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Money -->
+        <mxCell id="mod-money" value="Money" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="394" width="70" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="mod-money-desc" value="Onramp (Coinbase CDP), escrow, events" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=8;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="800" y="420" width="145" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Settlement -->
+        <mxCell id="mod-settlement" value="Settlement" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e0e0;strokeColor=#424242;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="800" y="440" width="70" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="mod-settlement-desc" value="Position ledger, PIV, Base blockchain (ERC-1155)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=8;fontColor=#555555;" vertex="1" parent="1">
+          <mxGeometry x="800" y="466" width="155" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Healthcheck -->
+        <mxCell id="api-hc" value="Healthcheck: fetch(&apos;http://localhost:3000/health/ready&apos;)&#xa;Interval: 10s, Timeout: 5s, Retries: 5, Start: 10s" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="645" y="430" width="230" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Restart policy -->
+        <mxCell id="api-restart" value="restart: unless-stopped" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e0e0;strokeColor=#424242;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="645" y="465" width="140" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== WORKER CONTAINER ==================== -->
+        <mxCell id="worker-box" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;arcSize=3;" vertex="1" parent="1">
+          <mxGeometry x="990" y="150" width="170" height="180" as="geometry" />
+        </mxCell>
+        <mxCell id="worker-title" value="worker (node:22-alpine, port 3001)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="995" y="158" width="160" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- Worker jobs -->
+        <mxCell id="worker-jobs-label" value="pg-boss Jobs" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="1000" y="188" width="85" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="job-expire" value="Expire reservations" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#f57c00;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="210" width="140" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="job-reconfirm" value="Reconfirmation window close" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#f57c00;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="238" width="140" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="job-onramp" value="Poll onramp transactions" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0288d1;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="266" width="140" height="24" as="geometry" />
+        </mxCell>
+        <mxCell id="job-email" value="Send emails (SMTP)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;fontSize=9;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="294" width="140" height="24" as="geometry" />
+        </mxCell>
+
+        <!-- Worker healthcheck -->
+        <mxCell id="worker-hc" value="Healthcheck: :3001/health/ready&#xa;Interval: 15s, Timeout: 5s, Retries: 3" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1000" y="325" width="145" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Worker restart -->
+        <mxCell id="worker-restart" value="restart: unless-stopped" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e0e0e0;strokeColor=#424242;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1000" y="360" width="140" height="22" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== DATABASES / INFRA ==================== -->
+        <mxCell id="infra-label" value="Infrastructure (Docker Compose internal network)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;fontStyle=2" vertex="1" parent="1">
+          <mxGeometry x="630" y="540" width="250" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- PostgreSQL -->
+        <mxCell id="postgres" value="PostgreSQL 18" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="640" y="570" width="110" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="postgres-note" value="(no host port published)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="645" y="632" width="105" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Valkey -->
+        <mxCell id="valkey" value="Valkey 8" style="shape=cylinder3;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#c62828;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="770" y="570" width="100" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="valkey-note" value="(cache, no host port)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="775" y="632" width="95" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- MinIO -->
+        <mxCell id="minio" value="MinIO" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="890" y="570" width="100" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="minio-note" value="console :9001 (localhost only)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="885" y="632" width="115" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- ClamAV -->
+        <mxCell id="clamav" value="ClamAV" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="570" width="90" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="clamav-note" value="(internal only)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1015" y="632" width="80" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- Maildev -->
+        <mxCell id="maildev" value="Maildev" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;fontSize=11;" vertex="1" parent="1">
+          <mxGeometry x="1120" y="570" width="90" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="maildev-note" value="web UI :1080 (localhost)" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="1115" y="632" width="105" height="15" as="geometry" />
+        </mxCell>
+
+        <!-- MinIO buckets -->
+        <mxCell id="buckets-label" value="MinIO Buckets" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="890" y="660" width="90" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="bucket-q" value="quarantine" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="890" y="680" width="80" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="bucket-p" value="private" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="980" y="680" width="60" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="bucket-k" value="kyc" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="680" width="50" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="bucket-d" value="disclosures" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="890" y="702" width="80" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="bucket-a" value="audit" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="980" y="702" width="50" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- Volumes -->
+        <mxCell id="volumes-label" value="Volumes" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="1050" y="702" width="55" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="vol-pg" value="staging-postgres-data" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="720" width="130" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="vol-minio" value="staging-minio-data" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="742" width="130" height="18" as="geometry" />
+        </mxCell>
+        <mxCell id="vol-clamav" value="staging-clamav-data" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;fontSize=8;" vertex="1" parent="1">
+          <mxGeometry x="1050" y="764" width="130" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== EXTERNAL SERVICES ==================== -->
+        <mxCell id="ext-label" value="External Services" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=11;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="630" y="800" width="120" height="18" as="geometry" />
+        </mxCell>
+
+        <!-- Didit -->
+        <mxCell id="didit" value="Didit (KYC)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e1f5fe;strokeColor=#0288d1;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="640" y="825" width="100" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- Coinbase CDP -->
+        <mxCell id="coinbase" value="Coinbase CDP" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#f57c00;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="760" y="825" width="110" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- Base blockchain -->
+        <mxCell id="base" value="Base (L2)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="890" y="825" width="100" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- SMTP -->
+        <mxCell id="smtp" value="SMTP (email)" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="1010" y="825" width="110" height="28" as="geometry" />
+        </mxCell>
+
+        <!-- ==================== REQUEST FLOW ARROWS ==================== -->
+
+        <!-- Mobile → Traefik -->
+        <mxCell id="flow-mobile-traefik" value="HTTPS&#xa;api.vistablox.io" style="endArrow=classic;html=1;strokeColor=#1565c0;strokeWidth=2;fontSize=9;fontColor=#1565c0;" edge="1" parent="1">
+          <mxGeometry x="280" y="180" as="geometry">
+            <mxPoint x="160" y="190" as="sourcePoint" />
+            <mxPoint x="360" y="190" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Admin → Traefik -->
+        <mxCell id="flow-admin-traefik" value="HTTPS&#xa;admin.vistablox.io" style="endArrow=classic;html=1;strokeColor=#283593;strokeWidth=2;fontSize=9;fontColor=#283593;" edge="1" parent="1">
+          <mxGeometry x="280" y="160" as="geometry">
+            <mxPoint x="275" y="170" as="sourcePoint" />
+            <mxPoint x="360" y="170" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Public → Traefik -->
+        <mxCell id="flow-public-traefik" value="HTTPS" style="endArrow=classic;html=1;strokeColor=#555555;strokeWidth=1;fontSize=9;fontColor=#555555;dashed=1;" edge="1" parent="1">
+          <mxGeometry x="280" y="295" as="geometry">
+            <mxPoint x="230" y="295" as="sourcePoint" />
+            <mxPoint x="360" y="250" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Traefik → API -->
+        <mxCell id="flow-traefik-api" value="proxy network&#xa;port 3000" style="endArrow=classic;html=1;strokeColor=#2e7d32;strokeWidth=2;fontSize=9;fontColor=#2e7d32;" edge="1" parent="1">
+          <mxGeometry x="560" y="200" as="geometry">
+            <mxPoint x="560" y="200" as="sourcePoint" />
+            <mxPoint x="630" y="210" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → PostgreSQL -->
+        <mxCell id="flow-api-pg" value="prisma&#xa;(Neon PG adapter)" style="endArrow=classic;html=1;strokeColor=#1565c0;strokeWidth=1;fontSize=8;fontColor=#1565c0;" edge="1" parent="1">
+          <mxGeometry x="720" y="530" as="geometry">
+            <mxPoint x="720" y="530" as="sourcePoint" />
+            <mxPoint x="695" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → Valkey -->
+        <mxCell id="flow-api-valkey" value="rate limit&#xa;profile cache" style="endArrow=classic;html=1;strokeColor=#c62828;strokeWidth=1;fontSize=8;fontColor=#c62828;" edge="1" parent="1">
+          <mxGeometry x="800" y="530" as="geometry">
+            <mxPoint x="800" y="530" as="sourcePoint" />
+            <mxPoint x="820" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → MinIO -->
+        <mxCell id="flow-api-minio" value="S3 (KYC docs,&#xa;disclosures)" style="endArrow=classic;html=1;strokeColor=#2e7d32;strokeWidth=1;fontSize=8;fontColor=#2e7d32;" edge="1" parent="1">
+          <mxGeometry x="900" y="530" as="geometry">
+            <mxPoint x="900" y="530" as="sourcePoint" />
+            <mxPoint x="940" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → ClamAV -->
+        <mxCell id="flow-api-clamav" value="AV scan&#xa;(port 3310)" style="endArrow=classic;html=1;strokeColor=#7b1fa2;strokeWidth=1;fontSize=8;fontColor=#7b1fa2;" edge="1" parent="1">
+          <mxGeometry x="980" y="530" as="geometry">
+            <mxPoint x="980" y="530" as="sourcePoint" />
+            <mxPoint x="1050" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → Maildev -->
+        <mxCell id="flow-api-maildev" value="SMTP&#xa;(port 1025)" style="endArrow=classic;html=1;strokeColor=#f9a825;strokeWidth=1;fontSize=8;fontColor=#f9a825;" edge="1" parent="1">
+          <mxGeometry x="1040" y="530" as="geometry">
+            <mxPoint x="1040" y="530" as="sourcePoint" />
+            <mxPoint x="1150" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → Didit -->
+        <mxCell id="flow-api-didit" value="HTTPS" style="endArrow=classic;html=1;strokeColor=#0288d1;strokeWidth=1;fontSize=8;fontColor=#0288d1;dashed=1;" edge="1" parent="1">
+          <mxGeometry x="690" y="790" as="geometry">
+            <mxPoint x="690" y="530" as="sourcePoint" />
+            <mxPoint x="690" y="825" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → Coinbase -->
+        <mxCell id="flow-api-coinbase" value="HTTPS" style="endArrow=classic;html=1;strokeColor=#f57c00;strokeWidth=1;fontSize=8;fontColor=#f57c00;dashed=1;" edge="1" parent="1">
+          <mxGeometry x="800" y="790" as="geometry">
+            <mxPoint x="800" y="530" as="sourcePoint" />
+            <mxPoint x="815" y="825" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- API → Base -->
+        <mxCell id="flow-api-base" value="HTTPS&#xa;(ERC-1155 mint)" style="endArrow=classic;html=1;strokeColor=#2e7d32;strokeWidth=1;fontSize=8;fontColor=#2e7d32;dashed=1;" edge="1" parent="1">
+          <mxGeometry x="940" y="790" as="geometry">
+            <mxPoint x="940" y="530" as="sourcePoint" />
+            <mxPoint x="940" y="825" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Worker → PostgreSQL -->
+        <mxCell id="flow-worker-pg" value="pg-boss jobs" style="endArrow=classic;html=1;strokeColor=#1565c0;strokeWidth=1;fontSize=8;fontColor=#1565c0;dashed=1;" edge="1" parent="1">
+          <mxGeometry x="1040" y="530" as="geometry">
+            <mxPoint x="1075" y="330" as="sourcePoint" />
+            <mxPoint x="750" y="570" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Worker → SMTP -->
+        <mxCell id="flow-worker-smtp" value="emails" style="endArrow=classic;html=1;strokeColor=#f9a825;strokeWidth=1;fontSize=8;fontColor=#f9a825;dashed=1;" edge="1" parent="1">
+          <mxGeometry x="1075" y="790" as="geometry">
+            <mxPoint x="1075" y="330" as="sourcePoint" />
+            <mxPoint x="1065" y="825" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- Admin CORS note -->
+        <mxCell id="admin-cors" value="Admin SPA cross-origin → api.vistablox.io&#xa;CORS via AUTH_TRUSTED_ORIGINS + SameSite=Lax" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#666666;" vertex="1" parent="1">
+          <mxGeometry x="175" y="350" width="180" height="30" as="geometry" />
+        </mxCell>
+
+        <!-- Env file note -->
+        <mxCell id="env-note" value="Environment: .env.staging&#xa;APP_ENV=staging&#xa;All secrets in .env.staging" style="text;html=1;align=left;verticalAlign=top;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=9;fontColor=#999999;" vertex="1" parent="1">
+          <mxGeometry x="1180" y="90" width="145" height="40" as="geometry" />
+        </mxCell>
+
+        <!-- Legend -->
+        <mxCell id="legend" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafafa;strokeColor=#999999;arcSize=5;" vertex="1" parent="1">
+          <mxGeometry x="50" y="420" width="250" height="230" as="geometry" />
+        </mxCell>
+        <mxCell id="legend-title" value="Legend" style="text;html=1;align=center;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=12;fontStyle=1" vertex="1" parent="1">
+          <mxGeometry x="140" y="430" width="50" height="20" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-solid" value="" style="endArrow=classic;html=1;strokeColor=#333333;strokeWidth=2;" edge="1" parent="1">
+          <mxGeometry x="100" y="465" as="geometry">
+            <mxPoint x="70" y="465" as="sourcePoint" />
+            <mxPoint x="100" y="465" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg-solid-t" value="Request flow (user → API)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="108" y="458" width="160" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-dashed" value="" style="endArrow=classic;html=1;strokeColor=#333333;strokeWidth=1;dashed=1;" edge="1" parent="1">
+          <mxGeometry x="100" y="495" as="geometry">
+            <mxPoint x="70" y="495" as="sourcePoint" />
+            <mxPoint x="100" y="495" as="targetPoint" />
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="leg-dashed-t" value="Async / external service calls" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="108" y="488" width="170" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-green" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e8f5e9;strokeColor=#2e7d32;" vertex="1" parent="1">
+          <mxGeometry x="70" y="520" width="20" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-green-t" value="Application containers (api, worker)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="98" y="518" width="185" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-blue" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#e3f2fd;strokeColor=#1565c0;" vertex="1" parent="1">
+          <mxGeometry x="70" y="540" width="20" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-blue-t" value="PostgreSQL / Database" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="98" y="538" width="140" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-pink" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fce4ec;strokeColor=#c62828;" vertex="1" parent="1">
+          <mxGeometry x="70" y="560" width="20" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-pink-t" value="Valkey / Cache" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="98" y="558" width="100" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-purple" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f3e5f5;strokeColor=#7b1fa2;" vertex="1" parent="1">
+          <mxGeometry x="70" y="580" width="20" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-purple-t" value="ClamAV (antivirus)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="98" y="578" width="120" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-yellow" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff9c4;strokeColor=#f9a825;" vertex="1" parent="1">
+          <mxGeometry x="70" y="600" width="20" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-yellow-t" value="Mail catcher (Maildev)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="98" y="598" width="140" height="18" as="geometry" />
+        </mxCell>
+
+        <mxCell id="leg-orange" value="" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fff3e0;strokeColor=#f57c00;" vertex="1" parent="1">
+          <mxGeometry x="70" y="620" width="20" height="15" as="geometry" />
+        </mxCell>
+        <mxCell id="leg-orange-t" value="pg-boss async jobs (worker)" style="text;html=1;align=left;verticalAlign=middle;resizable=0;points=0;autosize=1;strokeColor=none;fillColor=none;fontSize=10;" vertex="1" parent="1">
+          <mxGeometry x="98" y="618" width="160" height="18" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
