@@ -65,6 +65,50 @@ describe("PLAY_INTEGRITY_POLICY vs. the deployment tier", () => {
   it("rejects an unknown APP_ENV value", () => {
     expect(() => loadEnvironment({ ...base, NODE_ENV: "production", APP_ENV: "prod" })).toThrow();
   });
+
+  it("accepts single-reviewer recovery mode only on staging", () => {
+    const result = loadEnvironment({
+      ...base,
+      NODE_ENV: "production",
+      APP_ENV: "staging",
+      ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: "true",
+    });
+    expect(result.ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE).toBe(true);
+  });
+
+  it("rejects single-reviewer recovery mode outside staging", () => {
+    expect(() =>
+      loadEnvironment({
+        ...base,
+        NODE_ENV: "production",
+        APP_ENV: "production",
+        PLAY_INTEGRITY_POLICY: "strict",
+        ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: "true",
+      }),
+    ).toThrow(/ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE/);
+  });
+
+  it("accepts skipping the recovery Didit check only on staging", () => {
+    const result = loadEnvironment({
+      ...base,
+      NODE_ENV: "production",
+      APP_ENV: "staging",
+      ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING: "true",
+    });
+    expect(result.ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING).toBe(true);
+  });
+
+  it("rejects skipping the recovery Didit check outside staging", () => {
+    expect(() =>
+      loadEnvironment({
+        ...base,
+        NODE_ENV: "production",
+        APP_ENV: "production",
+        PLAY_INTEGRITY_POLICY: "strict",
+        ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING: "true",
+      }),
+    ).toThrow(/ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING/);
+  });
 });
 
 // Mirrors android-attestation-verifier.ts's own normalizeCertDigest rule
