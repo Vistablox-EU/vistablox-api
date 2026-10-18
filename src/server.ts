@@ -16,6 +16,7 @@ import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
+import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
 import { PrismaAccountRepository } from "./modules/account/repository/prisma-account.repository.js";
@@ -93,13 +94,16 @@ jobQueue.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
 });
 await jobQueue.start();
-// Mirrors worker.ts: createQueue is ON CONFLICT DO NOTHING, so this is safe
-// to run here even if the worker process hasn't started yet on a fresh
-// deploy — a send() would otherwise fail against a queue that doesn't exist.
-await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
-await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
-await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
-await jobQueue.createQueue("provider_events.didit_webhook");
+// Mirrors worker.ts: ensureJobQueue is safe to run here even if the worker
+// process hasn't started yet on a fresh deploy — a send() would otherwise fail
+// against a queue that doesn't exist — and it also brings a queue that
+// already exists up to the current retry and dead-letter settings, which
+// createQueue alone (ON CONFLICT DO NOTHING) never would.
+await ensureDeadLetterQueue(jobQueue);
+await ensureJobQueue(jobQueue, "case_timers.pre_offering_open_handoff", "event");
+await ensureJobQueue(jobQueue, "case_timers.offering_reconfirmation_window_opened", "event");
+await ensureJobQueue(jobQueue, "case_timers.post_ipo_structuring_handoff", "event");
+await ensureJobQueue(jobQueue, "provider_events.didit_webhook", "event");
 // Reversal (undoing the KYC microservice split): intake, offering,
 // profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
