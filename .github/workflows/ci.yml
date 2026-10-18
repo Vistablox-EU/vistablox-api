@@ -160,7 +160,10 @@ jobs:
           npm run contracts:export-abi
           abis=src/infrastructure/blockchain/abis
           if [ -n "$(git status --porcelain -- "$abis")" ]; then
-            echo "::error::$abis does not match the compiled contracts. Run 'npm run contracts:compile && npm run contracts:export-abi' and commit the result."
+            echo "::error::$abis does not match the compiled contracts. Run 'npm --prefix contracts ci && npm run contracts:compile && npm run contracts:export-abi' and commit the result."
+            # `git diff` skips a file the export recreated after it was deleted
+            # (untracked), so list the changed files first.
+            git status --short -- "$abis"
             git diff -- "$abis"
             exit 1
           fi
