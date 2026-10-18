@@ -119,6 +119,7 @@ describe("CreateReservationService", () => {
     const result = await service.execute({
       offeringId: "offering_01",
       accountId: "account_01",
+      clientIdempotencyKey: null,
       amountEur: "1000.00",
       traceId: "req_01",
     });
@@ -140,6 +141,7 @@ describe("CreateReservationService", () => {
       reservationId: "reservation_01",
       offeringId: "offering_01",
       accountId: "account_01",
+      clientIdempotencyKey: null,
       amountEur: "1000.00",
       disclosurePackVersionAtReservation: "2",
       traceId: "req_01",
@@ -268,5 +270,38 @@ describe("CreateReservationService", () => {
     expect(reservations.recordMoneyEvent).toHaveBeenCalledWith(
       expect.objectContaining({ reservationId: "reservation_01", capitalState: "purchase_failed" }),
     );
+  });
+
+  it("reuses the reservation id for an idempotent retry and does not mark it failed if a new onramp token cannot be issued", async () => {
+    const reservations = reservationRepository({
+      createReservation: vi.fn().mockResolvedValue({
+        reservation: { reservationId: "reservation_existing", createdAt: now },
+        conflict: null,
+        reused: true,
+      }),
+    });
+    const failingCoinbase = coinbase({
+      createOnrampSessionToken: vi.fn().mockRejectedValue(new Error("coinbase unavailable")),
+    });
+    const service = new CreateReservationService(offeringRepository(detail()), reservations, failingCoinbase, {
+      clock: () => now,
+      generateReservationId: () => "reservation_new",
+      fundingRailAvailable: true,
+    });
+
+    await expect(
+      service.execute({
+        offeringId: "offering_01",
+        accountId: "account_01",
+        amountEur: "1000.00",
+        clientIdempotencyKey: "operation_01",
+        traceId: "req_01",
+      }),
+    ).rejects.toThrow("coinbase unavailable");
+
+    expect(reservations.createReservation).toHaveBeenCalledWith(
+      expect.objectContaining({ clientIdempotencyKey: "operation_01" }),
+    );
+    expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
   });
 });

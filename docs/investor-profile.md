@@ -18,7 +18,7 @@ The response does not include raw wallet addresses, monetary balances, KYC evide
 Two customer-only, cursor-paginated subresources continue the profile aggregate without placing unbounded arrays on the overview response:
 
 - `GET /v1/investor-profile/reservations?limit=20&after=...` returns reservation terms, lifecycle timestamps, a residential-property summary, and only the latest `money.money_events` capital-state projection. Provider names and provider references are excluded.
-- `GET /v1/investor-profile/positions?limit=20&after=...` returns canonical off-chain holdings whose status is `pending_internal_settlement` or `active`. Redeemed positions and holder wallet addresses are excluded from this current-portfolio view.
+- `GET /v1/investor-profile/positions?limit=20&after=...` returns canonical off-chain holdings whose status is `pending_internal_settlement` or `active`. Redeemed positions and holder wallet addresses are excluded from this current-portfolio view. `reservation_id` and `offering_id` are `null` for a position that was not created from a reservation, such as one minted directly from an IPO escrow contribution (AD-256); `offering_id` is resolved only through the reservation.
 
 Limits default to 20 and are capped at 100. Cursors include their resource kind, so cursors cannot be reused across the reservation and position endpoints. Reservations sort newest-first by creation time and ID. Positions sort active timestamps newest-first, with pending positions after activated positions.
 

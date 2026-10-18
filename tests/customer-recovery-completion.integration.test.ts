@@ -3,12 +3,13 @@ import { createHash, randomUUID, webcrypto } from "node:crypto";
 import express from "express";
 import { Pool } from "pg";
 import request from "supertest";
+import { serializeSignedCookie } from "better-call";
 import { SignJWT, calculateJwkThumbprint, exportJWK, type JWK } from "jose";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // Only the Android key-attestation chain check is stubbed: this test has no
 // real Android keystore chain. Everything else in E2 runs for real.
-vi.mock("../src/modules/auth/application/android-attestation-verifier.js", async (importOriginal) => {
+vi.mock("../src/modules/auth/application/customer/android-attestation-verifier.js", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../src/modules/auth/application/customer/android-attestation-verifier.js")>();
   return { ...actual, verifyAndroidKeyAttestation: vi.fn(async () => undefined) };
 });
@@ -343,6 +344,10 @@ describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, 
        VALUES ($1, $2, $3, now() + interval '10 minutes', now(), 'oauth_pending', $4)`,
       [`session_pending_${suffix}`, pending.token, customerUserId, dpopJkt],
     );
+    // What the app holds and sends for that session: the signed set-auth-token
+    // value ("value.signature"), not the bare token stored in auth_session. The
+    // bearer plugin only accepts the signed form.
+    const pendingBearer = decodeURIComponent((await serializeSignedCookie("", pending.token, SECRET)).replace("=", ""));
     const enrolChallengeResponse = await request(testApp)
       .post(`${MOBILE}/enrol/challenge`)
       .set("dpop", await dpopProof(`${MOBILE}/enrol/challenge`));
@@ -365,8 +370,8 @@ describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, 
       .sign(newBioKeys.privateKey);
     const enrolResponse = await request(testApp)
       .post(`${MOBILE}/enrol/verify`)
-      .set("authorization", `Bearer ${pending.token}`)
-      .set("dpop", await dpopProof(`${MOBILE}/enrol/verify`, pending.token))
+      .set("authorization", `Bearer ${pendingBearer}`)
+      .set("dpop", await dpopProof(`${MOBILE}/enrol/verify`, pendingBearer))
       .send({
         challenge: enrolChallenge,
         jws: enrolJws,

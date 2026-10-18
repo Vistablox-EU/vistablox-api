@@ -1,5 +1,7 @@
 import type { BetterAuthPlugin } from "better-auth";
-import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
+
+import { getSessionForHook } from "../shared/better-auth-hook-session.js";
 
 // Better Auth's own /unlink-account only refuses to unlink an account when
 // it's the caller's *last* one (FAILED_TO_UNLINK_LAST_ACCOUNT) -- it has no
@@ -22,7 +24,7 @@ export function createBetterAuthRegistrationAccountGuardPlugin(): BetterAuthPlug
           handler: createAuthMiddleware(async (ctx) => {
             const accountId = readAccountId(ctx.body);
             if (accountId === null) return;
-            const session = await getSessionFromCtx(ctx);
+            const session = await getSessionForHook(ctx);
             if (session === null) return;
             const accounts = await ctx.context.internalAdapter.findAccounts(session.user.id);
             if (findRegistrationAccountId(accounts) === accountId) {

@@ -229,6 +229,7 @@ describe("POST /v1/offerings/:offering_id/reservations", () => {
 
     const response = await request(app)
       .post("/v1/offerings/offering_01/reservations")
+      .set("Idempotency-Key", "reservation-test-01")
       .send({ amount_eur: "1000.00" });
 
     expect(response.status).toBe(201);
@@ -247,7 +248,7 @@ describe("POST /v1/offerings/:offering_id/reservations", () => {
       },
     });
     expect(reservations.createReservation).toHaveBeenCalledWith(
-      expect.objectContaining({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00" }),
+      expect.objectContaining({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", clientIdempotencyKey: "reservation-test-01" }),
     );
   });
 
@@ -269,6 +270,7 @@ describe("POST /v1/offerings/:offering_id/reservations", () => {
 
     const response = await request(app)
       .post("/v1/offerings/offering_01/reservations")
+      .set("Idempotency-Key", "reservation-test-02")
       .send({ amount_eur: "1000.00" });
 
     expect(response.status).toBe(409);
@@ -283,10 +285,23 @@ describe("POST /v1/offerings/:offering_id/reservations", () => {
 
     const response = await request(app)
       .post("/v1/offerings/offering_01/reservations")
+      .set("Idempotency-Key", "reservation-test-03")
       .send({ amount_eur: "1000.00" });
 
     expect(response.status).toBe(404);
     expect(response.body.code).toBe("offering.not_found");
+  });
+
+  it("requires an idempotency key before creating a capacity hold", async () => {
+    const { app, reservations } = buildReservationApp();
+
+    const response = await request(app)
+      .post("/v1/offerings/offering_01/reservations")
+      .send({ amount_eur: "1000.00" });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("idempotency.key_required");
+    expect(reservations.createReservation).not.toHaveBeenCalled();
   });
 });
 

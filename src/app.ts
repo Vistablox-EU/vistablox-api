@@ -79,6 +79,13 @@ import {
 import { createRequireDpopOnly } from "./modules/auth/api/customer/require-dpop-only.js";
 import type { IssueDeviceChallengeService } from "./modules/auth/application/customer/device-challenge-issuance.service.js";
 import type { VistaBloxAuth } from "./modules/auth/infrastructure/shared/better-auth.factory.js";
+import { createDeviceReplacementRouter } from "./modules/auth/api/customer/device-replacement.router.js";
+import {
+  RequestDeviceReplacementService,
+  VerifyDeviceReplacementService,
+  type DeviceReplacementConfig,
+} from "./modules/auth/application/customer/device-replacement.service.js";
+import type { DeviceReplacementRepository } from "./modules/auth/repository/customer/device-replacement.repository.js";
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
@@ -380,6 +387,11 @@ export interface AppDependencies {
       baseUrl: string;
       appConfig: AppConfig;
     };
+    deviceReplacement?: {
+      repository: DeviceReplacementRepository;
+      emailSender: EmailSender;
+      config: DeviceReplacementConfig;
+    };
   };
 }
 
@@ -627,6 +639,21 @@ export function createApp(dependencies: AppDependencies): Express {
             ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
             ...(deviceAuthDpopKeyRateLimiter === undefined ? [] : [deviceAuthDpopKeyRateLimiter]),
           ],
+        ),
+      );
+    }
+    if (dependencies.protectedApi.deviceReplacement !== undefined) {
+      const replacement = dependencies.protectedApi.deviceReplacement;
+      app.use(
+        "/v1/auth/mobile/replacement",
+        createDeviceReplacementRouter(
+          requireAuthentication,
+          new RequestDeviceReplacementService(
+            replacement.repository,
+            replacement.emailSender,
+            replacement.config,
+          ),
+          new VerifyDeviceReplacementService(replacement.repository, replacement.config),
         ),
       );
     }

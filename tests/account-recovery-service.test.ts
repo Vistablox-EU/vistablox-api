@@ -103,6 +103,7 @@ function administrator(overrides: Partial<CustomerAccountAdministrator> = {}): C
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
     sendPasskeyRecoveryEmail: vi.fn().mockResolvedValue(undefined),
+    sendDeviceReplacementCodeEmail: vi.fn().mockResolvedValue(undefined),
     sendStaffInvitationEmail: vi.fn().mockResolvedValue(undefined),
     sendApplicantResponseReminderEmail: vi.fn().mockResolvedValue(undefined),
     sendKycRenewalReminderEmail: vi.fn().mockResolvedValue(undefined),

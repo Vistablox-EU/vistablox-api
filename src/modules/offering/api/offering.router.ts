@@ -60,10 +60,20 @@ export function createInvestorOfferingRouter(
       const context = requireCustomerContext(response.locals.authContext);
       const params = investorOfferingParamsSchema.parse(request.params);
       const body = createReservationBodySchema.parse(request.body);
+      const clientIdempotencyKey = String(request.header("idempotency-key") ?? "").trim();
+      if (clientIdempotencyKey.length === 0 || clientIdempotencyKey.length > 128) {
+        throw new AppError({
+          code: "idempotency.key_required",
+          title: "Idempotency-Key required",
+          status: 400,
+          detail: "A reservation requires an Idempotency-Key header of at most 128 characters.",
+        });
+      }
       const result = await createReservation.execute({
         offeringId: params.offering_id,
         accountId: context.accountId,
         amountEur: body.amount_eur,
+        clientIdempotencyKey,
         traceId: String(response.locals.traceId),
       });
       response.setHeader("Cache-Control", "no-store");

@@ -67,6 +67,7 @@ export class CreateReservationService {
     offeringId: string;
     accountId: string;
     amountEur: string;
+    clientIdempotencyKey?: string | null;
     traceId: string;
   }): Promise<CreateReservationResponse> {
     const detail = await this.offerings.getInvestorDetail({
@@ -117,6 +118,7 @@ export class CreateReservationService {
       reservationId,
       offeringId: input.offeringId,
       accountId: input.accountId,
+      clientIdempotencyKey: input.clientIdempotencyKey ?? null,
       amountEur: input.amountEur,
       disclosurePackVersionAtReservation:
         detail.currentDisclosurePack === null ? null : String(detail.currentDisclosurePack.version),
@@ -143,15 +145,19 @@ export class CreateReservationService {
     try {
       session = await this.coinbase.createOnrampSessionToken({ walletAddress, blockchain: this.blockchain });
     } catch (error) {
-      await this.reservations.recordMoneyEvent({
-        reservationId,
-        provider: "coinbase_cdp",
-        providerReference: null,
-        capitalState: "purchase_failed",
-        amountEur: input.amountEur,
-        amountEurc: null,
-        recordedAt: this.clock(),
-      });
+      // A replay must never mark an already-created reservation failed just
+      // because a fresh browser-session token could not be issued.
+      if (!created.reused) {
+        await this.reservations.recordMoneyEvent({
+          reservationId,
+          provider: "coinbase_cdp",
+          providerReference: null,
+          capitalState: "purchase_failed",
+          amountEur: input.amountEur,
+          amountEurc: null,
+          recordedAt: this.clock(),
+        });
+      }
       throw error;
     }
 
