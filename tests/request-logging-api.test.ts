@@ -177,6 +177,18 @@ describe("request log line, end to end", () => {
     expect(entry.req.headers["x-document-type"]).toBe("ownership_declaration");
   });
 
+  it("masks the query string of the referer header", async () => {
+    const { app, lines } = buildApp();
+
+    await request(app)
+      .get("/v1/offerings")
+      .set("referer", `https://admin.example.test/search?email=${encodedCustomerEmail}&view=list`);
+
+    const entry = await completedEntry(lines);
+    expect(lines.join("")).not.toContain("jane.doe");
+    expect(entry.req.headers.referer).toBe("https://admin.example.test/search?email=[REDACTED]&view=list");
+  });
+
   it("does not write the DPoP proof header, alongside the credentials it already censored", async () => {
     const { app, lines } = buildApp();
 

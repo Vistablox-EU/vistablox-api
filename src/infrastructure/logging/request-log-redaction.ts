@@ -114,14 +114,24 @@ export function redactQueryObject(query: unknown): unknown {
 
 /**
  * Request serializer for pino-http. It runs on the already serialized request
- * and changes only `url` and `query`, which carry whatever the client put in
- * the query string (the staff account search puts a customer's email there).
- * The headers are not touched here: the logger's `redact` paths censor those.
+ * and changes only `url`, `query` and the query string inside the `referer`
+ * header: those carry whatever the client put in a query string (the staff
+ * account search puts a customer's email there, and a browser caller whose
+ * referrer policy sends the full url puts its page's query string in the
+ * referer). The other headers are not touched here: the logger's `redact` paths
+ * censor the credential ones.
  */
 export function requestLogSerializer(request: SerializedRequest): SerializedRequest {
   const redacted = { ...request, url: redactUrl(request.url) };
-  if (request.query !== undefined) {
+  // pino's request serializer only sets an own `query` when the request had
+  // one, but the object also inherits an empty default; `query !== undefined`
+  // would copy that default onto the logged line as a new field.
+  if (Object.hasOwn(request, "query")) {
     redacted.query = redactQueryObject(request.query) as SerializedRequest["query"];
+  }
+  const referer = request.headers.referer;
+  if (typeof referer === "string") {
+    redacted.headers = { ...request.headers, referer: redactUrl(referer) };
   }
   return redacted;
 }

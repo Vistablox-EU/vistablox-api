@@ -1,3 +1,4 @@
+import { stdSerializers } from "pino";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -51,6 +52,44 @@ describe("redactQueryString", () => {
       expect(redactQueryString(`${name}=value_1`)).toBe(`${name}=value_1`);
     },
   );
+
+  // The name is compared with `_`, `-` and `.` removed, so every spelling of a
+  // multi-word name has to be masked, not just the underscore one.
+  it.each([
+    "api-key",
+    "api.key",
+    "API-Key",
+    "given-name",
+    "given.name",
+    "family.name",
+    "full-name",
+    "full.name",
+    "full-display_name",
+    "full.display.name",
+    "e-mail",
+    "e.mail",
+  ])("ignores - and . in the parameter name %s", (name) => {
+    expect(redactQueryString(`${name}=value`)).toBe(`${name}=[REDACTED]`);
+  });
+
+  it.each(["email_address", "phone_number", "password_confirmation", "tokens", "secretKey"])(
+    "matches a stem that is followed by more text, as in %s",
+    (name) => {
+      expect(redactQueryString(`${name}=value`)).toBe(`${name}=[REDACTED]`);
+    },
+  );
+
+  it("checks a parameter name that is not valid percent-encoding as it was received", () => {
+    expect(redactQueryString("token%ZZ=abc")).toBe("token%ZZ=[REDACTED]");
+    expect(redactQueryString("email%E0%A4%A=abc&limit=5")).toBe("email%E0%A4%A=[REDACTED]&limit=5");
+  });
+
+  it("decodes a percent-encoded parameter name before checking it, and keeps the name as received", () => {
+    expect(redactQueryString("tok%65n=secret")).toBe("tok%65n=[REDACTED]");
+    expect(redactQueryString("%65mail=x")).toBe("%65mail=[REDACTED]");
+    expect(redactQueryString("api%2Dkey=x")).toBe("api%2Dkey=[REDACTED]");
+    expect(redactQueryString("given%5Fname=Jane&limit=5")).toBe("given%5Fname=[REDACTED]&limit=5");
+  });
 
   it("masks a value that looks like an email under any parameter name", () => {
     expect(redactQueryString("q=jane.doe@example.test")).toBe("q=[REDACTED]");
@@ -193,6 +232,75 @@ describe("requestLogSerializer", () => {
     const result = requestLogSerializer({ ...withoutQuery } as never);
 
     expect(Object.keys(result)).toEqual(Object.keys(withoutQuery));
+  });
+
+  // pino-http hands the serializer what pino's own req serializer built. That
+  // object inherits an enumerable default `query: ''` and only has an own
+  // `query` when the request had one, so a plain object does not stand in for it.
+  it("does not add a query field to the serialized request pino builds when the request had none", () => {
+    const stock = stdSerializers.req({
+      id: "req_01",
+      method: "GET",
+      originalUrl: "/v1/offerings?email=jane%40example.test",
+      headers: { host: "api.example.test" },
+      socket: { remoteAddress: "10.0.0.2", remotePort: 41234 },
+    } as never);
+    expect(Object.hasOwn(stock, "query")).toBe(false);
+
+    const result = requestLogSerializer(stock);
+
+    expect(Object.keys(result)).toEqual(Object.keys(stock));
+    expect(Object.hasOwn(result, "query")).toBe(false);
+    expect(result.url).toBe("/v1/offerings?email=[REDACTED]");
+  });
+
+  it("masks the query of the serialized request pino builds when the request had one", () => {
+    const stock = stdSerializers.req({
+      id: "req_01",
+      method: "GET",
+      originalUrl: "/v1/offerings?email=jane%40example.test",
+      query: { email: "jane@example.test" },
+      headers: { host: "api.example.test" },
+      socket: { remoteAddress: "10.0.0.2", remotePort: 41234 },
+    } as never);
+
+    const result = requestLogSerializer(stock);
+
+    expect(result.query).toEqual({ email: "[REDACTED]" });
+    expect(result.url).toBe("/v1/offerings?email=[REDACTED]");
+  });
+
+  it("masks the query string of the referer header, which echoes the url of the calling page", () => {
+    const result = requestLogSerializer({
+      ...request,
+      headers: {
+        ...request.headers,
+        referer: "https://admin.example.test/search?email=jane%40example.test&view=list",
+      },
+    } as never);
+
+    expect(result.headers).toEqual({
+      host: "api.example.test",
+      "x-forwarded-for": "203.0.113.7",
+      referer: "https://admin.example.test/search?email=[REDACTED]&view=list",
+    });
+  });
+
+  it("leaves a referer that has no query string as it is", () => {
+    const result = requestLogSerializer({
+      ...request,
+      headers: { ...request.headers, referer: "https://admin.example.test/accounts" },
+    } as never);
+
+    expect(result.headers.referer).toBe("https://admin.example.test/accounts");
+  });
+
+  it("does not modify the headers object it was given", () => {
+    const headers = { ...request.headers, referer: "https://admin.example.test/s?token=abc" };
+
+    requestLogSerializer({ ...request, headers } as never);
+
+    expect(headers.referer).toBe("https://admin.example.test/s?token=abc");
   });
 
   it("does not modify the serialized request it was given", () => {
