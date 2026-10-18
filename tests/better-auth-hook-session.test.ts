@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseSignedBearerToken } from "../src/modules/auth/infrastructure/better-auth-hook-session.js";
+import { parseSignedBearerToken } from "../src/modules/auth/infrastructure/shared/better-auth-hook-session.js";
 
 // parseSignedBearerToken has to agree with better-auth's own bearer() plugin
 // (better-auth/plugins/bearer) about which Authorization headers it turns into

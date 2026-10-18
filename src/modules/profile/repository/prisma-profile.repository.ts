@@ -1,5 +1,5 @@
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
-import type { PendingClosureRequestReader } from "../../auth/repository/account-closure.repository.js";
+import type { PendingClosureRequestReader } from "../../auth/repository/shared/account-closure.repository.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import type { InvestorActivitySummaryReader } from "../../investor-activity/repository/investor-activity.repository.js";
 import type { WalletStatusReader } from "../../wallet/repository/wallet.repository.js";

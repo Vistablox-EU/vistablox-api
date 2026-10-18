@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
+import type { SessionResolver } from "../src/modules/auth/application/shared/session-resolver.js";
 import type {
   CloseCaseInput,
   FounderDecisionInput,

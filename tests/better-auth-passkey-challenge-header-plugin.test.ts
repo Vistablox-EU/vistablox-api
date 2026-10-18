@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createBetterAuthPasskeyChallengeHeaderPlugin } from "../src/modules/auth/infrastructure/better-auth-passkey-challenge-header.plugin.js";
+import { createBetterAuthPasskeyChallengeHeaderPlugin } from "../src/modules/auth/infrastructure/shared/better-auth-passkey-challenge-header.plugin.js";
 
 describe("createBetterAuthPasskeyChallengeHeaderPlugin", () => {
   it("matches only the verify-* paths for the before hook", () => {

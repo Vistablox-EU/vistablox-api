@@ -7,18 +7,18 @@ import { SignJWT, calculateJwkThumbprint, exportJWK, type JWK } from "jose";
 import { describe, expect, it, vi } from "vitest";
 
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import type { AuthAuditEvent } from "../src/modules/auth/application/auth-audit-sink.js";
-import { DeviceLoginFailedError } from "../src/modules/auth/application/device-auth-errors.js";
-import type { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
-import type { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
-import type { RecordSessionRevokedInput, SessionMirror } from "../src/modules/auth/application/session-mirror.js";
-import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/better-auth-audit.plugin.js";
-import { createBetterAuthDeviceAuthPlugin } from "../src/modules/auth/infrastructure/better-auth-device-auth.plugin.js";
+import type { AuthAuditEvent } from "../src/modules/auth/application/shared/auth-audit-sink.js";
+import { DeviceLoginFailedError } from "../src/modules/auth/application/customer/device-auth-errors.js";
+import type { EnrolDeviceService } from "../src/modules/auth/application/customer/device-enrolment.service.js";
+import type { LoginDeviceService } from "../src/modules/auth/application/customer/device-login.service.js";
+import type { RecordSessionRevokedInput, SessionMirror } from "../src/modules/auth/application/shared/session-mirror.js";
+import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/shared/better-auth-audit.plugin.js";
+import { createBetterAuthDeviceAuthPlugin } from "../src/modules/auth/infrastructure/customer/better-auth-device-auth.plugin.js";
 import {
   tryBindDpopAtCreation,
   type DpopCreationContext,
-} from "../src/modules/auth/infrastructure/dpop-session-creation.js";
-import type { Device } from "../src/modules/auth/repository/device.repository.js";
+} from "../src/modules/auth/infrastructure/shared/dpop-session-creation.js";
+import type { Device } from "../src/modules/auth/repository/customer/device.repository.js";
 
 // A real better-auth instance (in-memory database, bearer tokens) with the
 // real device-auth and audit plugins. Its session.create.before hook binds

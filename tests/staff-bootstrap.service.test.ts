@@ -2,12 +2,12 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { BootstrapFirstAdminService } from "../src/modules/auth/application/staff-bootstrap.service.js";
-import type { StaffIdentityProvider } from "../src/modules/auth/application/staff-identity-provider.js";
+import { BootstrapFirstAdminService } from "../src/modules/auth/application/staff/staff-bootstrap.service.js";
+import type { StaffIdentityProvider } from "../src/modules/auth/application/staff/staff-identity-provider.js";
 import type {
   StaffBootstrapCounts,
   StaffBootstrapRepository,
-} from "../src/modules/auth/repository/staff-bootstrap.repository.js";
+} from "../src/modules/auth/repository/staff/staff-bootstrap.repository.js";
 
 const now = new Date("2026-09-12T10:00:00.000Z");
 const acceptUrl = "https://admin.example.test/staff/accept-invitation";

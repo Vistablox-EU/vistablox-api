@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { IssueDeviceChallengeService } from "../src/modules/auth/application/device-challenge-issuance.service.js";
-import type { Device } from "../src/modules/auth/repository/device.repository.js";
-import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
+import { IssueDeviceChallengeService } from "../src/modules/auth/application/customer/device-challenge-issuance.service.js";
+import type { Device } from "../src/modules/auth/repository/customer/device.repository.js";
+import type { DeviceChallengeRepository } from "../src/modules/auth/repository/customer/device-challenge.repository.js";
 
 // What the repository says the database recorded as expires_at.
 const RECORDED_EXPIRY = new Date("2026-09-12T10:02:00.000Z");

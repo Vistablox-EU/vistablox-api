@@ -4,7 +4,7 @@ import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
-import { PrismaStaffWebAuthnRepository } from "../src/modules/auth/repository/prisma-staff-webauthn.repository.js";
+import { PrismaStaffWebAuthnRepository } from "../src/modules/auth/repository/staff/prisma-staff-webauthn.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 

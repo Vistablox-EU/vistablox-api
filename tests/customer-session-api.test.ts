@@ -2,15 +2,15 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createCustomerSessionRouter } from "../src/modules/auth/api/customer-session.router.js";
+import { createCustomerSessionRouter } from "../src/modules/auth/api/customer/customer-session.router.js";
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
   RevokeDeviceSessionsService,
   RevokeOwnSessionService,
-} from "../src/modules/auth/application/customer-session.service.js";
-import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
-import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer-session.repository.js";
+} from "../src/modules/auth/application/customer/customer-session.service.js";
+import type { SessionRevoker } from "../src/modules/auth/application/customer/session-revoker.js";
+import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer/customer-session.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
