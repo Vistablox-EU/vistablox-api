@@ -191,7 +191,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       accountId,
       walletAddress,
       tokenContractAddress: "0x1111111111111111111111111111111111111",
-      tokenId: "1",
+      tokenId: pastTokenId,
       mintAmount: 50_000_000_000n,
       attemptedAt: new Date("2026-09-01T11:59:00.000Z"),
       searchFromBlock: null,
@@ -225,7 +225,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       chainTxHash: "0xdeadbeef",
       tokenContractAddress: "0x1111111111111111111111111111111111111",
     });
-    expect(events[0]?.tokenId.toFixed(0)).toBe("1");
+    expect(events[0]?.tokenId.toFixed(0)).toBe(pastTokenId);
   });
 
   describe("escrow mint intents", () => {
