@@ -51,19 +51,43 @@ export function parseSignedBearerToken(authorization: string | null | undefined)
  * expired), bearer() would have contributed nothing for it, so the request's
  * own cookie, if any, is what the endpoint sees and what this falls back to.
  *
+ * A session that is already past its limit, or unknown, is left alone here:
+ * better-auth's full session lookup ends an expired session as a side effect,
+ * and the endpoint (and the device-session-lifetime plugin's REAUTH_REQUIRED
+ * answer, which reads the expired row from the request context) has to meet
+ * it as it is. Nothing is enforced on a session that cannot authenticate the
+ * request anyway; a hook that resolved it first would turn that answer into an
+ * anonymous one.
+ *
  * getSessionFromCtx caches its result on the per-request context that the
- * hooks share with the endpoint, so the endpoint reuses this session and no
- * second lookup happens.
+ * hooks share with the endpoint, so the endpoint reuses a live session found
+ * here and does not look it up again.
  */
 export async function getSessionForHook(ctx: HookContext): ReturnType<typeof getSessionFromCtx> {
   const authorization = ctx.request?.headers.get("authorization") || ctx.headers?.get("authorization");
   const token = parseSignedBearerToken(authorization);
   const original = ctx.request?.headers || ctx.headers;
-  if (token !== null && original !== undefined) {
+  if (token !== null && original !== undefined && (await isLiveSession(ctx, token))) {
     const headers = new Headers(original);
     setRequestCookie(headers, ctx.context.authCookies.sessionToken.name, token);
     const session = await getSessionFromCtx({ ...ctx, headers });
     if (session !== null) return session;
   }
   return getSessionFromCtx(ctx);
+}
+
+/**
+ * Whether the signed token names a session row that has not expired, read
+ * without any of getSession's side effects (it deletes an expired session and
+ * may refresh a live one). The row comes through the internal adapter's
+ * findSession, which the device-session-lifetime plugin wraps, so a device
+ * session past its idle or absolute limit already reads as expired. The
+ * signature is not checked: a wrong one finds nothing worth acting on, and the
+ * lookup that follows verifies it.
+ */
+async function isLiveSession(ctx: HookContext, signedToken: string): Promise<boolean> {
+  const separator = signedToken.lastIndexOf(".");
+  if (separator < 1) return false;
+  const found = await ctx.context.internalAdapter.findSession(signedToken.slice(0, separator));
+  return found !== null && found.session.expiresAt.getTime() > Date.now();
 }

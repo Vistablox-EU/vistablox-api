@@ -558,6 +558,39 @@ describe.skipIf(databaseUrl === undefined)(
       });
     });
 
+    describe("a device session past its time limit, as the mobile app meets it", () => {
+      it("get-session still answers 401 REAUTH_REQUIRED, which is how the app learns to log in on the device again", async () => {
+        // The device-session-lifetime plugin turns an expired device session
+        // into REAUTH_REQUIRED from the expired row it finds on the request
+        // context. Resolving the session in the DPoP hook must not consume
+        // that row: better-auth's own session lookup deletes an expired
+        // session, so the answer would turn into an anonymous 200 null.
+        const expired = await createFixture("expired-device-session");
+        await authPool.query(
+          `UPDATE "auth_session" SET "createdAt" = now() - interval '2 hours', "updatedAt" = now() - interval '2 hours' WHERE "id" = $1`,
+          [expired.sessionId],
+        );
+        const path = "/api/auth/get-session";
+        const p = await proofFor(expired, expired.keyA, "bearer", "GET", path);
+
+        const observed = await send({ fixture: expired, transport: "bearer", method: "GET", path, dpop: p.header });
+
+        expect(observed).toMatchObject({ status: 401, code: "REAUTH_REQUIRED" });
+        expect(await sessionRowExists(expired.sessionId)).toBe(false);
+      });
+
+      it("a signed token for a session that no longer exists stays an anonymous 200 null, as without the hook", async () => {
+        const gone = await createFixture("deleted-session");
+        await authPool.query('DELETE FROM "auth_session" WHERE "id" = $1', [gone.sessionId]);
+        const path = "/api/auth/get-session";
+        const p = await proofFor(gone, gone.keyA, "bearer", "GET", path);
+
+        const observed = await send({ fixture: gone, transport: "bearer", method: "GET", path, dpop: p.header });
+
+        expect(observed).toMatchObject({ status: 200, body: null });
+      });
+    });
+
     describe("only the signed session token authenticates as a bearer", () => {
       it("the bare session token is not a bearer, even with a proof that fits it", async () => {
         // The unsigned token is what auth_session stores and what some
