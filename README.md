@@ -226,6 +226,8 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 
 All errors follow the documented envelope: `type`, `code`, `title`, `status`, `detail`, `trace_id`, and optional `field_errors`.
 
+A request body the JSON parser cannot read is a client error, logged at warn without the body: malformed JSON is `400 request.invalid_json`, a body over the 1 MB limit is `413 request.payload_too_large`, an unsupported charset or `Content-Encoding` is `415 request.unsupported_charset` or `request.unsupported_encoding`, and an aborted, mis-sized or undecodable body is a 400 (`request.aborted`, `request.size_mismatch`, `request.body_rejected`).
+
 ## Database notes
 
 The Prisma schema lives under `prisma/schema/` (a multi-file schema: `schema.prisma` for the datasource/generator and most models, `auth.prisma` for auth's own tables in their own `auth` schema namespace); reviewed SQL migrations are under `prisma/migrations`. Check constraints and append-only revision enforcement that Prisma cannot express are maintained directly in migration SQL. Better Auth owns its four `public.auth_*` tables through its PostgreSQL adapter — product code deliberately does not model or query them through Prisma. The runtime uses the generated client in `src/generated/prisma`, which is deliberately excluded from Git and regenerated during setup/build.
