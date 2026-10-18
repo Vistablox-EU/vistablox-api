@@ -47,9 +47,12 @@ export function parseSignedBearerToken(authorization: string | null | undefined)
  * does (setRequestCookie replaces the session cookie): checking a cookie
  * session while the endpoint then acts on the bearer's would let a request
  * carry its own valid cookie and DPoP key next to somebody else's bearer.
- * When the bearer does not resolve to a session (unsigned, tampered or
- * expired), bearer() would have contributed nothing for it, so the request's
- * own cookie, if any, is what the endpoint sees and what this falls back to.
+ * When the bearer does not resolve to a live session, this falls back to the
+ * request's own cookie, if any. That is exact for an unsigned or tampered
+ * bearer; bearer() only checks the HMAC, so a validly signed bearer for a dead
+ * session still replaces the cookie at the endpoint, where the request is then
+ * anonymous. The only effect of the difference is a DPoP check on the
+ * requester's own cookie session, never on another one.
  *
  * A session that is already past its limit, or unknown, is left alone here:
  * better-auth's full session lookup ends an expired session as a side effect,
@@ -57,11 +60,17 @@ export function parseSignedBearerToken(authorization: string | null | undefined)
  * answer, which reads the expired row from the request context) has to meet
  * it as it is. Nothing is enforced on a session that cannot authenticate the
  * request anyway; a hook that resolved it first would turn that answer into an
- * anonymous one.
+ * anonymous one. The endpoints that act on the token directly (sign-out,
+ * get-session) therefore still remove such an expired row without a proof,
+ * which cannot hurt: it authenticates nothing.
  *
- * getSessionFromCtx caches its result on the per-request context that the
- * hooks share with the endpoint, so the endpoint reuses a live session found
- * here and does not look it up again.
+ * getSessionFromCtx caches its result on the per-request context. Endpoints
+ * behind better-auth's session middleware reuse it; get-session and sign-out
+ * read the credentials again themselves.
+ *
+ * The lookup runs before the DPoP decision, so it also refreshes a rolling
+ * (non-device) session that the decision then rejects. /v1 resolves the session
+ * before it checks the proof in the same way.
  */
 export async function getSessionForHook(ctx: HookContext): ReturnType<typeof getSessionFromCtx> {
   const authorization = ctx.request?.headers.get("authorization") || ctx.headers?.get("authorization");
@@ -89,5 +98,5 @@ async function isLiveSession(ctx: HookContext, signedToken: string): Promise<boo
   const separator = signedToken.lastIndexOf(".");
   if (separator < 1) return false;
   const found = await ctx.context.internalAdapter.findSession(signedToken.slice(0, separator));
-  return found !== null && found.session.expiresAt.getTime() > Date.now();
+  return found !== null && found.session.expiresAt.getTime() >= Date.now();
 }

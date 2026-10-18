@@ -39,8 +39,10 @@ interface TestKey {
 interface Fixture {
   userId: string;
   sessionId: string;
-  /** The value after "Bearer ": the signed session token, exactly as the app stores and sends it. */
+  /** The value after "Bearer ": the signed session token as the app stores and sends it (the set-auth-token value, "value.signature="). */
   bearer: string;
+  /** The same token spelled the way a Set-Cookie value carries it (percent-encoded). */
+  bearerEncoded: string;
   /** The unsigned session token, as it is stored in auth_session. */
   rawToken: string;
   /** "<cookie name>=<signed value>": the same session, presented as better-auth's own cookie. */
@@ -120,6 +122,8 @@ describe.skipIf(databaseUrl === undefined)(
     let keyB: TestKey;
     let sessionCookieName = "";
     let bound: Fixture;
+    let appPostCutover: express.Express;
+    let appNoDpop: express.Express;
 
     beforeAll(async () => {
       auth = createBetterAuth({
@@ -161,6 +165,34 @@ describe.skipIf(databaseUrl === undefined)(
         ),
       );
       app.use(errorHandler);
+
+      // The same stack with the Phase 1 cutover an hour in the past, so a
+      // session created now is "post-cutover", and a stack with no DPoP hook at all.
+      appPostCutover = express().all(
+        "/api/auth/*splat",
+        toNodeHandler(
+          createBetterAuth({
+            database: authPool,
+            baseURL: BASE_URL,
+            secret: SECRET,
+            secureCookies: false,
+            trustedOrigins: [BASE_URL],
+            dpop: { baseUrl: BASE_URL, replayRepository, phase1CutoverAt: new Date(Date.now() - HOUR) },
+          }),
+        ),
+      );
+      appNoDpop = express().all(
+        "/api/auth/*splat",
+        toNodeHandler(
+          createBetterAuth({
+            database: authPool,
+            baseURL: BASE_URL,
+            secret: SECRET,
+            secureCookies: false,
+            trustedOrigins: [BASE_URL],
+          }),
+        ),
+      );
 
       keyB = await newKey();
       bound = await createFixture("bound");
@@ -255,8 +287,10 @@ describe.skipIf(databaseUrl === undefined)(
       origin?: boolean;
       /** Also send this fixture's session cookie next to the bearer (two credentials in one request). */
       alsoCookieOf?: Fixture;
+      /** Send through another stack than the default one. */
+      via?: express.Express;
     }): Promise<Observed> {
-      const agent = request(app);
+      const agent = request(input.via ?? app);
       const pending = input.method === "GET" ? agent.get(input.path) : agent.post(input.path);
       if (input.transport === "bearer") {
         pending.set("Authorization", `Bearer ${input.fixture.bearer}`);
@@ -279,15 +313,54 @@ describe.skipIf(databaseUrl === undefined)(
     }
 
     /** A bearer-style GET with an arbitrary Authorization value (no Cookie), for tokens that are not a fixture's signed bearer. */
-    async function fetchWithAuthorization(authorization: string, path: string, dpop: string): Promise<Observed> {
-      const response = await request(app).get(path).set("Authorization", authorization).set("DPoP", dpop);
+    async function fetchWithAuthorization(
+      authorization: string,
+      path: string,
+      dpop?: string,
+      via?: express.Express,
+    ): Promise<Observed> {
+      const pending = request(via ?? app).get(path).set("Authorization", authorization);
+      if (dpop !== undefined) pending.set("DPoP", dpop);
+      const response = await pending;
       const body = response.body as { code?: unknown } | null;
+      const wwwAuthenticate = response.headers["www-authenticate"];
       return {
         status: response.status,
         code: typeof body?.code === "string" ? body.code : undefined,
-        wwwAuthenticate: undefined,
+        wwwAuthenticate: typeof wwwAuthenticate === "string" ? wwwAuthenticate : undefined,
         body: response.body,
       };
+    }
+
+    /** An unsigned Google ID token for the fixture's linked google account (the provider's signature check is stubbed in this suite). */
+    function googleIdToken(fixture: Fixture): string {
+      return [
+        { alg: "none", typ: "JWT" },
+        {
+          iss: "https://accounts.google.com",
+          aud: "test-google-client",
+          sub: fixture.googleSubject,
+          email: fixture.email,
+          email_verified: true,
+          name: "Bearer DPoP sign-in",
+          iat: Math.floor(Date.now() / 1000),
+          exp: Math.floor(Date.now() / 1000) + 600,
+        },
+      ]
+        .map((part) => Buffer.from(JSON.stringify(part)).toString("base64url"))
+        .concat("signature")
+        .join(".");
+    }
+
+    /** sign-in/social with no bearer and no proof: the session it creates is not bound to any key. */
+    async function signInWithoutProof(fixture: Fixture): Promise<{ bearer: string; token: string }> {
+      const response = await request(app)
+        .post("/api/auth/sign-in/social")
+        .send({ provider: "google", idToken: { token: googleIdToken(fixture) } });
+      expect(response.status).toBe(200);
+      const bearer = response.headers["set-auth-token"];
+      expect(typeof bearer).toBe("string");
+      return { bearer: bearer as string, token: (response.body as { token: string }).token };
     }
 
     function expectDpopRejection(observed: Observed, code: string): void {
@@ -357,7 +430,10 @@ describe.skipIf(databaseUrl === undefined)(
         googleSubject: `google-${suffix}`,
         sessionId: session.id,
         // bearer()'s own signing: serializeSignedCookie("", token, secret) minus the "=".
-        bearer: (await serializeSignedCookie("", session.token, SECRET)).replace("=", ""),
+        // bearer()'s own signing is serializeSignedCookie("", token, secret) minus
+        // the "="; that is the percent-encoded spelling, and the app sends it decoded.
+        bearer: decodeURIComponent((await serializeSignedCookie("", session.token, SECRET)).replace("=", "")),
+        bearerEncoded: (await serializeSignedCookie("", session.token, SECRET)).replace("=", ""),
         rawToken: session.token,
         cookie: (await serializeSignedCookie(sessionCookieName, session.token, SECRET)).split(";")[0] ?? "",
         keyA,
@@ -472,6 +548,20 @@ describe.skipIf(databaseUrl === undefined)(
         // The cookie control above leaves exactly this row: it is how we know
         // the verifier ran rather than the request merely being let through.
         expect(await recordedProofs(bound.keyA.jkt, p.jti)).toBe(1);
+      });
+
+      it("the percent-encoded spelling of the same signed token authenticates too, and is enforced the same way", async () => {
+        const encoded = bound.bearerEncoded;
+        expect(encoded).not.toBe(bound.bearer);
+        const good = await signProof(bound.keyA, { method: "GET", path: GET_SESSION, bearer: encoded });
+        const wrongKey = await signProof(keyB, { method: "GET", path: GET_SESSION, bearer: encoded });
+
+        const accepted = await fetchWithAuthorization(`Bearer ${encoded}`, GET_SESSION, good.header);
+        const rejected = await fetchWithAuthorization(`Bearer ${encoded}`, GET_SESSION, wrongKey.header);
+
+        expect(accepted.status).toBe(200);
+        expect(await recordedProofs(bound.keyA.jkt, good.jti)).toBe(1);
+        expectDpopRejection(rejected, "DPOP_KEY_MISMATCH");
       });
 
       it("get-session with a valid proof from a DIFFERENT key B is 401 DPOP_KEY_MISMATCH", async () => {
@@ -603,7 +693,7 @@ describe.skipIf(databaseUrl === undefined)(
 
         const observed = await fetchWithAuthorization(`Bearer ${bound.rawToken}`, path, p.header);
 
-        expect(observed.status).toBe(401);
+        expect(observed).toMatchObject({ status: 401, code: "UNAUTHORIZED" });
         expect(await recordedProofs(bound.keyA.jkt, p.jti)).toBe(0);
       });
 
@@ -630,7 +720,7 @@ describe.skipIf(databaseUrl === undefined)(
         const q = await signProof(bound.keyA, { method: "GET", path, bearer: listedToken });
         const observed = await fetchWithAuthorization(`Bearer ${listedToken}`, path, q.header);
 
-        expect(observed.status).toBe(401);
+        expect(observed).toMatchObject({ status: 401, code: "UNAUTHORIZED" });
       });
     });
 
@@ -672,6 +762,7 @@ describe.skipIf(databaseUrl === undefined)(
 
         expect(observed.status).toBe(200);
         expect(observed.body).toMatchObject({ session: { id: bound.sessionId } });
+        expect(await recordedProofs(bound.keyA.jkt, p.jti)).toBe(1);
       });
 
       it("a bearer that does not verify leaves the request's own cookie in charge, and that is enforced too", async () => {
@@ -695,29 +786,13 @@ describe.skipIf(databaseUrl === undefined)(
     });
 
     describe("a request that already carries a live bearer and then creates a session", () => {
-      it("sign-in/social binds the new session to the proof's key, with the proof recorded once", async () => {
+      it("sign-in/social binds the new session to the proof's key, and the verifier ran for it", async () => {
         // The generic DPoP hook now sees the bearer's session and verifies the
         // proof first. Session creation must reuse that verification:
         // verifying the same (jkt, jti) again would lose to the first as a
         // replay and leave the new session unbound.
         const fixture = await createFixture("sign-in-with-bearer");
         const path = "/api/auth/sign-in/social";
-        const idToken = [
-          { alg: "none", typ: "JWT" },
-          {
-            iss: "https://accounts.google.com",
-            aud: "test-google-client",
-            sub: fixture.googleSubject,
-            email: fixture.email,
-            email_verified: true,
-            name: "Bearer DPoP sign-in",
-            iat: Math.floor(Date.now() / 1000),
-            exp: Math.floor(Date.now() / 1000) + 600,
-          },
-        ]
-          .map((part) => Buffer.from(JSON.stringify(part)).toString("base64url"))
-          .concat("signature")
-          .join(".");
         const p = await signProof(fixture.keyA, { method: "POST", path, bearer: fixture.bearer });
 
         const observed = await send({
@@ -726,7 +801,7 @@ describe.skipIf(databaseUrl === undefined)(
           method: "POST",
           path,
           dpop: p.header,
-          body: { provider: "google", idToken: { token: idToken } },
+          body: { provider: "google", idToken: { token: googleIdToken(fixture) } },
         });
 
         expect(observed.status).toBe(200);
@@ -739,6 +814,96 @@ describe.skipIf(databaseUrl === undefined)(
         );
         expect(stored.rows[0]?.dpopJkt).toBe(fixture.keyA.jkt);
         expect(await recordedProofs(fixture.keyA.jkt, p.jti)).toBe(1);
+      });
+
+      it("sign-in/social with that live bearer and a proof from ANOTHER key is 401 DPOP_KEY_MISMATCH and creates no session", async () => {
+        const fixture = await createFixture("sign-in-wrong-key");
+        const path = "/api/auth/sign-in/social";
+        const p = await signProof(keyB, { method: "POST", path, bearer: fixture.bearer });
+        const sessionCount = async () =>
+          Number((await authPool.query('SELECT count(*) AS count FROM "auth_session" WHERE "userId" = $1', [fixture.userId])).rows[0]?.count);
+        const before = await sessionCount();
+
+        const observed = await send({
+          fixture,
+          transport: "bearer",
+          method: "POST",
+          path,
+          dpop: p.header,
+          body: { provider: "google", idToken: { token: googleIdToken(fixture) } },
+        });
+
+        expectDpopRejection(observed, "DPOP_KEY_MISMATCH");
+        expect(await sessionCount()).toBe(before);
+      });
+    });
+
+    describe("a session that was created without a proof (not bound to a key yet)", () => {
+      // Before the hook could see bearer sessions this branch never ran for the
+      // mobile app. It is the same decision /v1 makes (decideDpopForSession).
+      it("passes without a proof, as in Phase 1", async () => {
+        const user = await createFixture("unbound-no-proof");
+        const unbound = await signInWithoutProof(user);
+
+        const observed = await fetchWithAuthorization(`Bearer ${unbound.bearer}`, "/api/auth/get-session");
+
+        expect(observed.status).toBe(200);
+        expect(observed.body).toMatchObject({ session: { token: unbound.token } });
+      });
+
+      it("before the cutover, a valid proof binds it to that key on first sight", async () => {
+        const user = await createFixture("unbound-bind");
+        const unbound = await signInWithoutProof(user);
+        const key = await newKey();
+        const path = "/api/auth/get-session";
+        const p = await signProof(key, { method: "GET", path, bearer: unbound.bearer });
+
+        const observed = await fetchWithAuthorization(`Bearer ${unbound.bearer}`, path, p.header);
+
+        expect(observed.status).toBe(200);
+        const stored = await authPool.query<{ dpopJkt: string | null }>(
+          'SELECT "dpopJkt" FROM "auth_session" WHERE "token" = $1',
+          [unbound.token],
+        );
+        expect(stored.rows[0]?.dpopJkt).toBe(key.jkt);
+        expect(await recordedProofs(key.jkt, p.jti)).toBe(1);
+      });
+
+      it("after the cutover, a proof presented for it is 401 DPOP_KEY_MISMATCH", async () => {
+        const user = await createFixture("unbound-post-cutover");
+        const unbound = await signInWithoutProof(user);
+        const key = await newKey();
+        const path = "/api/auth/get-session";
+        const p = await signProof(key, { method: "GET", path, bearer: unbound.bearer });
+
+        const observed = await fetchWithAuthorization(`Bearer ${unbound.bearer}`, path, p.header, appPostCutover);
+
+        expectDpopRejection(observed, "DPOP_KEY_MISMATCH");
+      });
+    });
+
+    describe("state-changing routes check the proof too", () => {
+      it("update-user with a proof from another key is 401 DPOP_KEY_MISMATCH and changes nothing", async () => {
+        const fixture = await createFixture("update-user");
+        const path = "/api/auth/update-user";
+        const p = await proofFor(fixture, keyB, "bearer", "POST", path);
+
+        const observed = await send({ fixture, transport: "bearer", method: "POST", path, dpop: p.header, body: { name: "Renamed" } });
+
+        expectDpopRejection(observed, "DPOP_KEY_MISMATCH");
+        const stored = await authPool.query<{ name: string }>('SELECT "name" FROM "auth_user" WHERE "id" = $1', [fixture.userId]);
+        expect(stored.rows[0]?.name).toBe("Bearer DPoP update-user");
+      });
+
+      it("revoke-sessions with a proof from another key is 401 DPOP_KEY_MISMATCH and the session survives", async () => {
+        const fixture = await createFixture("revoke-sessions");
+        const path = "/api/auth/revoke-sessions";
+        const p = await proofFor(fixture, keyB, "bearer", "POST", path);
+
+        const observed = await send({ fixture, transport: "bearer", method: "POST", path, dpop: p.header });
+
+        expectDpopRejection(observed, "DPOP_KEY_MISMATCH");
+        expect(await sessionRowExists(fixture.sessionId)).toBe(true);
       });
     });
 
@@ -772,6 +937,22 @@ describe.skipIf(databaseUrl === undefined)(
         expect(observed).toMatchObject({ status: 403, code: "REGISTRATION_LOGIN_METHOD_LOCKED" });
         expect(await accountRowExists(targetRowId)).toBe(true);
         expect(await accountRowExists(otherRowId)).toBe(true);
+      });
+
+      it("the guard does not depend on the DPoP hook: with no hook in the stack, bearer-only unlinking the registration account is still 403", async () => {
+        const fixture = await createFixture("guard-only");
+
+        const observed = await send({
+          fixture,
+          transport: "bearer",
+          method: "POST",
+          path: UNLINK,
+          body: { accountId: fixture.registrationAccountRowId },
+          via: appNoDpop,
+        });
+
+        expect(observed).toMatchObject({ status: 403, code: "REGISTRATION_LOGIN_METHOD_LOCKED" });
+        expect(await accountRowExists(fixture.registrationAccountRowId)).toBe(true);
       });
 
       it("bearer, CONTROL: unlinking the LATER account with a correct proof succeeds", async () => {

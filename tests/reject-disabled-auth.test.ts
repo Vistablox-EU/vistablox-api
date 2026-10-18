@@ -36,6 +36,15 @@ describe("reject disabled auth routes", () => {
     expect(response.status).toBe(404);
   });
 
+  it("404s the expo authorization proxy, which signs caller-chosen values with the session secret", async () => {
+    for (const path of ["/api/auth/expo-authorization-proxy", "/api/auth/expo-authorization-proxy/", "/api/auth/Expo-Authorization-Proxy"]) {
+      const response = await request(buildApp()).get(path);
+
+      expect(response.status).toBe(404);
+      expect(response.body).toMatchObject({ code: "resource.not_found", status: 404 });
+    }
+  });
+
   it("leaves update-passkey (rename) open", async () => {
     const response = await request(buildApp()).post("/api/auth/passkey/update-passkey");
 

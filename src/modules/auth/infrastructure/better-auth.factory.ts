@@ -302,6 +302,9 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       // token, such as the `token` field some better-auth responses carry, would
       // be signed by bearer() itself and accepted. better-auth-hook-session.ts
       // parses Authorization the same way and must change together with this.
+      // Nothing may sign a caller-chosen value with the session secret:
+      // reject-disabled-auth.ts blocks @better-auth/expo's
+      // /expo-authorization-proxy, which would.
       bearer({ requireSignature: true }),
       // Device-session time limits: before the DPoP plugin, whose before
       // hook already reads the session. Registered unconditionally: it only
