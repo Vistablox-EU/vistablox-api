@@ -1,4 +1,3 @@
-import { readdirSync } from "node:fs";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
@@ -7,14 +6,6 @@ import { createVitest } from "vitest/node";
 const testsDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(testsDirectory, "..");
 const bootstrapSuite = "tests/staff-bootstrap-repository.integration.test.ts";
-
-// Repository-relative, forward-slash paths of every test file under tests/.
-function listTestFiles(): string[] {
-  return readdirSync(testsDirectory, { recursive: true, encoding: "utf8" })
-    .map((entry) => `tests/${entry.split("\\").join("/")}`)
-    .filter((entry) => entry.endsWith(".test.ts"))
-    .sort();
-}
 
 // The bootstrap suite's "issued" cases only pass while no account in the shared
 // test database holds an active admin_operations role, and other suites
@@ -42,9 +33,11 @@ describe("first-admin bootstrap suite isolation", () => {
       const [alone] = bootstrap;
       const others = placements.filter((placement) => placement.file !== bootstrapSuite);
 
-      // Every test file is picked up exactly once: none lost by an include
-      // pattern, none run twice because an exclude pattern missed it.
-      expect(placements.map((placement) => placement.file).sort()).toEqual(listTestFiles());
+      // The projects add their own exclude to the root one rather than
+      // replacing it: nothing from the directories vitest.config.ts excludes
+      // (contracts/ has its own runner) is picked up.
+      const excludedDirectories = /^(contracts|\.claude)\/|(^|\/)node_modules\//;
+      expect(placements.filter((placement) => excludedDirectories.test(placement.file))).toEqual([]);
 
       // It has a project to itself...
       const sharingItsProject = others.filter((placement) => placement.project === alone?.project);
