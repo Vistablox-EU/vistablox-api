@@ -53,6 +53,45 @@ describe("investor activity API", () => {
     },
   );
 
+  it("serves an escrow-minted position that has no reservation or offering", async () => {
+    // A position minted straight from an on-chain escrow contribution (AD-256)
+    // is not created from a reservation, and offering_id is resolved only
+    // through the reservation, so both ids are null. The response schema used
+    // to require both and turned this row into a 422 for the whole page.
+    vi.mocked(repository.listCurrentPositions).mockResolvedValueOnce([
+      {
+        positionId: "position_01",
+        reservationId: null,
+        offeringId: null,
+        pivId: "piv_01",
+        unitCount: "1000.000000",
+        costBasisEur: "1000.00",
+        positionStatus: "active",
+        activatedAt: new Date("2026-09-20T10:00:00.000Z"),
+        property: { propertyType: "residential", countryCode: "PT", city: "Porto" },
+      },
+    ]);
+
+    const response = await request(appFor("customer")).get(
+      "/v1/investor-profile/positions",
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual([
+      {
+        position_id: "position_01",
+        reservation_id: null,
+        offering_id: null,
+        piv_id: "piv_01",
+        unit_count: "1000.000000",
+        cost_basis_eur: "1000.00",
+        position_status: "active",
+        activated_at: "2026-09-20T10:00:00.000Z",
+        property: { property_type: "residential", country_code: "PT", city: "Porto" },
+      },
+    ]);
+  });
+
   it.each(["reservations", "positions"])(
     "does not expose %s to staff identities",
     async (resource) => {
