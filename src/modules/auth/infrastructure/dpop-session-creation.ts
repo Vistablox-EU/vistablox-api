@@ -86,6 +86,18 @@ export function isSessionUpgradeCeremonyPath(path: string | undefined): boolean 
 const dpopClaimsByRequest = new WeakMap<Request, DpopProofClaims>();
 
 /**
+ * For the generic /api/auth before-hook (better-auth-dpop.plugin.ts): it
+ * verifies and records the proof of a request that already carries a live
+ * session. If that same request then creates a session (sign-in/social with
+ * a still-valid bearer), session.create.before must bind it from these
+ * claims instead of verifying the identical (jkt, jti) a second time, which
+ * would lose to the first as a replay and leave the new session unbound.
+ */
+export function rememberVerifiedDpopProof(request: Request, claims: DpopProofClaims): void {
+  dpopClaimsByRequest.set(request, claims);
+}
+
+/**
  * Verifies a DPoP proof presented at session creation and returns its jkt to
  * bind, or null if there's nothing to bind (no dpop config, no proof, an
  * internal non-HTTP call, or the proof doesn't verify). A verification

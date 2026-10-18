@@ -231,6 +231,11 @@ export async function decideDpopForSession(input: {
   phase1CutoverAt: Date | undefined;
   recordProof: (jkt: string, jti: string, expiresAt: Date) => Promise<boolean>;
   replayWindowSeconds?: number;
+  // Called once with the proof's claims after it verified AND was recorded as
+  // new. The caller can hand them on so a later step of the same request does
+  // not verify-and-record the identical (jkt, jti) again and lose to it as a
+  // replay.
+  onVerified?: (claims: DpopProofClaims) => void;
 }): Promise<DpopSessionDecision> {
   const replayWindowSeconds = input.replayWindowSeconds ?? 120;
   const record = (claims: DpopProofClaims): Promise<boolean> =>
@@ -246,6 +251,7 @@ export async function decideDpopForSession(input: {
     if (claims.jkt !== input.boundJkt) throw new DpopKeyMismatchError();
     const accepted = await record(claims);
     if (!accepted) throw new DpopReplayError();
+    input.onVerified?.(claims);
     return { action: "pass" };
   }
 
@@ -269,5 +275,6 @@ export async function decideDpopForSession(input: {
   const accepted = await record(claims);
   if (!accepted) return { action: "pass" };
 
+  input.onVerified?.(claims);
   return { action: "bind", jkt: claims.jkt };
 }

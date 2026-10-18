@@ -302,12 +302,15 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       // hook already reads the session. Registered unconditionally: it only
       // acts on rows the device-auth plugin created.
       deviceSessionLifetime.plugin,
-      // Device binding (DPoP): must come after bearer() -- bearer turns
-      // Authorization into the session cookie context first, so a session
-      // is resolvable by the time this runs. Only the passkey verify-*
-      // ceremonies (below) enforce inline instead of through this plugin,
-      // since only they need "pending session" context this plugin doesn't
-      // have.
+      // Device binding (DPoP). Registered after bearer(), but that gives its
+      // hook no session by itself: better-auth runs every before-hook with
+      // the original request and applies bearer()'s session cookie to the
+      // endpoint only once all hooks are done. The hook (and the registration
+      // guard below) therefore resolve the session through getSessionForHook
+      // (better-auth-hook-session.ts), which builds that cookie itself. Only
+      // the passkey verify-* ceremonies (below) enforce inline instead of
+      // through this plugin, since only they need "pending session" context
+      // this plugin doesn't have.
       ...(options.dpop === undefined ? [] : [createBetterAuthDpopPlugin(options.dpop)]),
       // Device-key auth (E2/L2): after bearer()/the DPoP plugin, same
       // reasoning as those two -- its endpoints resolve a pending session
