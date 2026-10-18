@@ -7,14 +7,14 @@ import { SignJWT, calculateJwkThumbprint, exportJWK, generateKeyPair, type Crypt
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createRequireDpopOnly } from "../src/modules/auth/api/require-dpop-only.js";
+import { createRequireDpopOnly } from "../src/modules/auth/api/customer/require-dpop-only.js";
 import {
   assertDpopKeyMatchesPendingSession,
   requireDpopProofForSessionCreation,
   type DpopCreationContext,
   type DpopSessionCreationOptions,
-} from "../src/modules/auth/infrastructure/dpop-session-creation.js";
-import type { DpopReplayRepository } from "../src/modules/auth/repository/dpop-replay.repository.js";
+} from "../src/modules/auth/infrastructure/shared/dpop-session-creation.js";
+import type { DpopReplayRepository } from "../src/modules/auth/repository/shared/dpop-replay.repository.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";

@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { AUTHENTICATION_LEVELS } from "../src/modules/auth/infrastructure/better-auth.factory.js";
+import { AUTHENTICATION_LEVELS } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 
 const PROJECT_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const MIGRATIONS_DIR = join(PROJECT_ROOT, "prisma", "migrations");

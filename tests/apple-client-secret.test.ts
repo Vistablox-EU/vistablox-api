@@ -3,7 +3,7 @@ import { generateKeyPairSync } from "node:crypto";
 import { decodeJwt, decodeProtectedHeader } from "jose";
 import { describe, expect, it } from "vitest";
 
-import { createAppleClientSecret } from "../src/modules/auth/infrastructure/apple-client-secret.js";
+import { createAppleClientSecret } from "../src/modules/auth/infrastructure/customer/apple-client-secret.js";
 
 describe("Apple OAuth client secret", () => {
   it("generates the ES256 client-secret JWT Apple requires", async () => {

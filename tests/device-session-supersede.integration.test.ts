@@ -8,17 +8,17 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaAccountRepository } from "../src/modules/account/repository/prisma-account.repository.js";
-import { createDeviceAuthRouter } from "../src/modules/auth/api/device-auth.router.js";
-import { createRequireDpopOnly } from "../src/modules/auth/api/require-dpop-only.js";
-import type { AuthAuditEvent } from "../src/modules/auth/application/auth-audit-sink.js";
-import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
-import { IssueDeviceChallengeService } from "../src/modules/auth/application/device-challenge-issuance.service.js";
-import { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/prisma-session-mirror.js";
-import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/prisma-device-challenge.repository.js";
-import { PrismaDeviceRepository } from "../src/modules/auth/repository/prisma-device.repository.js";
-import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/prisma-dpop-replay.repository.js";
+import { createDeviceAuthRouter } from "../src/modules/auth/api/customer/device-auth.router.js";
+import { createRequireDpopOnly } from "../src/modules/auth/api/customer/require-dpop-only.js";
+import type { AuthAuditEvent } from "../src/modules/auth/application/shared/auth-audit-sink.js";
+import { EnrolDeviceService } from "../src/modules/auth/application/customer/device-enrolment.service.js";
+import { IssueDeviceChallengeService } from "../src/modules/auth/application/customer/device-challenge-issuance.service.js";
+import { LoginDeviceService } from "../src/modules/auth/application/customer/device-login.service.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/shared/prisma-session-mirror.js";
+import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/customer/prisma-device-challenge.repository.js";
+import { PrismaDeviceRepository } from "../src/modules/auth/repository/customer/prisma-device.repository.js";
+import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/shared/prisma-dpop-replay.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
