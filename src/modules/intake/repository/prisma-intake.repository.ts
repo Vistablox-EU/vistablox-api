@@ -170,6 +170,9 @@ export class PrismaIntakeRepository
   public async approveReversalOperation(input: { caseId: string; operationId: string; approverAccountId: string; approvedAt: Date }): Promise<IntakeReversalOperationRecord | null> {
     const operation = await this.database.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId } });
     if (operation === null) return null;
+    // An approval that committed but whose execution never ran (the process died in between) is finished by the account that gave it.
+    // Execution then re-checks everything as usual, and the approval on record stays the original one.
+    if (operation.status === "approved" && operation.approvedByAccountId === input.approverAccountId) return toReversalOperationRecord(operation);
     // One conditional UPDATE decides, so two approvers racing cannot both claim it and the requester cannot approve their own request.
     const claimed = await this.database.intakeCaseReversalOperation.updateMany({ where: { id: operation.id, status: "pending_approval", requestedByAccountId: { not: input.approverAccountId } }, data: { status: "approved", approvedByAccountId: input.approverAccountId, approvedAt: input.approvedAt } });
     if (claimed.count === 0) throw new CaseReviewConflictError(operation.fromStage, "approve this reversal");
@@ -181,12 +184,14 @@ export class PrismaIntakeRepository
       return await this.runReversalExecution(input);
     } catch (error) {
       // An unexpected error rolled the transaction back and left the operation in flight, which blocks every further correction on
-      // the case and offers no way to retry this one. Record it as failed so the case is not stuck behind it.
-      await this.database.$transaction(async (transaction) => {
+      // the case. Record it as failed so the case is not stuck behind it.
+      const recording = await this.database.$transaction(async (transaction) => {
         const operation = await transaction.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId } });
         if (operation !== null) await failReversalOperation(transaction, operation, { actorAccountId: input.actorAccountId, failedAt: input.completedAt, code: reversalFailureCodes.executionError, detail: "The correction failed unexpectedly and was not applied." });
-      }).catch(() => undefined);
-      throw error;
+      }).then(() => null, (failure: unknown) => ({ failure }));
+      if (recording === null) throw error;
+      // The operation stays in flight (an approved one can be finished by its approver). Say so rather than lose why recording failed.
+      throw new AggregateError([error, recording.failure], `${errorMessage(error)}; recording the failure also failed: ${errorMessage(recording.failure)}`, { cause: error });
     }
   }
 
@@ -2339,6 +2344,10 @@ function toCaseMessageRecord(input: {
     body: input.body,
     createdAt: input.createdAt,
   };
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 // Ends an in-flight operation as failed and records it in the audit log. Conditional on the operation still being in flight,

@@ -1139,6 +1139,78 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     });
   });
 
+  describe("an approval that was claimed but never executed", () => {
+    // approveReversalOperation and executeReversalOperation are separate
+    // transactions, so a process that dies between them leaves the operation
+    // approved: in flight for the policy, and refused by a second approval.
+    async function claimWithoutExecuting(command: string, stage: FixtureStage) {
+      const fixture = await createCase(stage);
+      const requested = await requestReversal(fixture, command);
+      await intakeRepository.approveReversalOperation({
+        caseId: fixture.caseId,
+        operationId: requested.data.operation_id,
+        approverAccountId: approverId,
+        approvedAt: new Date("2026-10-01T08:59:00.000Z"),
+      });
+      expect(await readOperation(requested.data.operation_id)).toMatchObject({ status: "approved", approvedByAccountId: approverId });
+      return { fixture, operationId: requested.data.operation_id };
+    }
+
+    it("blocks further corrections until it is finished", async () => {
+      const { fixture } = await claimWithoutExecuting("reopen_pre_offering", "pre_offering_open");
+      await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(true);
+      await expect(requestReversal(fixture, "reopen_pre_offering")).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_allowed" });
+    });
+
+    it("is finished when the account that approved it approves again, keeping the original approval", async () => {
+      const { fixture, operationId } = await claimWithoutExecuting("reopen_pre_offering", "pre_offering_open");
+
+      const resumed = await approve(fixture, operationId, approverId);
+
+      expect(resumed.data).toMatchObject({ status: "completed", approved_by_account_id: approverId, completed_at: now.toISOString() });
+      expect(await readOperation(operationId)).toMatchObject({
+        status: "completed",
+        approvedByAccountId: approverId,
+        approvedAt: new Date("2026-10-01T08:59:00.000Z"),
+        completedAt: now,
+      });
+      expect(await readCase(fixture.caseId)).toMatchObject({ stage: "submitted", approvedAt: null });
+      expect((await database.offering.findUniqueOrThrow({ where: { id: fixture.offeringId! } })).status).toBe("closed");
+      expect(await readAudit(fixture.caseId, "intake.reopen_pre_offering")).toHaveLength(1);
+      await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(false);
+    });
+
+    it("is not finished by the requester, nor by an account that did not approve it", async () => {
+      const { fixture, operationId } = await claimWithoutExecuting("reopen_structuring", "post_ipo_structuring");
+
+      await expect(approve(fixture, operationId, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_conflict" });
+      await expect(approve(fixture, operationId, investorId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_conflict" });
+
+      expect(await readOperation(operationId)).toMatchObject({ status: "approved", approvedByAccountId: approverId });
+      expect((await readCase(fixture.caseId)).stage).toBe("post_ipo_structuring");
+    });
+
+    it("still runs the execution-time checks when it is finished late", async () => {
+      const { fixture, operationId } = await claimWithoutExecuting("reopen_pre_offering", "pre_offering_open");
+      await addReservation(fixture.offeringId!, { capitalState: "eurc_reserved" });
+
+      await expect(approve(fixture, operationId, approverId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_allowed" });
+
+      expect(await readOperation(operationId)).toMatchObject({ status: "failed", failureCode: "not_allowed" });
+      expect((await database.offering.findUniqueOrThrow({ where: { id: fixture.offeringId! } })).status).toBe("pre_offering");
+    });
+
+    it("is finished once even when the approver submits it twice at the same time", async () => {
+      const { fixture, operationId } = await claimWithoutExecuting("reopen_pre_offering", "pre_offering_open");
+
+      const outcomes = await Promise.all([approve(fixture, operationId, approverId), approve(fixture, operationId, approverId)]);
+
+      expect(outcomes.map((outcome) => outcome.data.status)).toEqual(["completed", "completed"]);
+      expect(await readAudit(fixture.caseId, "intake.reopen_pre_offering")).toHaveLength(1);
+      expect(await readEvents(fixture.caseId).then((events) => events.filter((event) => event.eventType === "case_stage_reverted"))).toHaveLength(1);
+    });
+  });
+
   describe("execution that cannot finish", () => {
     it("records an unexpected execution error as a failed operation and releases the case", async () => {
       const fixture = await createCase("submitted");
@@ -1185,6 +1257,55 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         changes: { operation_id: created.operationId, command: "return_to_draft", failure_code: "execution_error" },
       });
       await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(false);
+    });
+
+    it("reports the failure of the failure recording as well, and leaves the operation in flight", async () => {
+      const fixture = await createCase("submitted");
+      const current = await readCase(fixture.caseId);
+      const created = await intakeRepository.createReversalOperation({
+        caseId: fixture.caseId,
+        command: "return_to_draft",
+        fromStage: "submitted",
+        toStage: "submitted",
+        status: "requested",
+        reasonCode: "operator_input_error",
+        reason: "provokes a ledger error",
+        requestedByAccountId: requesterId,
+        expectedStage: "submitted",
+        expectedWorkflowEventSequence: current.workflowEventSequence,
+        reversalOfEventId: fixture.transitions.submitted ?? null,
+        idempotencyKey: uid("key"),
+        traceId: uid("trace"),
+      });
+      // The execution transaction runs for real and fails on the ledger; the
+      // transaction that would record the failure cannot reach the database.
+      let transactions = 0;
+      const unreachable = new Proxy(database, {
+        get(target, property) {
+          if (property !== "$transaction") return Reflect.get(target, property, target);
+          return async (...args: Parameters<typeof target.$transaction>) => {
+            if (++transactions === 2) throw new Error("recorder cannot reach the database");
+            return (target.$transaction as (...inner: unknown[]) => Promise<unknown>)(...args);
+          };
+        },
+      });
+      const repository = new PrismaIntakeRepository(unreachable, boss, new PrismaKycRepository(database, boss));
+
+      const error = await repository
+        .executeReversalOperation({ caseId: fixture.caseId, operationId: created.operationId, actorAccountId: requesterId, traceId: uid("trace"), completedAt: now })
+        .then(
+          () => undefined,
+          (rejected: unknown) => rejected,
+        );
+
+      expect(error).toBeInstanceOf(AggregateError);
+      const aggregate = error as AggregateError;
+      expect(aggregate.message).toContain("recorder cannot reach the database");
+      expect(aggregate.message).toContain("reversal events require a stage transition");
+      expect(aggregate.errors).toHaveLength(2);
+      expect((aggregate.cause as Error).message).toContain("reversal events require a stage transition");
+      expect(await readOperation(created.operationId)).toMatchObject({ status: "requested", failedAt: null, failureCode: null });
+      expect((await readCase(fixture.caseId)).stage).toBe("submitted");
     });
 
     it("never turns an operation that did complete into a failed one when only the acknowledgement was lost", async () => {
@@ -1717,6 +1838,23 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         .get(`/internal/v1/intake-cases/${fixture.caseId}/reversal-preview`)
         .set("x-test-account", approverId);
       expect(preview.body.data).toMatchObject({ available: false, correction_in_progress: false, actions: [] });
+    });
+
+    it("lets the approver finish a claimed but unexecuted approval by approving again, and refuses everyone else", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const requested = await postCommand(fixture, "reopen-pre-offering", requesterId);
+      const operationId = requested.body.data.operation_id as string;
+      await intakeRepository.approveReversalOperation({ caseId: fixture.caseId, operationId, approverAccountId: approverId, approvedAt: now });
+      const approvalPath = `/internal/v1/intake-cases/${fixture.caseId}/reversal-operations/${operationId}/approve`;
+
+      const other = await request(httpApp()).post(approvalPath).set("x-test-account", investorId);
+      expect(other.status).toBe(409);
+      expect(other.body.code).toBe("intake.reversal_conflict");
+
+      const resumed = await request(httpApp()).post(approvalPath).set("x-test-account", approverId);
+      expect(resumed.status).toBe(200);
+      expect(resumed.body.data).toMatchObject({ status: "completed", approved_by_account_id: approverId });
+      expect((await readCase(fixture.caseId)).stage).toBe("submitted");
     });
 
     it("answers a request with stale headers with a 409 domain error", async () => {
