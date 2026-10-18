@@ -243,6 +243,34 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     return reservationId;
   }
 
+  // An information request that is no longer open to the applicant (or never
+  // was), as the history of a case that went through a request-for-information.
+  async function addHistoricInformationRequest(caseId: string, status: "proposed" | "answered" | "withdrawn" | "expired") {
+    const resolved = { resolvedAt: decidedAt };
+    let resolution: Record<string, unknown> = {};
+    if (status === "answered") {
+      const revisionId = uid("revision_rev");
+      await database.submissionRevision.create({
+        data: { id: revisionId, caseId, revisionNumber: 100 + ++counter, submittedByAccountId: applicantId, submissionData: {}, reason: "resubmission_after_rfi" },
+      });
+      resolution = { ...resolved, resolutionType: "resubmitted", resolvingRevisionId: revisionId };
+    } else if (status === "withdrawn" || status === "expired") {
+      resolution = { ...resolved, resolutionType: status };
+    }
+    await database.informationRequest.create({
+      data: {
+        id: uid("inforeq_rev"),
+        caseId,
+        requestingWorkstream: "intake",
+        proposedByAccountId: requesterId,
+        status,
+        ...(status === "proposed" ? {} : { publishedByAccountId: requesterId, publishedAt: decidedAt, dueAt: new Date("2026-10-15T10:00:00.000Z") }),
+        requestBody: `Earlier request, now ${status}.`,
+        ...resolution,
+      },
+    });
+  }
+
   const readCase = (caseId: string) => database.intakeCase.findUniqueOrThrow({ where: { id: caseId } });
   const readOperation = (operationId: string) =>
     database.intakeCaseReversalOperation.findUniqueOrThrow({ where: { id: operationId } });
@@ -337,6 +365,29 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       const fixture = await createCase("waiting_on_applicant");
       const snapshot = await intakeRepository.getIntakeReversalSnapshot(fixture.caseId);
       expect(snapshot).toMatchObject({ stage: "waiting_on_applicant", activeInformationRequest: true });
+    });
+
+    it("only counts an information request that is still published", async () => {
+      const fixture = await createCase("submitted");
+      for (const status of ["proposed", "answered", "withdrawn", "expired"] as const) {
+        await addHistoricInformationRequest(fixture.caseId, status);
+      }
+      expect((await intakeRepository.getIntakeReversalSnapshot(fixture.caseId))?.activeInformationRequest).toBe(false);
+
+      await database.informationRequest.create({
+        data: {
+          id: uid("inforeq_rev"),
+          caseId: fixture.caseId,
+          requestingWorkstream: "intake",
+          proposedByAccountId: requesterId,
+          status: "published",
+          publishedByAccountId: requesterId,
+          publishedAt: decidedAt,
+          dueAt: new Date("2026-10-15T10:00:00.000Z"),
+          requestBody: "Now there is an open one.",
+        },
+      });
+      expect((await intakeRepository.getIntakeReversalSnapshot(fixture.caseId))?.activeInformationRequest).toBe(true);
     });
 
     it("counts the offering's reservations, funding, disclosure pack and finalized state", async () => {
@@ -493,6 +544,20 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
           reason: "Wrong case selected",
         },
       });
+    });
+
+    it("still offers and runs it for a case whose earlier information requests were answered, withdrawn or expired", async () => {
+      const fixture = await createCase("submitted");
+      for (const status of ["answered", "withdrawn", "expired"] as const) {
+        await addHistoricInformationRequest(fixture.caseId, status);
+      }
+
+      const preview = await previewService.execute(fixture.caseId);
+      expect(preview.data.actions.map((action) => action.action)).toEqual(["return_to_draft"]);
+      const result = await requestReversal(fixture, "return_to_draft");
+
+      expect(result.data.status).toBe("completed");
+      expect((await readCase(fixture.caseId)).stage).toBe("draft");
     });
 
     it("no longer offers the same correction once it has run", async () => {
@@ -935,6 +1000,34 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
 
       await expect(approve(fixture, requested.data.operation_id)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_allowed" });
       expect((await readCase(fixture.caseId)).stage).toBe("post_ipo_structuring");
+    });
+
+    it.each([
+      [
+        "final terms were published",
+        "final_terms_published",
+        (offeringId: string) => database.offering.update({ where: { id: offeringId }, data: { finalOfferingPublishedAt: now } }),
+      ],
+      [
+        "a reservation was finalized",
+        "offering_finalized",
+        (offeringId: string) => addReservation(offeringId, { stage: "finalized", capitalState: "eurc_finalized" }),
+      ],
+      [
+        "a reconfirmation was opened",
+        "reconfirmation_open",
+        (offeringId: string) => addReservation(offeringId, { stage: "awaiting_reconfirmation", capitalState: "reconfirmation_pending" }),
+      ],
+    ])("fails an approval of reopen_final_offering_review when %s after the request (%s)", async (_name, _blocker, arrive) => {
+      const fixture = await createCase("approved_for_final_offering");
+      const requested = await requestReversal(fixture, "reopen_final_offering_review");
+      await arrive(fixture.offeringId!);
+
+      await expect(approve(fixture, requested.data.operation_id)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_allowed" });
+
+      expect(await readOperation(requested.data.operation_id)).toMatchObject({ status: "failed", failureCode: "not_allowed" });
+      expect(await readCase(fixture.caseId)).toMatchObject({ stage: "approved_for_final_offering", approvedForFinalOfferingAt: decidedAt });
+      expect(await readAudit(fixture.caseId, "intake.reopen_final_offering_review")).toHaveLength(0);
     });
 
     it("waits for an in-flight reservation to commit before deciding, so none can slip in behind the close", async () => {
