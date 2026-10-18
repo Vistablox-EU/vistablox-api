@@ -1,6 +1,6 @@
 import { AppError } from "../../../shared/errors/app-error.js";
-import { getReversalAction, reversalCommandSchema, reversalReasonCodeSchema, type ReversalCommand } from "../domain/intake-reversal.policy.js";
-import type { IntakeRepository, IntakeReversalOperationRecord, IntakeReversalSnapshot } from "../repository/intake.repository.js";
+import { getReversalAction, reversalCommandSchema, reversalFailureCodes, reversalReasonCodeSchema, type ReversalCommand } from "../domain/intake-reversal.policy.js";
+import { CaseReviewConflictError, type IntakeRepository, type IntakeReversalOperationRecord, type IntakeReversalSnapshot } from "../repository/intake.repository.js";
 
 // The reversal write/read methods are optional on IntakeRepository (so the
 // many test fake repositories don't have to stub them), but these services
@@ -61,13 +61,13 @@ export class RequestIntakeReversalService {
     const reasonCode = reversalReasonCodeSchema.parse(input.reasonCode);
     const snapshot = await this.repository.getIntakeReversalSnapshot(input.caseId);
     if (snapshot === null) throw new AppError({ code: "intake.case_not_found", title: "Case not found", status: 404, detail: "The intake case does not exist." });
-    if (snapshot.stage !== input.expectedStage || snapshot.workflowEventSequence !== input.expectedWorkflowEventSequence) throw new AppError({ code: "intake.reversal_conflict", title: "Case changed", status: 409, detail: "The case changed while this correction was being prepared. Refresh and try again." });
+    if (snapshot.stage !== input.expectedStage || snapshot.workflowEventSequence !== input.expectedWorkflowEventSequence) throw reversalConflictError();
     const action = getReversalAction(mapSnapshot(snapshot), command);
-    if (action === null) throw new AppError({ code: "intake.reversal_not_allowed", title: "Correction not allowed", status: 409, detail: "This case cannot be moved back from its current state." });
-    const operation = await this.repository.createReversalOperation({ caseId: input.caseId, command, fromStage: snapshot.stage, toStage: action.targetStage, status: action.requiresSecondApproval ? "pending_approval" : "requested", reasonCode, reason: input.reason, requestedByAccountId: input.accountId, expectedStage: input.expectedStage, expectedWorkflowEventSequence: input.expectedWorkflowEventSequence, reversalOfEventId: snapshot.latestTransition?.eventId ?? null, idempotencyKey: input.idempotencyKey, traceId: input.traceId });
+    if (action === null) throw reversalNotAllowedError();
+    const operation = await mapRepositoryConflict(() => this.repository.createReversalOperation({ caseId: input.caseId, command, fromStage: snapshot.stage, toStage: action.targetStage, status: action.requiresSecondApproval ? "pending_approval" : "requested", reasonCode, reason: input.reason, requestedByAccountId: input.accountId, expectedStage: input.expectedStage, expectedWorkflowEventSequence: input.expectedWorkflowEventSequence, reversalOfEventId: snapshot.latestTransition?.eventId ?? null, idempotencyKey: input.idempotencyKey, traceId: input.traceId }));
     if (operation.status === "pending_approval") return { data: toOperationResponse(operation) };
-    const completed = await this.repository.executeReversalOperation({ caseId: input.caseId, operationId: operation.operationId, actorAccountId: input.accountId, traceId: input.traceId, completedAt: this.clock() });
-    return { data: toOperationResponse(completed ?? operation) };
+    const completed = await mapRepositoryConflict(() => this.repository.executeReversalOperation({ caseId: input.caseId, operationId: operation.operationId, actorAccountId: input.accountId, traceId: input.traceId, completedAt: this.clock() }));
+    return { data: toOperationResponse(requireNotFailed(completed ?? operation)) };
   }
 }
 
@@ -75,10 +75,10 @@ export class ApproveIntakeReversalService {
   public constructor(private readonly repository: ReversalRepository, private readonly clock: () => Date = () => new Date()) {}
 
   public async execute(input: { caseId: string; operationId: string; accountId: string; traceId: string }) {
-    const operation = await this.repository.approveReversalOperation({ caseId: input.caseId, operationId: input.operationId, approverAccountId: input.accountId, approvedAt: this.clock() });
+    const operation = await mapRepositoryConflict(() => this.repository.approveReversalOperation({ caseId: input.caseId, operationId: input.operationId, approverAccountId: input.accountId, approvedAt: this.clock() }), "This correction cannot be approved: it is not awaiting approval, or you requested it yourself.");
     if (operation === null) throw new AppError({ code: "intake.reversal_operation_not_found", title: "Correction not found", status: 404, detail: "The correction operation does not exist." });
-    const completed = await this.repository.executeReversalOperation({ caseId: input.caseId, operationId: input.operationId, actorAccountId: input.accountId, traceId: input.traceId, completedAt: this.clock() });
-    return { data: toOperationResponse(completed ?? operation) };
+    const completed = await mapRepositoryConflict(() => this.repository.executeReversalOperation({ caseId: input.caseId, operationId: input.operationId, actorAccountId: input.accountId, traceId: input.traceId, completedAt: this.clock() }));
+    return { data: toOperationResponse(requireNotFailed(completed ?? operation)) };
   }
 }
 
@@ -89,6 +89,32 @@ export class GetIntakeReversalOperationService {
     if (operation === null) throw new AppError({ code: "intake.reversal_operation_not_found", title: "Correction not found", status: 404, detail: "The correction operation does not exist." });
     return { data: toOperationResponse(operation) };
   }
+}
+
+function reversalConflictError(detail = "The case changed while this correction was being prepared. Refresh and try again.", cause?: unknown) {
+  return new AppError({ code: "intake.reversal_conflict", title: "Case changed", status: 409, detail, cause });
+}
+
+function reversalNotAllowedError() {
+  return new AppError({ code: "intake.reversal_not_allowed", title: "Correction not allowed", status: 409, detail: "This case cannot be moved back from its current state." });
+}
+
+// The repository reports a conflict it detects under its own lock as a
+// CaseReviewConflictError, which would otherwise reach the client as a 500.
+async function mapRepositoryConflict<T>(action: () => Promise<T>, detail?: string): Promise<T> {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof CaseReviewConflictError) throw reversalConflictError(detail, error);
+    throw error;
+  }
+}
+
+// An operation that execution ended as failed did not change the case, so the
+// caller is told why, in the same terms the request-time checks use.
+function requireNotFailed(operation: IntakeReversalOperationRecord) {
+  if (operation.status === "failed") throw operation.failureCode === reversalFailureCodes.notAllowed ? reversalNotAllowedError() : reversalConflictError();
+  return operation;
 }
 
 function toOperationResponse(operation: IntakeReversalOperationRecord) {

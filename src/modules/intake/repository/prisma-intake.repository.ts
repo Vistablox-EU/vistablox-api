@@ -5,6 +5,7 @@ import { z } from "zod";
 import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
+import { getReversalAction, reversalCommandSchema, reversalFailureCodes } from "../domain/intake-reversal.policy.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { appendIntakeCaseEvent } from "./intake-case-event.repository.js";
 import {
@@ -67,6 +68,10 @@ const reminderDaysSettingSchema = z.object({
   business_days: z.array(z.number().int().min(1).max(60)).min(1),
 });
 
+// What loadReversalSnapshot reads through: either the shared client or a
+// transaction's.
+type ReversalSnapshotClient = Pick<Prisma.TransactionClient, "intakeCase" | "intakeCaseReversalOperation">;
+
 export class PrismaIntakeRepository
   implements IntakeRepository, PostIpoStructuringHandoffRepository
 {
@@ -77,7 +82,14 @@ export class PrismaIntakeRepository
   ) {}
 
   public async getIntakeReversalSnapshot(caseId: string): Promise<IntakeReversalSnapshot | null> {
-    const row = await this.database.intakeCase.findUnique({
+    return this.loadReversalSnapshot(this.database, caseId);
+  }
+
+  // Shared by the read endpoint and the execution step, which re-reads it inside
+  // its transaction. excludeOperationId leaves the operation being executed out
+  // of correctionInProgress, since it would otherwise block itself.
+  private async loadReversalSnapshot(client: ReversalSnapshotClient, caseId: string, excludeOperationId?: string): Promise<IntakeReversalSnapshot | null> {
+    const row = await client.intakeCase.findUnique({
       where: { id: caseId },
       include: {
         informationRequests: { where: { status: "published" }, select: { id: true }, take: 1 },
@@ -128,7 +140,7 @@ export class PrismaIntakeRepository
       },
       legalExecutionCompleted: row.legalExecutionEventRefs.length > 0,
       appraisalCompleted: row.appraisalCompletedAt !== null,
-      correctionInProgress: await this.database.intakeCaseReversalOperation.count({ where: { caseId, status: { in: ["requested", "pending_approval", "approved", "executing"] } } }) > 0,
+      correctionInProgress: await client.intakeCaseReversalOperation.count({ where: { caseId, status: { in: ["requested", "pending_approval", "approved", "executing"] }, ...(excludeOperationId === undefined ? {} : { id: { not: excludeOperationId } }) } }) > 0,
     };
   }
 
@@ -137,6 +149,9 @@ export class PrismaIntakeRepository
     if (existing !== null) return toReversalOperationRecord(existing);
     return this.database.$transaction(async (transaction) => {
       await transaction.$queryRaw`SELECT case_id FROM intake.intake_cases WHERE case_id = ${input.caseId} FOR UPDATE`;
+      // The caller's snapshot was read before this lock, so another action may have landed since.
+      const current = await transaction.intakeCase.findUniqueOrThrow({ where: { id: input.caseId }, select: { stage: true, workflowEventSequence: true } });
+      if (current.stage !== input.expectedStage || current.workflowEventSequence !== input.expectedWorkflowEventSequence) throw new CaseReviewConflictError(current.stage, "request this reversal");
       const created = await transaction.intakeCaseReversalOperation.create({ data: { id: `rev_${ulid()}`, ...input, expectedWorkflowEventSequence: input.expectedWorkflowEventSequence + 1, metadata: {} } });
       const now = new Date();
       await transaction.auditLog.create({ data: { id: `audit_${ulid()}`, actorAccountId: input.requestedByAccountId, action: "intake.correction_requested", resourceType: "intake_case", resourceId: input.caseId, changes: { operation_id: created.id, command: input.command, reason_code: input.reasonCode, reason: input.reason }, createdAt: now } });
@@ -153,30 +168,53 @@ export class PrismaIntakeRepository
   public async approveReversalOperation(input: { caseId: string; operationId: string; approverAccountId: string; approvedAt: Date }): Promise<IntakeReversalOperationRecord | null> {
     const operation = await this.database.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId } });
     if (operation === null) return null;
-    if (operation.requestedByAccountId === input.approverAccountId || operation.status !== "pending_approval") throw new CaseReviewConflictError(operation.fromStage, "approve this reversal");
-    const updated = await this.database.intakeCaseReversalOperation.update({ where: { id: operation.id }, data: { status: "approved", approvedByAccountId: input.approverAccountId, approvedAt: input.approvedAt } });
-    return toReversalOperationRecord(updated);
+    // One conditional UPDATE decides, so two approvers racing cannot both claim it and the requester cannot approve their own request.
+    const claimed = await this.database.intakeCaseReversalOperation.updateMany({ where: { id: operation.id, status: "pending_approval", requestedByAccountId: { not: input.approverAccountId } }, data: { status: "approved", approvedByAccountId: input.approverAccountId, approvedAt: input.approvedAt } });
+    if (claimed.count === 0) throw new CaseReviewConflictError(operation.fromStage, "approve this reversal");
+    return toReversalOperationRecord(await this.database.intakeCaseReversalOperation.findUniqueOrThrow({ where: { id: operation.id } }));
   }
 
   public async executeReversalOperation(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null> {
+    try {
+      return await this.runReversalExecution(input);
+    } catch (error) {
+      // An unexpected error rolled the transaction back and left the operation in flight, which blocks every further correction on
+      // the case and offers no way to retry this one. Record it as failed so the case is not stuck behind it.
+      await this.database.$transaction(async (transaction) => {
+        const operation = await transaction.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId } });
+        if (operation !== null) await failReversalOperation(transaction, operation, { actorAccountId: input.actorAccountId, failedAt: input.completedAt, code: reversalFailureCodes.executionError, detail: "The correction failed unexpectedly and was not applied." });
+      }).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  private async runReversalExecution(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null> {
     return this.database.$transaction(async (transaction) => {
       await transaction.$queryRaw`SELECT case_id FROM intake.intake_cases WHERE case_id = ${input.caseId} FOR UPDATE`;
       const operation = await transaction.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId }, include: { case: { select: { stage: true, workflowEventSequence: true } } } });
       if (operation === null) return null;
-      if (!["requested", "approved"].includes(operation.status)) return operation as unknown as IntakeReversalOperationRecord;
-      if (operation.case.stage !== operation.expectedStage || operation.case.workflowEventSequence !== operation.expectedWorkflowEventSequence) throw new CaseReviewConflictError(operation.case.stage, "execute this reversal");
+      if (!["requested", "approved"].includes(operation.status)) return toReversalOperationRecord(operation);
+      const failure = { actorAccountId: input.actorAccountId, failedAt: input.completedAt };
+      if (operation.case.stage !== operation.expectedStage || operation.case.workflowEventSequence !== operation.expectedWorkflowEventSequence) return failReversalOperation(transaction, operation, { ...failure, code: reversalFailureCodes.caseChanged, detail: "The case changed after this correction was requested." });
+      // The blockers were evaluated when the correction was requested, possibly long before this approval. Reservations, funding and
+      // disclosure packs do not move the case's workflow sequence, so evaluate them again here, with the offering row locked as
+      // createReservation locks it: a reservation either committed before this read or waits until the offering is closed.
+      const piv = await transaction.piv.findFirst({ where: { caseId: input.caseId }, orderBy: { id: "desc" }, select: { offerings: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true } } } });
+      const offeringId = piv?.offerings[0]?.id;
+      if (offeringId !== undefined) await transaction.$queryRaw`SELECT offering_id FROM offering.offerings WHERE offering_id = ${offeringId} FOR UPDATE`;
+      const snapshot = await this.loadReversalSnapshot(transaction, input.caseId, operation.id);
+      const command = reversalCommandSchema.safeParse(operation.command);
+      if (snapshot === null || !command.success || getReversalAction(snapshot, command.data) === null) return failReversalOperation(transaction, operation, { ...failure, code: reversalFailureCodes.notAllowed, detail: "The case no longer meets the conditions for this correction." });
       await transaction.intakeCaseReversalOperation.update({ where: { id: operation.id }, data: { status: "executing", startedAt: input.completedAt } });
       if (operation.command === "return_to_draft") await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "draft", updatedAt: input.completedAt } });
       else if (operation.command === "reopen_pre_offering") {
-        const piv = await transaction.piv.findFirst({ where: { caseId: input.caseId }, orderBy: { id: "desc" }, select: { offerings: { orderBy: { createdAt: "desc" }, take: 1, select: { id: true } } } });
-        const offeringId = piv?.offerings[0]?.id;
         if (offeringId !== undefined) await transaction.offering.update({ where: { id: offeringId }, data: { status: "closed" } });
         await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "submitted", approvedAt: null, ipoEndAt: null, ipoValueEur: null, updatedAt: input.completedAt } });
       } else if (operation.command === "reopen_structuring") {
         await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "pre_offering_open", postIpoStructuringCompletedAt: null, updatedAt: input.completedAt } });
       } else if (operation.command === "reopen_final_offering_review") {
         await transaction.intakeCase.update({ where: { id: input.caseId }, data: { stage: "post_ipo_structuring", approvedForFinalOfferingAt: null, postIpoStructuringCompletedAt: null, updatedAt: input.completedAt } });
-      } else throw new CaseReviewConflictError(operation.case.stage, "execute this reversal");
+      } else return failReversalOperation(transaction, operation, { ...failure, code: reversalFailureCodes.notAllowed, detail: `No executor exists for ${operation.command}.` });
       await transaction.auditLog.create({ data: { id: `audit_${ulid()}`, actorAccountId: input.actorAccountId, action: `intake.${operation.command}`, resourceType: "intake_case", resourceId: input.caseId, changes: { operation_id: operation.id, from_stage: operation.fromStage, to_stage: operation.toStage, reason_code: operation.reasonCode, reason: operation.reason }, createdAt: input.completedAt } });
       await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:reversal:${operation.id}:completed`, eventType: "case_stage_reverted", actorType: "staff", actorAccountId: input.actorAccountId, traceId: input.traceId, fromStage: operation.fromStage, toStage: operation.toStage, relatedResourceType: "intake_case_reversal_operation", relatedResourceId: operation.id, reversalOfEventId: operation.reversalOfEventId, metadata: { operation_id: operation.id, command: operation.command, reason_code: operation.reasonCode, reason: operation.reason }, occurredAt: input.completedAt });
       const updated = await transaction.intakeCaseReversalOperation.update({ where: { id: operation.id }, data: { status: "completed", completedAt: input.completedAt } });
@@ -2299,6 +2337,32 @@ function toCaseMessageRecord(input: {
     body: input.body,
     createdAt: input.createdAt,
   };
+}
+
+// Ends an in-flight operation as failed and records it in the audit log. Conditional on the operation still being in flight,
+// so it can never overwrite one that completed; returns null when it was not.
+async function failReversalOperation(
+  transaction: Prisma.TransactionClient,
+  operation: { id: string; caseId: string; command: string },
+  failure: { actorAccountId: string; failedAt: Date; code: string; detail: string },
+): Promise<IntakeReversalOperationRecord | null> {
+  const marked = await transaction.intakeCaseReversalOperation.updateMany({
+    where: { id: operation.id, status: { in: ["requested", "approved", "executing"] } },
+    data: { status: "failed", failedAt: failure.failedAt, failureCode: failure.code, failureDetail: failure.detail },
+  });
+  if (marked.count === 0) return null;
+  await transaction.auditLog.create({
+    data: {
+      id: `audit_${ulid()}`,
+      actorAccountId: failure.actorAccountId,
+      action: "intake.correction_failed",
+      resourceType: "intake_case",
+      resourceId: operation.caseId,
+      changes: { operation_id: operation.id, command: operation.command, failure_code: failure.code, failure_detail: failure.detail },
+      createdAt: failure.failedAt,
+    },
+  });
+  return toReversalOperationRecord(await transaction.intakeCaseReversalOperation.findUniqueOrThrow({ where: { id: operation.id } }));
 }
 
 function toReversalOperationRecord(input: {

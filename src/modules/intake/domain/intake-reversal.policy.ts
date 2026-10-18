@@ -22,6 +22,17 @@ export const reversalCommandSchema = z.enum([
 
 export type ReversalCommand = z.infer<typeof reversalCommandSchema>;
 
+// Why an operation ended in `failed`, as stored in failure_code. case_changed:
+// the case's stage or workflow sequence moved after the request. not_allowed:
+// the policy no longer allows the command at execution (a blocker appeared), or
+// no executor exists for it. execution_error: an unexpected error during
+// execution.
+export const reversalFailureCodes = {
+  caseChanged: "case_changed",
+  notAllowed: "not_allowed",
+  executionError: "execution_error",
+} as const;
+
 export interface ReversalSnapshot {
   stage: string;
   workflowEventSequence: number;
