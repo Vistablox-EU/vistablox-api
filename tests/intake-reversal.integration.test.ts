@@ -1614,7 +1614,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         "SELECT data FROM pgboss.job WHERE name = $1 AND data->>'case_id' = $2 ORDER BY created_on DESC LIMIT 1",
         [handoffQueue, caseId],
       );
-      return new OpenOfferingForApprovedCaseService(offeringRepository).execute(jobs.rows[0]?.data);
+      return new OpenOfferingForApprovedCaseService(offeringRepository, { openEscrowCampaign: true }).execute(jobs.rows[0]?.data);
     }
 
     it("leaves the offering closed, and its escrow campaign job queued, so investors still cannot invest", async () => {
