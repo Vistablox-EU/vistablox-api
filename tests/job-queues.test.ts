@@ -101,6 +101,31 @@ describe("queue creation at startup", () => {
     expect(/ensureJobQueue\(/.test(source)).toBe(true);
   });
 
+  // createQueue with a deadLetter option fails with "Queue maintenance.dead_letter
+  // does not exist" when the dead-letter queue is not there yet (a fresh
+  // database), which would stop the API and the worker from starting; and a
+  // consumer registered before the queue exists makes pg-boss emit an error
+  // event on every poll. Existing databases already have the queue, so only
+  // a fresh one would show it.
+  it.each(["src/server.ts", "src/worker.ts"])("%s creates the dead-letter queue before any job queue", (file) => {
+    const source = sourceOf(file);
+    const deadLetter = source.search(/ensureDeadLetterQueue\(\w+\)/);
+    const firstJobQueue = source.search(/ensureJobQueue\(/);
+
+    expect(deadLetter).toBeGreaterThan(-1);
+    expect(firstJobQueue).toBeGreaterThan(-1);
+    expect(deadLetter).toBeLessThan(firstJobQueue);
+  });
+
+  it("the worker starts consuming the dead-letter queue only after creating it", () => {
+    const source = sourceOf("src/worker.ts");
+    const created = source.indexOf("await ensureDeadLetterQueue(boss);");
+    const consumed = source.indexOf("await registerDeadLetterConsumer(boss, logger);");
+
+    expect(created).toBeGreaterThan(-1);
+    expect(consumed).toBeGreaterThan(created);
+  });
+
   it("the worker declares a cron-scheduled queue as scheduled and a one-shot queue as event", () => {
     const source = sourceOf("src/worker.ts");
     const kinds = queueKinds(source, "boss");
@@ -132,13 +157,26 @@ describe("queue creation at startup", () => {
     for (const name of consumed) expect([name, kinds.has(name)]).toEqual([name, true]);
   });
 
-  it("the API creates only event queues, each with the same kind the worker gives it", () => {
+  it("the API creates the queues it sends into, only as event queues, each with the same kind the worker gives it", () => {
     const serverKinds = queueKinds(sourceOf("src/server.ts"), "jobQueue");
     const workerKinds = queueKinds(sourceOf("src/worker.ts"), "boss");
 
+    // The queues the API process enqueues into: PrismaKycRepository.enqueueDiditWebhookProcessing,
+    // PrismaIntakeRepository (the offering-open handoff) and PrismaOfferingRepository
+    // (publishFinalOfferingTerms: the reconfirmation notification and the
+    // post-IPO handoff). Creating them here is what lets a send() succeed
+    // when the API starts before the worker on a fresh deploy, and it is the
+    // API process's only way to apply the retry and dead-letter settings.
+    // settlement.open_ipo_escrow_campaign is enqueued from inside the worker
+    // (the offering-open handoff's own transaction), so the worker creates it.
+    expect([...serverKinds.keys()].sort()).toEqual([
+      "case_timers.offering_reconfirmation_window_opened",
+      "case_timers.post_ipo_structuring_handoff",
+      "case_timers.pre_offering_open_handoff",
+      "provider_events.didit_webhook",
+    ]);
     // Two processes configuring one queue differently would undo each
     // other's settings on every start.
-    expect(serverKinds.size).toBeGreaterThan(0);
     for (const [name, kind] of serverKinds) expect([name, kind, workerKinds.get(name)]).toEqual([name, "event", "event"]);
   });
 });

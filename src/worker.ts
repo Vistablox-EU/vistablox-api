@@ -696,9 +696,11 @@ await boss.work("provider_events.didit_webhook", async (jobs) => {
   }
 });
 
-// Every job that fails after its last retry lands in the dead-letter queue
-// (ensureJobQueue, above); this logs each one at error level, which is what an
-// alert on a terminally failed job keys on.
+// A job sent from this release on that fails after its last retry lands in the
+// dead-letter queue (ensureJobQueue, above); a job queued by an earlier release
+// keeps the settings it was sent with and does not. This logs each entry at
+// error level, at least once, which is what an alert on a terminally failed job
+// keys on.
 await registerDeadLetterConsumer(boss, logger);
 
 logger.info("VistaBlox worker started");

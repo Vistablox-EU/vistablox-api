@@ -97,6 +97,36 @@ describe("dead-letter consumer", () => {
     });
   });
 
+  // pg-boss fails a job itself, with an output of the form { value: { message } },
+  // when its handler outlives expireInSeconds (a worker killed mid-job by a
+  // deploy or an OOM, or a hung handler) and when its heartbeat stops; and it
+  // wraps anything that is not an object (a string passed to fail(), a
+  // non-Error throw) as { value }.
+  it.each([
+    ["a job pg-boss timed out", { value: { message: "job timed out" } }, "job timed out"],
+    ["a job whose heartbeat stopped", { value: { message: "job heartbeat timeout" } }, "job heartbeat timeout"],
+    ["a non-Error throw", { value: "plain string failure" }, "plain string failure"],
+  ])("keeps the cause when the failure output is pg-boss's wrapped form: %s", async (_label, output, expected) => {
+    const { logger, error } = fakeLogger();
+
+    await createDeadLetterHandler(logger)([deadLetterJob({ output })]);
+
+    expect((error.mock.calls[0]?.[0] as { last_error: unknown }).last_error).toBe(expected);
+  });
+
+  it.each([
+    ["a number", { value: 42 }],
+    ["null", { value: null }],
+    ["an object with no message", { value: { code: "E_X" } }],
+    ["a blank output object", {}],
+  ])("logs a null last_error rather than guessing when the output holds no message: %s", async (_label, output) => {
+    const { logger, error } = fakeLogger();
+
+    await createDeadLetterHandler(logger)([deadLetterJob({ output })]);
+
+    expect((error.mock.calls[0]?.[0] as { last_error: unknown }).last_error).toBeNull();
+  });
+
   it("truncates a very long last error", async () => {
     const { logger, error } = fakeLogger();
 

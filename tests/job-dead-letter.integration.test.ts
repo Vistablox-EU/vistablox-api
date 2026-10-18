@@ -193,10 +193,13 @@ describe.skipIf(databaseUrl === undefined)("job retries and dead-lettering Postg
     });
     expect(logLines.filter((line) => line.msg === DEAD_LETTER_MESSAGE && line.job_id === jobId)).toHaveLength(1);
     // The payload stays in the dead-letter queue (completed, not deleted) for later replay.
-    await vi.waitFor(async () => {
-      const [row] = (await jobRows(DEAD_LETTER_QUEUE)).filter((candidate) => candidate.source_id === jobId);
-      expect(row?.state).toBe("completed");
-    });
+    await vi.waitFor(
+      async () => {
+        const [row] = (await jobRows(DEAD_LETTER_QUEUE)).filter((candidate) => candidate.source_id === jobId);
+        expect(row?.state).toBe("completed");
+      },
+      { timeout: 10_000, interval: 250 },
+    );
   }, 60_000);
 
   it("dead-letters a job whose worker handler keeps throwing, routed by the queue's own configuration", async () => {
@@ -241,6 +244,34 @@ describe.skipIf(databaseUrl === undefined)("job retries and dead-lettering Postg
     ]);
     await boss.complete(queueName, jobId ?? "");
     expect((await jobRows(queueName)).find((row) => row.id === jobId)?.state).toBe("completed");
+  }, 60_000);
+
+  it("logs the cause of a job that pg-boss itself failed because its handler outlived expireInSeconds", async () => {
+    const queueName = `case_timers.expires_${suffix}`;
+    const traceId = `req_expires_${suffix}`;
+    await ensureJobQueue(boss, queueName, "event");
+
+    // A worker killed mid-job (a deploy, an OOM) leaves the job active until
+    // pg-boss's supervisor expires it; the failure output pg-boss writes for
+    // that is its own, not a thrown Error's.
+    const jobId = await boss.send(queueName, { case_id: "case_expires", trace_id: traceId }, { retryLimit: 0, expireInSeconds: 1 });
+    expect((await boss.fetch(queueName)).map((job) => job.id)).toEqual([jobId]);
+    await pool.query(`UPDATE "${bossSchema}".job SET started_on = now() - interval '1 hour' WHERE name = $1 AND id = $2`, [
+      queueName,
+      jobId,
+    ]);
+    await boss.supervise(queueName);
+    expect((await jobRows(queueName)).find((row) => row.id === jobId)?.state).toBe("failed");
+
+    await vi.waitFor(() => expect(deadLetterLogFor(jobId ?? "")).toBeDefined(), { timeout: 20_000, interval: 250 });
+    expect(deadLetterLogFor(jobId ?? "")).toMatchObject({
+      level: 50,
+      job: queueName,
+      trace_id: traceId,
+      retry_count: 0,
+      attempts: 1,
+      last_error: "job timed out",
+    });
   }, 60_000);
 
   it("dead-letters a scheduled queue's job as well", async () => {

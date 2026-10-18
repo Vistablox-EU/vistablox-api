@@ -16,11 +16,24 @@ function traceIdOf(data: unknown): string {
   return "unknown";
 }
 
-// pg-boss stores a throwing handler's error as the failed job's output.
-function lastErrorOf(output: unknown): string | null {
+function messageOf(output: unknown): string | null {
   if (typeof output !== "object" || output === null) return null;
-  const message = (output as { message?: unknown }).message;
-  return typeof message === "string" ? message.slice(0, MAX_LAST_ERROR_LENGTH) : null;
+  const { message, value } = output as { message?: unknown; value?: unknown };
+  // A throwing handler's Error is stored as the failed job's output as it is.
+  if (typeof message === "string") return message;
+  // Anything else is wrapped as { value } by pg-boss: a non-Error throw or a
+  // string passed to fail() as { value: "..." }, and its own timeout and
+  // heartbeat failures as { value: { message: "job timed out" } }.
+  if (typeof value === "string") return value;
+  if (typeof value === "object" && value !== null) {
+    const wrapped = (value as { message?: unknown }).message;
+    if (typeof wrapped === "string") return wrapped;
+  }
+  return null;
+}
+
+function lastErrorOf(output: unknown): string | null {
+  return messageOf(output)?.slice(0, MAX_LAST_ERROR_LENGTH) ?? null;
 }
 
 /**
@@ -55,9 +68,11 @@ export function createDeadLetterHandler(
 }
 
 /**
- * The worker-side consumer of the dead-letter queue. It completes each entry
- * once logged, so an entry is logged once; the payload stays in the dead-letter
- * queue (see DEAD_LETTER_QUEUE_OPTIONS) to replay from.
+ * The worker-side consumer of the dead-letter queue. pg-boss completes an entry
+ * only after the handler returns, so an entry is logged at least once (a crash
+ * between the log line and the completion logs it again), not exactly once; the
+ * payload stays in the dead-letter queue (see DEAD_LETTER_QUEUE_OPTIONS) to
+ * replay from.
  */
 export async function registerDeadLetterConsumer(boss: PgBoss, logger: Logger): Promise<void> {
   await boss.work(DEAD_LETTER_QUEUE, { includeMetadata: true }, createDeadLetterHandler(logger));
