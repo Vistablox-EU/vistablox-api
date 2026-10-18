@@ -10,13 +10,14 @@
 -- What it covers:
 --   * Every UPDATE or DELETE of a money_events row is rejected with SQLSTATE
 --     23000, including an UPDATE that assigns a column its current value.
---   * That includes reconciled_at. RECONCILIATION.md says matching rows are
---     marked reconciled_at in place, which contradicts the "never UPDATE" rule
---     in LEDGER_DESIGN.md. No application code writes reconciled_at today, so
---     this enforces the rule as written. When the reconciliation job is built
---     the record has to choose between a narrow carve-out (reconciled_at
---     NULL -> non-NULL with every other column unchanged) and recording
---     reconciliation somewhere else; either choice is a new migration.
+--   * That includes reconciled_at. RECONCILIATION.md says to mark matching
+--     rows reconciled_at, which can only be an UPDATE of an existing row and
+--     so contradicts the "never UPDATE" rule in LEDGER_DESIGN.md. No
+--     application code writes reconciled_at today, so this enforces the rule
+--     as written. When the reconciliation job is built the record has to
+--     choose between a narrow carve-out (reconciled_at NULL -> non-NULL with
+--     every other column unchanged) and recording reconciliation somewhere
+--     else; either choice is a new migration.
 --   * money_events_reservation_id_fkey is ON UPDATE CASCADE, so renaming an
 --     offering.reservations.reservation_id that has money events would cascade
 --     an UPDATE into this table. That is rejected too. Deleting such a

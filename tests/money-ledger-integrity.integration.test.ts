@@ -3,11 +3,16 @@ import { randomUUID } from "node:crypto";
 import { Pool, type PoolClient } from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 
+import type { InvestorPositionRecord } from "../src/modules/investor-activity/repository/investor-activity.repository.js";
+import type { InvestorOfferingStatus } from "../src/modules/offering/repository/offering.repository.js";
+
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
 // money.money_events is append-only (LEDGER_DESIGN.md: "never UPDATE or DELETE
 // a money_events row"), and the money/offering/settlement tables around it
-// carry the amount and vocabulary CHECKs the record and the code agree on.
+// carry the amount and vocabulary CHECKs the record and the code agree on (the
+// two money_events amount checks are inferred from the code; the migration
+// says so).
 //
 // Every statement below runs inside a transaction that is rolled back. That
 // is deliberate: the trigger under test makes any committed money_events row
@@ -35,6 +40,58 @@ interface Fixture {
 
 const CHECK_VIOLATION = "23514";
 const INTEGRITY_CONSTRAINT_VIOLATION = "23000";
+
+// The status sets the CHECKs enforce, taken from the application's own types
+// so that a status added to (or removed from) the code without a migration
+// fails to typecheck here instead of surfacing as a 23514 at runtime. The
+// Record annotation is what makes each list exhaustive. Both vocabularies are
+// also in CORE_TABLES.md; position_status 'redeemed' is in the record and the
+// CHECK, but redemption is not built, so no application type names it yet.
+const offeringStatusesInCode: Record<InvestorOfferingStatus, true> = {
+  pre_offering: true,
+  final_offering: true,
+  closed: true,
+};
+const positionStatusesInCode: Record<InvestorPositionRecord["positionStatus"] | "redeemed", true> = {
+  pending_internal_settlement: true,
+  active: true,
+  redeemed: true,
+};
+
+// One representative event per capital state the application writes. The shapes
+// also vary provider_reference, amount_eurc and reconciled_at, the columns an
+// exception inside the trigger would most plausibly key on. eurc_reserved is
+// the label the funded-reservation logic depends on even though AD-260
+// supersedes it (see the migration); it is listed on purpose, so adding a
+// capital_state CHECK that follows the record instead of the code has to change
+// this list in the same commit.
+interface EventShape {
+  label: string;
+  capitalState: string;
+  providerReference: string | null;
+  amountEurc: string | null;
+  reconciledAt: string | null;
+}
+const eventShapes: EventShape[] = [
+  { label: "initiated, no provider reference", capitalState: "initiated", providerReference: null, amountEurc: null, reconciledAt: null },
+  { label: "purchase_failed, no provider reference", capitalState: "purchase_failed", providerReference: null, amountEurc: null, reconciledAt: null },
+  { label: "eurc_purchase_pending", capitalState: "eurc_purchase_pending", providerReference: "provider_ref_p", amountEurc: null, reconciledAt: null },
+  { label: "eurc_reserved with an EURC amount", capitalState: "eurc_reserved", providerReference: "provider_ref_r", amountEurc: "98.250000", reconciledAt: null },
+  { label: "reconfirmation_pending with an EURC amount", capitalState: "reconfirmation_pending", providerReference: "provider_ref_c", amountEurc: "98.250000", reconciledAt: null },
+  { label: "eurc_finalized and already reconciled", capitalState: "eurc_finalized", providerReference: "provider_ref_f", amountEurc: "98.250000", reconciledAt: "2026-09-03T08:00:00Z" },
+];
+
+const addedConstraints = [
+  ["money.money_events", "money_events_amount_eur_positive_check"],
+  ["money.money_events", "money_events_amount_eurc_positive_check"],
+  ["offering.reservations", "reservations_amount_eur_positive_check"],
+  ["offering.offerings", "offerings_status_check"],
+  ["offering.offerings", "offerings_minimum_raise_eur_positive_check"],
+  ["offering.offerings", "offerings_target_raise_eur_positive_check"],
+  ["settlement.position_ledger", "position_ledger_position_status_check"],
+  ["settlement.position_ledger", "position_ledger_unit_count_non_negative_check"],
+  ["settlement.position_ledger", "position_ledger_cost_basis_eur_non_negative_check"],
+] as const;
 
 describe.skipIf(databaseUrl === undefined)("money ledger database invariants PostgreSQL integration", () => {
   const pool = new Pool({ connectionString: databaseUrl });
@@ -144,6 +201,18 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
     );
   }
 
+  /** Inserts one event of the given shape and returns its id; a rejection is a test failure here. */
+  async function insertShapedEvent(client: PoolClient, fixture: Fixture, shape: EventShape): Promise<string> {
+    const moneyEventId = `money_event_${randomUUID()}`;
+    await client.query(
+      `INSERT INTO money.money_events
+         (money_event_id, reservation_id, provider, provider_reference, capital_state, amount_eur, amount_eurc, reconciled_at)
+       VALUES ($1, $2, 'coinbase_cdp', $3, $4, 100.00, $5, $6)`,
+      [moneyEventId, fixture.reservationId, shape.providerReference, shape.capitalState, shape.amountEurc, shape.reconciledAt],
+    );
+    return moneyEventId;
+  }
+
   function insertReservation(client: PoolClient, fixture: Fixture, amountEur: string): Promise<Rejection | null> {
     return attempt(
       client,
@@ -204,23 +273,18 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
   }
 
   describe("money.money_events is append-only", () => {
-    it("still accepts new events, with and without an EURC amount, for the states the application writes", async () => {
+    it("still accepts new events of every shape the application writes, with and without an EURC amount", async () => {
       await inRolledBackTransaction(async (client, fixture) => {
-        for (const capitalState of [
-          "initiated",
-          "eurc_purchase_pending",
-          "purchase_failed",
-          "reconfirmation_pending",
-          "eurc_finalized",
-        ]) {
-          expect(await insertMoneyEvent(client, fixture, { capitalState }), capitalState).toBeNull();
+        for (const shape of eventShapes) {
+          await expect(insertShapedEvent(client, fixture, shape), shape.label).resolves.toEqual(expect.any(String));
         }
+        // The fixture already holds one event, so 1 + the shapes + this one.
         expect(await insertMoneyEvent(client, fixture, { amountEurc: "98.250000" })).toBeNull();
         const count = await client.query<{ count: string }>(
           "SELECT count(*) FROM money.money_events WHERE reservation_id = $1",
           [fixture.reservationId],
         );
-        expect(count.rows[0]?.count).toBe("7");
+        expect(count.rows[0]?.count).toBe(String(1 + eventShapes.length + 1));
       });
     });
 
@@ -231,8 +295,8 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
       ["provider", "provider = 'rewritten'"],
       ["provider_reference", "provider_reference = 'rewritten'"],
       ["recorded_at", "recorded_at = now()"],
-      // The design record also says reconciliation marks rows in place
-      // (RECONCILIATION.md), which contradicts "never UPDATE". Nothing in the
+      // RECONCILIATION.md says to mark matching rows reconciled_at, which can
+      // only be an UPDATE and so contradicts "never UPDATE". Nothing in the
       // application writes reconciled_at, so the table rejects it too until
       // that conflict is decided; see the migration comment.
       ["reconciled_at", "reconciled_at = now()"],
@@ -272,6 +336,35 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
           [fixture.reservationId],
         );
         expect(amounts.rows).toEqual([{ amount_eur: "100.00" }, { amount_eur: "100.00" }]);
+      });
+    });
+
+    // The per-column tests above all target the fixture event. A trigger that
+    // were unconditional for that row but let other rows through (an event
+    // with no provider reference, a reconciled one, one in another capital
+    // state) would pass them, so the same two statements are tried on every
+    // shape the application writes.
+    it.each(eventShapes)("rejects an UPDATE and a DELETE of an event that is $label", async (shape) => {
+      await inRolledBackTransaction(async (client, fixture) => {
+        const moneyEventId = await insertShapedEvent(client, fixture, shape);
+        const before = await readMoneyEvent(client, moneyEventId);
+        expect(before).toMatchObject({ capital_state: shape.capitalState, amount_eur: "100.00" });
+
+        const update = await attempt(client, "UPDATE money.money_events SET amount_eur = 999.00 WHERE money_event_id = $1", [
+          moneyEventId,
+        ]);
+        const noOp = await attempt(client, "UPDATE money.money_events SET capital_state = capital_state WHERE money_event_id = $1", [
+          moneyEventId,
+        ]);
+        const remove = await attempt(client, "DELETE FROM money.money_events WHERE money_event_id = $1", [moneyEventId]);
+
+        for (const rejection of [update, noOp, remove]) {
+          expect(rejection).toMatchObject({
+            code: INTEGRITY_CONSTRAINT_VIOLATION,
+            message: expect.stringContaining("append-only"),
+          });
+        }
+        expect(await readMoneyEvent(client, moneyEventId)).toEqual(before);
       });
     });
 
@@ -345,7 +438,9 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
 
   describe("amount and vocabulary CHECK constraints", () => {
     describe("money.money_events", () => {
-      it.each(["0", "0.00", "0.004", "-0.01", "-100"])(
+      // NaN is listed because PostgreSQL orders NaN above every number, so a bare
+      // `amount_eur > 0` accepts it (a Decimal division by zero produces one).
+      it.each(["0", "0.00", "0.004", "-0.01", "-100", "NaN"])(
         "rejects amount_eur %s",
         async (amountEur) => {
           await inRolledBackTransaction(async (client, fixture) => {
@@ -363,7 +458,7 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
         });
       });
 
-      it.each(["0", "0.000000", "-0.000001", "-98.25"])("rejects amount_eurc %s", async (amountEurc) => {
+      it.each(["0", "0.000000", "-0.000001", "-98.25", "NaN"])("rejects amount_eurc %s", async (amountEurc) => {
         await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertMoneyEvent(client, fixture, { amountEurc })).toMatchObject({
             code: CHECK_VIOLATION,
@@ -380,7 +475,7 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
     });
 
     describe("offering.reservations", () => {
-      it.each(["0", "0.00", "-0.01", "-1000"])("rejects amount_eur %s on insert", async (amountEur) => {
+      it.each(["0", "0.00", "-0.01", "-1000", "NaN"])("rejects amount_eur %s on insert", async (amountEur) => {
         await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertReservation(client, fixture, amountEur)).toMatchObject({
             code: CHECK_VIOLATION,
@@ -397,7 +492,7 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
 
       it("rejects an UPDATE that would zero or negate an existing reservation amount", async () => {
         await inRolledBackTransaction(async (client, fixture) => {
-          for (const amountEur of ["0", "-5.00"]) {
+          for (const amountEur of ["0", "-5.00", "NaN"]) {
             expect(
               await attempt(client, "UPDATE offering.reservations SET amount_eur = $2 WHERE reservation_id = $1", [
                 fixture.reservationId,
@@ -419,7 +514,7 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
         });
       });
 
-      it.each(["pre_offering", "final_offering", "closed"])("accepts status %s", async (status) => {
+      it.each(Object.keys(offeringStatusesInCode))("accepts status %s, which the application names", async (status) => {
         await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertOffering(client, fixture, { status })).toBeNull();
         });
@@ -435,7 +530,7 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
         });
       });
 
-      it.each(["0", "-1.00"])("rejects minimum_raise_eur %s", async (minimumRaiseEur) => {
+      it.each(["0", "-1.00", "NaN"])("rejects minimum_raise_eur %s", async (minimumRaiseEur) => {
         await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertOffering(client, fixture, { minimumRaiseEur })).toMatchObject({
             code: CHECK_VIOLATION,
@@ -450,7 +545,7 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
         });
       });
 
-      it.each(["0", "-1.00"])("rejects target_raise_eur %s", async (targetRaiseEur) => {
+      it.each(["0", "-1.00", "NaN"])("rejects target_raise_eur %s", async (targetRaiseEur) => {
         await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertOffering(client, fixture, { targetRaiseEur })).toMatchObject({
             code: CHECK_VIOLATION,
@@ -483,7 +578,7 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
         });
       });
 
-      it.each(["pending_internal_settlement", "active", "redeemed"])("accepts position_status %s", async (positionStatus) => {
+      it.each(Object.keys(positionStatusesInCode))("accepts position_status %s, which the application or the record names", async (positionStatus) => {
         await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertPosition(client, fixture, { positionStatus })).toBeNull();
         });
@@ -499,34 +594,75 @@ describe.skipIf(databaseUrl === undefined)("money ledger database invariants Pos
         });
       });
 
-      it("rejects a negative unit_count but accepts zero (a fully reduced retained position is not ruled out by the record)", async () => {
+      it.each(["-0.000001", "-1", "NaN"])("rejects unit_count %s", async (unitCount) => {
         await inRolledBackTransaction(async (client, fixture) => {
-          expect(await insertPosition(client, fixture, { unitCount: "-0.000001" })).toMatchObject({
+          expect(await insertPosition(client, fixture, { unitCount })).toMatchObject({
             code: CHECK_VIOLATION,
             constraint: "position_ledger_unit_count_non_negative_check",
           });
           expect(
-            await attempt(client, "UPDATE settlement.position_ledger SET unit_count = -1 WHERE position_id = $1", [
+            await attempt(client, "UPDATE settlement.position_ledger SET unit_count = $2 WHERE position_id = $1", [
               fixture.positionId,
+              unitCount,
             ]),
           ).toMatchObject({ code: CHECK_VIOLATION, constraint: "position_ledger_unit_count_non_negative_check" });
+        });
+      });
+
+      // Zero is allowed on purpose: the record has not decided whether a fully
+      // reduced retained position keeps its row.
+      it("accepts a zero unit_count", async () => {
+        await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertPosition(client, fixture, { unitCount: "0" })).toBeNull();
         });
       });
 
-      it("rejects a negative cost_basis_eur but accepts zero (the owner-retained basis is undecided)", async () => {
+      it.each(["-0.01", "-1", "NaN"])("rejects cost_basis_eur %s", async (costBasisEur) => {
         await inRolledBackTransaction(async (client, fixture) => {
-          expect(await insertPosition(client, fixture, { costBasisEur: "-0.01" })).toMatchObject({
+          expect(await insertPosition(client, fixture, { costBasisEur })).toMatchObject({
             code: CHECK_VIOLATION,
             constraint: "position_ledger_cost_basis_eur_non_negative_check",
           });
           expect(
-            await attempt(client, "UPDATE settlement.position_ledger SET cost_basis_eur = -1 WHERE position_id = $1", [
+            await attempt(client, "UPDATE settlement.position_ledger SET cost_basis_eur = $2 WHERE position_id = $1", [
               fixture.positionId,
+              costBasisEur,
             ]),
           ).toMatchObject({ code: CHECK_VIOLATION, constraint: "position_ledger_cost_basis_eur_non_negative_check" });
+        });
+      });
+
+      // Zero is allowed on purpose: the record has not decided the
+      // owner-retained position's basis.
+      it("accepts a zero cost_basis_eur", async () => {
+        await inRolledBackTransaction(async (client, fixture) => {
           expect(await insertPosition(client, fixture, { costBasisEur: "0" })).toBeNull();
         });
+      });
+    });
+
+    // Every constraint above was added NOT VALID so the migration cannot fail
+    // on, or scan, rows that already exist. The migration header tells an
+    // operator how to find violating rows and then VALIDATE; until that is
+    // done in an environment, pg_constraint says convalidated = false there.
+    // This runs against a database that has only had the migrations applied.
+    // When a later migration validates these constraints, change this test
+    // with it.
+    describe("migration safety", () => {
+      it("adds every CHECK NOT VALID, on the table it belongs to", async () => {
+        const result = await pool.query<{ table: string; constraint: string; validated: boolean }>(
+          `SELECT n.nspname || '.' || c.relname AS "table", k.conname AS "constraint", k.convalidated AS validated
+           FROM pg_constraint k
+           JOIN pg_class c ON c.oid = k.conrelid
+           JOIN pg_namespace n ON n.oid = c.relnamespace
+           WHERE k.contype = 'c' AND k.conname = ANY($1)`,
+          [addedConstraints.map(([, name]) => name)],
+        );
+        const byConstraint = (a: { constraint: string }, b: { constraint: string }): number =>
+          a.constraint < b.constraint ? -1 : a.constraint > b.constraint ? 1 : 0;
+        expect([...result.rows].sort(byConstraint)).toEqual(
+          addedConstraints.map(([table, constraint]) => ({ table, constraint, validated: false })).sort(byConstraint),
+        );
       });
     });
   });
