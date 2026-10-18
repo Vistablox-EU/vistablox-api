@@ -19,6 +19,7 @@ function mapSnapshot(snapshot: IntakeReversalSnapshot) {
     stage: snapshot.stage,
     workflowEventSequence: snapshot.workflowEventSequence,
     latestTransition: snapshot.latestTransition,
+    latestTransitionReversed: snapshot.latestTransitionReversed,
     activeInformationRequest: snapshot.activeInformationRequest,
     offering: snapshot.offering,
     legalExecutionCompleted: snapshot.legalExecutionCompleted,

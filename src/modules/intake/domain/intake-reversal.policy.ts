@@ -37,6 +37,9 @@ export interface ReversalSnapshot {
   stage: string;
   workflowEventSequence: number;
   latestTransition: { eventId: string; fromStage: string; toStage: string } | null;
+  // Every correction is recorded against the latest transition, and the ledger
+  // allows an event to be reversed only once.
+  latestTransitionReversed: boolean;
   activeInformationRequest: boolean;
   offering: {
     offeringId: string;
@@ -66,7 +69,7 @@ export interface ReversalAction {
 const terminalStages = new Set(["rejected", "withdrawn", "expired"]);
 
 export function evaluateReversalActions(snapshot: ReversalSnapshot): ReversalAction[] {
-  if (snapshot.correctionInProgress || terminalStages.has(snapshot.stage)) return [];
+  if (snapshot.correctionInProgress || snapshot.latestTransitionReversed || terminalStages.has(snapshot.stage)) return [];
   const actions: ReversalAction[] = [];
   if (snapshot.stage === "submitted" && snapshot.latestTransition?.toStage === "submitted" && !snapshot.activeInformationRequest && snapshot.offering === null) {
     actions.push({ command: "return_to_draft", targetStage: "draft", label: "Return to draft", requiresSecondApproval: false, executionMode: "synchronous", impactSummary: "The current submission is preserved and the case returns to draft for correction.", blockers: [] });

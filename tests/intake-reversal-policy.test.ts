@@ -29,6 +29,7 @@ function snapshot(overrides: Partial<ReversalSnapshot> = {}): ReversalSnapshot {
     stage: "submitted",
     workflowEventSequence: 7,
     latestTransition: { eventId: "evt_01", fromStage: "draft", toStage: "submitted" },
+    latestTransitionReversed: false,
     activeInformationRequest: false,
     offering: null,
     legalExecutionCompleted: false,
@@ -109,6 +110,15 @@ describe("intake reversal policy", () => {
       for (const stage of allStages) {
         expect(evaluateReversalActions({ ...cleanSnapshots[stage], correctionInProgress: true })).toEqual([]);
       }
+    });
+
+    it("offers nothing once the transition it would rewind has itself been rewound, because the ledger reverses an event only once", () => {
+      for (const stage of allStages) {
+        expect(evaluateReversalActions({ ...cleanSnapshots[stage], latestTransitionReversed: true })).toEqual([]);
+      }
+      // the same snapshots do offer their command when that transition is still standing
+      expect(commandsFor({ ...cleanSnapshots.pre_offering_open, latestTransitionReversed: false })).toEqual(["reopen_pre_offering"]);
+      expect(commandsFor({ ...cleanSnapshots.post_ipo_structuring, latestTransitionReversed: false })).toEqual(["reopen_structuring"]);
     });
 
     it("offers nothing from a terminal stage even when the rest of the snapshot looks reversible", () => {

@@ -22,6 +22,7 @@ function reversalSnapshot(overrides: Partial<IntakeReversalSnapshot> = {}): Inta
     stage: "submitted",
     workflowEventSequence: 7,
     latestTransition: { eventId: "evt_submitted", fromStage: "draft", toStage: "submitted" },
+    latestTransitionReversed: false,
     activeInformationRequest: false,
     offering: null,
     legalExecutionCompleted: false,
@@ -169,6 +170,16 @@ describe("GetIntakeReversalPreviewService", () => {
     expect(result.data).toMatchObject({ available: false, actions: [] });
   });
 
+  it("reports nothing available when the transition a rewind would target has already been rewound", async () => {
+    const repository = fakeRepository({
+      getIntakeReversalSnapshot: vi.fn().mockResolvedValue(
+        reversalSnapshot({ stage: "pre_offering_open", offering: cleanOffering(), latestTransitionReversed: true }),
+      ),
+    });
+    const result = await new GetIntakeReversalPreviewService(repository).execute("case_01");
+    expect(result.data).toMatchObject({ available: false, actions: [], correction_in_progress: false });
+  });
+
   it("returns a null latest_transition when the case has none", async () => {
     const repository = fakeRepository({
       getIntakeReversalSnapshot: vi.fn().mockResolvedValue(reversalSnapshot({ stage: "draft", latestTransition: null })),
@@ -221,6 +232,23 @@ describe("RequestIntakeReversalService", () => {
           stage: "pre_offering_open",
           offering: cleanOffering({ reservationCount: 2, fundedReservationCount: 1 }),
         }),
+      ),
+    });
+    const error = await rejection(
+      new RequestIntakeReversalService(repository).execute({
+        ...requestInput,
+        command: "reopen_pre_offering",
+        expectedStage: "pre_offering_open",
+      }),
+    );
+    expect(error).toMatchObject({ status: 409, code: "intake.reversal_not_allowed" });
+    expect(repository.createReversalOperation).not.toHaveBeenCalled();
+  });
+
+  it("rejects a rewind whose target transition has already been rewound with 409, without creating an operation", async () => {
+    const repository = fakeRepository({
+      getIntakeReversalSnapshot: vi.fn().mockResolvedValue(
+        reversalSnapshot({ stage: "pre_offering_open", offering: cleanOffering(), latestTransitionReversed: true }),
       ),
     });
     const error = await rejection(

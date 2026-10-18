@@ -316,6 +316,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         stage: "submitted",
         workflowEventSequence: 2,
         latestTransition: { eventId: fixture.transitions.submitted, fromStage: "draft", toStage: "submitted" },
+        latestTransitionReversed: false,
         activeInformationRequest: false,
         offering: null,
         legalExecutionCompleted: false,
@@ -1267,24 +1268,100 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       await expect(requestService.execute(input)).rejects.toMatchObject({ status: 409, code: "intake.reversal_conflict" });
       expect(await database.intakeCaseReversalOperation.count({ where: { caseId: fixture.caseId } })).toBe(1);
     });
+  });
 
-    it("cannot rewind through the stage chain twice in a row: the second rewind targets an event that was already reversed", async () => {
-      // A reversal records the latest non-reversal transition as the event it
-      // reverses, and the ledger allows each event to be reversed once. After
-      // reopen_structuring that latest transition is still the one just
-      // reversed, so the next rewind violates the unique index. The operation
-      // ends failed and the case stays correctable by other means, but this
-      // rewind cannot be done.
+  describe("rewinding the same transition twice", () => {
+    // A reversal records the latest non-reversal transition as the event it
+    // reverses, and the ledger allows each event to be reversed once. After
+    // reopen_structuring that latest transition is still the one just
+    // reversed, so a second rewind has nothing left to target. It is withheld
+    // rather than offered and then failed at the ledger.
+    async function reopenStructuring() {
       const fixture = await createCase("post_ipo_structuring");
       const first = await requestReversal(fixture, "reopen_structuring");
       await approve(fixture, first.data.operation_id);
       expect((await readCase(fixture.caseId)).stage).toBe("pre_offering_open");
+      return { fixture, first };
+    }
 
-      const second = await requestReversal(fixture, "reopen_pre_offering");
-      expect(second.data.reversal_of_event_id).toBe(first.data.reversal_of_event_id);
-      await expect(approve(fixture, second.data.operation_id)).rejects.toThrow("intake_case_events_reversal_of_event_id_key");
+    it("reports that the latest transition has already been reversed", async () => {
+      const { fixture, first } = await reopenStructuring();
+      const snapshot = await intakeRepository.getIntakeReversalSnapshot(fixture.caseId);
+      expect(snapshot).toMatchObject({
+        latestTransition: { eventId: first.data.reversal_of_event_id },
+        latestTransitionReversed: true,
+      });
+      const untouched = await createCase("post_ipo_structuring");
+      expect((await intakeRepository.getIntakeReversalSnapshot(untouched.caseId))?.latestTransitionReversed).toBe(false);
+    });
 
-      expect(await readOperation(second.data.operation_id)).toMatchObject({ status: "failed", failureCode: "execution_error" });
+    it("does not offer a second rewind, and refuses to create one with a 409 domain error", async () => {
+      const { fixture } = await reopenStructuring();
+
+      const preview = await previewService.execute(fixture.caseId);
+      expect(preview.data).toMatchObject({ available: false, correction_in_progress: false, actions: [] });
+      await expect(requestReversal(fixture, "reopen_pre_offering")).rejects.toMatchObject({
+        status: 409,
+        code: "intake.reversal_not_allowed",
+      });
+
+      expect(await database.intakeCaseReversalOperation.count({ where: { caseId: fixture.caseId } })).toBe(1);
+      expect(await readAudit(fixture.caseId, "intake.correction_requested")).toHaveLength(1);
+      expect((await readCase(fixture.caseId)).stage).toBe("pre_offering_open");
+      await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(false);
+    });
+
+    it("withholds reopen_structuring after reopen_final_offering_review, which reversed the same transition", async () => {
+      const fixture = await createCase("approved_for_final_offering");
+      const first = await requestReversal(fixture, "reopen_final_offering_review");
+      await approve(fixture, first.data.operation_id);
+      expect((await readCase(fixture.caseId)).stage).toBe("post_ipo_structuring");
+
+      await expect(requestReversal(fixture, "reopen_structuring")).rejects.toMatchObject({
+        status: 409,
+        code: "intake.reversal_not_allowed",
+      });
+      expect(await database.intakeCaseReversalOperation.count({ where: { caseId: fixture.caseId } })).toBe(1);
+    });
+
+    it("offers a rewind again once the case has made the transition anew", async () => {
+      const { fixture } = await reopenStructuring();
+      // The partner completes structuring a second time: a new transition event,
+      // which is not reversed.
+      await appendFixtureEvents(fixture.caseId, [
+        { key: "post_ipo_structuring_again", type: "case_post_ipo_structuring_started", from: "pre_offering_open", to: "post_ipo_structuring" },
+      ]);
+      await database.intakeCase.update({ where: { id: fixture.caseId }, data: { stage: "post_ipo_structuring" } });
+
+      const second = await requestReversal(fixture, "reopen_structuring");
+      expect(second.data.status).toBe("pending_approval");
+      expect((await approve(fixture, second.data.operation_id)).data.status).toBe("completed");
+      expect((await readCase(fixture.caseId)).stage).toBe("pre_offering_open");
+    });
+
+    it("fails an operation that targets an already reversed event as not allowed at approval, instead of hitting the ledger", async () => {
+      const { fixture, first } = await reopenStructuring();
+      const current = await readCase(fixture.caseId);
+      // What an operation requested before the transition was withheld looks like.
+      const stale = await intakeRepository.createReversalOperation({
+        caseId: fixture.caseId,
+        command: "reopen_pre_offering",
+        fromStage: "pre_offering_open",
+        toStage: "submitted",
+        status: "pending_approval",
+        reasonCode: "operator_input_error",
+        reason: "requested before a rewind of the same transition was withheld",
+        requestedByAccountId: requesterId,
+        expectedStage: current.stage,
+        expectedWorkflowEventSequence: current.workflowEventSequence,
+        reversalOfEventId: first.data.reversal_of_event_id,
+        idempotencyKey: uid("key"),
+        traceId: uid("trace"),
+      });
+
+      await expect(approve(fixture, stale.operationId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_allowed" });
+
+      expect(await readOperation(stale.operationId)).toMatchObject({ status: "failed", failureCode: "not_allowed" });
       expect((await readCase(fixture.caseId)).stage).toBe("pre_offering_open");
       await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(false);
     });
@@ -1529,6 +1606,24 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       expect(approved.status).toBe(409);
       expect(approved.body.code).toBe("intake.reversal_not_allowed");
       expect((await database.offering.findUniqueOrThrow({ where: { id: fixture.offeringId! } })).status).toBe("pre_offering");
+    });
+
+    it("answers a second rewind of the same transition with a 409 domain error, not a 500, and offers nothing", async () => {
+      const fixture = await createCase("post_ipo_structuring");
+      const first = await postCommand(fixture, "reopen-structuring", requesterId);
+      const approved = await request(httpApp())
+        .post(`/internal/v1/intake-cases/${fixture.caseId}/reversal-operations/${first.body.data.operation_id}/approve`)
+        .set("x-test-account", approverId);
+      expect(approved.status).toBe(200);
+
+      const second = await postCommand(fixture, "reopen-pre-offering", requesterId);
+      expect(second.status).toBe(409);
+      expect(second.body).toMatchObject({ code: "intake.reversal_not_allowed", status: 409 });
+
+      const preview = await request(httpApp())
+        .get(`/internal/v1/intake-cases/${fixture.caseId}/reversal-preview`)
+        .set("x-test-account", approverId);
+      expect(preview.body.data).toMatchObject({ available: false, correction_in_progress: false, actions: [] });
     });
 
     it("answers a request with stale headers with a 409 domain error", async () => {

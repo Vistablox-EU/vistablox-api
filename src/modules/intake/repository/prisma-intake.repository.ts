@@ -70,7 +70,7 @@ const reminderDaysSettingSchema = z.object({
 
 // What loadReversalSnapshot reads through: either the shared client or a
 // transaction's.
-type ReversalSnapshotClient = Pick<Prisma.TransactionClient, "intakeCase" | "intakeCaseReversalOperation">;
+type ReversalSnapshotClient = Pick<Prisma.TransactionClient, "intakeCase" | "intakeCaseEvent" | "intakeCaseReversalOperation">;
 
 export class PrismaIntakeRepository
   implements IntakeRepository, PostIpoStructuringHandoffRepository
@@ -119,6 +119,7 @@ export class PrismaIntakeRepository
       },
     });
     if (row === null) return null;
+    const latestEvent = row.lifecycleEvents[0];
     const offering = row.pivs[0]?.offerings[0];
     const reservations = offering?.reservations ?? [];
     const fundedStates = new Set(["eurc_reserved", "reconfirmation_pending", "eurc_finalized"]);
@@ -127,6 +128,7 @@ export class PrismaIntakeRepository
       stage: row.stage,
       workflowEventSequence: row.workflowEventSequence,
       latestTransition: row.lifecycleEvents[0]?.fromStage !== null && row.lifecycleEvents[0]?.toStage !== null && row.lifecycleEvents[0] !== undefined ? { eventId: row.lifecycleEvents[0].id, fromStage: row.lifecycleEvents[0].fromStage as string, toStage: row.lifecycleEvents[0].toStage as string } : null,
+      latestTransitionReversed: latestEvent !== undefined && await client.intakeCaseEvent.count({ where: { caseId, reversalOfEventId: latestEvent.id } }) > 0,
       activeInformationRequest: row.informationRequests.length > 0,
       offering: offering === undefined ? null : {
         offeringId: offering.id,

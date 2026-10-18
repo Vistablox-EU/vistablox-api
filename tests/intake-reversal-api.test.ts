@@ -22,6 +22,7 @@ function snapshot(overrides: Partial<IntakeReversalSnapshot> = {}): IntakeRevers
     stage: "submitted",
     workflowEventSequence: 7,
     latestTransition: { eventId: "evt_submitted", fromStage: "draft", toStage: "submitted" },
+    latestTransitionReversed: false,
     activeInformationRequest: false,
     offering: null,
     legalExecutionCompleted: false,
