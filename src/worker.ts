@@ -244,7 +244,7 @@ const settlementRepository = chainClients === undefined ? undefined : new Prisma
 const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
-    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients);
+    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger);
 const confirmWalletRegistrations =
   chainClients === undefined ||
   settlementRepository === undefined ||
@@ -457,11 +457,22 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
   await boss.work("settlement.finalize_ipo_escrow_campaigns", async () => {
     const traceId = `req_${ulid()}`;
     try {
-      const summary = await finalizeIpoEscrowCampaigns.execute();
-      logger.info(
-        { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
-        "case timer job completed",
-      );
+      const summary = await finalizeIpoEscrowCampaigns.execute(traceId);
+      // The service swallows per-campaign failures into summary.errors (one
+      // bad campaign must not stop the others) and has already logged each at
+      // error level with its piv_id/token_id; a run that had any is not
+      // "completed" cleanly, so it must not be logged as if it were.
+      if (summary.errors.length > 0) {
+        logger.error(
+          { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
+          "case timer job completed with campaign errors",
+        );
+      } else {
+        logger.info(
+          { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
+          "case timer job completed",
+        );
+      }
     } catch (error) {
       logger.error(
         { err: error, trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns" },
