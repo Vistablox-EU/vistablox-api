@@ -32,7 +32,7 @@ A `case_timers.pre_offering_open_handoff` job that already ran out of retries be
 
 ## Reservation creation
 
-`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
+`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Requires an `Idempotency-Key` header (AD-057/AD-147 — reservation funding initiation is a high-risk write, deduplicated through the shared `audit.idempotency_keys` table under the `offering.reservation.create` endpoint). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
 
 ```json
 {
@@ -50,6 +50,17 @@ A `case_timers.pre_offering_open_handoff` job that already ran out of retries be
 The reservation row and its first `money.money_events` row (`capital_state: "initiated"`) are written inside one transaction that also re-verifies, under a row lock on the `offerings` row, that the offering is still `pre_offering` and that the requested amount still fits the offering's remaining capacity (`AD-146`: the same check `GetInvestorOfferingService`'s `reservation.blockers` reports is advisory only — this is the atomic, authoritative one, sharing its rule set via `domain/reservation-eligibility.policy.ts` so the two can never disagree). A losing concurrent request gets `409 offering.reservation_not_available` (offering closed between read and write) or `422 offering.reservation_amount_exceeds_capacity` (amount no longer fits), never a silent oversell.
 
 After the reservation is durably created, the CDP onramp session token call happens synchronously in the request path, the same way `StartKycSessionService` calls Didit — not through a job (`AD-145` governs cross-domain *state transitions*, not a single external call whose whole purpose is "start now, hand the client a URL"). If that call fails, a `purchase_failed` money event is recorded and the error propagates; the reservation row is deliberately left in place rather than unwound, because the already-decided capacity policy (reserve immediately, auto-expire if unfunded) already covers this case identically to an investor who simply never completes the purchase.
+
+### Retrying a reservation request (`Idempotency-Key`)
+
+The request requires an `Idempotency-Key` header of at most 128 characters (`400 idempotency.key_required` otherwise). The key is stored on the reservation (`client_idempotency_key`, unique per account, offering and key); a lookup under the same `offerings` row lock that guards capacity returns the existing reservation instead of creating a second hold, so a client that lost the response can retry safely. Keys are scoped to the account and the offering: another account, or the same key on another offering, is an unrelated request.
+
+A retry is served only while the stored reservation is still what the client asked for and can still be paid. It gets a fresh onramp session for the original `reservation_id` and the original `expires_at`; a retry never creates a new hold, never extends an existing one, and never revives one that has ended:
+
+- `409 offering.idempotency_key_reused`: the key was already used for a different `amount_eur` (`AD-147`).
+- `409 offering.reservation_replay_unavailable`: the stored reservation is no longer payable through a new session: it is past its 15-minute hold, its `reservation_stage` is no longer `initiated` (`lapsed`, `cancelled`, `awaiting_reconfirmation`, ...), or its latest `capital_state` is already funded (`eurc_reserved`, `reconfirmation_pending`, `eurc_finalized`). The client should read its reservations for the current state instead of retrying again.
+
+If the onramp session call fails on a retry, a `purchase_failed` money event is recorded against the original reservation, exactly as on a first attempt.
 
 ## Unfunded reservation expiry
 
@@ -83,7 +94,7 @@ See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/B
 
 ### 1. Publishing final terms (founder-triggered)
 
-`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
+`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Requires an `Idempotency-Key` header (AD-057/AD-147 — a finalization-batch action; endpoint `offering.finalize`). Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
 
 ```json
 {
@@ -108,7 +119,7 @@ No position is created here. The transaction also sets `final_offering_published
 
 ### 2. Investor reconfirmation (investor-triggered, during the open window)
 
-`POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm` is each investor's own explicit action, customer-only (same auth as the rest of `offering.router.ts`). Response (`200`):
+`POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm` is each investor's own explicit action, customer-only (same auth as the rest of `offering.router.ts`). Requires an `Idempotency-Key` header (AD-057/AD-147 — investor reconfirmation submission; endpoint `offering.reservation.reconfirm`; the request itself posts no body). Response (`200`):
 
 ```json
 {

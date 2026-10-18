@@ -10,8 +10,8 @@ import {
   tryBindDpopAtCreation,
   type BetterAuthFactoryOptions,
   type DpopCreationContext,
-} from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import type { DpopReplayRepository } from "../src/modules/auth/repository/dpop-replay.repository.js";
+} from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import type { DpopReplayRepository } from "../src/modules/auth/repository/shared/dpop-replay.repository.js";
 
 const BASE_URL = "https://api.vistablox.io";
 const VERIFY_PATH = `${BASE_URL}/api/auth/passkey/verify-authentication`;

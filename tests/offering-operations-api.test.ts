@@ -7,6 +7,8 @@ import { ClassifyMaterialityService } from "../src/modules/offering/application/
 import { FinalizeOfferingService } from "../src/modules/offering/application/finalize-offering.service.js";
 import { PublishDisclosurePackService } from "../src/modules/offering/application/publish-disclosure-pack.service.js";
 import { AppError } from "../src/shared/errors/app-error.js";
+import { createIdempotencyMiddleware } from "../src/shared/http/idempotency.js";
+import type { IdempotencyStore, StoredIdempotentResponse } from "../src/infrastructure/idempotency/idempotency-store.js";
 import type { DisclosurePackRepository } from "../src/modules/offering/repository/disclosure-pack.repository.js";
 import type { FinalizeOfferingRepository } from "../src/modules/offering/repository/finalize-offering.repository.js";
 import type { MaterialityRepository } from "../src/modules/offering/repository/materiality.repository.js";
@@ -18,6 +20,7 @@ type Repository = FinalizeOfferingRepository & MaterialityRepository & Disclosur
 function buildApp(options?: {
   repository?: Partial<Repository>;
   denyAdminOperations?: boolean;
+  requireFinalizeIdempotency?: RequestHandler;
 }) {
   const authenticated: RequestHandler = (_request, response, next) => {
     response.locals.authContext = {
@@ -105,6 +108,7 @@ function buildApp(options?: {
       new FinalizeOfferingService(repository, () => new Date("2026-09-02T12:00:00.000Z")),
       new ClassifyMaterialityService(repository, () => new Date("2026-09-05T12:00:00.000Z")),
       new PublishDisclosurePackService(repository, () => new Date("2026-09-06T12:00:00.000Z")),
+      options?.requireFinalizeIdempotency,
     ),
   );
   app.use(errorHandler);
@@ -425,5 +429,83 @@ describe("POST /internal/v1/offerings/:offering_id/disclosure-packs", () => {
 
     expect(response.status).toBe(403);
     expect(repository.publishDisclosurePack).not.toHaveBeenCalled();
+  });
+});
+
+function memoryIdempotencyStore(): IdempotencyStore {
+  const rows = new Map<string, StoredIdempotentResponse>();
+  return {
+    find: vi.fn(async (idempotencyKey: string, endpoint: string) => {
+      return rows.get(`${idempotencyKey}:${endpoint}`) ?? null;
+    }),
+    save: vi.fn(async (input) => {
+      const key = `${input.idempotencyKey}:${input.endpoint}`;
+      const existing = rows.get(key);
+      if (existing !== undefined) return existing;
+      const saved = {
+        requestBodyHash: input.requestBodyHash,
+        responseStatus: input.responseStatus,
+        responseBody: input.responseBody,
+      };
+      rows.set(key, saved);
+      return saved;
+    }),
+  };
+}
+
+describe("POST /internal/v1/offerings/:offering_id/finalize — idempotency", () => {
+  it("requires the Idempotency-Key on the finalization-batch action", async () => {
+    const store = memoryIdempotencyStore();
+    const { app, repository } = buildApp({
+      requireFinalizeIdempotency: createIdempotencyMiddleware(store, "offering.finalize"),
+    });
+
+    const response = await request(app)
+      .post("/internal/v1/offerings/offering_01/finalize")
+      .send({ founder_review_notes: "Target reached." });
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe("idempotency.key_required");
+    expect(repository.publishFinalOfferingTerms).not.toHaveBeenCalled();
+  });
+
+  it("replays the cached finalize response without re-running the service", async () => {
+    const store = memoryIdempotencyStore();
+    const { app, repository } = buildApp({
+      requireFinalizeIdempotency: createIdempotencyMiddleware(store, "offering.finalize"),
+    });
+
+    const first = await request(app)
+      .post("/internal/v1/offerings/offering_01/finalize")
+      .set("Idempotency-Key", "finalize-key-1")
+      .send({ founder_review_notes: "Target reached." });
+    const replay = await request(app)
+      .post("/internal/v1/offerings/offering_01/finalize")
+      .set("Idempotency-Key", "finalize-key-1")
+      .send({ founder_review_notes: "Target reached." });
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(replay.body).toEqual(first.body);
+    expect(repository.publishFinalOfferingTerms).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects the same finalize key with a different body as a 409", async () => {
+    const store = memoryIdempotencyStore();
+    const { app } = buildApp({
+      requireFinalizeIdempotency: createIdempotencyMiddleware(store, "offering.finalize"),
+    });
+
+    await request(app)
+      .post("/internal/v1/offerings/offering_01/finalize")
+      .set("Idempotency-Key", "finalize-key-1")
+      .send({ founder_review_notes: "Target reached." });
+    const conflict = await request(app)
+      .post("/internal/v1/offerings/offering_01/finalize")
+      .set("Idempotency-Key", "finalize-key-1")
+      .send({ founder_review_notes: "Different notes." });
+
+    expect(conflict.status).toBe(409);
+    expect(conflict.body.code).toBe("idempotency.body_mismatch");
   });
 });

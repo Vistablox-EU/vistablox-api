@@ -58,6 +58,20 @@ describe("idempotency middleware", () => {
     expect(response.body).toMatchObject({ code: "idempotency.key_required", status: 400 });
   });
 
+  it("hashes and replays a bodyless request (actions like reconfirmation post no body)", async () => {
+    const handler = vi.fn();
+    const app = appFor(memoryStore(), handler);
+
+    const first = await request(app).post("/orders").set("Idempotency-Key", "key-bodyless");
+    const replay = await request(app).post("/orders").set("Idempotency-Key", "key-bodyless");
+
+    expect(first.status).toBe(201);
+    expect(first.body).toEqual({ order_id: "order_01" });
+    expect(replay.status).toBe(201);
+    expect(replay.body).toEqual({ order_id: "order_01" });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
   it("runs the handler once and caches its response on first use", async () => {
     const handler = vi.fn();
     const app = appFor(memoryStore(), handler);

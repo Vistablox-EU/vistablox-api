@@ -1,12 +1,12 @@
 import { APIError } from "better-auth/api";
 import { describe, expect, it, vi } from "vitest";
 
-import { BetterAuthLoginMethodUnlinker } from "../src/modules/auth/infrastructure/better-auth-login-method-unlinker.js";
+import { BetterAuthLoginMethodUnlinker } from "../src/modules/auth/infrastructure/customer/better-auth-login-method-unlinker.js";
 import {
   LoginMethodNotLinkedError,
   RegistrationLoginMethodLockedError,
-} from "../src/modules/auth/application/login-method-unlinker.js";
-import type { VistaBloxAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
+} from "../src/modules/auth/application/customer/login-method-unlinker.js";
+import type { VistaBloxAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 
 function fakeAuth(overrides: {
   accounts?: Array<{ id: string; providerId: string }>;

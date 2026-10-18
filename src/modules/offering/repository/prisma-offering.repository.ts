@@ -530,13 +530,25 @@ export class PrismaOfferingRepository
               clientIdempotencyKey,
             },
           },
-          select: { id: true, createdAt: true },
+          select: { id: true, createdAt: true, amountEur: true, reservationStage: true },
         });
         if (existing !== null) {
+          // Same ordering the funded-amount and expiry queries use: the latest
+          // money event decides the reservation's capital state.
+          const latestMoneyEvent = await transaction.moneyEvent.findFirst({
+            where: { reservationId: existing.id },
+            orderBy: [{ recordedAt: "desc" }, { id: "desc" }],
+            select: { capitalState: true },
+          });
           return {
             reservation: { reservationId: existing.id, createdAt: existing.createdAt },
             conflict: null,
             reused: true,
+            replay: {
+              amountEur: existing.amountEur.toFixed(2),
+              reservationStage: existing.reservationStage,
+              latestCapitalState: latestMoneyEvent?.capitalState ?? null,
+            },
           };
         }
       }

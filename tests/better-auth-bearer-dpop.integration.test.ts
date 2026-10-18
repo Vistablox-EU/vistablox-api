@@ -11,16 +11,16 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaAccountRepository } from "../src/modules/account/repository/prisma-account.repository.js";
-import { createLoginMethodsRouter } from "../src/modules/auth/api/login-methods.router.js";
-import { createRequireAuthentication } from "../src/modules/auth/api/require-authentication.js";
-import { rejectDisabledAuthRoutes } from "../src/modules/auth/api/reject-disabled-auth.js";
-import { decideDpopForSession } from "../src/modules/auth/application/dpop-proof-verifier.js";
-import { RegistrationLoginMethodLockedError } from "../src/modules/auth/application/login-method-unlinker.js";
-import { UnlinkLoginMethodService } from "../src/modules/auth/application/unlink-login-method.service.js";
-import { BetterAuthLoginMethodUnlinker } from "../src/modules/auth/infrastructure/better-auth-login-method-unlinker.js";
-import { BetterAuthSessionResolver } from "../src/modules/auth/infrastructure/better-auth-session.resolver.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/prisma-dpop-replay.repository.js";
+import { createLoginMethodsRouter } from "../src/modules/auth/api/customer/login-methods.router.js";
+import { createRequireAuthentication } from "../src/modules/auth/api/shared/require-authentication.js";
+import { rejectDisabledAuthRoutes } from "../src/modules/auth/api/shared/reject-disabled-auth.js";
+import { decideDpopForSession } from "../src/modules/auth/application/shared/dpop-proof-verifier.js";
+import { RegistrationLoginMethodLockedError } from "../src/modules/auth/application/customer/login-method-unlinker.js";
+import { UnlinkLoginMethodService } from "../src/modules/auth/application/customer/unlink-login-method.service.js";
+import { BetterAuthLoginMethodUnlinker } from "../src/modules/auth/infrastructure/customer/better-auth-login-method-unlinker.js";
+import { BetterAuthSessionResolver } from "../src/modules/auth/infrastructure/shared/better-auth-session.resolver.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/shared/prisma-dpop-replay.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 

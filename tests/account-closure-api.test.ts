@@ -2,12 +2,12 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createAccountClosureRouter } from "../src/modules/auth/api/account-closure.router.js";
+import { createAccountClosureRouter } from "../src/modules/auth/api/customer/account-closure.router.js";
 import {
   CancelAccountClosureService,
   RequestAccountClosureService,
-} from "../src/modules/auth/application/account-closure.service.js";
-import type { AccountClosureRepository, AccountClosureRequestRecord } from "../src/modules/auth/repository/account-closure.repository.js";
+} from "../src/modules/auth/application/shared/account-closure.service.js";
+import type { AccountClosureRepository, AccountClosureRequestRecord } from "../src/modules/auth/repository/shared/account-closure.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 

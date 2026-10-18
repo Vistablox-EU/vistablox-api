@@ -3,8 +3,8 @@ import { Pool } from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaStaffBootstrapRepository } from "../src/modules/auth/repository/prisma-staff-bootstrap.repository.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaStaffBootstrapRepository } from "../src/modules/auth/repository/staff/prisma-staff-bootstrap.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
