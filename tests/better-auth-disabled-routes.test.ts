@@ -8,7 +8,11 @@ import type { Pool } from "pg";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { createApp } from "../src/app.js";
-import { isAuthPathAllowed, isDisabledAuthPath } from "../src/modules/auth/domain/disabled-auth-routes.js";
+import {
+  isAuthPathAllowed,
+  isCanonicalAuthPath,
+  isDisabledAuthPath,
+} from "../src/modules/auth/domain/disabled-auth-routes.js";
 import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 import { issuePasskeyBootstrap } from "../src/modules/auth/infrastructure/shared/passkey-bootstrap.js";
 import { createSoftwareAuthenticator } from "./support/software-authenticator.js";
@@ -210,9 +214,12 @@ interface Variant {
   /**
    * True when WHATWG URL parsing -- which is what Better Auth routes on --
    * turns the target into exactly /api/auth<path>. Such a request WOULD be
-   * routed to the denied endpoint if nothing stopped it. False variants are
-   * ones the router does not route (it does not percent-decode, and 404s
-   * repeated and trailing slashes); the guard must still refuse them.
+   * routed to the denied endpoint if nothing stopped it. For the false
+   * variants URL parsing yields some other path. The router mostly does not
+   * route those either (it does not percent-decode, and 404s repeated and
+   * trailing slashes), but not always: the parameter route
+   * GET /reset-password/:token captures an encoded letter, a null byte or a
+   * path parameter in its last segment. Either way the guard must refuse them.
    */
   routesToEndpoint: boolean;
 }
@@ -502,12 +509,13 @@ describe("the live Better Auth route table", () => {
     expect(routes).toContain("/callback/:id");
   });
 
-  it("serves only paths the guard passes on, apart from the disabled ones", async () => {
-    const refused = (await routeTable())
-      .map((route) => route.replaceAll(/:[A-Za-z]+/g, "Sample-value_1.2~3"))
-      .filter((route) => !isAuthPathAllowed(`/api/auth${route}`) && !isDisabledAuthPath(`/api/auth${route}`));
+  it("serves only canonical paths, so the guard passes every route that is not disabled", async () => {
+    const paths = (await routeTable()).map(
+      (route) => `/api/auth${route.replaceAll(/:[A-Za-z]+/g, "Sample-value_1.2~3")}`,
+    );
 
-    expect(refused).toEqual([]);
+    expect(paths.filter((path) => !isCanonicalAuthPath(path))).toEqual([]);
+    expect(paths.filter((path) => !isDisabledAuthPath(path) && !isAuthPathAllowed(path))).toEqual([]);
   });
 
   it("disables exactly the intended routes", async () => {

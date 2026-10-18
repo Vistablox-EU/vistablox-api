@@ -31,8 +31,9 @@ const CANONICAL_SEGMENT = /^[A-Za-z0-9._~-]+$/;
 // dots is not one, but nothing routed here is named that, so it is refused too.
 const DOTS_ONLY = /^\.+$/;
 
-// These two tolerate any number of trailing slashes, as Better Auth's own
-// normalizePathname strips them all.
+// The credential email and passkey-delete rules below tolerate any number of
+// trailing slashes, as Better Auth's own normalizePathname strips them all.
+// The email-otp rule is a prefix match, so it needs no such allowance.
 const CREDENTIAL_EMAIL_PATH = /^\/api\/auth\/(?:sign-in|sign-up)\/email\/*$/;
 const EMAIL_OTP_PATH = /^\/api\/auth\/(?:email-otp|sign-in\/email-otp)(?:\/|$)/;
 // Passkey replacement only ever happens via account recovery and staff

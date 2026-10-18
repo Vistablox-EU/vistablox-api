@@ -1,9 +1,9 @@
 import http from "node:http";
 import type { AddressInfo } from "node:net";
 
-import express from "express";
+import express, { type Request, type Response } from "express";
 import request from "supertest";
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { rejectDisabledAuthRoutes } from "../src/modules/auth/api/shared/reject-disabled-auth.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
@@ -82,6 +82,13 @@ describe("reject disabled auth routes", () => {
 // above go through supertest, whose client may tidy a path before it is sent;
 // node:http puts `path` on the request line as given, so these reach the guard
 // exactly as an attacker would write them.
+//
+// The guard is mounted with app.all, so it must refuse whatever the HTTP
+// method: every table below runs once per method. The stub handler records
+// every target it is given, so "the guard refused it" means "the handler was
+// never called", not merely "the status was 404".
+const METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"] as const;
+
 describe("reject disabled auth routes: request targets Better Auth would normalise", () => {
   let server: http.Server;
   let port: number;
@@ -107,24 +114,32 @@ describe("reject disabled auth routes: request targets Better Auth would normali
     await new Promise<void>((resolve) => server.close(() => resolve()));
   });
 
-  function sendRaw(target: string): Promise<{ status: number; body: string }> {
+  function sendRaw(target: string, method: string): Promise<{ status: number; body: string }> {
     return new Promise((resolve, reject) => {
-      const outgoing = http.request(
-        { host: "127.0.0.1", port, method: "POST", path: target },
-        (response) => {
-          let body = "";
-          response.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
-          response.on("end", () => resolve({ status: response.statusCode ?? 0, body }));
-        },
-      );
+      const outgoing = http.request({ host: "127.0.0.1", port, method, path: target }, (response) => {
+        let body = "";
+        response.on("data", (chunk: Buffer) => (body += chunk.toString("utf8")));
+        response.on("end", () => resolve({ status: response.statusCode ?? 0, body }));
+      });
       outgoing.on("error", reject);
       outgoing.end();
     });
   }
 
+  /** A HEAD response has no body, so only the status can be checked for it. */
+  function expectRefused(response: { status: number; body: string }, method: string): void {
+    expect(response.status).toBe(404);
+    if (method !== "HEAD") {
+      expect(JSON.parse(response.body)).toMatchObject({ code: "resource.not_found", status: 404 });
+    }
+    expect(reached).toEqual([]);
+  }
+
   // Not all of these are routed by Better Auth (it does not percent-decode,
   // and 404s repeated and trailing slashes itself). The guard does not try to
   // work out which: a path whose meaning depends on the parser is refused.
+  // Several are deeper than four segments, so a check that only looked at the
+  // first few segments of a path would let them through.
   const AMBIGUOUS_TARGETS: Array<[string, string]> = [
     ["a dot segment", "/api/auth/x/../get-session"],
     ["a dot segment onto the passkey delete route", "/api/auth/x/../passkey/delete-passkey"],
@@ -161,27 +176,13 @@ describe("reject disabled auth routes: request targets Better Auth would normali
     ["a path parameter on an inner segment", "/api/auth/x;a=b/get-session"],
     ["a path parameter on a dot segment", "/api/auth/x/..;/get-session"],
     ["an absolute-form request target", "http://127.0.0.1/api/auth/get-session"],
+    ["dot segments five segments deep onto the passkey delete route", "/api/auth/a/b/c/d/../../../../passkey/delete-passkey"],
+    ["encoded dot segments six segments deep onto the passkey delete route", "/api/auth/a/b/c/d/e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/%2e%2e/passkey/delete-passkey"],
+    ["a dot segment only after the fourth segment", "/api/auth/a/b/c/d/e/../get-session"],
+    ["a backslash only after the fourth segment", "/api/auth/a/b/c/d/e\\get-session"],
+    ["an encoded slash only after the fourth segment", "/api/auth/a/b/c/d/e%2fget-session"],
+    ["a path parameter only after the fourth segment", "/api/auth/a/b/c/d/e;x/get-session"],
   ];
-
-  it.each(AMBIGUOUS_TARGETS)("404s %s without reaching Better Auth", async (_name, target) => {
-    const response = await sendRaw(target);
-
-    expect(response.status).toBe(404);
-    expect(JSON.parse(response.body)).toMatchObject({ code: "resource.not_found", status: 404 });
-    expect(reached).toEqual([]);
-  });
-
-  // Express decodes the path while matching the route, before any handler
-  // runs, and refuses these itself; they never get as far as the guard.
-  it.each([
-    ["a malformed percent escape", "/api/auth/get-session%"],
-    ["a non-ASCII character", "/api/auth/g\u00e9t-session"],
-  ])("never passes %s on to Better Auth", async (_name, target) => {
-    const response = await sendRaw(target);
-
-    expect(response.status).toBeGreaterThanOrEqual(400);
-    expect(reached).toEqual([]);
-  });
 
   const DISABLED_TARGETS: Array<[string, string]> = [
     ["the passkey delete route", "/api/auth/passkey/delete-passkey"],
@@ -200,14 +201,6 @@ describe("reject disabled auth routes: request targets Better Auth would normali
     ["the email-otp sign-in route", "/api/auth/sign-in/email-otp"],
   ];
 
-  it.each(DISABLED_TARGETS)("404s %s without reaching Better Auth", async (_name, target) => {
-    const response = await sendRaw(target);
-
-    expect(response.status).toBe(404);
-    expect(JSON.parse(response.body)).toMatchObject({ code: "resource.not_found", status: 404 });
-    expect(reached).toEqual([]);
-  });
-
   // Every shape Better Auth is actually called with: plain lower-case
   // segments, a provider name as a parameter, dots inside a name, and
   // anything at all after the `?`.
@@ -216,6 +209,7 @@ describe("reject disabled auth routes: request targets Better Auth would normali
     ["a nested route", "/api/auth/sign-in/social"],
     ["a route with a parameter", "/api/auth/callback/google"],
     ["a three-segment route", "/api/auth/device/enrol/verify"],
+    ["a route more than four segments deep", "/api/auth/a/b/c/d/e/f/get-session"],
     ["update-passkey", "/api/auth/passkey/update-passkey"],
     ["a dot inside a segment", "/api/auth/some.route/under_score/til~de"],
     ["an upper-case parameter value", "/api/auth/callback/Provider1"],
@@ -226,10 +220,79 @@ describe("reject disabled auth routes: request targets Better Auth would normali
     ["a query string and a fragment", "/api/auth/get-session?a=b#c/../d"],
   ];
 
-  it.each(ALLOWED_TARGETS)("lets %s through", async (_name, target) => {
-    const response = await sendRaw(target);
+  describe.each(METHODS)("%s", (method) => {
+    it.each(AMBIGUOUS_TARGETS)("404s %s without reaching Better Auth", async (_name, target) => {
+      expectRefused(await sendRaw(target, method), method);
+    });
 
-    expect(response.status).toBe(200);
-    expect(reached).toEqual([target]);
+    it.each(DISABLED_TARGETS)("404s %s without reaching Better Auth", async (_name, target) => {
+      expectRefused(await sendRaw(target, method), method);
+    });
+
+    it.each(ALLOWED_TARGETS)("lets %s through", async (_name, target) => {
+      const response = await sendRaw(target, method);
+
+      expect(response.status).toBe(200);
+      expect(reached).toEqual([target]);
+    });
+  });
+
+  // Two targets that never get as far as the guard over HTTP/1.1; Better Auth
+  // must not be reached either way, and the guard's own answer to both is
+  // checked on its own in the next describe.
+  it("never passes a non-ASCII character on to Better Auth: Node's HTTP parser answers 400 itself", async () => {
+    const response = await sendRaw("/api/auth/gét-session", "POST");
+
+    expect(response.status).toBe(400);
+    expect(reached).toEqual([]);
+  });
+
+  it("never passes a malformed percent escape on to Better Auth: Express's param decoding fails first", async () => {
+    const response = await sendRaw("/api/auth/get-session%", "POST");
+
+    // The status is whatever the error handler makes of Express's decode
+    // failure (500 today, although 400 would be more accurate); it is not
+    // pinned here, only that this is an error and nothing was routed.
+    expect(response.status).toBeGreaterThanOrEqual(400);
+    expect(reached).toEqual([]);
+  });
+});
+
+// The guard on its own, handed a request target directly. Over HTTP/1.1 Node's
+// HTTP parser refuses raw non-ASCII and control characters in a request line,
+// Express's route matching refuses malformed percent escapes, and "*" does not
+// match the route, so none of those can be driven through a server; but they
+// would reach the guard if a different front end or parser let them through.
+// The empty target is the same kind of odd shape. The guard must refuse them
+// all itself rather than lean on what sits in front of it.
+describe("reject disabled auth routes: targets refused without a server in front of the guard", () => {
+  it.each([
+    ["a non-ASCII character", "/api/auth/gét-session"],
+    ["a non-ASCII dot lookalike", "/api/auth/x/．．/passkey/delete-passkey"],
+    ["a malformed percent escape", "/api/auth/get-session%"],
+    ["a percent sign followed by non-hex characters", "/api/auth/get-session%zz"],
+    ["a space", "/api/auth/get session"],
+    ["a tab", "/api/auth/get\tsession"],
+    ["a line feed", "/api/auth/get\nsession"],
+    ["a null byte", "/api/auth/get\u0000session"],
+    ["a delete control character", "/api/auth/get\u007fsession"],
+    ["an empty target", ""],
+    ["the bare asterisk target", "*"],
+  ])("answers 404 for %s", (_name, url) => {
+    const next = vi.fn();
+
+    rejectDisabledAuthRoutes({ url } as Request, {} as Response, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next.mock.calls[0]?.[0]).toMatchObject({ code: "resource.not_found", status: 404 });
+  });
+
+  it("calls next without an error for a plain route", () => {
+    const next = vi.fn();
+
+    rejectDisabledAuthRoutes({ url: "/api/auth/get-session?a=b" } as Request, {} as Response, next);
+
+    expect(next).toHaveBeenCalledTimes(1);
+    expect(next).toHaveBeenCalledWith();
   });
 });
