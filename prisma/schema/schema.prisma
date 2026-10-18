@@ -57,6 +57,7 @@ model Account {
   resolvedClosureRequests        AccountClosureRequest[] @relation("ClosureRequestResolver")
   devices                        Device[]
   deviceReplacementCodes         DeviceReplacementCode[]
+  signingRequests                SigningRequest[]
   reviewedEvidence                DocumentaryScreeningEvidence[] @relation("EvidenceReviewer")
   intakeReversalRequests          IntakeCaseReversalOperation[] @relation("IntakeReversalRequester")
   intakeReversalApprovals         IntakeCaseReversalOperation[] @relation("IntakeReversalApprover")

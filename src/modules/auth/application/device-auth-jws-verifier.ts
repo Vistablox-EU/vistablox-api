@@ -1,5 +1,7 @@
 import { type JWK, calculateJwkThumbprint, importJWK, jwtVerify } from "jose";
 
+import { parseTxClaims, SIGNING_JWS_PURPOSE, type TxClaims } from "../domain/signing-request.policy.js";
+
 const IAT_WINDOW_SECONDS = 60;
 const JWS_TYP = "vistablox-device-auth+jwt";
 
@@ -49,6 +51,13 @@ export interface DeviceAuthJwsClaims {
   deviceId: string | undefined;
   /** Only present on the `enrol-device` purpose. */
   jwk: JWK | undefined;
+  /**
+   * Only present on the `tx` purpose: the signed per-action claims
+   * (contract 3.2) after their shape has been validated, ready for the
+   * field-by-field comparison the signing service performs. Kept out of the
+   * generic verification so non-tx callers never see per-action data.
+   */
+  txClaims: TxClaims | undefined;
 }
 
 function isPublicP256Jwk(value: unknown): value is JWK {
@@ -191,11 +200,21 @@ export async function verifyDeviceAuthJws(input: {
     }
   }
 
+  let txClaims: TxClaims | undefined;
+  if (payload.purpose === SIGNING_JWS_PURPOSE) {
+    const parsed = parseTxClaims(payload);
+    if (parsed === null) {
+      throw new DeviceJwsInvalidError("malformed tx claims");
+    }
+    txClaims = parsed;
+  }
+
   return {
     bioJkt,
     purpose: payload.purpose,
     challenge: payload.challenge,
     deviceId: typeof payload.device_id === "string" ? payload.device_id : undefined,
     jwk: isEnrolDevice ? verificationKey : undefined,
+    txClaims,
   };
 }
