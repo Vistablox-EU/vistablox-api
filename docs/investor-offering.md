@@ -41,6 +41,17 @@ The reservation row and its first `money.money_events` row (`capital_state: "ini
 
 After the reservation is durably created, the CDP onramp session token call happens synchronously in the request path, the same way `StartKycSessionService` calls Didit — not through a job (`AD-145` governs cross-domain *state transitions*, not a single external call whose whole purpose is "start now, hand the client a URL"). If that call fails, a `purchase_failed` money event is recorded and the error propagates; the reservation row is deliberately left in place rather than unwound, because the already-decided capacity policy (reserve immediately, auto-expire if unfunded) already covers this case identically to an investor who simply never completes the purchase.
 
+### Retrying a reservation request (`Idempotency-Key`)
+
+The request requires an `Idempotency-Key` header of at most 128 characters (`400 idempotency.key_required` otherwise). The key is stored on the reservation (`client_idempotency_key`, unique per account, offering and key); a lookup under the same `offerings` row lock that guards capacity returns the existing reservation instead of creating a second hold, so a client that lost the response can retry safely. Keys are scoped to the account and the offering: another account, or the same key on another offering, is an unrelated request.
+
+A retry is served only while the stored reservation is still what the client asked for and can still be paid. It gets a fresh onramp session for the original `reservation_id` and the original `expires_at`; a retry never creates a new hold, never extends an existing one, and never revives one that has ended:
+
+- `409 offering.idempotency_key_reused`: the key was already used for a different `amount_eur` (`AD-147`).
+- `409 offering.reservation_replay_unavailable`: the stored reservation is no longer payable through a new session: it is past its 15-minute hold, its `reservation_stage` is no longer `initiated` (`lapsed`, `cancelled`, `awaiting_reconfirmation`, ...), or its latest `capital_state` is already funded (`eurc_reserved`, `reconfirmation_pending`, `eurc_finalized`). The client should read its reservations for the current state instead of retrying again.
+
+If the onramp session call fails on a retry, a `purchase_failed` money event is recorded against the original reservation, exactly as on a first attempt.
+
 ## Unfunded reservation expiry
 
 A `case_timers.reservation_unfunded_expiry` job (`ExpireUnfundedReservationsService`, run every minute by the worker process — the other `case_timers`/`maintenance` jobs run hourly, but a 15-minute promise needs a tighter sweep) lists every `initiated` reservation and flips any older than 15 minutes to `lapsed`, exactly like `ExpireOverdueInformationRequestsService` already does for overdue information requests. There is no separate "release capacity" step: `reserved_capacity_eur` is computed by summing reservations excluding `cancelled`/`lapsed` at read/check time, so flipping the stage is the entire release. Each expiry is idempotent (a reservation no longer `initiated` by the time the job reaches it is a no-op, not an error) and writes an `offering.reservation_lapsed` audit log entry with `actor_account_id: null`, since nothing but the timer itself acts here.
