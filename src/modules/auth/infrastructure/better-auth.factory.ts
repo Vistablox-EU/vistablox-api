@@ -296,8 +296,13 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     plugins: [
       expo(),
       // Native mobile uses the Better Auth session itself, sent as a bearer
-      // token via the Authorization header instead of a cookie.
-      bearer(),
+      // token via the Authorization header instead of a cookie. Only the
+      // signed "value.signature" form (the set-auth-token value, which the app
+      // sends byte for byte) authenticates: with the default, a bare session
+      // token, such as the `token` field some better-auth responses carry, would
+      // be signed by bearer() itself and accepted. better-auth-hook-session.ts
+      // parses Authorization the same way and must change together with this.
+      bearer({ requireSignature: true }),
       // Device-session time limits: before the DPoP plugin, whose before
       // hook already reads the session. Registered unconditionally: it only
       // acts on rows the device-auth plugin created.

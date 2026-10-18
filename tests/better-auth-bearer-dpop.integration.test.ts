@@ -278,6 +278,18 @@ describe.skipIf(databaseUrl === undefined)(
       };
     }
 
+    /** A bearer-style GET with an arbitrary Authorization value (no Cookie), for tokens that are not a fixture's signed bearer. */
+    async function fetchWithAuthorization(authorization: string, path: string, dpop: string): Promise<Observed> {
+      const response = await request(app).get(path).set("Authorization", authorization).set("DPoP", dpop);
+      const body = response.body as { code?: unknown } | null;
+      return {
+        status: response.status,
+        code: typeof body?.code === "string" ? body.code : undefined,
+        wwwAuthenticate: undefined,
+        body: response.body,
+      };
+    }
+
     function expectDpopRejection(observed: Observed, code: string): void {
       expect(observed).toMatchObject({ status: 401, code, wwwAuthenticate: WWW_AUTHENTICATE });
     }
@@ -543,6 +555,49 @@ describe.skipIf(databaseUrl === undefined)(
 
         expect(observed).toMatchObject({ status: 200, body: { success: true } });
         expect(await sessionRowExists(fixture.sessionId)).toBe(false);
+      });
+    });
+
+    describe("only the signed session token authenticates as a bearer", () => {
+      it("the bare session token is not a bearer, even with a proof that fits it", async () => {
+        // The unsigned token is what auth_session stores and what some
+        // better-auth responses return in a `token` field. If bearer() signed
+        // it itself, anything that learned it would authenticate without the
+        // signature, and the DPoP hook (which only looks at signed tokens)
+        // would not see the session at all.
+        const path = "/api/auth/list-accounts";
+        const p = await signProof(bound.keyA, { method: "GET", path, bearer: bound.rawToken });
+
+        const observed = await fetchWithAuthorization(`Bearer ${bound.rawToken}`, path, p.header);
+
+        expect(observed.status).toBe(401);
+        expect(await recordedProofs(bound.keyA.jkt, p.jti)).toBe(0);
+      });
+
+      it("the bare token does not get a session from get-session either (200 with a null body)", async () => {
+        const path = "/api/auth/get-session";
+        const p = await signProof(bound.keyA, { method: "GET", path, bearer: bound.rawToken });
+
+        const observed = await fetchWithAuthorization(`Bearer ${bound.rawToken}`, path, p.header);
+
+        expect(observed).toMatchObject({ status: 200, body: null });
+      });
+
+      it("a token that came back from list-sessions is the bare one, so it is no bearer", async () => {
+        const listPath = "/api/auth/list-sessions";
+        const p = await proofFor(bound, bound.keyA, "bearer", "GET", listPath);
+        const listed = await send({ fixture: bound, transport: "bearer", method: "GET", path: listPath, dpop: p.header });
+        expect(listed.status).toBe(200);
+        const entry = (listed.body as Array<{ token?: string }>).find((candidate) => candidate.token === bound.rawToken);
+        // Documents why the signed form matters: the bare token is in the response.
+        expect(entry).toBeDefined();
+        const listedToken = entry?.token ?? "";
+
+        const path = "/api/auth/list-accounts";
+        const q = await signProof(bound.keyA, { method: "GET", path, bearer: listedToken });
+        const observed = await fetchWithAuthorization(`Bearer ${listedToken}`, path, q.header);
+
+        expect(observed.status).toBe(401);
       });
     });
 
