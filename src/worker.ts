@@ -41,6 +41,7 @@ import { FinalizeIpoEscrowCampaignsService } from "./modules/settlement/applicat
 import { ConfirmWalletRegistrationsService } from "./modules/settlement/application/confirm-wallet-registrations.service.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
+import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 import { WorkerHeartbeat } from "./shared/health/worker-heartbeat.js";
@@ -154,7 +155,6 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 );
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(intakeRepository);
 const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(intakeRepository);
-const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
 const sendReconfirmationReminders = new SendReconfirmationRemindersService(offeringRepository, emailSender);
@@ -226,16 +226,20 @@ const chainClients =
 // all-configured-together-or-none per environment.ts's own refine --
 // separate from chainClients's own base-connectivity gate above, since
 // confirmWalletRegistrations below needs none of these four.
-const settlementBundleConfigured =
-  chainClients !== undefined &&
-  environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS !== undefined &&
-  environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS !== undefined &&
-  environment.EURC_TOKEN_ADDRESS !== undefined &&
-  environment.PIV_TREASURY_ADDRESS !== undefined;
+const settlementBundleConfigured = isSettlementBundleConfigured(environment);
 const openIpoEscrowCampaign =
   chainClients === undefined || !settlementBundleConfigured
     ? undefined
     : new OpenIpoEscrowCampaignService(chainClients);
+// Opening an offering hands off to the escrow campaign job only where this
+// process also creates and consumes that job's queue (AD-256). While token
+// settlement is dormant (AD-234) that bundle is unconfigured, no such queue
+// exists, and enqueueing into it would fail the whole offering open -- so the
+// flag is derived from the same condition that decides whether the queue and
+// its consumer are registered below, and cannot drift from it.
+const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository, {
+  openEscrowCampaign: openIpoEscrowCampaign !== undefined,
+});
 const settlementRepository = chainClients === undefined ? undefined : new PrismaSettlementRepository(database);
 const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured

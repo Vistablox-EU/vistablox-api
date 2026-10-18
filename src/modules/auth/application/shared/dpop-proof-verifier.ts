@@ -95,8 +95,9 @@ export function dpopErrorResponseFields(
  * Canonical `htu` for a request: scheme + lower-cased host (default port
  * omitted) + the path exactly as sent (percent-encoding kept, no query or
  * fragment). `baseUrl` should be BETTER_AUTH_URL, never a value derived from
- * request headers -- the API has no `trust proxy` configured, so
- * `X-Forwarded-*`/`req.protocol`/`req.get('host')` are not trustworthy here.
+ * request headers: `req.get('host')` is whatever the caller sent, and
+ * `X-Forwarded-*` (and what Express derives from it, such as `req.protocol`)
+ * is only believable for the proxies TRUST_PROXY names.
  */
 export function buildHtu(baseUrl: string, rawPathWithMaybeQuery: string): string {
   const base = new URL(baseUrl);
