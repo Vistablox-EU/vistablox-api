@@ -441,6 +441,40 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
       ]);
     });
 
+    it("reads an escrow-minted position, which has no reservation, alongside reservation-backed ones", async () => {
+      // recordEscrowMintedPosition writes no reservation_id (AD-256), and the
+      // offering is only reachable through the reservation, so both come back
+      // null. The router's response schema must accept that.
+      const escrowPositionId = `position_escrow_${suffix}`;
+      await database.positionLedger.create({
+        data: {
+          id: escrowPositionId,
+          pivId,
+          accountId,
+          unitCount: "1000.000000",
+          costBasisEur: "1000.00",
+          positionStatus: "active",
+          activatedAt: new Date("2026-09-07T12:00:00.000Z"),
+        },
+      });
+      try {
+        const page = await investorActivityRepository.listCurrentPositions({ accountId, limit: 10 });
+        expect(page.find((row) => row.positionId === escrowPositionId)).toMatchObject({
+          reservationId: null,
+          offeringId: null,
+          pivId,
+          unitCount: "1000.000000",
+          costBasisEur: "1000.00",
+        });
+        expect(page.find((row) => row.positionId === `position_active_${suffix}`)).toMatchObject({
+          reservationId: reservationIds[0],
+          offeringId,
+        });
+      } finally {
+        await database.positionLedger.delete({ where: { id: escrowPositionId } });
+      }
+    });
+
     it("summarizes reservation and active-position counts", async () => {
       await expect(investorActivityRepository.getSummary(accountId)).resolves.toEqual({
         reservationCount: 3,

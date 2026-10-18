@@ -95,8 +95,9 @@ export function dpopErrorResponseFields(
  * Canonical `htu` for a request: scheme + lower-cased host (default port
  * omitted) + the path exactly as sent (percent-encoding kept, no query or
  * fragment). `baseUrl` should be BETTER_AUTH_URL, never a value derived from
- * request headers -- the API has no `trust proxy` configured, so
- * `X-Forwarded-*`/`req.protocol`/`req.get('host')` are not trustworthy here.
+ * request headers: `req.get('host')` is whatever the caller sent, and
+ * `X-Forwarded-*` (and what Express derives from it, such as `req.protocol`)
+ * is only believable for the proxies TRUST_PROXY names.
  */
 export function buildHtu(baseUrl: string, rawPathWithMaybeQuery: string): string {
   const base = new URL(baseUrl);
@@ -231,6 +232,11 @@ export async function decideDpopForSession(input: {
   phase1CutoverAt: Date | undefined;
   recordProof: (jkt: string, jti: string, expiresAt: Date) => Promise<boolean>;
   replayWindowSeconds?: number;
+  // Called once with the proof's claims after it verified AND was recorded as
+  // new. The caller can hand them on so a later step of the same request does
+  // not verify-and-record the identical (jkt, jti) again and lose to it as a
+  // replay.
+  onVerified?: (claims: DpopProofClaims) => void;
 }): Promise<DpopSessionDecision> {
   const replayWindowSeconds = input.replayWindowSeconds ?? 120;
   const record = (claims: DpopProofClaims): Promise<boolean> =>
@@ -246,6 +252,7 @@ export async function decideDpopForSession(input: {
     if (claims.jkt !== input.boundJkt) throw new DpopKeyMismatchError();
     const accepted = await record(claims);
     if (!accepted) throw new DpopReplayError();
+    input.onVerified?.(claims);
     return { action: "pass" };
   }
 
@@ -269,5 +276,6 @@ export async function decideDpopForSession(input: {
   const accepted = await record(claims);
   if (!accepted) return { action: "pass" };
 
+  input.onVerified?.(claims);
   return { action: "bind", jkt: claims.jkt };
 }

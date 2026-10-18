@@ -58,8 +58,13 @@ export const investorCurrentPositionsResponseSchema = z.object({
   data: z.array(
     z.object({
       position_id: z.string().min(1),
-      reservation_id: z.string().min(1),
-      offering_id: z.string().min(1),
+      // Null for a position that was not created from a reservation: today
+      // that is the AD-256 escrow mint (recordEscrowMintedPosition writes no
+      // reservation_id), and CORE_TABLES allows the same for owner-retained
+      // positions. offering_id is resolved only through the reservation, so
+      // it is null with it.
+      reservation_id: z.string().min(1).nullable(),
+      offering_id: z.string().min(1).nullable(),
       piv_id: z.string().min(1),
       unit_count: z.string().regex(/^\d+\.\d{6}$/),
       cost_basis_eur: z.string().regex(/^\d+\.\d{2}$/),

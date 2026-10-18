@@ -81,6 +81,13 @@ import {
 import { createRequireDpopOnly } from "./modules/auth/api/require-dpop-only.js";
 import type { IssueDeviceChallengeService } from "./modules/auth/application/device-challenge-issuance.service.js";
 import type { VistaBloxAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
+import { createDeviceReplacementRouter } from "./modules/auth/api/device-replacement.router.js";
+import {
+  RequestDeviceReplacementService,
+  VerifyDeviceReplacementService,
+  type DeviceReplacementConfig,
+} from "./modules/auth/application/device-replacement.service.js";
+import type { DeviceReplacementRepository } from "./modules/auth/repository/device-replacement.repository.js";
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
@@ -253,6 +260,11 @@ export interface AppDependencies {
   webauthnRelatedOrigins?: string[];
   rateLimitStore?: RateLimitStore;
   idempotencyStore?: IdempotencyStore;
+  // Express's `trust proxy`, from TRUST_PROXY (validated, and compiled by
+  // Express itself, in environment.ts). Unset trusts no proxy: req.ip is the connecting address
+  // and X-Forwarded-For is ignored, which is the safe default but, behind a
+  // reverse proxy, makes every caller share the proxy's IP rate-limit bucket.
+  trustProxy?: number | string[];
   /** Never true unless a human has done the live Coinbase EUR/Base verification AD-255 leaves open — see docs/investor-offering.md. Defaults false. */
   reservationFundingRailEnabled?: boolean;
   protectedApi?: {
@@ -385,11 +397,19 @@ export interface AppDependencies {
       baseUrl: string;
       appConfig: AppConfig;
     };
+    deviceReplacement?: {
+      repository: DeviceReplacementRepository;
+      emailSender: EmailSender;
+      config: DeviceReplacementConfig;
+    };
   };
 }
 
 export function createApp(dependencies: AppDependencies): Express {
   const app = express();
+  if (dependencies.trustProxy !== undefined) {
+    app.set("trust proxy", dependencies.trustProxy);
+  }
   const listPublicOfferings = new ListPublicOfferingsService(dependencies.offeringRepository);
   const baselineRateLimiter =
     dependencies.rateLimitStore === undefined
@@ -659,6 +679,21 @@ export function createApp(dependencies: AppDependencies): Express {
             ...(tightenedRateLimiter === undefined ? [] : [tightenedRateLimiter]),
             ...(deviceAuthDpopKeyRateLimiter === undefined ? [] : [deviceAuthDpopKeyRateLimiter]),
           ],
+        ),
+      );
+    }
+    if (dependencies.protectedApi.deviceReplacement !== undefined) {
+      const replacement = dependencies.protectedApi.deviceReplacement;
+      app.use(
+        "/v1/auth/mobile/replacement",
+        createDeviceReplacementRouter(
+          requireAuthentication,
+          new RequestDeviceReplacementService(
+            replacement.repository,
+            replacement.emailSender,
+            replacement.config,
+          ),
+          new VerifyDeviceReplacementService(replacement.repository, replacement.config),
         ),
       );
     }

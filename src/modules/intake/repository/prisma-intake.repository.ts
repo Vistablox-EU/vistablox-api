@@ -1230,8 +1230,17 @@ export class PrismaIntakeRepository
       const legalStructuringCompletedAt =
         current.legalStructuringCompletedAt ??
         (input.markCompleted === true ? input.recordedAt : null);
-      // Mirrors domain/case-review.policy.ts's isPostIpoStructuringComplete,
-      // duplicated here for the same reason as the recheck above.
+      // CORE_TABLES.md's post_ipo_structuring_completed_at comment: "set once
+      // both legal_structuring_completed_at and appraisal_completed_at are
+      // set; stage moves post_ipo_structuring -> approved_for_final_offering
+      // in the same action". A system-computed consequence of whichever
+      // partner's writeback completes second, not a founder decision
+      // (PERMISSION_MATRIX.md's "only admin/operations moves stage" is about
+      // stage as someone's own direct action). It is decided here, from the
+      // other side's completion as read above under this transaction's row
+      // lock, so two partners finishing at once cannot both miss each
+      // other's write; recordAppraisal repeats it with the sides swapped.
+      // Covered by tests/partner-writeback-repository.integration.test.ts.
       const bothComplete =
         legalStructuringCompletedAt !== null &&
         current.appraisalCompletedAt !== null;

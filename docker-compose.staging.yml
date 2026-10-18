@@ -152,6 +152,16 @@ services:
       # what marks this deployment as staging. Staging-only settings, such as
       # PLAY_INTEGRITY_POLICY=disabled, are accepted here and nowhere else.
       APP_ENV: staging
+      # Which proxies' X-Forwarded-For the API trusts for IP rate limits (see
+      # .env.example). Traefik fronts the API here, so unset puts every caller
+      # in the proxy's bucket. No default: the right value depends on whether
+      # anything (a CDN) sits in front of Traefik, and a hop count is only safe
+      # while published port 3000 below is not reachable from outside, so the
+      # Docker subnet of the `proxy` network is the better value. Compose
+      # interpolates this from --env-file .env.staging (scripts/deploy/
+      # staging.sh passes it); an empty value here overrides one set only in the
+      # service's env_file.
+      TRUST_PROXY: ${TRUST_PROXY:-}
       # Device-key auth (Android). "disabled" until a Play Console / Cloud
       # project exists; Android key attestation is enforced regardless, and
       # enrolment needs both ANDROID_ATTESTATION_* values set.

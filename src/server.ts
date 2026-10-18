@@ -23,6 +23,7 @@ import { PrismaAccountRepository } from "./modules/account/repository/prisma-acc
 import { createBetterAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
 import { PrismaDeviceRepository } from "./modules/auth/repository/prisma-device.repository.js";
 import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prisma-device-challenge.repository.js";
+import { PrismaDeviceReplacementRepository } from "./modules/auth/repository/prisma-device-replacement.repository.js";
 import { EnrolDeviceService } from "./modules/auth/application/device-enrolment.service.js";
 import { LoginDeviceService } from "./modules/auth/application/device-login.service.js";
 import { IssueDeviceChallengeService } from "./modules/auth/application/device-challenge-issuance.service.js";
@@ -178,6 +179,13 @@ const rateLimitStore =
   rateLimitCacheClient?.isReady === true
     ? new RedisRateLimitStore(rateLimitCacheClient)
     : undefined;
+// Production and staging both run behind a reverse proxy (staging: Traefik),
+// where req.ip is the proxy's address unless TRUST_PROXY says otherwise.
+if (rateLimitStore !== undefined && environment.TRUST_PROXY === undefined && environment.NODE_ENV === "production") {
+  logger.warn(
+    "rate limiting is enabled but TRUST_PROXY is unset; behind a reverse proxy every unauthenticated caller shares the proxy's address and one IP rate-limit bucket",
+  );
+}
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -217,6 +225,15 @@ const dpopLogger: DpopLogger = {
 // itself needs up front.
 const deviceRepository = new PrismaDeviceRepository(database);
 const deviceChallengeRepository = new PrismaDeviceChallengeRepository(database);
+const deviceReplacementRepository = new PrismaDeviceReplacementRepository(database);
+const deviceReplacementConfig = {
+  codeTtlMs: environment.DEVICE_REPLACEMENT_CODE_TTL_MINUTES * 60_000,
+  maxAttempts: environment.DEVICE_REPLACEMENT_MAX_ATTEMPTS,
+  cooldownMs: environment.DEVICE_REPLACEMENT_COOLDOWN_HOURS * 3_600_000,
+  // The request rate limit is per hour (AD-271: 3 per account per hour).
+  requestWindowMs: 3_600_000,
+  maxRequestsPerWindow: environment.DEVICE_REPLACEMENT_RATE_LIMIT_PER_HOUR,
+};
 const androidAttestationRevocationList = new HttpAndroidAttestationRevocationList();
 const playIntegrityDecoder =
   environment.PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON === undefined ||
@@ -530,6 +547,7 @@ const app = createApp({
   webauthnRelatedOrigins: webauthnSettings.relatedOrigins,
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
   idempotencyStore: new PrismaIdempotencyStore(database),
+  ...(environment.TRUST_PROXY === undefined ? {} : { trustProxy: environment.TRUST_PROXY }),
   reservationFundingRailEnabled,
   protectedApi: {
     accounts: accountRepository,
@@ -591,6 +609,11 @@ const app = createApp({
             } }
           : {}),
       },
+    },
+    deviceReplacement: {
+      repository: deviceReplacementRepository,
+      emailSender,
+      config: deviceReplacementConfig,
     },
     wallet: {
       repository: walletRepository,
