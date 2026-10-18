@@ -1,5 +1,5 @@
 import type { BetterAuthPlugin } from "better-auth";
-import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
+import { APIError, createAuthMiddleware } from "better-auth/api";
 
 import {
   DPOP_WWW_AUTHENTICATE,
@@ -10,7 +10,8 @@ import {
   type DpopLogger,
 } from "../application/dpop-proof-verifier.js";
 import type { DpopReplayRepository } from "../repository/dpop-replay.repository.js";
-import { isSessionUpgradeCeremonyPath } from "./dpop-session-creation.js";
+import { getSessionForHook } from "./better-auth-hook-session.js";
+import { isSessionUpgradeCeremonyPath, rememberVerifiedDpopProof } from "./dpop-session-creation.js";
 
 export interface BetterAuthDpopPluginOptions {
   baseUrl: string;
@@ -26,9 +27,12 @@ export interface BetterAuthDpopPluginOptions {
  * wire contract lists outside the passkey verify-* ceremonies (those are
  * handled inline in better-auth.factory.ts's afterVerification callbacks,
  * since only they need the "pending session" context this plugin doesn't
- * have). Registered after bearer() in the plugins array: bearer turns
- * Authorization into the session cookie context first, so a session is
- * resolvable here at all.
+ * have).
+ *
+ * The session is looked up with getSessionForHook, not getSessionFromCtx:
+ * bearer()'s session cookie only reaches the endpoint after every before-hook
+ * has run, so a hook that read the request as it arrived would find no session
+ * for a bearer-authenticated client (the mobile app) and enforce nothing.
  */
 export function createBetterAuthDpopPlugin(options: BetterAuthDpopPluginOptions): BetterAuthPlugin {
   return {
@@ -49,7 +53,7 @@ export function createBetterAuthDpopPlugin(options: BetterAuthDpopPluginOptions)
             // be verified/recorded/bound here.
             if (isSessionUpgradeCeremonyPath(ctx.path)) return;
 
-            const current = await getSessionFromCtx(ctx);
+            const current = await getSessionForHook(ctx);
             if (current === null) return;
 
             const sessionRecord = current.session as Record<string, unknown> & {
@@ -77,6 +81,7 @@ export function createBetterAuthDpopPlugin(options: BetterAuthDpopPluginOptions)
                 phase1CutoverAt: options.phase1CutoverAt,
                 recordProof: (jkt, jti, expiresAt) =>
                   options.replayRepository.recordProof(jkt, jti, expiresAt),
+                onVerified: (claims) => rememberVerifiedDpopProof(ctx.request!, claims),
                 ...(options.replayWindowSeconds === undefined
                   ? {}
                   : { replayWindowSeconds: options.replayWindowSeconds }),

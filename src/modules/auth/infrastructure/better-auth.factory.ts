@@ -296,18 +296,29 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
     plugins: [
       expo(),
       // Native mobile uses the Better Auth session itself, sent as a bearer
-      // token via the Authorization header instead of a cookie.
-      bearer(),
+      // token via the Authorization header instead of a cookie. Only the
+      // signed "value.signature" form (the set-auth-token value, which the app
+      // sends byte for byte) authenticates: with the default, a bare session
+      // token, such as the `token` field some better-auth responses carry, would
+      // be signed by bearer() itself and accepted. better-auth-hook-session.ts
+      // parses Authorization the same way and must change together with this.
+      // Nothing may sign a caller-chosen value with the session secret:
+      // reject-disabled-auth.ts blocks @better-auth/expo's
+      // /expo-authorization-proxy, which would.
+      bearer({ requireSignature: true }),
       // Device-session time limits: before the DPoP plugin, whose before
       // hook already reads the session. Registered unconditionally: it only
       // acts on rows the device-auth plugin created.
       deviceSessionLifetime.plugin,
-      // Device binding (DPoP): must come after bearer() -- bearer turns
-      // Authorization into the session cookie context first, so a session
-      // is resolvable by the time this runs. Only the passkey verify-*
-      // ceremonies (below) enforce inline instead of through this plugin,
-      // since only they need "pending session" context this plugin doesn't
-      // have.
+      // Device binding (DPoP). Registered after bearer(), but that gives its
+      // hook no session by itself: better-auth runs every before-hook with
+      // the original request and applies bearer()'s session cookie to the
+      // endpoint only once all hooks are done. The hook (and the registration
+      // guard below) therefore resolve the session through getSessionForHook
+      // (better-auth-hook-session.ts), which builds that cookie itself. Only
+      // the passkey verify-* ceremonies (below) enforce inline instead of
+      // through this plugin, since only they need "pending session" context
+      // this plugin doesn't have.
       ...(options.dpop === undefined ? [] : [createBetterAuthDpopPlugin(options.dpop)]),
       // Device-key auth (E2/L2): after bearer()/the DPoP plugin, same
       // reasoning as those two -- its endpoints resolve a pending session
