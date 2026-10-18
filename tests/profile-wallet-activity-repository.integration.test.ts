@@ -268,28 +268,19 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
     await database.positionLedger.deleteMany({
       where: { accountId: { in: [accountId, otherAccountId] } },
     });
-    await database.moneyEvent.deleteMany({
-      where: { reservation: { accountId } },
-    });
-    await database.reservation.deleteMany({
-      where: { accountId: { in: [accountId, otherAccountId] } },
-    });
-    await database.offering.deleteMany({ where: { id: offeringId } });
-    await database.piv.deleteMany({ where: { id: pivId } });
-    await database.intakeCase.deleteMany({ where: { id: caseId } });
-    await database.property.deleteMany({ where: { id: propertyId } });
     await database.walletRegistration.deleteMany({
       where: { accountId: { in: [accountId, otherAccountId] } },
     });
     await database.kycEligibility.deleteMany({ where: { accountId } });
     await database.loginMethod.deleteMany({ where: { accountId } });
-    await database.account.deleteMany({
-      where: { id: { in: [accountId, otherAccountId] } },
-    });
-    await authPool.query('DELETE FROM "auth_user" WHERE "id" IN ($1, $2)', [
-      betterAuthUserId,
-      otherBetterAuthUserId,
-    ]);
+    // money_events is append-only (its trigger rejects every UPDATE and
+    // DELETE) with an ON DELETE RESTRICT foreign key to reservations, so the
+    // reservation that has money events -- and through the foreign keys the
+    // offering, PIV, case, property, the account that holds it and its
+    // auth_user row -- is permanently undeletable. The rest of the fixture is
+    // left in place with it. Every id here is uniquely suffixed per run, so
+    // that cannot collide with a later run; the rows above are the deletable
+    // part.
     await Promise.all([database.$disconnect(), authPool.end()]);
   });
 
