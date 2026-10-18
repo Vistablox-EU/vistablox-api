@@ -12,7 +12,7 @@ describe("OpenOfferingForApprovedCaseService", () => {
         .fn()
         .mockResolvedValue({ pivId: "piv_01", offeringId: "offering_01" }),
     };
-    const service = new OpenOfferingForApprovedCaseService(repository, () => now);
+    const service = new OpenOfferingForApprovedCaseService(repository, { openEscrowCampaign: true }, () => now);
 
     const result = await service.execute({
       case_id: "case_01",
@@ -28,14 +28,35 @@ describe("OpenOfferingForApprovedCaseService", () => {
       ipoValueEur: "500000.00",
       traceId: "trace_01",
       openedAt: now,
+      openEscrowCampaign: true,
     });
+  });
+
+  it("tells the repository not to enqueue the escrow campaign job when this process has no consumer for it", async () => {
+    const repository: OfferingIntakeHandoffRepository = {
+      openOfferingForApprovedCase: vi
+        .fn()
+        .mockResolvedValue({ pivId: "piv_01", offeringId: "offering_01" }),
+    };
+    const service = new OpenOfferingForApprovedCaseService(repository, { openEscrowCampaign: false }, () => now);
+
+    await service.execute({
+      case_id: "case_01",
+      property_id: "prop_01",
+      ipo_value_eur: "500000.00",
+      trace_id: "trace_01",
+    });
+
+    expect(repository.openOfferingForApprovedCase).toHaveBeenCalledWith(
+      expect.objectContaining({ openEscrowCampaign: false }),
+    );
   });
 
   it("rejects a malformed job payload without calling the repository", async () => {
     const repository: OfferingIntakeHandoffRepository = {
       openOfferingForApprovedCase: vi.fn(),
     };
-    const service = new OpenOfferingForApprovedCaseService(repository, () => now);
+    const service = new OpenOfferingForApprovedCaseService(repository, { openEscrowCampaign: true }, () => now);
 
     await expect(service.execute({ case_id: "case_01" })).rejects.toThrow();
     expect(repository.openOfferingForApprovedCase).not.toHaveBeenCalled();

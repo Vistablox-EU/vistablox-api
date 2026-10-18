@@ -178,6 +178,13 @@ const rateLimitStore =
   rateLimitCacheClient?.isReady === true
     ? new RedisRateLimitStore(rateLimitCacheClient)
     : undefined;
+// Production and staging both run behind a reverse proxy (staging: Traefik),
+// where req.ip is the proxy's address unless TRUST_PROXY says otherwise.
+if (rateLimitStore !== undefined && environment.TRUST_PROXY === undefined && environment.NODE_ENV === "production") {
+  logger.warn(
+    "rate limiting is enabled but TRUST_PROXY is unset; behind a reverse proxy every unauthenticated caller shares the proxy's address and one IP rate-limit bucket",
+  );
+}
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -538,6 +545,7 @@ const app = createApp({
   },
   webauthnRelatedOrigins: webauthnSettings.relatedOrigins,
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
+  ...(environment.TRUST_PROXY === undefined ? {} : { trustProxy: environment.TRUST_PROXY }),
   reservationFundingRailEnabled,
   protectedApi: {
     accounts: accountRepository,

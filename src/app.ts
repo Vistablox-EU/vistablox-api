@@ -257,6 +257,11 @@ export interface AppDependencies {
   // derived by resolveWebAuthnSettings.
   webauthnRelatedOrigins?: string[];
   rateLimitStore?: RateLimitStore;
+  // Express's `trust proxy`, from TRUST_PROXY (validated, and compiled by
+  // Express itself, in environment.ts). Unset trusts no proxy: req.ip is the connecting address
+  // and X-Forwarded-For is ignored, which is the safe default but, behind a
+  // reverse proxy, makes every caller share the proxy's IP rate-limit bucket.
+  trustProxy?: number | string[];
   /** Never true unless a human has done the live Coinbase EUR/Base verification AD-255 leaves open — see docs/investor-offering.md. Defaults false. */
   reservationFundingRailEnabled?: boolean;
   protectedApi?: {
@@ -399,6 +404,9 @@ export interface AppDependencies {
 
 export function createApp(dependencies: AppDependencies): Express {
   const app = express();
+  if (dependencies.trustProxy !== undefined) {
+    app.set("trust proxy", dependencies.trustProxy);
+  }
   const listPublicOfferings = new ListPublicOfferingsService(dependencies.offeringRepository);
   const baselineRateLimiter =
     dependencies.rateLimitStore === undefined
