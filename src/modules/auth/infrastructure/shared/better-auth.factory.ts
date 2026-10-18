@@ -44,6 +44,7 @@ import {
 import { createBetterAuthPasskeyChallengeHeaderPlugin } from "./better-auth-passkey-challenge-header.plugin.js";
 import { createBetterAuthStaffAccountGuardPlugin } from "../staff/better-auth-staff-account-guard.plugin.js";
 import { createBetterAuthRegistrationAccountGuardPlugin } from "../customer/better-auth-registration-account-guard.plugin.js";
+import { createBetterAuthDisabledRoutesPlugin } from "./better-auth-disabled-routes.plugin.js";
 
 export interface AuthUserSnapshot {
   id: string;
@@ -294,6 +295,10 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
       },
     },
     plugins: [
+      // First, so no other plugin's onRequest sees a request for a disabled
+      // route; see the plugin for why this lives inside Better Auth as well
+      // as in front of it.
+      createBetterAuthDisabledRoutesPlugin(),
       expo(),
       // Native mobile uses the Better Auth session itself, sent as a bearer
       // token via the Authorization header instead of a cookie. Only the
