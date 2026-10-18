@@ -10,6 +10,11 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQL integration", () => {
   const suffix = randomUUID();
+  // Outside the range intake.piv_token_id_seq hands out (it starts at 1, and
+  // other test files take ids from it while this one runs), so these fixed
+  // Pivs cannot collide with sequence-assigned ones on the unique token_id.
+  const pastTokenId = String(8_000_000_000_000 + Math.floor(Math.random() * 1_000_000_000));
+  const futureTokenId = String(BigInt(pastTokenId) + 1n);
   const accountId = `account_settlement_${suffix}`;
   const betterAuthUserId = `auth_settlement_${suffix}`;
   const propertyId = `property_settlement_${suffix}`;
@@ -49,9 +54,9 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
     });
 
     for (const [propId, caseId, pivId, ipoEndAt, tokenId] of [
-      [pastPropertyId, pastCaseId, pastPivId, new Date("2026-01-01T00:00:00.000Z"), "1"],
+      [pastPropertyId, pastCaseId, pastPivId, new Date("2026-01-01T00:00:00.000Z"), pastTokenId],
       [untokenizedPropertyId, untokenizedCaseId, untokenizedPivId, new Date("2026-01-01T00:00:00.000Z"), null],
-      [futurePropertyId, futureCaseId, futurePivId, new Date("2099-01-01T00:00:00.000Z"), "2"],
+      [futurePropertyId, futureCaseId, futurePivId, new Date("2099-01-01T00:00:00.000Z"), futureTokenId],
     ] as const) {
       await database.property.create({
         data: {
@@ -114,7 +119,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
     expect(candidateIds).not.toContain(futurePivId);
 
     const past = candidates.find((c) => c.pivId === pastPivId);
-    expect(past?.tokenId).toBe("1");
+    expect(past?.tokenId).toBe(pastTokenId);
   });
 
   it("resolves a wallet to its account case-insensitively", async () => {
@@ -135,7 +140,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       costBasisEur: "50000.000000",
       activatedAt: new Date("2026-09-01T12:00:00.000Z"),
       tokenContractAddress: "0x1111111111111111111111111111111111111",
-      tokenId: "1",
+      tokenId: pastTokenId,
       chainTxHash: "0xdeadbeef",
     });
 

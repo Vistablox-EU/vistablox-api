@@ -2241,6 +2241,7 @@ describe.skipIf(databaseUrl === undefined)(
         ipoValueEur: "220000.00",
         traceId: `trace_${suffix}`,
         openedAt: new Date("2026-09-01T19:00:00.000Z"),
+        openEscrowCampaign: true,
       });
       pivId = opened.pivId;
       offeringId = opened.offeringId;
@@ -2268,6 +2269,7 @@ describe.skipIf(databaseUrl === undefined)(
         ipoValueEur: "220000.00",
         traceId: `trace_replay_${suffix}`,
         openedAt: new Date("2026-09-01T19:05:00.000Z"),
+        openEscrowCampaign: true,
       });
 
       expect(replayed).toEqual(opened);

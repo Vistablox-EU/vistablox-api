@@ -20,6 +20,16 @@ Current-pack documents are accessible to any authenticated customer, matching `A
 
 The download response uses `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and `Cache-Control: private, no-store`. Object-store failures are mapped to provider-neutral `503` errors before streaming starts. See [`document-storage.md`](document-storage.md) for the runtime and deployment implementation.
 
+## Opening an offering while token settlement is dormant
+
+`case_timers.pre_offering_open_handoff` (`OpenOfferingForApprovedCaseService`, run by the worker) creates the `Piv` and `Offering` for an approved case. When the worker also runs the on-chain settlement bundle (`AD-256`), the same transaction enqueues `settlement.open_ipo_escrow_campaign`. `AD-234` launches production with token settlement dormant, so the bundle is unconfigured there: the worker neither creates nor consumes that queue, and the open does not enqueue the job (`openEscrowCampaign: false`, derived in `src/worker.ts` from the same condition that registers the queue and its consumer). Enqueueing anyway would fail the whole open with pg-boss's `Queue ... does not exist` and roll back the `Piv`/`Offering`, so no approved case could become a listing.
+
+The job is not enqueued "just in case" for two reasons. A job left waiting carries the target amount and deadline frozen at enqueue time, which can be stale by the time a consumer exists (the escrow contract rejects a deadline that has passed), and pg-boss deletes a job that is still unconsumed when its retention runs out (14 days from enqueue by default), so campaigns would be lost without any signal. Offerings opened while dormant therefore have no campaign job. For an offering whose `ipo_end_at` passes while settlement is dormant, a campaign can never be opened. For one whose window is still running at activation, activation has to open the campaign as an explicit step; `OpenIpoEscrowCampaignService` skips a campaign that is already open on-chain, so repeating that step is safe. That step is not built yet.
+
+The design record does not say what a `Pre-offering open` offering does while settlement is dormant (`AD-278` has `openCampaign` happen when a case enters that state; `AD-234` and `AD-256` keep the escrow behind activation). This change picks "open the offering, defer the campaign" so approved cases become listings at all; it is a choice for the founder to confirm, not something the record decided.
+
+A `case_timers.pre_offering_open_handoff` job that already ran out of retries before this change stays failed (pg-boss deletes failed jobs seven days after they complete); re-queue any such job, and check for `pre_offering_open` cases that have no `Piv`, after deploying.
+
 ## Reservation creation
 
 `POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
