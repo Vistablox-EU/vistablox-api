@@ -10,7 +10,12 @@ import type {
   RecordEscrowMintedPositionInput,
 } from "../src/modules/settlement/repository/settlement.repository.js";
 import { PrismaSettlementRepository } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
-import { CAMPAIGN_STATE_SUCCESSFUL, FakeEscrowChain, makeCapturingLogger } from "./support/escrow-mint-fakes.js";
+import {
+  CAMPAIGN_STATE_SUCCESSFUL,
+  FakeEscrowChain,
+  makeCapturingLogger,
+  PROPERTY_CONTRACT,
+} from "./support/escrow-mint-fakes.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -207,7 +212,13 @@ describe.skipIf(databaseUrl === undefined)(
         positionStatus: "active",
       });
       expect(recovered.events).toHaveLength(1);
-      expect(recovered.events[0]).toMatchObject({ eventType: "mint", chainTxHash: h.chain.mints[0]!.hash });
+      expect(recovered.events[0]).toMatchObject({
+        eventType: "mint",
+        chainTxHash: h.chain.mints[0]!.hash,
+        positionId: recovered.positions[0]!.id,
+        tokenContractAddress: PROPERTY_CONTRACT,
+      });
+      expect(recovered.events[0]!.tokenId.toFixed(0)).toBe(piv.tokenId);
       expect(recovered.intents[0]).toMatchObject({ status: "recorded" });
       expect(h.campaigns.get(piv.tokenId)!.swept).toBe(true);
 

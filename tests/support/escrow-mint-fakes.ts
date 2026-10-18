@@ -34,8 +34,13 @@ export interface FakeCampaign {
  *   mine-then-reject   accepted and mined, but the call rejects (an RPC timeout, or the
  *                      process dying right after the node accepted it): the caller never
  *                      sees the hash
+ *   replaced           accepted, then replaced in the mempool by another transaction from the
+ *                      same account and nonce: the mint never executes, and waiting for the
+ *                      returned hash resolves with the REPLACEMENT's receipt (as viem's
+ *                      waitForTransactionReceipt does), while looking the hash up directly
+ *                      finds no receipt
  */
-export type MintMode = "mine" | "revert" | "pending" | "reject" | "mine-then-reject";
+export type MintMode = "mine" | "revert" | "pending" | "reject" | "mine-then-reject" | "replaced";
 
 interface FakeTransaction {
   status: "success" | "reverted" | "pending";
@@ -69,6 +74,8 @@ export class FakeEscrowChain {
   // Every write.mint call that reached the node (a "reject" never does).
   public readonly mints: Array<{ hash: string; to: string; tokenId: bigint; amount: bigint }> = [];
   public readonly mintModes: MintMode[] = [];
+  // hash -> the hash of the transaction that replaced it (see MintMode "replaced").
+  public readonly replacements = new Map<string, string>();
   // Called inside write.mint, after the call is made and before it returns.
   public onMint: (() => void) | undefined;
   public failWithdrawRaisedOnce = false;
@@ -116,10 +123,12 @@ export class FakeEscrowChain {
     waitForTransactionReceipt: vi.fn(async ({ hash }: { hash: string }) => {
       this.timeline.push(`chain:waitForReceipt(${hash})`);
       const tx = this.transactions.get(hash);
+      const replacement = this.replacements.get(hash);
+      if (replacement !== undefined) return { status: "success", transactionHash: replacement };
       if (tx === undefined || tx.status === "pending") {
         throw new Error(`timed out waiting for transaction ${hash}`);
       }
-      return { status: tx.status };
+      return { status: tx.status, transactionHash: hash };
     }),
     getTransactionReceipt: vi.fn(async ({ hash }: { hash: string }) => {
       const tx = this.transactions.get(hash);
@@ -194,6 +203,9 @@ export class FakeEscrowChain {
           this.transactions.set(hash, { status: "reverted" });
         } else if (mode === "pending") {
           this.transactions.set(hash, { status: "pending", apply });
+        } else if (mode === "replaced") {
+          this.transactions.set(hash, { status: "pending", apply });
+          this.replacements.set(hash, `${hash}-replacement`);
         } else {
           apply();
           this.transactions.set(hash, { status: "success" });
@@ -283,6 +295,7 @@ export class InMemorySettlementRepository implements SettlementRepository {
   private readonly walletToAccount: Map<string, string>;
   private readonly failures: Array<{ method: RepositoryMethod; when: "before" | "after" }> = [];
   private readonly interleavings: Array<{ method: RepositoryMethod; action: () => void }> = [];
+  private readonly intentReadInterleavings: Array<() => void | Promise<void>> = [];
   private idCounter = 0;
 
   public constructor(
@@ -311,6 +324,15 @@ export class InMemorySettlementRepository implements SettlementRepository {
   /** Runs `action` just before the next `method` call applies -- another run slipping in first. */
   public interleaveBefore(method: RepositoryMethod, action: () => void): void {
     this.interleavings.push({ method, action });
+  }
+
+  /**
+   * Runs `action` just before the next findEscrowMintIntent read -- another run committing
+   * after this run's earlier reads (hasPosition) and before this one. The read is not on the
+   * timeline, so ordering assertions over the write methods are unaffected.
+   */
+  public interleaveBeforeIntentRead(action: () => void | Promise<void>): void {
+    this.intentReadInterleavings.push(action);
   }
 
   /** Writes an intent as another run would have, without going through a failure hook. */
@@ -345,6 +367,7 @@ export class InMemorySettlementRepository implements SettlementRepository {
   }
 
   public async findEscrowMintIntent(pivId: string, accountId: string): Promise<EscrowMintIntent | null> {
+    await this.intentReadInterleavings.shift()?.();
     const found = [...this.intents.values()].find((i) => i.pivId === pivId && i.accountId === accountId);
     return found === undefined ? null : { ...found };
   }

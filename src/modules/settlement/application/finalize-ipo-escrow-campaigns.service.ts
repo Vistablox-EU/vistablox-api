@@ -16,6 +16,14 @@ const CAMPAIGN_STATE_FAILED = 3;
 // mint is therefore not sent until the attempt is this old and the contributor
 // still holds nothing. This is a time-based assumption about how long a
 // transaction can stay pending; it cannot be checked without a chain.
+//
+// "Holds nothing" is likewise the only chain evidence used, and it is not proof
+// that nothing was minted: VistaBloxProperty.burn (BURNER_ROLE) and
+// forceTransfer (TRANSFER_AGENT_ROLE) can empty a wallet that holds a mint, and
+// a mint that is then neither recorded nor found by balance would be sent again.
+// That needs a privileged role acting between a crash and a later run. (The
+// same property means burning a mint that has no recorded transaction hash is
+// what makes a later run mint that contributor afresh.)
 export const ESCROW_MINT_IN_FLIGHT_GRACE_MS = 30 * 60 * 1000;
 
 // A mint cannot land before the chain head seen just before the attempt began;
@@ -88,7 +96,9 @@ interface ConfirmedMint {
  *     cannot prove safe, it refuses with an error naming the PIV, token and
  *     wallet, rather than guess.
  * A contributor who already has a position is never touched, so a crash
- * partway through a large contributor list is safe to simply re-run.
+ * partway through a large contributor list is safe to simply re-run -- as
+ * long as the campaign is not swept in between by someone else (see the swept
+ * check in processCampaign).
  */
 export class FinalizeIpoEscrowCampaignsService {
   public constructor(
@@ -139,8 +149,13 @@ export class FinalizeIpoEscrowCampaignsService {
     let campaign = await this.readCampaign(tokenId);
 
     if (campaign.swept) {
-      // Minting and the treasury sweep both happen before swept is set --
-      // already fully processed.
+      // This job mints every contributor before it sweeps, so a campaign it
+      // swept itself is fully processed. But withdrawRaised is permissionless:
+      // a sweep by anyone else, before the mints, also lands here, and any
+      // contributor not yet minted stays unminted. Walking swept campaigns
+      // would repair that, but means re-walking every swept campaign's
+      // contributors on every run with no durable "fully minted" marker to
+      // stop on, so it is left as a known gap rather than decided here.
       return;
     }
 
@@ -230,6 +245,7 @@ export class FinalizeIpoEscrowCampaignsService {
     };
 
     const mint = await this.obtainConfirmedMint(target);
+    if (mint === null) return "skipped";
 
     // AD-247's shared 1-unit-per-EUR convention:
     // unit_count == cost_basis_eur.
@@ -253,9 +269,10 @@ export class FinalizeIpoEscrowCampaignsService {
   /**
    * Returns a mint that is known to have succeeded on-chain for this
    * contributor, sending one only when the durable record and the chain
-   * together show none exists and none can still be in flight.
+   * together show none exists and none can still be in flight. Null when the
+   * position turns out to have been recorded already (by an overlapping run).
    */
-  private async obtainConfirmedMint(target: MintTarget): Promise<ConfirmedMint> {
+  private async obtainConfirmedMint(target: MintTarget): Promise<ConfirmedMint | null> {
     // Intent first, then the balance: the balance is then at least as fresh as
     // the intent state it is judged against, so a mint that lands in between is
     // seen rather than missed.
@@ -263,7 +280,8 @@ export class FinalizeIpoEscrowCampaignsService {
     const balance = (await this.chain.property.read.balanceOf!([target.walletAddress, target.tokenId])) as bigint;
 
     if (intent === null) {
-      // Nothing recorded. A zero balance means nothing was ever minted; a
+      // Nothing recorded. A zero balance is taken to mean nothing was minted
+      // (see ESCROW_MINT_IN_FLIGHT_GRACE_MS for what that does not rule out); a
       // balance equal to the contribution means a mint landed that this
       // database has no record of (an earlier run died between sending it and
       // recording it, including runs of the version before intents existed).
@@ -273,9 +291,11 @@ export class FinalizeIpoEscrowCampaignsService {
     this.assertIntentMatchesTarget(intent, target);
 
     if (intent.status === "recorded") {
-      // The position is written in the same transaction that sets this, and
-      // the caller already found no position: the two disagree, and sending
-      // another mint would compound whichever is wrong.
+      // The position is written in the same transaction that sets this. The
+      // caller found none a few reads ago, so either an overlapping run has
+      // committed it since (done) or the two really disagree.
+      if (await this.repository.hasPosition(target.pivId, target.accountId)) return null;
+      // They disagree, and sending another mint would compound whichever is wrong.
       throw new Error(
         `escrow mint intent ${intent.id} is recorded but no position exists for wallet ${target.walletAddress} ` +
           `(token_id=${target.tokenId}); not minting -- manual reconciliation required`,
@@ -462,6 +482,17 @@ export class FinalizeIpoEscrowCampaignsService {
     }
 
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
+    // When another transaction from the same account and nonce takes this one's
+    // place (a speed-up, a cancel, a colliding operator transaction), viem
+    // resolves the wait with the REPLACEMENT's receipt. Its status says nothing
+    // about whether this mint executed, so it is not evidence of one.
+    if (receipt.transactionHash.toLowerCase() !== hash.toLowerCase()) {
+      throw new Error(
+        `mint transaction ${hash} was replaced by transaction ${receipt.transactionHash} (wallet ` +
+          `${target.walletAddress}, token_id=${target.tokenId}); not recording a position for it -- manual ` +
+          "reconciliation required",
+      );
+    }
     if (receipt.status !== "success") {
       throw new Error(`mint transaction reverted for ${target.walletAddress} (tx=${hash})`);
     }

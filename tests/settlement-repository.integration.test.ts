@@ -35,7 +35,17 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
   // One PIV per escrow-mint test below, so each starts with no intent and no
   // position for (piv, account). Their token ids are derived from the suffix
   // so they cannot collide with the fixed ones above or with another suite's.
-  const mintTestNames = ["create", "constraints", "sent", "record", "restart", "atomic", "rollback", "checks"] as const;
+  const mintTestNames = [
+    "create",
+    "constraints",
+    "sent",
+    "record",
+    "restart",
+    "atomic",
+    "rollback",
+    "checks",
+    "fkeys",
+  ] as const;
   type MintTestName = (typeof mintTestNames)[number];
   const mintPivIds = Object.fromEntries(
     mintTestNames.map((name) => [name, `piv_settlement_mint_${name}_${suffix}`]),
@@ -210,7 +220,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
 
     const events = await database.chainSettlementEvent.findMany({ where: { positionId } });
     expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({ eventType: "mint", chainTxHash: "0xdeadbeef" });
+    expect(events[0]).toMatchObject({
+      eventType: "mint",
+      chainTxHash: "0xdeadbeef",
+      tokenContractAddress: "0x1111111111111111111111111111111111111",
+    });
+    expect(events[0]?.tokenId.toFixed(0)).toBe("1");
   });
 
   describe("escrow mint intents", () => {
@@ -320,7 +335,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       expect(await database.positionLedger.count({ where: { pivId: mintPivIds.checks, accountId } })).toBe(2);
     });
 
-    it("enforces the intent's own invariants with CHECK constraints", async () => {
+    it("enforces the intent's own invariants with CHECK constraints, each by its own constraint", async () => {
       const base = {
         pivId: mintPivIds.checks,
         accountId,
@@ -330,25 +345,70 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
         mintAmount: "1",
         attemptedAt,
       };
-      const attempts: Array<[string, Record<string, unknown>]> = [
-        ["an unknown status", { status: "bogus" }],
-        ["a mint_sent intent with no hash", { status: "mint_sent" }],
-        ["a recorded intent with no hash", { status: "recorded", recordedAt: attemptedAt }],
-        ["a recorded intent with no recorded_at", { status: "recorded", mintTxHash: "0xchk" }],
-        ["a sending intent with a recorded_at", { recordedAt: attemptedAt }],
-        ["a zero mint amount", { mintAmount: "0" }],
-        ["a zero attempt number", { attempt: 0 }],
+      // Each row violates exactly one constraint, so the name asserted is the only one that can fire.
+      const attempts: Array<[string, Record<string, unknown>, string]> = [
+        ["an unknown status", { status: "bogus", mintTxHash: "0xchk" }, "escrow_mint_intents_status_check"],
+        ["a mint_sent intent with no hash", { status: "mint_sent" }, "escrow_mint_intents_hash_check"],
+        [
+          "a recorded intent with no hash",
+          { status: "recorded", recordedAt: attemptedAt },
+          "escrow_mint_intents_hash_check",
+        ],
+        [
+          "a recorded intent with no recorded_at",
+          { status: "recorded", mintTxHash: "0xchk" },
+          "escrow_mint_intents_recorded_check",
+        ],
+        ["a sending intent with a recorded_at", { recordedAt: attemptedAt }, "escrow_mint_intents_recorded_check"],
+        ["a zero mint amount", { mintAmount: "0" }, "escrow_mint_intents_mint_amount_check"],
+        ["a zero attempt number", { attempt: 0 }, "escrow_mint_intents_attempt_check"],
       ];
 
-      for (const [index, [label, overrides]] of attempts.entries()) {
+      for (const [index, [label, overrides, constraint]] of attempts.entries()) {
         await expect(
           database.escrowMintIntent.create({
             data: { id: `escrow_mint_chk_${index}_${suffix}`, ...base, ...overrides } as never,
           }),
           label,
-        ).rejects.toThrow(/check constraint/i);
+        ).rejects.toThrow(constraint);
       }
       expect(await database.escrowMintIntent.count({ where: { pivId: mintPivIds.checks } })).toBe(0);
+    });
+
+    it("refuses an intent for a PIV or account that does not exist, and a position for an intent that does not exist", async () => {
+      const base = {
+        holderWalletAddress: walletAddress,
+        tokenContractAddress,
+        tokenId: mintTokenId("fkeys"),
+        mintAmount: "1",
+        attemptedAt,
+      };
+
+      await expect(
+        database.escrowMintIntent.create({
+          data: { id: `escrow_mint_fk_piv_${suffix}`, pivId: `piv_missing_${suffix}`, accountId, ...base },
+        }),
+      ).rejects.toThrow("escrow_mint_intents_piv_id_fkey");
+      await expect(
+        database.escrowMintIntent.create({
+          data: { id: `escrow_mint_fk_acct_${suffix}`, pivId: mintPivIds.fkeys, accountId: `account_missing_${suffix}`, ...base },
+        }),
+      ).rejects.toThrow("escrow_mint_intents_account_id_fkey");
+      await expect(
+        database.positionLedger.create({
+          data: {
+            id: `position_fk_${suffix}`,
+            escrowMintIntentId: `escrow_mint_missing_${suffix}`,
+            pivId: mintPivIds.fkeys,
+            accountId,
+            unitCount: "1.000000",
+            costBasisEur: "1.00",
+          },
+        }),
+      ).rejects.toThrow("position_ledger_escrow_mint_intent_id_fkey");
+
+      expect(await database.escrowMintIntent.count({ where: { pivId: mintPivIds.fkeys } })).toBe(0);
+      expect(await database.positionLedger.count({ where: { pivId: mintPivIds.fkeys } })).toBe(0);
     });
 
     it("records the hash only on the attempt that sent it, idempotently", async () => {
@@ -384,7 +444,14 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
 
       expect(replay.positionId).toBe(first.positionId);
       expect(await database.positionLedger.count({ where: { pivId: mintPivIds.record, accountId } })).toBe(1);
-      expect(await database.chainSettlementEvent.count({ where: { chainTxHash: "0xrecord" } })).toBe(1);
+      const events = await database.chainSettlementEvent.findMany({ where: { chainTxHash: "0xrecord" } });
+      expect(events).toHaveLength(1);
+      expect(events[0]).toMatchObject({
+        positionId: first.positionId,
+        eventType: "mint",
+        tokenContractAddress,
+      });
+      expect(events[0]?.tokenId.toFixed(0)).toBe(mintTokenId("record"));
       expect(await repository.findEscrowMintIntent(mintPivIds.record, accountId)).toMatchObject({
         status: "recorded",
         mintTxHash: "0xrecord",
