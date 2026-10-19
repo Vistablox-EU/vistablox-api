@@ -240,10 +240,13 @@ describe.skipIf(databaseUrl === undefined)(
     });
 
     afterAll(async () => {
-      await database.moneyEvent.deleteMany({
-        where: { reservationId: { in: Object.values(reservationIds) } },
-      });
-      await database.reservation.deleteMany({ where: { offeringId } });
+      // money_events is append-only (its trigger rejects every UPDATE and
+      // DELETE), and its reservation_id foreign key is ON DELETE RESTRICT --
+      // so once beforeAll records money events, their reservations, the
+      // offering, PIV, case, property, the account and its auth_user all
+      // become permanently undeletable. Every id here is uniquely suffixed per
+      // run, so leaving them behind cannot collide with a later run; only the
+      // rows nothing restricts are cleaned up.
       await database.materialityRecord.deleteMany({ where: { offeringId } });
       await database.disclosureDocument.deleteMany({
         where: {
@@ -253,17 +256,9 @@ describe.skipIf(databaseUrl === undefined)(
         },
       });
       await database.disclosurePack.deleteMany({ where: { offeringId } });
-      await database.offering.deleteMany({ where: { id: offeringId } });
-      await database.piv.deleteMany({ where: { id: pivId } });
-      await database.intakeCase.deleteMany({ where: { id: caseId } });
-      await database.property.deleteMany({ where: { id: propertyId } });
       await database.walletRegistration.deleteMany({ where: { accountId } });
       await database.kycEligibility.deleteMany({ where: { accountId } });
       await database.loginMethod.deleteMany({ where: { accountId } });
-      await database.account.deleteMany({ where: { id: accountId } });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [
-        betterAuthUserId,
-      ]);
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
@@ -378,10 +373,6 @@ describe.skipIf(databaseUrl === undefined)(
     // describe block's comment for why).
     let boss: PgBoss;
     let repository: PrismaOfferingRepository;
-    const offeringIds: string[] = [];
-    const pivIds: string[] = [];
-    const caseIds: string[] = [];
-    const propertyIds: string[] = [];
 
     async function createOffering(input: {
       targetRaiseEur: string;
@@ -424,10 +415,6 @@ describe.skipIf(databaseUrl === undefined)(
           status: input.status ?? "pre_offering",
         },
       });
-      propertyIds.push(propertyId);
-      caseIds.push(caseId);
-      pivIds.push(pivId);
-      offeringIds.push(offeringId);
       return offeringId;
     }
 
@@ -448,15 +435,16 @@ describe.skipIf(databaseUrl === undefined)(
     });
 
     afterAll(async () => {
-      await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
+      // createReservation records a money event in the same transaction, and
+      // money_events is append-only (its trigger rejects every UPDATE and
+      // DELETE) with an ON DELETE RESTRICT foreign key to reservations. So
+      // most of the reservations created here, and through the foreign keys
+      // their offerings, PIVs, cases, properties, the accounts and their
+      // auth_user rows, are permanently undeletable. Rather than sort out
+      // which few are not, everything is left behind: every id here is
+      // uniquely suffixed per run, so that cannot collide with a later run.
+      // Only the audit rows are deleted.
       await database.auditLog.deleteMany({ where: { resourceType: "reservation" } });
-      await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
-      await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
-      await database.piv.deleteMany({ where: { id: { in: pivIds } } });
-      await database.intakeCase.deleteMany({ where: { id: { in: caseIds } } });
-      await database.property.deleteMany({ where: { id: { in: propertyIds } } });
-      await database.account.deleteMany({ where: { id: { in: [accountId, otherAccountId] } } });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [[betterAuthUserId, otherBetterAuthUserId]]);
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
@@ -997,8 +985,6 @@ describe.skipIf(databaseUrl === undefined)(
     let repository: PrismaOfferingRepository;
     const offeringIds: string[] = [];
     const pivIds: string[] = [];
-    const caseIds: string[] = [];
-    const propertyIds: string[] = [];
 
     async function createOffering(input: { targetRaiseEur: string; status?: string }): Promise<{
       offeringId: string;
@@ -1039,8 +1025,6 @@ describe.skipIf(databaseUrl === undefined)(
           status: input.status ?? "pre_offering",
         },
       });
-      propertyIds.push(propertyId);
-      caseIds.push(caseId);
       pivIds.push(pivId);
       offeringIds.push(offeringId);
       return { offeringId, pivId };
@@ -1130,25 +1114,22 @@ describe.skipIf(databaseUrl === undefined)(
         where: { disclosurePack: { offeringId: { in: offeringIds } } },
       });
       await database.disclosurePack.deleteMany({ where: { offeringId: { in: offeringIds } } });
-      await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
       await database.auditLog.deleteMany({ where: { resourceId: { in: offeringIds }, resourceType: "offering" } });
       // Separate from the resourceId-scoped delete above: this FK is on
       // actorAccountId, and the founder account acted on plenty of audit
       // log rows whose resourceType/resourceId isn't "offering" (disclosure
       // packs, materiality records, reconfirmations).
       await database.auditLog.deleteMany({ where: { actorAccountId: founderAccountId } });
-      await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
-      await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
-      await database.piv.deleteMany({ where: { id: { in: pivIds } } });
-      await database.intakeCase.deleteMany({ where: { id: { in: caseIds } } });
-      await database.property.deleteMany({ where: { id: { in: propertyIds } } });
       await database.walletRegistration.deleteMany({ where: { accountId: fundedAccountId } });
-      await database.account.deleteMany({
-        where: { id: { in: [fundedAccountId, unfundedAccountId, founderAccountId] } },
-      });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [
-        [`auth_${fundedAccountId}`, `auth_${unfundedAccountId}`, `auth_${founderAccountId}`],
-      ]);
+      // Every reservation created here goes through createReservation, which
+      // records a money event in the same transaction, and money_events is
+      // append-only (its trigger rejects every UPDATE and DELETE) with an ON
+      // DELETE RESTRICT foreign key to reservations. So the reservations, and
+      // through the foreign keys their offerings, PIVs, cases, properties,
+      // the accounts and their auth_user rows, are permanently undeletable.
+      // Every id here is uniquely suffixed per run, so leaving them behind
+      // cannot collide with a later run; positions, disclosure rows, wallet
+      // registrations and audit rows above are the deletable part.
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
