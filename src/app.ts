@@ -11,6 +11,7 @@ import { pinoHttp } from "pino-http";
 
 import type { DatabaseProbe } from "./infrastructure/database/database-probe.js";
 import type { EmailSender } from "./infrastructure/email/smtp-email-sender.js";
+import { requestLogSerializer } from "./infrastructure/logging/request-log-redaction.js";
 import type { AccountRepository } from "./modules/account/repository/account.repository.js";
 import { createAccountSearchRouter } from "./modules/account/api/account.router.js";
 import { SearchAccountsByEmailService } from "./modules/account/application/search-accounts.service.js";
@@ -452,6 +453,10 @@ export function createApp(dependencies: AppDependencies): Express {
       logger: dependencies.logger,
       genReqId: (_request, response) => String(response.locals.traceId),
       customAttributeKeys: { reqId: "trace_id" },
+      // pino-http gives its child logger the stock req serializer, which
+      // overrides any serializer set on the logger itself, so this has to be
+      // passed here.
+      serializers: { req: requestLogSerializer },
     }),
   );
   app.use((request, response, next) => {
