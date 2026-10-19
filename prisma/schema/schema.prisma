@@ -49,6 +49,7 @@ model Account {
   payouts                        Payout[]
   walletRegistration             WalletRegistration?
   positions                      PositionLedger[]
+  escrowMintIntents              EscrowMintIntent[]
   auditEntries                   AuditLog[]
   idempotencyKeys                IdempotencyKey[]
   updatedSettings                PlatformSetting[]
@@ -574,6 +575,7 @@ model Piv {
   corridorClearance      CorridorClearance?      @relation(fields: [corridorClearanceId], references: [id])
   offerings              Offering[]
   positions              PositionLedger[]
+  escrowMintIntents      EscrowMintIntent[]
   rentCollections        RentCollection[]
   operatingDistributions OperatingDistribution[]
 
@@ -764,10 +766,16 @@ model PositionLedger {
   activatedAt           DateTime? @map("activated_at") @db.Timestamptz(6)
   redeemedAt            DateTime? @map("redeemed_at") @db.Timestamptz(6)
   redemptionProceedsEur Decimal?  @map("redemption_proceeds_eur") @db.Decimal(15, 2)
+  // Set only on a position recorded from an AD-256 escrow mint, pointing at the
+  // EscrowMintIntent it was recorded from. Unique, so a replay of the recording
+  // step cannot create a second position for the same mint. Null for every other
+  // origin (reservation flow, and any row written before the intent table existed).
+  escrowMintIntentId    String?   @unique(map: "uq_position_ledger_escrow_mint_intent") @map("escrow_mint_intent_id")
 
   reservation                  Reservation?                 @relation(fields: [reservationId], references: [id])
   piv                          Piv                          @relation(fields: [pivId], references: [id])
   account                      Account                      @relation(fields: [accountId], references: [id])
+  escrowMintIntent             EscrowMintIntent?            @relation(fields: [escrowMintIntentId], references: [id])
   chainEvents                  ChainSettlementEvent[]
   operatingDistributionEntries OperatingDistributionEntry[]
 
@@ -775,6 +783,49 @@ model PositionLedger {
   @@index([pivId], map: "idx_position_ledger_piv")
   @@index([accountId], map: "idx_position_ledger_account")
   @@map("position_ledger")
+  @@schema("settlement")
+}
+
+// Durable record of one AD-256 escrow mint, written BEFORE the mint transaction
+// is sent and advanced as the transaction is sent and recorded. The chain mint
+// is not idempotent (VistaBloxProperty.mint is an unconditional _mint) and the
+// position_ledger write that follows it cannot be in the same transaction, so
+// this row is what a retry reconciles against: it says whether an attempt may
+// be in flight (`sending`), which transaction to look up (`mint_sent`), or that
+// the position exists (`recorded`). Unique per (piv, account): at most one
+// intent -- hence at most one claimed mint -- per contributor per PIV.
+model EscrowMintIntent {
+  id                   String    @id @map("escrow_mint_intent_id")
+  pivId                String    @map("piv_id")
+  accountId            String    @map("account_id")
+  holderWalletAddress  String    @map("holder_wallet_address")
+  tokenContractAddress String    @map("token_contract_address")
+  tokenId              Decimal   @map("token_id") @db.Decimal(78, 0)
+  // The on-chain amount to mint, in the token's base units (contributionOf at
+  // the time the intent was written).
+  mintAmount           Decimal   @map("mint_amount") @db.Decimal(78, 0)
+  // sending | mint_sent | recorded (CHECK constraint in the migration).
+  status               String    @default("sending")
+  mintTxHash           String?   @map("mint_tx_hash")
+  // Which send attempt this row is on. A run that wants to start a new attempt
+  // does so with a compare-and-set on this number, so two overlapping runs
+  // cannot both start one.
+  attempt              Int       @default(1)
+  // When the latest attempt to send the mint was started.
+  attemptedAt          DateTime  @map("attempted_at") @db.Timestamptz(6)
+  // Earliest block a mint for this intent could have landed in; bounds the log
+  // search that recovers the transaction hash after a crash. Null when the mint
+  // was already on-chain before the intent was written.
+  searchFromBlock      BigInt?   @map("search_from_block")
+  createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+  recordedAt           DateTime? @map("recorded_at") @db.Timestamptz(6)
+
+  piv      Piv             @relation(fields: [pivId], references: [id])
+  account  Account         @relation(fields: [accountId], references: [id])
+  position PositionLedger?
+
+  @@unique([pivId, accountId], map: "uq_escrow_mint_intents_piv_account")
+  @@map("escrow_mint_intents")
   @@schema("settlement")
 }
 
