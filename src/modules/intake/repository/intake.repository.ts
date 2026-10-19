@@ -296,6 +296,7 @@ export interface IntakeReversalSnapshot {
   stage: string;
   workflowEventSequence: number;
   latestTransition: { eventId: string; fromStage: string; toStage: string } | null;
+  latestTransitionReversed: boolean;
   activeInformationRequest: boolean;
   offering: {
     offeringId: string;
