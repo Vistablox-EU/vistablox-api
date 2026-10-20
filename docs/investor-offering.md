@@ -60,7 +60,7 @@ A retry is served only while the stored reservation is still what the client ask
 - `409 offering.idempotency_key_reused`: the key was already used for a different `amount_eur` (`AD-147`).
 - `409 offering.reservation_replay_unavailable`: the stored reservation is no longer payable through a new session: it is past its 15-minute hold, its `reservation_stage` is no longer `initiated` (`lapsed`, `cancelled`, `awaiting_reconfirmation`, ...), or its latest `capital_state` is already funded (`eurc_reserved`, `reconfirmation_pending`, `eurc_finalized`). The client should read its reservations for the current state instead of retrying again.
 
-If the onramp session call fails on a retry, a `purchase_failed` money event is recorded against the original reservation, exactly as on a first attempt.
+If the onramp session call fails on a retry, the error is returned and no `purchase_failed` money event is recorded: only a first attempt marks a reservation failed, so the original reservation keeps its state and the client can retry again until the hold ends.
 
 ## Unfunded reservation expiry
 
