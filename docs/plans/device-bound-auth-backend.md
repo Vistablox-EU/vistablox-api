@@ -298,6 +298,7 @@ The existing `/v1/auth/sessions*` endpoints stay. `revoke-all` also cancels pend
 | `DEVICE_REVOKED` | 403 | This device was removed. | Wipe the bio key, `device_id` and token (keep the DPoP key); start screen. |
 | `DEVICE_NOT_FOUND` | 404 | Target device unknown. | Refresh the device list. |
 | `DEVICE_HOLD_ACTIVE` | 403 | The 7-day wait after an email recovery hasn't finished. | "You can move money again on `hold_until`." Viewing works. |
+| `FRESH_AUTHENTICATION_REQUIRED` (on `/api/auth`) / `authentication.fresh_auth_required` (problem+json on `/v1`) | 403 | Unlinking a login method or revoking sessions needs a device login within the last 5 minutes. | Run device login (L1/L2), then repeat the action. |
 | `LAST_OWNER` | 409 | Removing this device would leave the account without any phone that can approve. | "Add another phone first." |
 | `REENROL_NOT_ALLOWED` | 403 | No matching live device for this jkt. | Go to recovery (section 5.10). |
 | `REENROL_SELFIE_REQUIRED` | 403 | E1/E2 for a re-enrolment without an approved selfie. | Start RE1. |

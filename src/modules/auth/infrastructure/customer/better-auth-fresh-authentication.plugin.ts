@@ -37,8 +37,14 @@ export interface BetterAuthFreshAuthenticationPluginOptions {
  * the window alone. If a customer step-up that records one is ever added, this
  * hook has to learn it together with the middleware.
  *
- * Staff and partner sessions are left to their own controls: these are
- * customer self-service actions, as are the /v1 routes this mirrors.
+ * Staff and partner sessions are skipped here: these are customer
+ * self-service actions. /v1 does not skip them (a staff session passes there
+ * only through the repository fallback, which a recorded passkey login
+ * satisfies), so the two doors differ for staff. Step-up for staff on these
+ * endpoints is a separate item.
+ *
+ * A customer session that is not a device-biometric one (an oauth_pending
+ * session, before device login) is refused too, as on /v1.
  *
  * The session comes from getSessionForHook for the reason given in
  * better-auth-dpop.plugin.ts: a bearer-only request has no session for a

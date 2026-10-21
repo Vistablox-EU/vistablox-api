@@ -447,6 +447,26 @@ describe.skipIf(databaseUrl === undefined)(
       };
     }
 
+    /** Another device-biometric session for an existing fixture user, minted the way createFixture mints its own. */
+    async function mintExtraSession(userId: string): Promise<{ id: string; token: string }> {
+      const authContext = await auth.$context;
+      const key = await newKey();
+      const verifyPath = "/api/auth/device/login/verify";
+      const proof = await signProof(key, { method: "POST", path: verifyPath });
+      const headers = new Headers({ dpop: proof.header });
+      const mint = createAuthEndpoint("/device/login/verify", { method: "POST" }, async (ctx) =>
+        ctx.context.internalAdapter.createSession(userId, false),
+      );
+      return (await dispatchAuthEndpoint(mint, {
+        path: "/device/login/verify",
+        method: "POST",
+        headers,
+        request: new Request(`${BASE_URL}${verifyPath}`, { method: "POST", headers }),
+        asResponse: false,
+        context: authContext,
+      } as never)) as { id: string; token: string };
+    }
+
     async function accountRowExists(rowId: string): Promise<boolean> {
       const result = await authPool.query('SELECT 1 FROM "auth_account" WHERE "id" = $1', [rowId]);
       return (result.rowCount ?? 0) > 0;
@@ -985,6 +1005,10 @@ describe.skipIf(databaseUrl === undefined)(
         expect(await accountRowExists(unlink.laterAccountRowId)).toBe(false);
         expect(await accountRowExists(unlink.registrationAccountRowId)).toBe(true);
 
+        const revokeOne = await createFixture("fresh-effect-revoke-one");
+        expect((await call(revokeOne, "bearer", routes[1]!)).status).toBe(200);
+        expect(await sessionRowExists(revokeOne.sessionId)).toBe(false);
+
         const revokeAll = await createFixture("fresh-effect-revoke-all");
         expect((await call(revokeAll, "bearer", routes[2]!)).status).toBe(200);
         expect(await sessionRowExists(revokeAll.sessionId)).toBe(false);
@@ -992,6 +1016,20 @@ describe.skipIf(databaseUrl === undefined)(
         const revokeOthers = await createFixture("fresh-effect-revoke-others");
         expect((await call(revokeOthers, "bearer", routes[3]!)).status).toBe(200);
         expect(await sessionRowExists(revokeOthers.sessionId)).toBe(true);
+      });
+
+      it("revoke-other-sessions ends the user's other sessions for a fresh session and leaves them alone for a stale one", async () => {
+        const fresh = await createFixture("fresh-others-fresh");
+        const freshOther = await mintExtraSession(fresh.userId);
+        expect((await call(fresh, "bearer", routes[3]!)).status).toBe(200);
+        expect(await sessionRowExists(freshOther.id)).toBe(false);
+        expect(await sessionRowExists(fresh.sessionId)).toBe(true);
+
+        const stale = await createFixture("fresh-others-stale");
+        const staleOther = await mintExtraSession(stale.userId);
+        await ageSession(stale, 6);
+        expect((await call(stale, "bearer", routes[3]!)).status).toBe(403);
+        expect(await sessionRowExists(staleOther.id)).toBe(true);
       });
 
       it("the cookie transport is held to the same rule", async () => {
@@ -1068,7 +1106,7 @@ describe.skipIf(databaseUrl === undefined)(
         expect(await accountRowExists(fixture.laterAccountRowId)).toBe(true);
       });
 
-      it("the real /v1 route's internal unlink is not refused by the /api/auth hook: a fresh session unlinks the later account", async () => {
+      it("the real /v1 route: a fresh session unlinks the later account (204)", async () => {
         const fixture = await createFixture("fresh-v1-fresh");
         const path = "/v1/auth/login-methods/apple/unlink";
         const p = await proofFor(fixture, fixture.keyA, "bearer", "POST", path);
