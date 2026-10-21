@@ -1,6 +1,7 @@
 import type { PublicOfferingStatus } from "../domain/public-offering.policy.js";
 
 export interface OfferingCursor {
+  featured?: boolean;
   createdAt: Date;
   id: string;
 }
@@ -8,6 +9,7 @@ export interface OfferingCursor {
 export interface PublicOfferingRecord {
   id: string;
   status: PublicOfferingStatus;
+  featured: boolean;
   targetRaiseEur: string;
   createdAt: Date;
   property: {
