@@ -16,6 +16,7 @@ import {
 
 export function createCustomerSessionRouter(
   requireAuthentication: RequestHandler,
+  requireFreshAuthentication: RequestHandler,
   listOwnSessions: ListOwnSessionsService,
   revokeOwnSession: RevokeOwnSessionService,
   revokeAllOwnSessions: RevokeAllOwnSessionsService,
@@ -44,29 +45,44 @@ export function createCustomerSessionRouter(
     );
   });
 
-  router.post("/revoke-all", requireAuthentication, async (request, response) => {
-    requireAuthContext(response.locals.authContext);
-    await revokeAllOwnSessions.execute(request.headers);
-    response.status(204).end();
-  });
+  router.post(
+    "/revoke-all",
+    requireAuthentication,
+    requireFreshAuthentication,
+    async (request, response) => {
+      requireAuthContext(response.locals.authContext);
+      await revokeAllOwnSessions.execute(request.headers);
+      response.status(204).end();
+    },
+  );
 
-  router.post("/:session_id/revoke", requireAuthentication, async (request, response) => {
-    const context = requireAuthContext(response.locals.authContext);
-    const params = sessionIdParamsSchema.parse(request.params);
-    await revokeOwnSession.execute(context.accountId, params.session_id, request.headers);
-    response.status(204).end();
-  });
+  router.post(
+    "/:session_id/revoke",
+    requireAuthentication,
+    requireFreshAuthentication,
+    async (request, response) => {
+      const context = requireAuthContext(response.locals.authContext);
+      const params = sessionIdParamsSchema.parse(request.params);
+      await revokeOwnSession.execute(context.accountId, params.session_id, request.headers);
+      response.status(204).end();
+    },
+  );
 
   if (revokeDeviceSessions !== undefined) {
-    router.post("/devices/:jkt/revoke", requireAuthentication, async (request, response) => {
-      requireAuthContext(response.locals.authContext);
-      const params = dpopKeyParamsSchema.parse(request.params);
-      const result = await revokeDeviceSessions.execute(params.jkt, request.headers);
-      response.setHeader("Cache-Control", "no-store");
-      response.json(
-        revokeDeviceResponseSchema.parse({ data: { revoked_count: result.revokedCount } }),
-      );
-    });
+    router.post(
+      "/devices/:jkt/revoke",
+      requireAuthentication,
+      requireFreshAuthentication,
+      async (request, response) => {
+        requireAuthContext(response.locals.authContext);
+        const params = dpopKeyParamsSchema.parse(request.params);
+        const result = await revokeDeviceSessions.execute(params.jkt, request.headers);
+        response.setHeader("Cache-Control", "no-store");
+        response.json(
+          revokeDeviceResponseSchema.parse({ data: { revoked_count: result.revokedCount } }),
+        );
+      },
+    );
   }
 
   return router;

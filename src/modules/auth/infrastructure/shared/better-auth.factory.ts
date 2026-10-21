@@ -43,6 +43,7 @@ import {
 } from "./dpop-session-creation.js";
 import { createBetterAuthPasskeyChallengeHeaderPlugin } from "./better-auth-passkey-challenge-header.plugin.js";
 import { createBetterAuthStaffAccountGuardPlugin } from "../staff/better-auth-staff-account-guard.plugin.js";
+import { createBetterAuthFreshAuthenticationPlugin } from "../customer/better-auth-fresh-authentication.plugin.js";
 import { createBetterAuthRegistrationAccountGuardPlugin } from "../customer/better-auth-registration-account-guard.plugin.js";
 import { createBetterAuthDisabledRoutesPlugin } from "./better-auth-disabled-routes.plugin.js";
 
@@ -422,6 +423,11 @@ export function createBetterAuth(options: BetterAuthFactoryOptions) {
         },
       }),
       createBetterAuthStaffAccountGuardPlugin(),
+      // Fresh authentication for the /api/auth endpoints that unlink a login
+      // method or revoke sessions, as /v1's routes require it. Before the
+      // registration guard, so a stale session gets 403 whichever account it
+      // names, as on /v1 where the route's middleware runs first.
+      createBetterAuthFreshAuthenticationPlugin(),
       createBetterAuthRegistrationAccountGuardPlugin(),
       ...(options.authAuditSink === undefined
         ? []
