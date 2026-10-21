@@ -44,7 +44,7 @@ function freshAuthRejected(): RequestHandler {
     code: "authentication.fresh_auth_required",
     title: "Fresh authentication required",
     status: 403,
-    detail: "Confirm with a passkey or authenticator code before continuing.",
+    detail: "Sign in again on this device before continuing.",
   });
   return (_request, _response, next) => next(error);
 }

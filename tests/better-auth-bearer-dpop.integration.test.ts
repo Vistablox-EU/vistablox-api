@@ -912,6 +912,183 @@ describe.skipIf(databaseUrl === undefined)(
       });
     });
 
+    describe("fresh authentication on the /api/auth endpoints that unlink a login method or revoke sessions", () => {
+      const FRESH_REQUIRED = "FRESH_AUTHENTICATION_REQUIRED";
+      const routes: Array<{ path: string; body: (fixture: Fixture) => object | undefined }> = [
+        { path: "/api/auth/unlink-account", body: (fixture) => ({ accountId: fixture.laterAccountRowId }) },
+        { path: "/api/auth/revoke-session", body: (fixture) => ({ token: fixture.rawToken }) },
+        { path: "/api/auth/revoke-sessions", body: () => undefined },
+        { path: "/api/auth/revoke-other-sessions", body: () => undefined },
+      ];
+
+      // The fresh-authentication window counts from the session's creation, so
+      // an older session is the same session signed in some minutes earlier.
+      // Its idle and absolute device-session limits are untouched.
+      async function ageSession(fixture: Fixture, minutes: number): Promise<void> {
+        await authPool.query(`UPDATE "auth_session" SET "createdAt" = now() - make_interval(mins => $2::int) WHERE "id" = $1`, [
+          fixture.sessionId,
+          minutes,
+        ]);
+      }
+
+      async function call(
+        fixture: Fixture,
+        transport: Transport,
+        route: { path: string; body: (fixture: Fixture) => object | undefined },
+      ): Promise<Observed> {
+        const p = await proofFor(fixture, fixture.keyA, transport, "POST", route.path);
+        const body = route.body(fixture);
+        return send({
+          fixture,
+          transport,
+          method: "POST",
+          path: route.path,
+          dpop: p.header,
+          ...(body === undefined ? {} : { body }),
+        });
+      }
+
+      for (const route of routes) {
+        it(`${route.path}: a session created 6 minutes ago is 403 ${FRESH_REQUIRED} and nothing changes`, async () => {
+          const fixture = await createFixture(`fresh-stale-${route.path.split("/").pop()}`);
+          await ageSession(fixture, 6);
+
+          const observed = await call(fixture, "bearer", route);
+
+          expect(observed).toMatchObject({ status: 403, code: FRESH_REQUIRED });
+          expect(await sessionRowExists(fixture.sessionId)).toBe(true);
+          expect(await accountRowExists(fixture.laterAccountRowId)).toBe(true);
+        });
+
+        it(`${route.path}: the same request from a session created moments ago goes through`, async () => {
+          const fixture = await createFixture(`fresh-new-${route.path.split("/").pop()}`);
+
+          const observed = await call(fixture, "bearer", route);
+
+          expect(observed.status).toBe(200);
+          expect(observed.code).toBeUndefined();
+        });
+      }
+
+      it("a session created 4 minutes ago is still fresh", async () => {
+        const fixture = await createFixture("fresh-four-minutes");
+        await ageSession(fixture, 4);
+
+        const observed = await call(fixture, "bearer", routes[2]!);
+
+        expect(observed.status).toBe(200);
+      });
+
+      it("the effects of the requests that go through are the endpoints' own", async () => {
+        const unlink = await createFixture("fresh-effect-unlink");
+        expect((await call(unlink, "bearer", routes[0]!)).status).toBe(200);
+        expect(await accountRowExists(unlink.laterAccountRowId)).toBe(false);
+        expect(await accountRowExists(unlink.registrationAccountRowId)).toBe(true);
+
+        const revokeAll = await createFixture("fresh-effect-revoke-all");
+        expect((await call(revokeAll, "bearer", routes[2]!)).status).toBe(200);
+        expect(await sessionRowExists(revokeAll.sessionId)).toBe(false);
+
+        const revokeOthers = await createFixture("fresh-effect-revoke-others");
+        expect((await call(revokeOthers, "bearer", routes[3]!)).status).toBe(200);
+        expect(await sessionRowExists(revokeOthers.sessionId)).toBe(true);
+      });
+
+      it("the cookie transport is held to the same rule", async () => {
+        const fixture = await createFixture("fresh-cookie");
+        await ageSession(fixture, 6);
+
+        const observed = await call(fixture, "cookie", routes[2]!);
+
+        expect(observed).toMatchObject({ status: 403, code: FRESH_REQUIRED });
+        expect(await sessionRowExists(fixture.sessionId)).toBe(true);
+      });
+
+      it("routes that are not sensitive are not affected by the session's age", async () => {
+        const fixture = await createFixture("fresh-not-sensitive");
+        await ageSession(fixture, 6);
+        const path = "/api/auth/list-accounts";
+        const p = await proofFor(fixture, fixture.keyA, "bearer", "GET", path);
+
+        const observed = await send({ fixture, transport: "bearer", method: "GET", path, dpop: p.header });
+
+        expect(observed.status).toBe(200);
+      });
+
+      it("the DPoP check comes first: a proof from another key on a stale session is 401 DPOP_KEY_MISMATCH", async () => {
+        const fixture = await createFixture("fresh-dpop-first");
+        await ageSession(fixture, 6);
+        const path = "/api/auth/revoke-sessions";
+        const p = await proofFor(fixture, keyB, "bearer", "POST", path);
+
+        const observed = await send({ fixture, transport: "bearer", method: "POST", path, dpop: p.header });
+
+        expectDpopRejection(observed, "DPOP_KEY_MISMATCH");
+      });
+
+      it("it comes before the registration-account guard: a stale session unlinking the registration account is 403 FRESH, not LOCKED, and the row stays", async () => {
+        const fixture = await createFixture("fresh-before-guard");
+        await ageSession(fixture, 6);
+
+        const observed = await call(fixture, "bearer", {
+          path: "/api/auth/unlink-account",
+          body: (f) => ({ accountId: f.registrationAccountRowId }),
+        });
+
+        expect(observed).toMatchObject({ status: 403, code: FRESH_REQUIRED });
+        expect(await accountRowExists(fixture.registrationAccountRowId)).toBe(true);
+      });
+
+      it("a request with no session is left to the endpoint: 401, not the freshness answer", async () => {
+        const observed = await request(app).post("/api/auth/revoke-sessions");
+
+        expect(observed.status).toBe(401);
+        expect((observed.body as { code?: unknown } | null)?.code).not.toBe(FRESH_REQUIRED);
+      });
+
+      it("a staff-partner session is not held to this customer rule", async () => {
+        const fixture = await createFixture("fresh-staff");
+        await authPool.query(`UPDATE "auth_user" SET "population" = 'staff_partner' WHERE "id" = $1`, [fixture.userId]);
+        await ageSession(fixture, 6);
+
+        const observed = await call(fixture, "bearer", routes[3]!);
+
+        expect(observed.status).toBe(200);
+      });
+
+      it("the real /v1 route enforces the same rule: a stale session is 403 authentication.fresh_auth_required and the row stays", async () => {
+        const fixture = await createFixture("fresh-v1-stale");
+        await ageSession(fixture, 6);
+        const path = "/v1/auth/login-methods/apple/unlink";
+        const p = await proofFor(fixture, fixture.keyA, "bearer", "POST", path);
+
+        const observed = await send({ fixture, transport: "bearer", method: "POST", path, dpop: p.header });
+
+        expect(observed).toMatchObject({ status: 403, code: "authentication.fresh_auth_required" });
+        expect(await accountRowExists(fixture.laterAccountRowId)).toBe(true);
+      });
+
+      it("the real /v1 route's internal unlink is not refused by the /api/auth hook: a fresh session unlinks the later account", async () => {
+        const fixture = await createFixture("fresh-v1-fresh");
+        const path = "/v1/auth/login-methods/apple/unlink";
+        const p = await proofFor(fixture, fixture.keyA, "bearer", "POST", path);
+
+        const observed = await send({ fixture, transport: "bearer", method: "POST", path, dpop: p.header });
+
+        expect(observed.status).toBe(204);
+        expect(await accountRowExists(fixture.laterAccountRowId)).toBe(false);
+      });
+
+      it("an in-process auth.api call carries no HTTP request and is not checked here; its callers enforce the rule themselves", async () => {
+        const fixture = await createFixture("fresh-in-process");
+        await ageSession(fixture, 6);
+
+        await new BetterAuthLoginMethodUnlinker(auth).unlink("apple", { authorization: `Bearer ${fixture.bearer}` });
+
+        expect(await accountRowExists(fixture.laterAccountRowId)).toBe(false);
+      });
+    });
+
     describe("registration-account guard on POST /api/auth/unlink-account", () => {
       const UNLINK = "/api/auth/unlink-account";
 
