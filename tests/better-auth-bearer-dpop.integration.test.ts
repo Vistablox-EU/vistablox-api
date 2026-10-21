@@ -12,6 +12,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaAccountRepository } from "../src/modules/account/repository/prisma-account.repository.js";
 import { createLoginMethodsRouter } from "../src/modules/auth/api/customer/login-methods.router.js";
+import { createRequireFreshAuthentication } from "../src/modules/auth/api/customer/require-fresh-authentication.js";
 import { createRequireAuthentication } from "../src/modules/auth/api/shared/require-authentication.js";
 import { rejectDisabledAuthRoutes } from "../src/modules/auth/api/shared/reject-disabled-auth.js";
 import { decideDpopForSession } from "../src/modules/auth/application/shared/dpop-proof-verifier.js";
@@ -20,6 +21,7 @@ import { UnlinkLoginMethodService } from "../src/modules/auth/application/custom
 import { BetterAuthLoginMethodUnlinker } from "../src/modules/auth/infrastructure/customer/better-auth-login-method-unlinker.js";
 import { BetterAuthSessionResolver } from "../src/modules/auth/infrastructure/shared/better-auth-session.resolver.js";
 import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaCustomerSessionRepository } from "../src/modules/auth/repository/customer/prisma-customer-session.repository.js";
 import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/shared/prisma-dpop-replay.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
@@ -156,11 +158,14 @@ describe.skipIf(databaseUrl === undefined)(
       app.get("/v1/test/protected", requireAuthentication, (_request, response) => {
         response.json({ ok: true });
       });
-      // The real /v1 unlink route, wired as in src/app.ts.
+      // The real /v1 unlink route, wired as in src/app.ts. The fixtures'
+      // sessions are device-biometric sessions created moments ago, so the
+      // real fresh-authentication middleware lets them through.
       app.use(
         "/v1/auth/login-methods",
         createLoginMethodsRouter(
           requireAuthentication,
+          createRequireFreshAuthentication(new PrismaCustomerSessionRepository(database)),
           new UnlinkLoginMethodService(new BetterAuthLoginMethodUnlinker(auth)),
         ),
       );
