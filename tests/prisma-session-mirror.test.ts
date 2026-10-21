@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { DatabaseClient } from "../src/infrastructure/database/prisma.js";
-import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/prisma-session-mirror.js";
+import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/shared/prisma-session-mirror.js";
 
 function buildMirror() {
   const accountFindUnique = vi.fn().mockResolvedValue({ id: "acct_01" });

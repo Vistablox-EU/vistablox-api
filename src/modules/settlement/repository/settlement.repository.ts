@@ -4,6 +4,10 @@ export interface PivPendingEscrowResolution {
 }
 
 export interface RecordEscrowMintedPositionInput {
+  // The intent this position records the outcome of (see EscrowMintIntent).
+  // The position row carries it under a unique constraint, so recording the
+  // same mint twice can never produce a second position.
+  escrowMintIntentId: string;
   pivId: string;
   accountId: string;
   walletAddress: string;
@@ -13,6 +17,43 @@ export interface RecordEscrowMintedPositionInput {
   tokenContractAddress: string;
   tokenId: string;
   chainTxHash: string;
+}
+
+// sending: a mint transaction may be in flight but no hash is recorded yet.
+// mint_sent: the transaction hash is recorded; no position yet.
+// recorded: the position and its mint event exist.
+export type EscrowMintIntentStatus = "sending" | "mint_sent" | "recorded";
+
+/**
+ * The durable record of one contributor's escrow mint (see the
+ * escrow_mint_intents model). Written before the mint transaction is sent so
+ * that a crash at any later point leaves something for the next run to
+ * reconcile against the chain, instead of nothing.
+ */
+export interface EscrowMintIntent {
+  id: string;
+  pivId: string;
+  accountId: string;
+  walletAddress: string;
+  tokenContractAddress: string;
+  tokenId: string;
+  mintAmount: bigint;
+  status: EscrowMintIntentStatus;
+  mintTxHash: string | null;
+  attempt: number;
+  attemptedAt: Date;
+  searchFromBlock: bigint | null;
+}
+
+export interface CreateEscrowMintIntentInput {
+  pivId: string;
+  accountId: string;
+  walletAddress: string;
+  tokenContractAddress: string;
+  tokenId: string;
+  mintAmount: bigint;
+  attemptedAt: Date;
+  searchFromBlock: bigint | null;
 }
 
 export interface PendingWalletRegistration {
@@ -43,6 +84,29 @@ export interface SettlementRepository {
   findPivsWithPassedIpoDeadline(now: Date): Promise<PivPendingEscrowResolution[]>;
   resolveAccountIdForWallet(walletAddress: string): Promise<string | null>;
   hasPosition(pivId: string, accountId: string): Promise<boolean>;
+  findEscrowMintIntent(pivId: string, accountId: string): Promise<EscrowMintIntent | null>;
+  // Writes the intent in `sending` unless one already exists for this
+  // (piv, account), in which case nothing is written and the existing row is
+  // returned with created=false. The unique key is what makes two overlapping
+  // runs unable to both claim the same mint.
+  createEscrowMintIntent(
+    input: CreateEscrowMintIntentInput,
+  ): Promise<{ intent: EscrowMintIntent; created: boolean }>;
+  // Compare-and-set start of another send attempt on an intent that is still
+  // at the attempt the caller read: back to `sending`, hash cleared, attempt
+  // incremented. False means another run got there first.
+  restartEscrowMintAttempt(input: {
+    intentId: string;
+    expectedAttempt: number;
+    attemptedAt: Date;
+  }): Promise<boolean>;
+  // Records the hash of the mint transaction on the attempt that sent it
+  // (`sending` -> `mint_sent`). Idempotent for the same hash; throws if the
+  // intent is on another attempt or already holds a different hash.
+  recordEscrowMintSent(input: { intentId: string; attempt: number; txHash: string }): Promise<void>;
+  // Records the confirmed mint: flips the intent to `recorded` and writes the
+  // position and its mint event in one transaction. Replaying it for an
+  // intent that is already recorded returns the existing position.
   recordEscrowMintedPosition(input: RecordEscrowMintedPositionInput): Promise<{ positionId: string }>;
   findPendingWalletRegistrationByCommitment(commitment: string): Promise<PendingWalletRegistration | null>;
   countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number>;

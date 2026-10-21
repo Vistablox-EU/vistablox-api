@@ -2,6 +2,9 @@ import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import type {
+  CreateEscrowMintIntentInput,
+  EscrowMintIntent,
+  EscrowMintIntentStatus,
   PendingWalletRegistration,
   PivPendingEscrowResolution,
   PivTokenHolding,
@@ -16,6 +19,39 @@ import type {
 // value to persist and this table already exists for exactly this kind of
 // thing.
 const WALLET_REGISTRY_CURSOR_SETTING_KEY = "wallet_registry.last_processed_block";
+
+interface EscrowMintIntentRow {
+  id: string;
+  pivId: string;
+  accountId: string;
+  holderWalletAddress: string;
+  tokenContractAddress: string;
+  tokenId: { toFixed(decimalPlaces: number): string };
+  mintAmount: { toFixed(decimalPlaces: number): string };
+  status: string;
+  mintTxHash: string | null;
+  attempt: number;
+  attemptedAt: Date;
+  searchFromBlock: bigint | null;
+}
+
+function toEscrowMintIntent(row: EscrowMintIntentRow): EscrowMintIntent {
+  return {
+    id: row.id,
+    pivId: row.pivId,
+    accountId: row.accountId,
+    walletAddress: row.holderWalletAddress,
+    tokenContractAddress: row.tokenContractAddress,
+    tokenId: row.tokenId.toFixed(0),
+    mintAmount: BigInt(row.mintAmount.toFixed(0)),
+    // The status CHECK constraint is what guarantees this cast.
+    status: row.status as EscrowMintIntentStatus,
+    mintTxHash: row.mintTxHash,
+    attempt: row.attempt,
+    attemptedAt: row.attemptedAt,
+    searchFromBlock: row.searchFromBlock,
+  };
+}
 
 export class PrismaSettlementRepository implements SettlementRepository, PivTokenHoldingsReader {
   public constructor(private readonly database: DatabaseClient) {}
@@ -62,16 +98,115 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     }));
   }
 
+  public async findEscrowMintIntent(pivId: string, accountId: string): Promise<EscrowMintIntent | null> {
+    const row = await this.database.escrowMintIntent.findUnique({
+      where: { pivId_accountId: { pivId, accountId } },
+    });
+    return row === null ? null : toEscrowMintIntent(row);
+  }
+
+  public async createEscrowMintIntent(
+    input: CreateEscrowMintIntentInput,
+  ): Promise<{ intent: EscrowMintIntent; created: boolean }> {
+    // ON CONFLICT DO NOTHING on uq_escrow_mint_intents_piv_account: when two
+    // runs race to claim the same contributor, exactly one inserts.
+    const inserted = await this.database.escrowMintIntent.createMany({
+      data: [
+        {
+          id: `escrow_mint_${ulid()}`,
+          pivId: input.pivId,
+          accountId: input.accountId,
+          holderWalletAddress: input.walletAddress,
+          tokenContractAddress: input.tokenContractAddress,
+          tokenId: input.tokenId,
+          mintAmount: input.mintAmount.toString(),
+          status: "sending",
+          attempt: 1,
+          attemptedAt: input.attemptedAt,
+          searchFromBlock: input.searchFromBlock,
+        },
+      ],
+      skipDuplicates: true,
+    });
+    const row = await this.database.escrowMintIntent.findUniqueOrThrow({
+      where: { pivId_accountId: { pivId: input.pivId, accountId: input.accountId } },
+    });
+    return { intent: toEscrowMintIntent(row), created: inserted.count === 1 };
+  }
+
+  public async restartEscrowMintAttempt(input: {
+    intentId: string;
+    expectedAttempt: number;
+    attemptedAt: Date;
+  }): Promise<boolean> {
+    const updated = await this.database.escrowMintIntent.updateMany({
+      where: { id: input.intentId, attempt: input.expectedAttempt, status: { in: ["sending", "mint_sent"] } },
+      data: {
+        status: "sending",
+        mintTxHash: null,
+        attempt: { increment: 1 },
+        attemptedAt: input.attemptedAt,
+      },
+    });
+    return updated.count === 1;
+  }
+
+  public async recordEscrowMintSent(input: {
+    intentId: string;
+    attempt: number;
+    txHash: string;
+  }): Promise<void> {
+    const updated = await this.database.escrowMintIntent.updateMany({
+      where: { id: input.intentId, attempt: input.attempt, status: "sending" },
+      data: { status: "mint_sent", mintTxHash: input.txHash },
+    });
+    if (updated.count === 1) return;
+
+    const current = await this.database.escrowMintIntent.findUnique({
+      where: { id: input.intentId },
+      select: { attempt: true, mintTxHash: true },
+    });
+    if (current !== null && current.attempt === input.attempt && current.mintTxHash === input.txHash) {
+      return; // Idempotent replay of the same hash on the same attempt.
+    }
+    throw new Error(
+      `escrow mint intent ${input.intentId} is not at attempt ${input.attempt} in 'sending'; ` +
+        `cannot record mint tx ${input.txHash}`,
+    );
+  }
+
   public async recordEscrowMintedPosition(
     input: RecordEscrowMintedPositionInput,
   ): Promise<{ positionId: string }> {
     return this.database.$transaction(async (transaction) => {
+      // The intent flips to `recorded` in the same transaction as the
+      // position and event rows, so there is no moment at which the position
+      // exists and the intent still says otherwise (or the reverse). Only the
+      // transaction that wins this flip writes the position; one that loses it
+      // (a replay, or an overlapping run) finds the position already there.
+      const flipped = await transaction.escrowMintIntent.updateMany({
+        where: { id: input.escrowMintIntentId, status: "mint_sent", mintTxHash: input.chainTxHash },
+        data: { status: "recorded", recordedAt: input.activatedAt },
+      });
+      if (flipped.count === 0) {
+        const existing = await transaction.positionLedger.findUnique({
+          where: { escrowMintIntentId: input.escrowMintIntentId },
+          select: { id: true },
+        });
+        if (existing !== null) return { positionId: existing.id };
+        throw new Error(
+          `escrow mint intent ${input.escrowMintIntentId} is not in 'mint_sent' with tx ${input.chainTxHash}; ` +
+            "refusing to record a position for it",
+        );
+      }
+
       const position = await transaction.positionLedger.create({
         data: {
           id: `position_${ulid()}`,
           // No reservationId: this position originated directly from an
           // on-chain escrow contribution (AD-256), not the onramp/
           // reconfirmation reservation flow (AD-146/AD-214).
+          escrowMintIntentId: input.escrowMintIntentId,
           pivId: input.pivId,
           accountId: input.accountId,
           unitCount: input.unitCount,

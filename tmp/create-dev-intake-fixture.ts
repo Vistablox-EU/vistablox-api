@@ -10,12 +10,20 @@ const offeringId = "offering_dev_zagreb_full_fixture";
 const packId = "pack_dev_zagreb_full_fixture";
 const legalId = "legal_dev_fixture";
 const appraisalId = "appraisal_dev_fixture";
+const porto = {
+  caseId: "case_dev_porto_ipo_fixture",
+  propertyId: "property_dev_porto_ipo_fixture",
+  revisionId: "revision_dev_porto_ipo_fixture",
+  pivId: "piv_dev_porto_ipo_fixture",
+  offeringId: "offering_dev_porto_ipo_fixture",
+  packId: "pack_dev_porto_ipo_fixture",
+};
 const now = new Date("2026-09-17T12:00:00.000Z");
 const ref = (name: string) => `intake/dev/${caseId}/${name}`;
 
 async function main(): Promise<void> {
 await database.$transaction(async (tx) => {
-  await tx.intakeCase.deleteMany({ where: { id: caseId } });
+  await tx.intakeCase.deleteMany({ where: { id: { in: [caseId, porto.caseId] } } });
   await tx.legalPractice.deleteMany({ where: { id: legalId } });
   await tx.appraisalFirm.deleteMany({ where: { id: appraisalId } });
   await tx.legalPractice.create({ data: { id: legalId, name: "Development Legal Practice", countryCode: "HR" } });
@@ -58,8 +66,49 @@ await database.$transaction(async (tx) => {
   for (const [id, amount, stage] of [["reservation_dev_1", "100000.00", "finalized"], ["reservation_dev_2", "150000.00", "reconfirmed"], ["reservation_dev_3", "50000.00", "cancelled"] as const]) {
     await tx.reservation.create({ data: { id, offeringId, accountId, amountEur: amount, reservationStage: stage, createdAt: new Date("2026-09-16T12:00:00.000Z"), moneyEvents: { create: { id: `${id}_money`, provider: "development_fixture", providerReference: `${id}-payment`, capitalState: stage === "cancelled" ? "eurc_cancelled" : "eurc_finalized", amountEur: amount, recordedAt: new Date("2026-09-16T13:00:00.000Z") } } } });
   }
+
+  // A separate, intentionally open IPO fixture. It is distinct from the
+  // completed Zagreb listing above so the mobile app can exercise both
+  // discovery and investment-ready states without manufacturing production
+  // data. These IDs are the only ones with local editorial imagery in mobile.
+  await tx.property.create({ data: {
+    id: porto.propertyId, countryCode: "PT", city: "Porto", addressLine: "Rua da Foz 42",
+    landRegistryReference: "DEV-PT-PT-FOZ-42", ownerDeclaredValueEur: "620000.00",
+    hasExistingEncumbrance: false, residentialSubtype: "apartment", livingAreaSqM: "146.00",
+    bedrooms: 3, bathrooms: 2, floor: 3, totalFloors: 5, yearBuilt: 2021, condition: "excellent", energyRating: "A",
+  } });
+  await tx.intakeCase.create({ data: {
+    id: porto.caseId, propertyId: porto.propertyId, applicantAccountId: accountId, stage: "pre_offering_open",
+    legalPracticeId: legalId, appraisalFirmId: appraisalId,
+    approvedAt: new Date("2026-09-16T12:00:00.000Z"), ipoPeriodDays: 30,
+    ipoEndAt: new Date("2026-10-18T00:00:00.000Z"), ipoValueEur: "500000.00",
+    founderReviewNotes: "Development fixture - open IPO sample case.", reviewedByAccountId: accountId,
+    legalExecutionEventRefs: [], legalDocumentRefs: [ref("ownership-declaration.pdf")], appraisalDocumentRefs: [ref("appraisal-report.pdf")],
+  } });
+  await tx.submissionRevision.create({ data: {
+    id: porto.revisionId, caseId: porto.caseId, revisionNumber: 1,
+    submittedAt: new Date("2026-09-14T12:00:00.000Z"), submittedByAccountId: accountId,
+    submissionData: { development_fixture: true }, reason: "initial",
+  } });
+  await tx.intakeCase.update({ where: { id: porto.caseId }, data: { currentSubmissionRevisionId: porto.revisionId } });
+  await tx.piv.create({ data: {
+    id: porto.pivId, propertyId: porto.propertyId, caseId: porto.caseId,
+    legalName: "Harbour View Apartments PIV, Lda.", jurisdiction: "PT", registrationNo: "DEV-PT-00042",
+    incorporatedAt: new Date("2026-09-16T12:00:00.000Z"), deedTransferStatus: "completed",
+  } });
+  await tx.offering.create({ data: {
+    id: porto.offeringId, pivId: porto.pivId, minimumRaiseEur: "1000.00", targetRaiseEur: "500000.00",
+    status: "pre_offering", createdAt: new Date("2026-09-17T12:00:00.000Z"),
+    disclosurePacks: { create: {
+      id: porto.packId, version: 1, publishedAt: new Date("2026-09-17T12:00:00.000Z"), isCurrent: true,
+      documents: { create: ["ecsp_kiis", "priips_kid", "final_offer_summary", "final_terms_sheet", "issuer_offeror_structure_sheet", "investor_rights_payout_waterfall_summary", "risk_factors_summary", "property_appraisal_summary", "fees_costs_tax_liquidity_summary", "withdrawal_cancellation_supplement_rights_notice", "full_prospectus"].map((type, i) => ({ id: `disclosure_porto_${i}`, documentType: type, documentRef: ref("property-facts-sheet.pdf") })) },
+    } },
+  } });
 });
-console.log(JSON.stringify({ caseId, propertyId, pivId, offeringId, packId }));
+console.log(JSON.stringify({
+  listing: { caseId, propertyId, pivId, offeringId, packId },
+  ipo: porto,
+}));
 await database.$disconnect();
 }
 

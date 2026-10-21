@@ -16,7 +16,7 @@ import type {
   KycEligibilityRecord,
   KycRepository,
 } from "../src/modules/identity/repository/kyc.repository.js";
-import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
+import type { SessionResolver } from "../src/modules/auth/application/shared/session-resolver.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import type { IntakeRepository } from "../src/modules/intake/repository/intake.repository.js";
 
@@ -90,6 +90,7 @@ function fakeEmailSender(): EmailSender {
     sendAccountRecoveryRejectedEmail: vi.fn(),
     sendAccountRecoveryCompletedEmail: vi.fn(),
     sendPasskeyRecoveryEmail: vi.fn(),
+    sendDeviceReplacementCodeEmail: vi.fn(),
   };
 }
 

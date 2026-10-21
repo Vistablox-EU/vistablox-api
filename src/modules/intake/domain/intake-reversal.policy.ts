@@ -22,10 +22,24 @@ export const reversalCommandSchema = z.enum([
 
 export type ReversalCommand = z.infer<typeof reversalCommandSchema>;
 
+// Why an operation ended in `failed`, as stored in failure_code. case_changed:
+// the case's stage or workflow sequence moved after the request. not_allowed:
+// the policy no longer allows the command at execution (a blocker appeared), or
+// no executor exists for it. execution_error: an unexpected error during
+// execution.
+export const reversalFailureCodes = {
+  caseChanged: "case_changed",
+  notAllowed: "not_allowed",
+  executionError: "execution_error",
+} as const;
+
 export interface ReversalSnapshot {
   stage: string;
   workflowEventSequence: number;
   latestTransition: { eventId: string; fromStage: string; toStage: string } | null;
+  // Every correction is recorded against the latest transition, and the ledger
+  // allows an event to be reversed only once.
+  latestTransitionReversed: boolean;
   activeInformationRequest: boolean;
   offering: {
     offeringId: string;
@@ -55,7 +69,7 @@ export interface ReversalAction {
 const terminalStages = new Set(["rejected", "withdrawn", "expired"]);
 
 export function evaluateReversalActions(snapshot: ReversalSnapshot): ReversalAction[] {
-  if (snapshot.correctionInProgress || terminalStages.has(snapshot.stage)) return [];
+  if (snapshot.correctionInProgress || snapshot.latestTransitionReversed || terminalStages.has(snapshot.stage)) return [];
   const actions: ReversalAction[] = [];
   if (snapshot.stage === "submitted" && snapshot.latestTransition?.toStage === "submitted" && !snapshot.activeInformationRequest && snapshot.offering === null) {
     actions.push({ command: "return_to_draft", targetStage: "draft", label: "Return to draft", requiresSecondApproval: false, executionMode: "synchronous", impactSummary: "The current submission is preserved and the case returns to draft for correction.", blockers: [] });

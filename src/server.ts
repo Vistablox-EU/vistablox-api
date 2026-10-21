@@ -13,40 +13,43 @@ import {
 } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
+import { PrismaIdempotencyStore } from "./infrastructure/idempotency/prisma-idempotency-store.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
+import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
 import { PrismaAccountRepository } from "./modules/account/repository/prisma-account.repository.js";
-import { createBetterAuth } from "./modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaDeviceRepository } from "./modules/auth/repository/prisma-device.repository.js";
-import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prisma-device-challenge.repository.js";
-import { EnrolDeviceService } from "./modules/auth/application/device-enrolment.service.js";
-import { LoginDeviceService } from "./modules/auth/application/device-login.service.js";
-import { IssueDeviceChallengeService } from "./modules/auth/application/device-challenge-issuance.service.js";
+import { createBetterAuth } from "./modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaDeviceRepository } from "./modules/auth/repository/customer/prisma-device.repository.js";
+import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/customer/prisma-device-challenge.repository.js";
+import { PrismaDeviceReplacementRepository } from "./modules/auth/repository/customer/prisma-device-replacement.repository.js";
+import { EnrolDeviceService } from "./modules/auth/application/customer/device-enrolment.service.js";
+import { LoginDeviceService } from "./modules/auth/application/customer/device-login.service.js";
+import { IssueDeviceChallengeService } from "./modules/auth/application/customer/device-challenge-issuance.service.js";
 import {
   ANDROID_ONLY_MOBILE_PLATFORM_POLICY,
   mobileAuthPlatformFlags,
 } from "./modules/auth/domain/mobile-platform.policy.js";
-import { HttpAndroidAttestationRevocationList } from "./modules/auth/infrastructure/http-android-attestation-revocation-list.js";
-import { GooglePlayIntegrityDecoder } from "./modules/auth/infrastructure/google-play-integrity.decoder.js";
-import { createAppleClientSecret } from "./modules/auth/infrastructure/apple-client-secret.js";
-import { BetterAuthStaffIdentityProvider } from "./modules/auth/infrastructure/better-auth-staff-identity.provider.js";
-import { BetterAuthStaffAccountAdministrator } from "./modules/auth/infrastructure/better-auth-staff-account-administrator.js";
-import { BetterAuthSessionResolver } from "./modules/auth/infrastructure/better-auth-session.resolver.js";
-import { SimpleWebAuthnCeremony } from "./modules/auth/infrastructure/simple-webauthn.ceremony.js";
-import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/prisma-staff-webauthn.repository.js";
-import { PrismaStaffInvitationRepository } from "./modules/auth/repository/prisma-staff-invitation.repository.js";
-import { PrismaAuthAuditSink } from "./modules/auth/repository/prisma-auth-audit-sink.js";
-import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
-import { BetterAuthCustomerAccountAdministrator } from "./modules/auth/infrastructure/better-auth-customer-account-administrator.js";
-import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
-import { PrismaAccountClosureRepository } from "./modules/auth/repository/prisma-account-closure.repository.js";
-import { PrismaSessionMirror } from "./modules/auth/infrastructure/prisma-session-mirror.js";
-import { PrismaCustomerSessionRepository } from "./modules/auth/repository/prisma-customer-session.repository.js";
-import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/better-auth-session-revoker.js";
-import { BetterAuthLoginMethodUnlinker } from "./modules/auth/infrastructure/better-auth-login-method-unlinker.js";
+import { HttpAndroidAttestationRevocationList } from "./modules/auth/infrastructure/customer/http-android-attestation-revocation-list.js";
+import { GooglePlayIntegrityDecoder } from "./modules/auth/infrastructure/customer/google-play-integrity.decoder.js";
+import { createAppleClientSecret } from "./modules/auth/infrastructure/customer/apple-client-secret.js";
+import { BetterAuthStaffIdentityProvider } from "./modules/auth/infrastructure/staff/better-auth-staff-identity.provider.js";
+import { BetterAuthStaffAccountAdministrator } from "./modules/auth/infrastructure/staff/better-auth-staff-account-administrator.js";
+import { BetterAuthSessionResolver } from "./modules/auth/infrastructure/shared/better-auth-session.resolver.js";
+import { SimpleWebAuthnCeremony } from "./modules/auth/infrastructure/staff/simple-webauthn.ceremony.js";
+import { PrismaStaffWebAuthnRepository } from "./modules/auth/repository/staff/prisma-staff-webauthn.repository.js";
+import { PrismaStaffInvitationRepository } from "./modules/auth/repository/staff/prisma-staff-invitation.repository.js";
+import { PrismaAuthAuditSink } from "./modules/auth/repository/shared/prisma-auth-audit-sink.js";
+import { PrismaStaffAccountLifecycleRepository } from "./modules/auth/repository/staff/prisma-staff-account-lifecycle.repository.js";
+import { BetterAuthCustomerAccountAdministrator } from "./modules/auth/infrastructure/customer/better-auth-customer-account-administrator.js";
+import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/staff/prisma-account-recovery.repository.js";
+import { PrismaAccountClosureRepository } from "./modules/auth/repository/shared/prisma-account-closure.repository.js";
+import { PrismaSessionMirror } from "./modules/auth/infrastructure/shared/prisma-session-mirror.js";
+import { PrismaCustomerSessionRepository } from "./modules/auth/repository/customer/prisma-customer-session.repository.js";
+import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/customer/better-auth-session-revoker.js";
+import { BetterAuthLoginMethodUnlinker } from "./modules/auth/infrastructure/customer/better-auth-login-method-unlinker.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
@@ -65,8 +68,8 @@ import { IdentityDisplayProfileProvider } from "./infrastructure/profile/identit
 import { PrismaProfileRepository } from "./modules/profile/repository/prisma-profile.repository.js";
 import { PrismaAccountPreferencesRepository } from "./modules/profile/repository/prisma-account-preferences.repository.js";
 import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
-import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
-import { jktFingerprint, type DpopLogger } from "./modules/auth/application/dpop-proof-verifier.js";
+import { PrismaDpopReplayRepository } from "./modules/auth/repository/shared/prisma-dpop-replay.repository.js";
+import { jktFingerprint, type DpopLogger } from "./modules/auth/application/shared/dpop-proof-verifier.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { createChainReader } from "./infrastructure/blockchain/chain-client.js";
 import { ViemWalletChainReader } from "./infrastructure/blockchain/chain-wallet-reader.js";
@@ -92,13 +95,16 @@ jobQueue.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
 });
 await jobQueue.start();
-// Mirrors worker.ts: createQueue is ON CONFLICT DO NOTHING, so this is safe
-// to run here even if the worker process hasn't started yet on a fresh
-// deploy — a send() would otherwise fail against a queue that doesn't exist.
-await jobQueue.createQueue("case_timers.pre_offering_open_handoff");
-await jobQueue.createQueue("case_timers.offering_reconfirmation_window_opened");
-await jobQueue.createQueue("case_timers.post_ipo_structuring_handoff");
-await jobQueue.createQueue("provider_events.didit_webhook");
+// Mirrors worker.ts: ensureJobQueue is safe to run here even if the worker
+// process hasn't started yet on a fresh deploy — a send() would otherwise fail
+// against a queue that doesn't exist — and it also brings a queue that
+// already exists up to the current retry and dead-letter settings, which
+// createQueue alone (ON CONFLICT DO NOTHING) never would.
+await ensureDeadLetterQueue(jobQueue);
+await ensureJobQueue(jobQueue, "case_timers.pre_offering_open_handoff", "event");
+await ensureJobQueue(jobQueue, "case_timers.offering_reconfirmation_window_opened", "event");
+await ensureJobQueue(jobQueue, "case_timers.post_ipo_structuring_handoff", "event");
+await ensureJobQueue(jobQueue, "provider_events.didit_webhook", "event");
 // Reversal (undoing the KYC microservice split): intake, offering,
 // profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
@@ -177,6 +183,13 @@ const rateLimitStore =
   rateLimitCacheClient?.isReady === true
     ? new RedisRateLimitStore(rateLimitCacheClient)
     : undefined;
+// Production and staging both run behind a reverse proxy (staging: Traefik),
+// where req.ip is the proxy's address unless TRUST_PROXY says otherwise.
+if (rateLimitStore !== undefined && environment.TRUST_PROXY === undefined && environment.NODE_ENV === "production") {
+  logger.warn(
+    "rate limiting is enabled but TRUST_PROXY is unset; behind a reverse proxy every unauthenticated caller shares the proxy's address and one IP rate-limit bucket",
+  );
+}
 const emailSender = new SmtpEmailSender({
   host: environment.SMTP_HOST,
   port: environment.SMTP_PORT,
@@ -216,6 +229,15 @@ const dpopLogger: DpopLogger = {
 // itself needs up front.
 const deviceRepository = new PrismaDeviceRepository(database);
 const deviceChallengeRepository = new PrismaDeviceChallengeRepository(database);
+const deviceReplacementRepository = new PrismaDeviceReplacementRepository(database);
+const deviceReplacementConfig = {
+  codeTtlMs: environment.DEVICE_REPLACEMENT_CODE_TTL_MINUTES * 60_000,
+  maxAttempts: environment.DEVICE_REPLACEMENT_MAX_ATTEMPTS,
+  cooldownMs: environment.DEVICE_REPLACEMENT_COOLDOWN_HOURS * 3_600_000,
+  // The request rate limit is per hour (AD-271: 3 per account per hour).
+  requestWindowMs: 3_600_000,
+  maxRequestsPerWindow: environment.DEVICE_REPLACEMENT_RATE_LIMIT_PER_HOUR,
+};
 const androidAttestationRevocationList = new HttpAndroidAttestationRevocationList();
 const playIntegrityDecoder =
   environment.PLAY_INTEGRITY_SERVICE_ACCOUNT_JSON === undefined ||
@@ -528,6 +550,8 @@ const app = createApp({
   },
   webauthnRelatedOrigins: webauthnSettings.relatedOrigins,
   ...(rateLimitStore === undefined ? {} : { rateLimitStore }),
+  idempotencyStore: new PrismaIdempotencyStore(database),
+  ...(environment.TRUST_PROXY === undefined ? {} : { trustProxy: environment.TRUST_PROXY }),
   reservationFundingRailEnabled,
   protectedApi: {
     accounts: accountRepository,
@@ -589,6 +613,11 @@ const app = createApp({
             } }
           : {}),
       },
+    },
+    deviceReplacement: {
+      repository: deviceReplacementRepository,
+      emailSender,
+      config: deviceReplacementConfig,
     },
     wallet: {
       repository: walletRepository,
