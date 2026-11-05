@@ -6,12 +6,14 @@ import { unlinkLoginMethodParamsSchema } from "./login-methods.schemas.js";
 
 export function createLoginMethodsRouter(
   requireAuthentication: RequestHandler,
+  requireFreshAuthentication: RequestHandler,
   unlinkLoginMethod: UnlinkLoginMethodService,
 ): Router {
   const router = Router();
   router.post(
     "/:method_type/unlink",
     requireAuthentication,
+    requireFreshAuthentication,
     async (request, response) => {
       requireAuthContext(response.locals.authContext);
       const params = unlinkLoginMethodParamsSchema.parse(request.params);
