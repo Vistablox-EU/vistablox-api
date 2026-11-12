@@ -7,10 +7,35 @@ import {
   RevokeOwnSessionService,
 } from "../src/modules/auth/application/customer/customer-session.service.js";
 import type { SessionRevoker } from "../src/modules/auth/application/customer/session-revoker.js";
+import type { ProviderSessionFacts } from "../src/modules/auth/domain/session-liveness.js";
 import type {
   CustomerSessionRepository,
   CustomerSessionSummary,
 } from "../src/modules/auth/repository/customer/customer-session.repository.js";
+
+const NOW = new Date("2026-09-01T09:02:00.000Z");
+const MINUTE = 60_000;
+
+// What better-auth's own row says about a device session created at 09:00
+// and last used at 09:00: live at NOW (2 min idle, 2 min old).
+function liveProviderSession(): ProviderSessionFacts {
+  return {
+    authenticationLevel: "device_biometric",
+    createdAt: new Date("2026-09-01T09:00:00.000Z"),
+    updatedAt: new Date("2026-09-01T09:00:00.000Z"),
+    expiresAt: new Date("2026-09-01T09:30:00.000Z"),
+  };
+}
+
+// The same device session, long past its limits.
+function expiredProviderSession(): ProviderSessionFacts {
+  return {
+    authenticationLevel: "device_biometric",
+    createdAt: new Date("2026-08-31T09:00:00.000Z"),
+    updatedAt: new Date("2026-08-31T09:00:00.000Z"),
+    expiresAt: new Date("2026-08-31T09:30:00.000Z"),
+  };
+}
 
 function summary(overrides: Partial<CustomerSessionSummary> = {}): CustomerSessionSummary {
   return {
@@ -23,6 +48,7 @@ function summary(overrides: Partial<CustomerSessionSummary> = {}): CustomerSessi
     status: "active",
     revocationReason: null,
     betterAuthSessionId: "auth_session_01",
+    providerSession: liveProviderSession(),
     ...overrides,
   };
 }
@@ -40,12 +66,88 @@ describe("ListOwnSessionsService", () => {
       ]),
       findOwnedProviderSessionId: vi.fn(),
     };
-    const service = new ListOwnSessionsService(repository);
+    const service = new ListOwnSessionsService(repository, () => NOW);
 
     const result = await service.execute("acct_01", "auth_session_02");
 
     expect(result.find((s) => s.sessionId === "sess_01")?.isCurrent).toBe(false);
     expect(result.find((s) => s.sessionId === "sess_02")?.isCurrent).toBe(true);
+  });
+
+  function listing(rows: CustomerSessionSummary[]): CustomerSessionRepository {
+    return { listForAccount: vi.fn().mockResolvedValue(rows), findOwnedProviderSessionId: vi.fn() };
+  }
+
+  it("omits an active-looking session that can no longer authenticate", async () => {
+    const service = new ListOwnSessionsService(
+      listing([
+        summary({ sessionId: "sess_live", betterAuthSessionId: "auth_live" }),
+        summary({
+          sessionId: "sess_expired",
+          betterAuthSessionId: "auth_expired",
+          providerSession: expiredProviderSession(),
+        }),
+        summary({ sessionId: "sess_gone", betterAuthSessionId: "auth_gone", providerSession: null }),
+      ]),
+      () => NOW,
+    );
+
+    const result = await service.execute("acct_01", "auth_other");
+
+    expect(result.map((s) => s.sessionId)).toEqual(["sess_live"]);
+  });
+
+  it("omits a device session past its idle limit while better-auth's own expiresAt is still ahead", async () => {
+    const idleExpired: ProviderSessionFacts = {
+      ...liveProviderSession(),
+      updatedAt: new Date(NOW.getTime() - 6 * MINUTE),
+      createdAt: new Date(NOW.getTime() - 10 * MINUTE),
+      expiresAt: new Date(NOW.getTime() + 20 * MINUTE),
+    };
+    const service = new ListOwnSessionsService(
+      listing([summary({ sessionId: "sess_idle", providerSession: idleExpired })]),
+      () => NOW,
+    );
+
+    expect(await service.execute("acct_01", "auth_other")).toEqual([]);
+  });
+
+  it("still returns revoked sessions, with their stored status and reason", async () => {
+    const service = new ListOwnSessionsService(
+      listing([
+        summary({
+          sessionId: "sess_revoked",
+          status: "revoked",
+          revocationReason: "self_revoke_one",
+          providerSession: null,
+        }),
+      ]),
+      () => NOW,
+    );
+
+    const result = await service.execute("acct_01", "auth_other");
+
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({ status: "revoked", revocationReason: "self_revoke_one" });
+  });
+
+  it("never drops the caller's own session, even if its stored facts look expired", async () => {
+    // The caller has just authenticated with it, so a stale or lagging row
+    // must not make it vanish from its own list.
+    const service = new ListOwnSessionsService(
+      listing([
+        summary({
+          sessionId: "sess_current",
+          betterAuthSessionId: "auth_current",
+          providerSession: expiredProviderSession(),
+        }),
+      ]),
+      () => NOW,
+    );
+
+    const result = await service.execute("acct_01", "auth_current");
+
+    expect(result.map((s) => [s.sessionId, s.isCurrent])).toEqual([["sess_current", true]]);
   });
 });
 

@@ -204,7 +204,7 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `GET` | `/v1/investor-profile/reservations?limit=20&after=...` | Read account-scoped reservation history with the latest capital state |
 | `GET` | `/v1/investor-profile/positions?limit=20&after=...` | Read active and internally-settling portfolio positions |
 | `POST` | `/v1/investor-profile/wallet` | Register a customer wallet address (KYC-eligible, idempotent by account); requires authentication |
-| `GET` | `/v1/auth/sessions` | List the authenticated customer's own sessions (web and native) |
+| `GET` | `/v1/auth/sessions` | List the authenticated customer's own sessions (web and native): sessions that can still authenticate, plus revoked history. A session that merely timed out is omitted rather than reported `active` (nothing moves the stored `status` on expiry, so it is judged from Better Auth's own session row); the caller's own session is always listed |
 | `POST` | `/v1/auth/sessions/:session_id/revoke` | Revoke one of the authenticated customer's own sessions; needs fresh authentication |
 | `POST` | `/v1/auth/sessions/revoke-all` | Revoke every one of the authenticated customer's own sessions, including the current one; needs fresh authentication |
 | `GET` | `/v1/kyc` | Read the authenticated customer's local eligibility status and renewal dates |

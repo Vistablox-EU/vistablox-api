@@ -1,3 +1,5 @@
+import type { ProviderSessionFacts } from "../../domain/session-liveness.js";
+
 export interface CustomerSessionSummary {
   sessionId: string;
   channel: string;
@@ -8,6 +10,12 @@ export interface CustomerSessionSummary {
   status: string;
   revocationReason: string | null;
   betterAuthSessionId: string | null;
+  /**
+   * Better-auth's own row for this session, or null when it has none (the row
+   * is gone, or the mirror row has no provider session to look up). Only
+   * looked up for rows still marked 'active'.
+   */
+  providerSession: ProviderSessionFacts | null;
 }
 
 export interface CustomerSessionRepository {
