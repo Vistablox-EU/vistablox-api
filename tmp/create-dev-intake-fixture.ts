@@ -63,8 +63,16 @@ await database.$transaction(async (tx) => {
   ]) await tx.documentaryScreeningEvidence.create({ data: { id, caseId, submissionRevisionId: revisionId, documentType: type, status: "accepted", documentRef: ref(filename), uploadedAt: new Date("2026-09-08T12:30:00.000Z"), reviewedByAccountId: accountId, reviewedAt: new Date("2026-09-09T12:30:00.000Z"), reviewNotes: "Development fixture accepted." } });
   await tx.piv.create({ data: { id: pivId, propertyId, caseId, legalName: "Ilica 12 Residential PIV d.o.o.", jurisdiction: "HR", registrationNo: "DEV-HR-00012", incorporatedAt: new Date("2026-09-14T12:00:00.000Z"), deedTransferStatus: "completed" } });
   await tx.offering.create({ data: { id: offeringId, pivId, minimumRaiseEur: "100000.00", targetRaiseEur: "250000.00", status: "pre_offering", createdAt: new Date("2026-09-15T12:00:00.000Z"), disclosurePacks: { create: { id: packId, version: 1, publishedAt: new Date("2026-09-15T12:00:00.000Z"), isCurrent: true, documents: { create: ["ecsp_kiis","priips_kid","final_offer_summary","final_terms_sheet","issuer_offeror_structure_sheet","investor_rights_payout_waterfall_summary","risk_factors_summary","property_appraisal_summary","fees_costs_tax_liquidity_summary","withdrawal_cancellation_supplement_rights_notice","full_prospectus"].map((type, i) => ({ id: `disclosure_dev_${i}`, documentType: type, documentRef: ref("property-facts-sheet.pdf") })) } } } } });
+  // Cancellation is a reservation_stage fact, not a capital state: the record's
+  // money_events.capital_state values (PAYMENT_FLOWS.md, DATA_MODEL.md) have no
+  // cancelled state, and the only code that cancels a reservation (publishing
+  // final terms) cancels an unfunded one and writes no money event. So the
+  // cancelled reservation keeps the event createReservation writes first:
+  // "initiated", with no payment behind it. The reader
+  // (investor-activity asCapitalState) is deliberately strict, so a state it
+  // does not know fails the whole reservations list.
   for (const [id, amount, stage] of [["reservation_dev_1", "100000.00", "finalized"], ["reservation_dev_2", "150000.00", "reconfirmed"], ["reservation_dev_3", "50000.00", "cancelled"] as const]) {
-    await tx.reservation.create({ data: { id, offeringId, accountId, amountEur: amount, reservationStage: stage, createdAt: new Date("2026-09-16T12:00:00.000Z"), moneyEvents: { create: { id: `${id}_money`, provider: "development_fixture", providerReference: `${id}-payment`, capitalState: stage === "cancelled" ? "eurc_cancelled" : "eurc_finalized", amountEur: amount, recordedAt: new Date("2026-09-16T13:00:00.000Z") } } } });
+    await tx.reservation.create({ data: { id, offeringId, accountId, amountEur: amount, reservationStage: stage, createdAt: new Date("2026-09-16T12:00:00.000Z"), moneyEvents: { create: { id: `${id}_money`, provider: "development_fixture", providerReference: stage === "cancelled" ? null : `${id}-payment`, capitalState: stage === "cancelled" ? "initiated" : "eurc_finalized", amountEur: amount, recordedAt: new Date("2026-09-16T13:00:00.000Z") } } } });
   }
 
   // A separate, intentionally open IPO fixture. It is distinct from the
