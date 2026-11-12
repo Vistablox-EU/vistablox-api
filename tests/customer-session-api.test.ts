@@ -15,6 +15,9 @@ import { AppError } from "../src/shared/errors/app-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
+// The listing judges expiry against "now"; pin it so fixtures stay valid.
+const NOW = new Date("2026-09-01T09:02:00.000Z");
+
 function fakeRevoker(overrides: Partial<SessionRevoker> = {}): SessionRevoker {
   return { revoke: vi.fn(), revokeAll: vi.fn(), revokeByDpopKey: vi.fn(), ...overrides };
 }
@@ -49,7 +52,7 @@ function buildApp(
     createCustomerSessionRouter(
       authenticated,
       freshAuthentication ?? ((_request, _response, next) => next()),
-      new ListOwnSessionsService(repository),
+      new ListOwnSessionsService(repository, () => NOW),
       new RevokeOwnSessionService(repository, revoker),
       new RevokeAllOwnSessionsService(revoker),
       new RevokeDeviceSessionsService(revoker),
@@ -73,6 +76,7 @@ describe("customer session API", () => {
           status: "active",
           revocationReason: null,
           betterAuthSessionId: "auth_session_current",
+          providerSession: null,
         },
       ]),
       findOwnedProviderSessionId: vi.fn(),
@@ -96,6 +100,65 @@ describe("customer session API", () => {
         revocation_reason: null,
         is_current: true,
       },
+    ]);
+  });
+
+  it("does not list a session that is still marked active but can no longer authenticate", async () => {
+    // The staging symptom: rows whose status column was never moved off
+    // 'active' after both of their limits passed. The mobile app keeps only
+    // status === 'active', so listing them offered dead sessions with a Revoke
+    // button. Expired sessions are left out; revoked ones stay, as before.
+    const row = (overrides: Record<string, unknown>) => ({
+      sessionId: "sess_live",
+      channel: "mobile",
+      deviceLabel: null,
+      authMethodAtLogin: "device_biometric",
+      createdAt: new Date("2026-09-01T09:00:00.000Z"),
+      lastSeenAt: new Date("2026-09-01T09:00:00.000Z"),
+      status: "active",
+      revocationReason: null,
+      betterAuthSessionId: "auth_session_live",
+      providerSession: {
+        authenticationLevel: "device_biometric",
+        createdAt: new Date("2026-09-01T09:00:00.000Z"),
+        updatedAt: new Date("2026-09-01T09:00:00.000Z"),
+        expiresAt: new Date("2026-09-01T09:30:00.000Z"),
+      },
+      ...overrides,
+    });
+    const longAgo = new Date("2026-08-31T09:00:00.000Z");
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn().mockResolvedValue([
+        row({}),
+        row({
+          sessionId: "sess_expired",
+          betterAuthSessionId: "auth_session_expired",
+          providerSession: {
+            authenticationLevel: "device_biometric",
+            createdAt: longAgo,
+            updatedAt: longAgo,
+            expiresAt: new Date(longAgo.getTime() + 30 * 60_000),
+          },
+        }),
+        row({
+          sessionId: "sess_revoked",
+          betterAuthSessionId: "auth_session_revoked",
+          status: "revoked",
+          revocationReason: "sign_out",
+          providerSession: null,
+        }),
+      ]),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(buildApp(repository, fakeRevoker())).get("/v1/auth/sessions");
+
+    expect(response.status).toBe(200);
+    expect(
+      response.body.data.map((s: { session_id: string; status: string }) => [s.session_id, s.status]),
+    ).toEqual([
+      ["sess_live", "active"],
+      ["sess_revoked", "revoked"],
     ]);
   });
 

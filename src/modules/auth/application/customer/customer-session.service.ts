@@ -1,6 +1,7 @@
 import type { IncomingHttpHeaders } from "node:http";
 
 import { AppError } from "../../../../shared/errors/app-error.js";
+import { canSessionStillAuthenticate } from "../../domain/session-liveness.js";
 import type {
   CustomerSessionRepository,
   CustomerSessionSummary,
@@ -12,17 +13,40 @@ export interface OwnSessionSummary extends CustomerSessionSummary {
 }
 
 export class ListOwnSessionsService {
-  public constructor(private readonly repository: CustomerSessionRepository) {}
+  public constructor(
+    private readonly repository: CustomerSessionRepository,
+    private readonly clock: () => Date = () => new Date(),
+  ) {}
 
+  /**
+   * The caller's sessions: those that can still authenticate, plus revoked
+   * history. A session that has merely timed out is left out. The mirror
+   * keeps calling it 'active' (nothing moves the column when a session
+   * expires), so passing the stored status through would offer a dead session
+   * as live. The caller's own session is always kept: it has just
+   * authenticated, so a lagging row must not hide it from its own list.
+   */
   public async execute(
     accountId: string,
     currentProviderSessionId: string,
   ): Promise<OwnSessionSummary[]> {
+    const now = this.clock();
     const sessions = await this.repository.listForAccount(accountId);
-    return sessions.map((session) => ({
-      ...session,
-      isCurrent: session.betterAuthSessionId === currentProviderSessionId,
-    }));
+    return sessions
+      .map((session) => ({
+        ...session,
+        isCurrent: session.betterAuthSessionId === currentProviderSessionId,
+      }))
+      .filter(
+        (session) =>
+          session.isCurrent ||
+          canSessionStillAuthenticate({
+            status: session.status,
+            betterAuthSessionId: session.betterAuthSessionId,
+            providerSession: session.providerSession,
+            now,
+          }),
+      );
   }
 }
 
