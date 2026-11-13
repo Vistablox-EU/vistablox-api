@@ -52,6 +52,42 @@ export class WalletRegistrationFixtures {
     return { accountId, walletAddress, commitment };
   }
 
+  /** A valid transaction hash no other test run can have used: this run's suffix plus the tag. */
+  public uniqueHash(tag: string): string {
+    return `0x${this.suffix.padEnd(32, "0").slice(0, 32)}${Buffer.from(tag).toString("hex").padEnd(32, "0").slice(0, 32)}`;
+  }
+
+  /**
+   * Holds the row lock on a registration in a transaction of its own, runs
+   * `whileLocked` (which should start the operation under test and check that
+   * it is still waiting), then lets `change` modify the row and commits. A
+   * write that does not take the same lock first would act on the state it
+   * read before the change.
+   */
+  public async withRowLocked<T>(
+    accountId: string,
+    whileLocked: () => Promise<T>,
+    change: (transaction: Parameters<Parameters<DatabaseClient["$transaction"]>[0]>[0]) => Promise<void>,
+  ): Promise<T> {
+    let lockTaken!: () => void;
+    const locked = new Promise<void>((resolve) => (lockTaken = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const holder = this.database.$transaction(async (transaction) => {
+      await transaction.$queryRaw`SELECT account_id FROM settlement.wallet_registrations WHERE account_id = ${accountId} FOR UPDATE`;
+      lockTaken();
+      await gate;
+      await change(transaction);
+    });
+    await locked;
+    try {
+      return await whileLocked();
+    } finally {
+      release();
+      await holder;
+    }
+  }
+
   public query(sql: string, params: unknown[] = []) {
     return this.pool.query(sql, params);
   }

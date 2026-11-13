@@ -26,8 +26,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
   const fixtures = new WalletRegistrationFixtures(database, databaseUrl ?? "");
   // Transaction hashes are unique per test run, so parallel suites and earlier
   // runs on the same database cannot collide on (transaction hash, log index).
-  const uniqueTx = (tag: string) =>
-    `0x${fixtures.suffix.padEnd(32, "0").slice(0, 32)}${Buffer.from(tag).toString("hex").padEnd(32, "0").slice(0, 32)}`;
+  const uniqueTx = (tag: string) => fixtures.uniqueHash(tag);
 
   afterAll(async () => {
     await fixtures.cleanup();
@@ -301,6 +300,37 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       expect(await read(accountId)).toEqual(before);
     });
 
+    it("waits for a concurrent change and then finds the row no longer as it was read (stale), without overwriting it", async () => {
+      const { accountId, initial } = await confirmed("e9");
+      const concurrent = evidence({ transactionHash: initial.transactionHash, blockHash: hex("61"), logIndex: 7 });
+      let result: Promise<string> | undefined;
+
+      await fixtures.withRowLocked(
+        accountId,
+        async () => {
+          result = repository.replaceWalletRegistrationEvidence({
+            accountId,
+            expected: keyOf(initial),
+            next: evidence({ transactionHash: initial.transactionHash, blockHash: hex("62"), logIndex: 8 }),
+            reason: "refreshed",
+            changedAt: T1,
+          });
+          const state = await Promise.race([result.then(() => "finished"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 300))]);
+          expect(state).toBe("waiting");
+        },
+        async (transaction) => {
+          await transaction.walletRegistration.update({
+            where: { accountId },
+            data: { registrationBlockHash: concurrent.blockHash, registrationLogIndex: concurrent.logIndex },
+          });
+        },
+      );
+
+      expect(await result).toBe("stale");
+      expect(await read(accountId)).toMatchObject({ registrationBlockHash: hex("61"), registrationLogIndex: 7 });
+      expect(await fixtures.auditActions(accountId)).toEqual([]);
+    });
+
     it("replaces the evidence of exactly one of two concurrent refreshes", async () => {
       const { accountId, initial } = await confirmed("e8");
       const attempt = (blockHash: string, logIndex: number) =>
@@ -375,6 +405,31 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
         registrationTxHash: initial.transactionHash,
       });
       expect(await fixtures.auditActions(accountId)).toEqual(["settlement.wallet_registration_evidence_flagged"]);
+    });
+
+    it("does not flag over a row that changed while it waited for the lock", async () => {
+      const { accountId, initial } = await confirmed("f5");
+      let result: Promise<boolean> | undefined;
+
+      await fixtures.withRowLocked(
+        accountId,
+        async () => {
+          result = repository.flagWalletRegistrationEvidence({
+            accountId,
+            expected: keyOf(initial),
+            flag: "event_missing",
+            flaggedAt: T1,
+          });
+          const state = await Promise.race([result.then(() => "finished"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 300))]);
+          expect(state).toBe("waiting");
+        },
+        async (transaction) => {
+          await transaction.walletRegistration.update({ where: { accountId }, data: { registrationBlockHash: hex("71") } });
+        },
+      );
+
+      expect(await result).toBe(false);
+      expect((await read(accountId)).registrationEvidenceFlag).toBeNull();
     });
 
     it("does not flag a row that holds another identity than the one the caller read", async () => {
