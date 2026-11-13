@@ -1,7 +1,9 @@
 import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import { isUniqueViolation } from "../../../infrastructure/database/unique-violation.js";
 import type {
+  ConfirmWalletRegistrationInput,
   CreateEscrowMintIntentInput,
   EscrowMintIntent,
   EscrowMintIntentStatus,
@@ -12,6 +14,7 @@ import type {
   RecordEscrowMintedPositionInput,
   SettlementRepository,
   WalletRegistrationAddressMismatchInput,
+  WalletRegistrationConfirmation,
 } from "./settlement.repository.js";
 
 // Reuses the generic platform.settings key-value table (PlatformSetting)
@@ -19,6 +22,11 @@ import type {
 // value to persist and this table already exists for exactly this kind of
 // thing.
 const WALLET_REGISTRY_CURSOR_SETTING_KEY = "wallet_registry.last_processed_block";
+
+// The partial unique index created by
+// 20261113150200_wallet_claims_confirmed_address_uniqueness:
+// UNIQUE (lower(wallet_address)) WHERE registered_at IS NOT NULL.
+const CONFIRMED_ADDRESS_INDEX = "wallet_registrations_confirmed_address_key";
 
 interface EscrowMintIntentRow {
   id: string;
@@ -68,14 +76,20 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
   }
 
   public async resolveAccountIdForWallet(walletAddress: string): Promise<string | null> {
-    // Case-insensitive: nothing in the registration path (register-wallet.service.ts)
-    // normalizes casing, so this can't assume it matches an on-chain
-    // contributor address's (typically EIP-55 checksummed) casing.
-    const registration = await this.database.walletRegistration.findFirst({
-      where: { walletAddress: { equals: walletAddress, mode: "insensitive" } },
-      select: { accountId: true },
-    });
-    return registration?.accountId ?? null;
+    // CONFIRMED registrations only. A pending claim is the customer's typed
+    // address with nothing proving they control it, so it must not attribute
+    // an on-chain contribution (and its escrow mint) to that account.
+    // Case-insensitive: rows written before the canonical lowercase form can
+    // carry EIP-55 mixed case, and an on-chain contributor address is
+    // typically checksummed. Raw SQL so the lookup uses the partial index;
+    // Prisma's `mode: insensitive` emits ILIKE, which cannot.
+    const rows = await this.database.$queryRaw<Array<{ account_id: string }>>`
+      SELECT account_id FROM settlement.wallet_registrations
+      WHERE lower(wallet_address) = lower(${walletAddress})
+        AND registered_at IS NOT NULL
+      LIMIT 1
+    `;
+    return rows[0]?.account_id ?? null;
   }
 
   public async hasPosition(pivId: string, accountId: string): Promise<boolean> {
@@ -239,7 +253,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     // was stored when the commitment was generated.
     return this.database.walletRegistration.findFirst({
       where: { registrationCommitment: { equals: commitment, mode: "insensitive" }, registeredAt: null },
-      select: { accountId: true, walletAddress: true },
+      select: { accountId: true, walletAddress: true, registrationCommitment: true },
     });
   }
 
@@ -249,10 +263,80 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     });
   }
 
-  public async confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void> {
-    await this.database.walletRegistration.update({
-      where: { accountId },
-      data: { registeredAt },
+  public async confirmWalletRegistration(
+    input: ConfirmWalletRegistrationInput,
+  ): Promise<WalletRegistrationConfirmation> {
+    try {
+      return await this.database.$transaction(async (transaction) => {
+        // Compare-and-set on the exact claim the event was matched to (stored
+        // address and stored commitment, not a case-insensitive lookup). If
+        // the account replaced its claim after the match, or an overlapping
+        // run already confirmed it, nothing matches and nothing is written:
+        // the new, unproven address is never confirmed on the old address's
+        // evidence.
+        const updated = await transaction.walletRegistration.updateMany({
+          where: {
+            accountId: input.accountId,
+            walletAddress: input.walletAddress,
+            registrationCommitment: input.registrationCommitment,
+            registeredAt: null,
+          },
+          data: { registeredAt: input.registeredAt },
+        });
+        if (updated.count === 0) return { outcome: "stale" } as const;
+        await transaction.auditLog.create({
+          data: {
+            id: `audit_${ulid()}`,
+            action: "settlement.wallet_registration_confirmed",
+            resourceType: "wallet_registration",
+            resourceId: input.accountId,
+            changes: {
+              wallet_address: input.walletAddress.toLowerCase(),
+              registered_at: input.registeredAt.toISOString(),
+            },
+            createdAt: input.registeredAt,
+          },
+        });
+        return { outcome: "confirmed" } as const;
+      });
+    } catch (error) {
+      if (!isUniqueViolation(error, CONFIRMED_ADDRESS_INDEX)) throw error;
+      // Another account confirmed this address first. The violation aborted
+      // the transaction above, so the audit row is a separate statement. The
+      // losing claim stays pending: its next register call answers
+      // address_claimed and the account may replace it.
+      await this.recordConfirmationConflict(input);
+      return { outcome: "address_conflict" };
+    }
+  }
+
+  private async recordConfirmationConflict(input: ConfirmWalletRegistrationInput): Promise<void> {
+    const address = input.walletAddress.toLowerCase();
+    const holders = await this.database.$queryRaw<Array<{ account_id: string }>>`
+      SELECT account_id FROM settlement.wallet_registrations
+      WHERE lower(wallet_address) = lower(${address})
+        AND registered_at IS NOT NULL
+        AND account_id <> ${input.accountId}
+      LIMIT 1
+    `;
+    // The watcher rescans an overlapping block range every run, so the same
+    // conflict is seen again and again; the event key keeps it to one row.
+    await this.database.auditLog.createMany({
+      data: [
+        {
+          id: `audit_${ulid()}`,
+          eventKey: `wallet_registration_confirmation_conflict:chain_event:${input.accountId}:${address}`,
+          action: "settlement.wallet_registration_confirmation_conflict",
+          resourceType: "wallet_registration",
+          resourceId: input.accountId,
+          changes: {
+            wallet_address: address,
+            holder_account_id: holders[0]?.account_id ?? null,
+            source: "chain_event",
+          },
+        },
+      ],
+      skipDuplicates: true,
     });
   }
 

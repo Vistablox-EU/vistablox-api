@@ -32,6 +32,12 @@ export interface ConfirmWalletRegistrationsSummary {
   eventsFound: number;
   registrationsConfirmed: number;
   unmatchedEvents: number;
+  // The matched claim was replaced or already confirmed between the match and
+  // the write; nothing was written.
+  staleConfirmations: number;
+  // Another account already holds the address confirmed; the claim stays
+  // pending and the conflict is in audit_log.
+  confirmationConflicts: number;
   addressMismatches: string[];
   pendingRegistrationsOverdue: number;
   pendingWarnAfterMinutes: number;
@@ -47,7 +53,11 @@ export interface ConfirmWalletRegistrationsSummary {
  * commitment only matches a row where registered_at IS NULL, so replaying
  * the same event twice (an overlapping rescan after a crash between the read
  * and the cursor write) is a harmless no-op the second time, not a double
- * write.
+ * write. The write itself is a compare-and-set on the matched claim's stored
+ * address and commitment, so a claim the account replaced between the match
+ * and the write is reported as stale instead of being confirmed, and an
+ * address another account already holds confirmed is reported as a conflict
+ * instead of failing the run.
  */
 export class ConfirmWalletRegistrationsService {
   public constructor(
@@ -81,6 +91,8 @@ export class ConfirmWalletRegistrationsService {
       eventsFound: 0,
       registrationsConfirmed: 0,
       unmatchedEvents: 0,
+      staleConfirmations: 0,
+      confirmationConflicts: 0,
       addressMismatches: [],
       pendingRegistrationsOverdue,
       pendingWarnAfterMinutes: Math.round(this.pendingWarnAfterMs / 60_000),
@@ -131,8 +143,23 @@ export class ConfirmWalletRegistrationsService {
         continue;
       }
 
-      await this.repository.confirmWalletRegistration(pending.accountId, this.clock());
-      summary.registrationsConfirmed += 1;
+      const confirmation = await this.repository.confirmWalletRegistration({
+        accountId: pending.accountId,
+        walletAddress: pending.walletAddress,
+        registrationCommitment: pending.registrationCommitment,
+        registeredAt: this.clock(),
+      });
+      switch (confirmation.outcome) {
+        case "confirmed":
+          summary.registrationsConfirmed += 1;
+          break;
+        case "stale":
+          summary.staleConfirmations += 1;
+          break;
+        case "address_conflict":
+          summary.confirmationConflicts += 1;
+          break;
+      }
     }
 
     await this.repository.setLastProcessedWalletRegistryBlock(toBlock);

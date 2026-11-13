@@ -59,7 +59,31 @@ export interface CreateEscrowMintIntentInput {
 export interface PendingWalletRegistration {
   accountId: string;
   walletAddress: string;
+  // The stored commitment, exactly as persisted. confirmWalletRegistration
+  // compares against it so a claim the account replaced after this row was
+  // read is not confirmed.
+  registrationCommitment: string;
 }
+
+export interface ConfirmWalletRegistrationInput {
+  accountId: string;
+  // The address and commitment of the pending claim the on-chain event was
+  // matched to, exactly as stored.
+  walletAddress: string;
+  registrationCommitment: string;
+  registeredAt: Date;
+}
+
+// confirmed: the claim was still pending and is now registered.
+// stale: no pending claim with that account, address and commitment exists any
+//   more (replaced by its account, confirmed by an overlapping run, or gone);
+//   nothing was written.
+// address_conflict: another account already holds the address confirmed; the
+//   claim stays pending and the conflict is recorded in audit_log.
+export type WalletRegistrationConfirmation =
+  | { outcome: "confirmed" }
+  | { outcome: "stale" }
+  | { outcome: "address_conflict" };
 
 export interface WalletRegistrationAddressMismatchInput {
   accountId: string;
@@ -82,6 +106,8 @@ export interface WalletRegistrationAddressMismatchInput {
  */
 export interface SettlementRepository {
   findPivsWithPassedIpoDeadline(now: Date): Promise<PivPendingEscrowResolution[]>;
+  // Resolves CONFIRMED registrations only: a pending claim proves nothing, so
+  // it must never attribute an on-chain contribution to an account.
   resolveAccountIdForWallet(walletAddress: string): Promise<string | null>;
   hasPosition(pivId: string, accountId: string): Promise<boolean>;
   findEscrowMintIntent(pivId: string, accountId: string): Promise<EscrowMintIntent | null>;
@@ -110,7 +136,8 @@ export interface SettlementRepository {
   recordEscrowMintedPosition(input: RecordEscrowMintedPositionInput): Promise<{ positionId: string }>;
   findPendingWalletRegistrationByCommitment(commitment: string): Promise<PendingWalletRegistration | null>;
   countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number>;
-  confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void>;
+  // Compare-and-set: confirms only the exact pending claim that was matched.
+  confirmWalletRegistration(input: ConfirmWalletRegistrationInput): Promise<WalletRegistrationConfirmation>;
   getLastProcessedWalletRegistryBlock(): Promise<bigint | null>;
   setLastProcessedWalletRegistryBlock(block: bigint): Promise<void>;
   // A durable, queryable record of a possible spoofed-registration attempt

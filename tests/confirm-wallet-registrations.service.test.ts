@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 
 import { ConfirmWalletRegistrationsService } from "../src/modules/settlement/application/confirm-wallet-registrations.service.js";
 import type {
+  ConfirmWalletRegistrationInput,
   PendingWalletRegistration,
   PivPendingEscrowResolution,
   SettlementRepository,
   WalletRegistrationAddressMismatchInput,
+  WalletRegistrationConfirmation,
 } from "../src/modules/settlement/repository/settlement.repository.js";
 
 const MAX_BLOCK_RANGE_PER_RUN = 2000n;
@@ -47,19 +49,29 @@ function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[]; fail
 // mirroring the real repository's registered_at IS NULL filter.
 class FakeSettlementRepository implements SettlementRepository {
   public readonly confirmedAccountIds: string[] = [];
+  public readonly confirmCalls: ConfirmWalletRegistrationInput[] = [];
   public readonly recordedMismatches: WalletRegistrationAddressMismatchInput[] = [];
   private readonly overdueCount: number;
   public overdueCutoff: Date | undefined;
+  // Forces confirmWalletRegistration to report this outcome instead of
+  // behaving like the real compare-and-set; used to drive the service's
+  // handling of the two non-happy outcomes.
+  public forcedOutcome: WalletRegistrationConfirmation | undefined;
   private readonly byCommitment: Map<string, PendingWalletRegistration>;
   private readonly confirmed = new Set<string>();
   private cursor: bigint | null;
 
   public constructor(
-    pending: Array<PendingWalletRegistration & { commitment: string }>,
+    pending: Array<{ accountId: string; walletAddress: string; commitment: string }>,
     initialCursor: bigint | null = null,
     overdueCount = 0,
   ) {
-    this.byCommitment = new Map(pending.map((row) => [row.commitment.toLowerCase(), row]));
+    this.byCommitment = new Map(
+      pending.map((row) => [
+        row.commitment.toLowerCase(),
+        { accountId: row.accountId, walletAddress: row.walletAddress, registrationCommitment: row.commitment },
+      ]),
+    );
     this.cursor = initialCursor;
     this.overdueCount = overdueCount;
   }
@@ -69,12 +81,17 @@ class FakeSettlementRepository implements SettlementRepository {
   ): Promise<PendingWalletRegistration | null> {
     const match = this.byCommitment.get(commitment.toLowerCase());
     if (match === undefined || this.confirmed.has(match.accountId)) return null;
-    return { accountId: match.accountId, walletAddress: match.walletAddress };
+    return { ...match };
   }
 
-  public async confirmWalletRegistration(accountId: string): Promise<void> {
-    this.confirmed.add(accountId);
-    this.confirmedAccountIds.push(accountId);
+  public async confirmWalletRegistration(
+    input: ConfirmWalletRegistrationInput,
+  ): Promise<WalletRegistrationConfirmation> {
+    this.confirmCalls.push(input);
+    if (this.forcedOutcome !== undefined) return this.forcedOutcome;
+    this.confirmed.add(input.accountId);
+    this.confirmedAccountIds.push(input.accountId);
+    return { outcome: "confirmed" };
   }
 
   public async countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number> {
@@ -295,5 +312,68 @@ describe("ConfirmWalletRegistrationsService", () => {
     expect(summary.eventsFound).toBe(2);
     expect(summary.registrationsConfirmed).toBe(1);
     expect(repository.confirmedAccountIds).toEqual(["acct_01"]);
+  });
+
+  it("confirms the exact claim it matched: account, stored address and stored commitment", async () => {
+    const { chain } = makeFakeChain({
+      latestBlock: 100n,
+      events: [{ blockNumber: 50n, wallet: "0xabc", commitment: "0xc1" }],
+    });
+    const repository = new FakeSettlementRepository(
+      [{ accountId: "acct_01", walletAddress: "0xAbC", commitment: "0xC1" }],
+      10n,
+    );
+    const now = new Date("2026-09-16T10:00:00Z");
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => now);
+
+    await service.execute();
+
+    expect(repository.confirmCalls).toEqual([
+      { accountId: "acct_01", walletAddress: "0xAbC", registrationCommitment: "0xC1", registeredAt: now },
+    ]);
+  });
+
+  it("counts a stale confirmation without confirming, and still advances the cursor", async () => {
+    const { chain } = makeFakeChain({
+      latestBlock: 100n,
+      events: [{ blockNumber: 50n, wallet: "0xabc", commitment: "0xc1" }],
+    });
+    const repository = new FakeSettlementRepository(
+      [{ accountId: "acct_01", walletAddress: "0xabc", commitment: "0xc1" }],
+      10n,
+    );
+    repository.forcedOutcome = { outcome: "stale" };
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => new Date());
+
+    const summary = await service.execute();
+
+    expect(summary).toMatchObject({ registrationsConfirmed: 0, staleConfirmations: 1, confirmationConflicts: 0 });
+    expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(97n);
+  });
+
+  it("counts an address conflict without throwing, and still advances the cursor", async () => {
+    const { chain } = makeFakeChain({
+      latestBlock: 100n,
+      events: [
+        { blockNumber: 50n, wallet: "0xabc", commitment: "0xc1" },
+        { blockNumber: 51n, wallet: "0xdef", commitment: "0xc2" },
+      ],
+    });
+    const repository = new FakeSettlementRepository(
+      [
+        { accountId: "acct_01", walletAddress: "0xabc", commitment: "0xc1" },
+        { accountId: "acct_02", walletAddress: "0xdef", commitment: "0xc2" },
+      ],
+      10n,
+    );
+    repository.forcedOutcome = { outcome: "address_conflict" };
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => new Date());
+
+    const summary = await service.execute();
+
+    // One conflicting claim must not stop the run from reaching the next event.
+    expect(summary).toMatchObject({ registrationsConfirmed: 0, staleConfirmations: 0, confirmationConflicts: 2 });
+    expect(repository.confirmCalls).toHaveLength(2);
+    expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(97n);
   });
 });

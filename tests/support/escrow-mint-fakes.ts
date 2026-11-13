@@ -458,7 +458,9 @@ export class InMemorySettlementRepository implements SettlementRepository {
     return null;
   }
 
-  public async confirmWalletRegistration(): Promise<void> {}
+  public async confirmWalletRegistration(): Promise<{ outcome: "confirmed" }> {
+    return { outcome: "confirmed" };
+  }
 
   public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {
     return null;
