@@ -1,5 +1,4 @@
-import { createServer, type Server } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { Server } from "node:http";
 
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -16,6 +15,7 @@ import {
   WALLET_ADDRESS,
   blockHash,
   createTransferWorld,
+  serveTransferWorld,
 } from "./support/transfer-chain-world.js";
 
 const baseConfig: ChainSettlementConfig = {
@@ -81,36 +81,7 @@ describe("ChainReader transfer snapshot", () => {
     );
   });
 
-  // A real JSON-RPC-over-HTTP endpoint backed by the in-memory chain model, so
-  // the production http transport, config wiring and chain id are exercised.
-  async function serve(world: ReturnType<typeof createTransferWorld>): Promise<string> {
-    const server = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on("data", (chunk: Buffer) => chunks.push(chunk));
-      req.on("end", () => {
-        const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
-          id: number;
-          method: string;
-          params: unknown;
-        };
-        world
-          .request({ method: body.method, params: body.params })
-          .then((result) => ({ jsonrpc: "2.0", id: body.id, result }))
-          .catch((error: { code: number; message: string; data?: unknown }) => ({
-            jsonrpc: "2.0",
-            id: body.id,
-            error: { code: error.code, message: error.message, data: error.data },
-          }))
-          .then((payload) => {
-            res.setHeader("content-type", "application/json");
-            res.end(JSON.stringify(payload));
-          });
-      });
-    });
-    servers.push(server);
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
-  }
+  const serve = (world: ReturnType<typeof createTransferWorld>) => serveTransferWorld(world, servers);
 
   it("exposes readTransferSnapshot and still has no wallet account or signing client", () => {
     const reader = new ChainReader({

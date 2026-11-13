@@ -188,19 +188,21 @@ describe("RequestWalletTransferService", () => {
     expect(chainReader.readTransferSnapshot).toHaveBeenCalledTimes(1);
   });
 
-  it("answers 503 wallet.chain_unavailable when the chain cannot be read, without leaking the cause", async () => {
-    const { service } = build(
-      buildTransferChainReader(() =>
-        Promise.reject(new ChainStateUnavailableError("HttpRequestError: https://rpc.example/key-secret")),
-      ),
+  it("answers 503 wallet.chain_unavailable when the chain cannot be read, and keeps the reason for the log only", async () => {
+    const reason = new ChainStateUnavailableError(
+      "CallExecutionError: Invalid parameters were provided to the RPC method. (code -32602)",
     );
+    const { service } = build(buildTransferChainReader(() => Promise.reject(reason)));
 
     const error = (await execute(service).catch((caught: unknown) => caught)) as AppError;
 
     expect(error).toBeInstanceOf(AppError);
     expect(error).toMatchObject({ code: "wallet.chain_unavailable", status: 503 });
-    expect(error.cause).toBeUndefined();
-    expect(JSON.stringify([error.message, error.title, error.code])).not.toMatch(/https?:|key-secret/);
+    // The reason is the cause (the error handler logs it) ...
+    expect(error.cause).toBe(reason);
+    // ... and nothing the client is shown carries it.
+    expect(JSON.stringify([error.message, error.title, error.code, error.type])).not.toMatch(/-32602|RPC method/);
+    expect(error.message).toBe("The on-chain state could not be read. Try again shortly.");
   });
 
   it("lets any other reader failure propagate untouched so a bug is not disguised as an outage", async () => {

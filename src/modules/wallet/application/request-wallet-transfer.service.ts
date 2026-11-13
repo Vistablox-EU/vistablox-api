@@ -128,11 +128,16 @@ export class RequestWalletTransferService {
       });
     } catch (error) {
       if (error instanceof ChainStateUnavailableError) {
+        // The cause is for the server log only (the error handler never puts
+        // it in the response): it says which kind of failure this was, for
+        // example a provider that rejects block hashes versus a missing
+        // header, and by construction carries no URL or key.
         throw new AppError({
           code: "wallet.chain_unavailable",
           title: "Chain state unavailable",
           status: 503,
           detail: "The on-chain state could not be read. Try again shortly.",
+          cause: error,
         });
       }
       throw error;

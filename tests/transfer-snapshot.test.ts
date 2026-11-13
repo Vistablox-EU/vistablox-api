@@ -400,6 +400,16 @@ describe("readTransferSnapshot infrastructure failures", () => {
     expect(error).toBeInstanceOf(ChainStateUnavailableError);
   });
 
+  it("keeps the reason for a head with no hash or number, not an anonymous 'Error'", async () => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    world.headResponse = () => ({ number: "0x3e8", hash: null, transactions: [] });
+
+    const error = (await readTransferSnapshot(depsFor(world), input).catch((caught: unknown) => caught)) as Error;
+
+    expect(error).toBeInstanceOf(ChainStateUnavailableError);
+    expect(error.message).toBe("latest block has no number or hash");
+  });
+
   it.each(failures)("leaks neither the RPC URL nor its key for %s", async (_name, arrange) => {
     const world = worldWith({ [HEAD_A]: GOOD_STATE });
     arrange(world);
@@ -434,6 +444,234 @@ describe("readTransferSnapshot infrastructure failures", () => {
     } finally {
       process.off("unhandledRejection", unhandled);
     }
+  });
+});
+
+// What an operator can learn from the description alone, when the request
+// answers 503. It must say which kind of failure it was without ever carrying
+// the node's own message (a node can echo the request path, which holds the key).
+describe("readTransferSnapshot failure description", () => {
+  async function describeFailure(arrange: (world: TransferWorld) => void): Promise<string> {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    arrange(world);
+    const error = (await readTransferSnapshot(depsFor(world), input).catch((caught: unknown) => caught)) as Error;
+    expect(error).toBeInstanceOf(ChainStateUnavailableError);
+    return error.message;
+  }
+
+  const rpcCodes: [string, number, string][] = [
+    ["a provider that rejects EIP-1898 block hashes", -32602, "node-words: blockHash not supported"],
+    ["a header the node does not have", -32000, "node-words: header not found"],
+    ["an internal error", -32603, "node-words: boom"],
+    ["a rate limit", -32005, "node-words: slow down"],
+  ];
+
+  it.each(rpcCodes)("names the JSON-RPC code for %s", async (_name, code, nodeMessage) => {
+    const message = await describeFailure((world) => {
+      world.simulationFailure = () => {
+        throw rpcFailure({ code, message: nodeMessage });
+      };
+    });
+
+    expect(message).toContain(`code ${code}`);
+    // The node's own words are not part of the description: they can echo the URL.
+    expect(message).not.toContain(nodeMessage);
+  });
+
+  it("names the HTTP status of a failed request", async () => {
+    const message = await describeFailure((world) => {
+      world.headResponse = () => {
+        throw new HttpRequestError({ url: RPC_URL_WITH_KEY, status: 429 });
+      };
+    });
+
+    expect(message).toContain("status 429");
+    expect(message).not.toMatch(/SECRET-API-KEY|rpc\.example\.test|https?:\/\//);
+  });
+
+  it("does not let a node smuggle its message in through a JSON-RPC error", async () => {
+    const message = await describeFailure((world) => {
+      world.simulationFailure = () => {
+        throw rpcFailure({ code: -32603, message: `internal error at ${RPC_URL_WITH_KEY}` });
+      };
+    });
+
+    expect(message).not.toMatch(/SECRET-API-KEY|rpc\.example\.test|https?:\/\//);
+  });
+
+  it("tells a provider that rejects block hashes apart from a header it does not have", async () => {
+    const rejected = await describeFailure((world) => {
+      world.simulationFailure = () => {
+        throw rpcFailure({ code: -32602, message: "invalid argument 1" });
+      };
+    });
+    const missing = await describeFailure((world) => {
+      world.simulationFailure = () => {
+        throw rpcFailure({ code: -32000, message: "header not found" });
+      };
+    });
+
+    expect(rejected).not.toBe(missing);
+  });
+});
+
+// A load-balanced provider can answer the pinned calls from a backend that has
+// not imported the head the first backend just reported (or whose head was
+// reorged away). viem's transport does not retry that family, so one bounded
+// retry of the whole snapshot (head included) is made, inside the same budget.
+describe("readTransferSnapshot lagging backend", () => {
+  // Reports `heads` one per getBlock call, the last one repeated.
+  function reportHeads(world: TransferWorld, heads: Hex[]) {
+    let reads = 0;
+    world.headResponse = () => ({
+      number: "0x3e8",
+      hash: heads[Math.min(reads++, heads.length - 1)],
+      transactions: [],
+    });
+  }
+  const headReads = (world: TransferWorld) => world.calls.filter((call) => call.method === "eth_getBlockByNumber").length;
+
+  it("re-reads the head once when the pinned block is not known yet, and answers from the new one", async () => {
+    // HEAD_B is the head the first backend reported; the backend that served
+    // the pinned calls only knows HEAD_A.
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    reportHeads(world, [HEAD_B, HEAD_A]);
+
+    const snapshot = await readTransferSnapshot(depsFor(world), input);
+
+    expect(snapshot.block.hash).toBe(HEAD_A);
+    expect(headReads(world)).toBe(2);
+    // Every call of the second attempt is pinned to the second head.
+    const pins = world.calls
+      .filter((call) => call.method === "eth_call")
+      .map((call) => (call.params as [unknown, { blockHash: Hex }])[1].blockHash);
+    expect(pins.slice(-2)).toEqual([HEAD_A, HEAD_A]);
+  });
+
+  it("re-reads the head once when the pinned block is no longer canonical", async () => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE, [HEAD_B]: GOOD_STATE });
+    world.nonCanonical.add(HEAD_B);
+    reportHeads(world, [HEAD_B, HEAD_A]);
+
+    const snapshot = await readTransferSnapshot(depsFor(world), input);
+
+    expect(snapshot.block.hash).toBe(HEAD_A);
+    expect(headReads(world)).toBe(2);
+  });
+
+  // The words are each client's own; the retry must recognise the ones real
+  // nodes use for "I cannot serve that block hash right now".
+  it.each([
+    ["geth, unknown hash", { code: -32000, message: "header for hash not found" }],
+    ["geth, hash reorged away", { code: -32000, message: "hash is not currently canonical" }],
+    ["a node reporting an unknown block", { code: -32000, message: "unknown block" }],
+    ["a node reporting header not found", { code: -32000, message: "header not found" }],
+    ["EIP-1474 resource not found", { code: -32001, message: "Resource not found" }],
+  ])("re-reads the head once on %s", async (_name, failure) => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    let simulations = 0;
+    // Only the first simulation fails; the world answers the second normally.
+    world.simulationFailure = () => {
+      simulations += 1;
+      if (simulations === 1) {
+        throw rpcFailure(failure);
+      }
+      return undefined as never;
+    };
+
+    const snapshot = await readTransferSnapshot(depsFor(world), input);
+
+    expect(snapshot.simulation).toEqual({ status: "passed" });
+    expect(headReads(world)).toBe(2);
+  });
+
+  it("gives up after the second attempt and reports an outage", async () => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    reportHeads(world, [HEAD_B]);
+
+    const error = await readTransferSnapshot(depsFor(world), input).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ChainStateUnavailableError);
+    expect(headReads(world)).toBe(2);
+  });
+
+  it.each([
+    ["a JSON-RPC internal error", { code: -32603, message: "internal error" }],
+    ["a provider that rejects block hashes", { code: -32602, message: "invalid argument 1: blockHash not supported" }],
+    ["a rate limit", { code: -32005, message: "limit exceeded" }],
+    ["an unrelated -32000", { code: -32000, message: "execution timeout" }],
+  ])("does not retry %s", async (_name, failure) => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    world.simulationFailure = () => {
+      throw rpcFailure(failure);
+    };
+
+    const error = await readTransferSnapshot(depsFor(world), input).catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ChainStateUnavailableError);
+    expect(headReads(world)).toBe(1);
+  });
+
+  it("does not retry a contract revert, which is an answer", async () => {
+    const world = worldWith({ [HEAD_A]: BAD_STATE });
+    world.simulationFailure = () => {
+      throw rpcFailure(REVERT_SHAPES["code 3 with data"]!(revertData("TransferLaneClosed")));
+    };
+
+    const snapshot = await readTransferSnapshot(depsFor(world), input);
+
+    expect(snapshot.simulation).toEqual({ status: "reverted", revert: { errorName: "TransferLaneClosed" } });
+    expect(headReads(world)).toBe(1);
+  });
+
+  it("does not retry a head with no hash", async () => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    world.headResponse = () => ({ number: "0x3e8", hash: null, transactions: [] });
+
+    await readTransferSnapshot(depsFor(world), input).catch(() => undefined);
+
+    expect(headReads(world)).toBe(1);
+  });
+
+  it("spends the same budget on both attempts, not one budget each", async () => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    let reads = 0;
+    // First attempt: a slow head that turns out to be unknown. Second: hangs.
+    world.headResponse = () => {
+      reads += 1;
+      if (reads === 1) {
+        return new Promise((resolve) => {
+          setTimeout(() => resolve({ number: "0x3e8", hash: HEAD_B, transactions: [] }), 60);
+        });
+      }
+      return new Promise(() => undefined);
+    };
+    const started = Date.now();
+
+    const error = await readTransferSnapshot(depsFor(world, { budgetMs: 100 }), input).catch(
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(ChainStateUnavailableError);
+    expect(reads).toBe(2);
+    expect(Date.now() - started).toBeLessThan(180);
+  });
+
+  it("does not start a second attempt once the budget has run out", async () => {
+    const world = worldWith({ [HEAD_A]: GOOD_STATE });
+    // The head arrives after the budget, and is unknown: no retry may follow.
+    world.headResponse = () =>
+      new Promise((resolve) => {
+        setTimeout(() => resolve({ number: "0x3e8", hash: HEAD_B, transactions: [] }), 150);
+      });
+
+    const error = await readTransferSnapshot(depsFor(world, { budgetMs: 50 }), input).catch(
+      (caught: unknown) => caught,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 350));
+
+    expect(error).toBeInstanceOf(ChainStateUnavailableError);
+    expect(headReads(world)).toBe(1);
   });
 });
 

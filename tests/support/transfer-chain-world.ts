@@ -1,3 +1,6 @@
+import { createServer, type Server } from "node:http";
+import type { AddressInfo } from "node:net";
+
 import {
   RpcRequestError,
   decodeFunctionData,
@@ -203,4 +206,39 @@ function simulateTransfer(tx: Record<string, string>, state: WorldBlockState): H
     return fail("ERC1155InsufficientBalance", [tx.from, state.balance, amount, tokenId]);
   }
   return "0x";
+}
+
+/**
+ * Serves a world as a real JSON-RPC-over-HTTP endpoint, so the production http
+ * transport, the config wiring and the chain id are exercised. The server is
+ * pushed onto `servers` for the caller's afterEach to close. Resolves to the
+ * base URL.
+ */
+export async function serveTransferWorld(world: TransferWorld, servers: Server[]): Promise<string> {
+  const server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as {
+        id: number;
+        method: string;
+        params: unknown;
+      };
+      world
+        .request({ method: body.method, params: body.params })
+        .then((result) => ({ jsonrpc: "2.0", id: body.id, result }))
+        .catch((error: { code: number; message: string; data?: unknown }) => ({
+          jsonrpc: "2.0",
+          id: body.id,
+          error: { code: error.code, message: error.message, data: error.data },
+        }))
+        .then((payload) => {
+          res.setHeader("content-type", "application/json");
+          res.end(JSON.stringify(payload));
+        });
+    });
+  });
+  servers.push(server);
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  return `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 }

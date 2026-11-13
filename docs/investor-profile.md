@@ -65,6 +65,8 @@ The endpoint reads the chain head once (uncached) and pins everything else to th
 | `token_paused` | Always `false` on a 200 |
 | `simulation` | Always `"passed"` on a 200: the calldata ran without reverting from the wallet at that block |
 
+RPC provider requirement: `CHAIN_RPC_URL` must point to a provider that accepts an EIP-1898 block hash with `requireCanonical` in `eth_call`, and that answers a block it has just reported as head from every backend behind its load balancer. Support is not verified for the provider planned for production (CDP Node, `docs/plans/device-bound-auth-backend.md`, `docs/plans/devops-device-bound-auth.md`; neither plan records a check): make one `POST` against the staging deployment before relying on this route. A provider that rejects block hashes fails every request with `503 wallet.chain_unavailable`, and the server log then shows `ChainStateUnavailableError` with the node's JSON-RPC code (for example `-32602`, invalid params), which is how it is told apart from a timeout or a rate limit. Contingency, until the provider is switched: pin by `{ blockNumber: head.number }` in `readTransferSnapshot` instead of the block hash. Every node accepts that, but it cannot detect a reorg between the head read and the pinned calls.
+
 The preflight is advisory. State can change after the block it describes, the contract remains the final authority, and the simulation covers only the inner `safeTransferFrom` call. It does not simulate an ERC-4337 UserOperation (bundler, paymaster, owner signature, gas). `Cache-Control: no-store` stays on the response.
 
 When the preflight fails, nothing is prepared and the response is a documented error envelope:
@@ -81,7 +83,11 @@ When the preflight fails, nothing is prepared and the response is a documented e
 | 422 | `wallet.transfer_would_revert` | The simulation reverted for a reason not listed above |
 | 503 | `wallet.chain_unavailable` | The chain could not be read within the 10 second budget; retry |
 
-When several reasons apply the first in this order wins: closed lane, paused, recipient not authorized, insufficient balance, recipient cannot receive, any other revert. The chain being unreachable was previously a 500; it is now a 503, and the error carries no RPC URL.
+When several reasons apply the first in this order wins: closed lane, paused, recipient not authorized, insufficient balance, recipient cannot receive, any other revert. The chain being unreachable was previously a 500; it is now a 503, and the response carries no RPC URL.
+
+Reading the 503 in the server log: the logged error has the reason as its cause, for example `ChainStateUnavailableError: CallExecutionError: Invalid parameters were provided to the RPC method. (code -32602)`. That is viem's error class and fixed sentence plus the numeric JSON-RPC code or HTTP status, so a provider that rejects block-hash pinning (`-32602`), a header the node does not have (`-32000`), a rate limit (`-32005`, status `429`) and a timeout (`chain state read timed out`) can be told apart. It never holds the RPC URL, a key or the node's own message text, and it is never part of the response body.
+
+A node that has not yet seen the head another backend just reported (or whose head was reorged away) answers "header not found", `-32001` or "not currently canonical" to the pinned calls. viem's transport does not retry those, so the whole snapshot is taken once more from a fresh head, inside the same 10 second budget. No other failure is retried. Which wordings count is a short list in `transfer-snapshot.ts` (`isPinnedBlockUnavailable`); a wording it misses is not retried and answers 503.
 
 **Current behaviour: every request answers `422 wallet.transfer_lane_closed`.** The Phase 1 `VistaBloxProperty.safeTransferFrom` always reverts with `TransferLaneClosed` (`contracts/contracts/VistaBloxProperty.sol`), so any calldata this endpoint prepared before the simulation existed would have failed on chain. The endpoint now says so up front instead of handing out a doomed transaction. It starts returning 200 once a transfer lane is opened in the contract; whether and when that happens is a product and legal decision recorded outside this repository.
 
