@@ -306,6 +306,22 @@ const environmentSchema = z
     // additionally requires the CHAIN_* bundle above to be configured.
     VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: optionalEthAddress(),
     WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(5),
+    // Alert thresholds for the wallet-registry watcher and its health check
+    // (docs/wallet-registration-operations.md). Starting values for Base
+    // Sepolia, not calibrated against real traffic. Blank counts as unset, so a
+    // compose file that passes ${NAME:-} falls back to the default instead of
+    // stopping the worker.
+    // The watcher has not completed a run for this long: wallet_registry.watcher_stalled.
+    WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES: blankTolerantInteger(2, 1440, 10),
+    // The saved cursor is at least this many blocks behind the safe chain head
+    // (about 30 minutes at Base's 2 second blocks): wallet_registry.cursor_lag.
+    WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS: blankTolerantInteger(1, 1_000_000, 900),
+    // This many claims pending longer than WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES:
+    // wallet_registry.pending_overdue.
+    WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT: blankTolerantInteger(1, 10_000, 1),
+    // This many events that match no pending claim in one run:
+    // wallet_registry.unmatched_events.
+    WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: blankTolerantInteger(1, 10_000, 5),
     KYC_CREATING_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
     KYC_OPEN_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(10080).default(60),
     ACCOUNT_RECOVERY_ALERT_AFTER_HOURS: z.coerce.number().int().min(1).max(720).default(24),
@@ -689,6 +705,13 @@ function startsWithZeroHextet(address: string): boolean {
 
 function emptyStringToUndefined(value: unknown): unknown {
   return value === "" ? undefined : value;
+}
+
+// An integer variable with bounds and a default that treats a blank value as
+// unset. A function declaration, not a const, so the schema above can use it
+// while the module is still initialising.
+function blankTolerantInteger(min: number, max: number, fallback: number) {
+  return z.preprocess(emptyStringToUndefined, z.coerce.number().int().min(min).max(max).default(fallback));
 }
 
 // "a, b ,,c" -> ["a", "b", "c"]; empty or all-blank -> undefined, so an
