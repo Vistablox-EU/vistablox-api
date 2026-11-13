@@ -1,4 +1,5 @@
 import type { ChainClients } from "../../../infrastructure/blockchain/chain-client.js";
+import { maskHexIdentifier } from "../../../shared/logging/log-redaction.js";
 import type { SettlementRepository } from "../repository/settlement.repository.js";
 
 // Bounds each run's eth_getLogs range so a long gap since the last run (a
@@ -26,13 +27,37 @@ interface WalletRegisteredEventArgs {
   commitment?: string;
 }
 
+/**
+ * A first-seen address mismatch, as it may appear in a log line or a metric:
+ * the account id plus masked forms of the three values. The full stored
+ * address, on-chain sender and commitment live only in the audit_log row.
+ */
+export interface WalletRegistrationMismatchSignal {
+  accountId: string;
+  commitmentMasked: string;
+  storedWalletMasked: string;
+  onChainSenderMasked: string;
+}
+
 export interface ConfirmWalletRegistrationsSummary {
   fromBlock: string;
   toBlock: string;
+  // The newest block this run may trust (chain head minus the confirmation
+  // depth, never below 0), not this run's capped toBlock: the health check
+  // measures cursor lag against it.
+  safeHeadBlock: string;
   eventsFound: number;
   registrationsConfirmed: number;
+  // Every event with no pending row, including a registration confirmed a
+  // minute ago that the overlap rescan reads again.
   unmatchedEvents: number;
-  addressMismatches: string[];
+  // The part of unmatchedEvents that is news: events in a block past the cursor
+  // an earlier completed run reached. Alerts key on this, not on the total.
+  newUnmatchedEvents: number;
+  // First-seen mismatches only (see recordWalletRegistrationAddressMismatch).
+  addressMismatches: WalletRegistrationMismatchSignal[];
+  // Mismatches this run read that were already recorded by an earlier read.
+  addressMismatchesRepeated: number;
   pendingRegistrationsOverdue: number;
   pendingWarnAfterMinutes: number;
 }
@@ -78,10 +103,13 @@ export class ConfirmWalletRegistrationsService {
     const summary: ConfirmWalletRegistrationsSummary = {
       fromBlock: fromBlock.toString(),
       toBlock: safeLatestBlock.toString(),
+      safeHeadBlock: (safeLatestBlock < 0n ? 0n : safeLatestBlock).toString(),
       eventsFound: 0,
       registrationsConfirmed: 0,
       unmatchedEvents: 0,
+      newUnmatchedEvents: 0,
       addressMismatches: [],
+      addressMismatchesRepeated: 0,
       pendingRegistrationsOverdue,
       pendingWarnAfterMinutes: Math.round(this.pendingWarnAfterMs / 60_000),
     };
@@ -99,7 +127,7 @@ export class ConfirmWalletRegistrationsService {
     const events = (await this.chain.walletRegistry.getEvents.WalletRegistered!({
       fromBlock,
       toBlock,
-    })) as unknown as ReadonlyArray<{ args: WalletRegisteredEventArgs }>;
+    })) as unknown as ReadonlyArray<{ args: WalletRegisteredEventArgs; blockNumber?: bigint | null }>;
     summary.eventsFound = events.length;
 
     for (const event of events) {
@@ -111,23 +139,39 @@ export class ConfirmWalletRegistrationsService {
       const pending = await this.repository.findPendingWalletRegistrationByCommitment(commitment);
       if (pending === null) {
         summary.unmatchedEvents += 1;
+        // An event at or before the cursor was already read by a completed run,
+        // so here it is an overlap replay (for example the registration that
+        // was confirmed a minute ago), not news. No block number or no cursor
+        // means it cannot be shown to be a replay, so it counts.
+        if (cursor === null || event.blockNumber === undefined || event.blockNumber === null || event.blockNumber > cursor) {
+          summary.newUnmatchedEvents += 1;
+        }
         continue;
       }
 
       if (pending.walletAddress.toLowerCase() !== wallet.toLowerCase()) {
-        summary.addressMismatches.push(
-          `account_id=${pending.accountId} commitment=${commitment}: stored wallet ${pending.walletAddress} != on-chain sender ${wallet}`,
-        );
-        // Durable record, not just the log line worker.ts emits from this
+        // Durable record, not just the log line the worker emits from this
         // summary -- a log scrolls away; this is what a support/security
-        // review actually queries later.
-        await this.repository.recordWalletRegistrationAddressMismatch({
+        // review actually queries later. It also decides whether this is news:
+        // the overlap rescan re-reads the same event every run, and only the
+        // first sight of an (account, commitment, sender) is a signal.
+        const { created } = await this.repository.recordWalletRegistrationAddressMismatch({
           accountId: pending.accountId,
           commitment,
           storedWalletAddress: pending.walletAddress,
           onChainSender: wallet,
           detectedAt: this.clock(),
         });
+        if (created) {
+          summary.addressMismatches.push({
+            accountId: pending.accountId,
+            commitmentMasked: maskHexIdentifier(commitment),
+            storedWalletMasked: maskHexIdentifier(pending.walletAddress),
+            onChainSenderMasked: maskHexIdentifier(wallet),
+          });
+        } else {
+          summary.addressMismatchesRepeated += 1;
+        }
         continue;
       }
 

@@ -20,6 +20,24 @@ import type {
 // thing.
 const WALLET_REGISTRY_CURSOR_SETTING_KEY = "wallet_registry.last_processed_block";
 
+/**
+ * The identity of an address-mismatch signal, stored as audit_log.event_key.
+ * Account, commitment and on-chain sender are each trimmed and lower-cased
+ * (inline: the address helper belongs to another change), so the same event
+ * read with a different hex case is the same signal, while a different sender
+ * for the same commitment is a new one.
+ */
+export function walletRegistrationAddressMismatchEventKey(
+  input: Pick<WalletRegistrationAddressMismatchInput, "accountId" | "commitment" | "onChainSender">,
+): string {
+  return [
+    "wallet_registration_address_mismatch",
+    input.accountId,
+    input.commitment.trim().toLowerCase(),
+    input.onChainSender.trim().toLowerCase(),
+  ].join(":");
+}
+
 interface EscrowMintIntentRow {
   id: string;
   pivId: string;
@@ -279,22 +297,34 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
 
   public async recordWalletRegistrationAddressMismatch(
     input: WalletRegistrationAddressMismatchInput,
-  ): Promise<void> {
+  ): Promise<{ created: boolean }> {
     // No actorAccountId: this fires from the worker's own event watcher, not
     // a staff action -- there's no acting account to attribute it to.
-    await this.database.auditLog.create({
-      data: {
-        id: `audit_${ulid()}`,
-        action: "settlement.wallet_registration_address_mismatch",
-        resourceType: "wallet_registration",
-        resourceId: input.accountId,
-        changes: {
-          commitment: input.commitment,
-          stored_wallet_address: input.storedWalletAddress,
-          onchain_sender: input.onChainSender,
+    //
+    // A claim on audit_log.event_key, the same conflict-do-nothing insert the
+    // KYC webhook and the auth audit sink use: concurrent or repeated attempts
+    // for one (account, commitment, sender) leave exactly one row and exactly
+    // one caller sees count 1. The row keeps the FULL stored address, sender
+    // and commitment: it is the evidence a reviewer works from, and masking
+    // applies to logs and metrics only.
+    const result = await this.database.auditLog.createMany({
+      data: [
+        {
+          id: `audit_${ulid()}`,
+          eventKey: walletRegistrationAddressMismatchEventKey(input),
+          action: "settlement.wallet_registration_address_mismatch",
+          resourceType: "wallet_registration",
+          resourceId: input.accountId,
+          changes: {
+            commitment: input.commitment,
+            stored_wallet_address: input.storedWalletAddress,
+            onchain_sender: input.onChainSender,
+          },
+          createdAt: input.detectedAt,
         },
-        createdAt: input.detectedAt,
-      },
+      ],
+      skipDuplicates: true,
     });
+    return { created: result.count === 1 };
   }
 }
