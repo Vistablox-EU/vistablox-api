@@ -4,6 +4,48 @@ import { Pool } from "pg";
 
 import type { DatabaseClient } from "../../src/infrastructure/database/prisma.js";
 
+/** A promise that is settled from outside, for pausing one writer while a test does something else. */
+export function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => (resolve = done));
+  return { promise, resolve };
+}
+
+export interface WriteHooks {
+  /** Runs (and is awaited) before every wallet_registrations UPDATE, inside the caller's transaction if it has one. */
+  beforeRegistrationUpdate?: () => Promise<void>;
+  /** Makes every audit_log INSERT fail with this error, after the statements before it succeeded. */
+  failAuditWrite?: Error;
+}
+
+/**
+ * The same database with a hook in front of two writes, for tests that need to
+ * stop a repository method between its read and its UPDATE, or make its audit
+ * INSERT fail after the UPDATE went through. Both pin what a transaction gives
+ * and a lone statement does not: the row lock held until the write, and the
+ * evidence and its audit row stored together. Prisma applies a query extension
+ * inside interactive transactions too, so the hook runs in the middle of the
+ * repository's own transaction. It shares the base client's connection pool.
+ */
+export function withWriteHooks(database: DatabaseClient, hooks: WriteHooks): DatabaseClient {
+  return database.$extends({
+    query: {
+      walletRegistration: {
+        async update({ args, query }) {
+          await hooks.beforeRegistrationUpdate?.();
+          return query(args);
+        },
+      },
+      auditLog: {
+        async create({ args, query }) {
+          if (hooks.failAuditWrite !== undefined) throw hooks.failAuditWrite;
+          return query(args);
+        },
+      },
+    },
+  }) as unknown as DatabaseClient;
+}
+
 /**
  * Accounts with a wallet_registrations row for the integration suites, created
  * with unique ids and removed again (including the audit rows written about

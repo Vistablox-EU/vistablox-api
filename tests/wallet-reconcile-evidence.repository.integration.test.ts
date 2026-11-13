@@ -4,7 +4,7 @@ import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
 import type { ReconcileWalletRegistrationInput } from "../src/modules/wallet/repository/wallet.repository.js";
 import type { WalletRegistrationEvidence } from "../src/shared/domain/wallet-registration-evidence.js";
-import { WalletRegistrationFixtures } from "./support/wallet-registration-db.js";
+import { WalletRegistrationFixtures, deferred, withWriteHooks } from "./support/wallet-registration-db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -38,9 +38,10 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRepository.reconcileWall
     accountId: string,
     evidence: WalletRegistrationEvidence,
     overrides: Partial<ReconcileWalletRegistrationInput> = {},
+    using: PrismaWalletRepository = repository,
   ) => {
-    const reconcileWalletRegistration = repository.reconcileWalletRegistration;
-    return reconcileWalletRegistration.call(repository, {
+    const reconcileWalletRegistration = using.reconcileWalletRegistration;
+    return reconcileWalletRegistration.call(using, {
       accountId,
       actorAccountId: await defaultActor(),
       evidence,
@@ -268,6 +269,90 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRepository.reconcileWall
 
     expect(await result).toEqual({ kind: "conflict", reason: "different_event" });
     expect(await read(accountId)).toMatchObject({ registeredAt: EARLIER, registrationTxHash: other.transactionHash });
+  });
+
+  // The evidence and its audit row are written together or not at all. An
+  // audit row that cannot be written (here: a created_at that is not a date)
+  // must take the evidence write back with it, whichever way the row changes.
+  describe("when the audit row cannot be written", () => {
+    const cases: Array<{ name: string; outcome: string; prepare: () => Promise<{ accountId: string; evidence: WalletRegistrationEvidence }> }> = [
+      {
+        name: "a pending registration being confirmed",
+        outcome: "confirmed",
+        prepare: async () => ({ accountId: (await fixtures.createRegistration()).accountId, evidence: evidenceFor("a1") }),
+      },
+      {
+        name: "a registration without evidence being recorded",
+        outcome: "evidence_recorded",
+        prepare: async () => ({
+          accountId: (await fixtures.createRegistration({ registeredAt: EARLIER })).accountId,
+          evidence: evidenceFor("a2"),
+        }),
+      },
+      {
+        name: "a registration whose evidence is being replaced",
+        outcome: "evidence_replaced",
+        prepare: async () => {
+          const row = await registeredWith("a3");
+          return { accountId: row.accountId, evidence: { ...row.evidence, blockHash: hex("33"), blockNumber: 101n } };
+        },
+      },
+    ];
+
+    it.each(cases)("leaves $name exactly as it was", async ({ outcome, prepare }) => {
+      const { accountId, evidence } = await prepare();
+      const before = await read(accountId);
+
+      // Sanity: the same input does go through with a valid date, so it is the audit row that fails below.
+      await expect(reconcile(accountId, evidence, { changedAt: new Date(Number.NaN) })).rejects.toThrow();
+
+      expect(await read(accountId)).toEqual(before);
+      expect(await fixtures.auditActions(accountId)).toEqual([]);
+      expect(await reconcile(accountId, evidence)).toMatchObject({ kind: "reconciled", outcome });
+      expect(await fixtures.auditActions(accountId)).toHaveLength(1);
+    });
+  });
+
+  it("keeps the row locked from its decision to its write, so a second reconcile waits and then decides on the first one's result", async () => {
+    const { accountId } = await fixtures.createRegistration();
+    const first = evidenceFor("r14a", { blockHash: hex("a2"), blockNumber: 311n, logIndex: 1 });
+    const second = evidenceFor("r14b", { blockHash: hex("b2"), blockNumber: 312n, logIndex: 2 });
+    const reachedWrite = deferred();
+    const releaseWrite = deferred();
+    // The first reconcile stops right before its UPDATE: it has read the row as
+    // pending and decided to confirm it, which is the moment a second writer
+    // must not be able to get in.
+    const pausedBeforeUpdate = new PrismaWalletRepository(
+      withWriteHooks(database, {
+        beforeRegistrationUpdate: async () => {
+          reachedWrite.resolve();
+          await releaseWrite.promise;
+        },
+      }),
+    );
+
+    let firstResult: ReturnType<typeof reconcile> | undefined;
+    let secondResult: ReturnType<typeof reconcile> | undefined;
+    try {
+      firstResult = reconcile(accountId, first, {}, pausedBeforeUpdate);
+      await reachedWrite.promise;
+
+      secondResult = reconcile(accountId, second);
+      const state = await Promise.race([secondResult.then(() => "finished"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 300))]);
+      expect(state).toBe("waiting");
+    } finally {
+      releaseWrite.resolve();
+    }
+
+    expect(await firstResult).toMatchObject({ kind: "reconciled", outcome: "confirmed" });
+    expect(await secondResult).toEqual({ kind: "conflict", reason: "different_event" });
+    expect(await read(accountId)).toMatchObject({
+      registrationTxHash: first.transactionHash,
+      registrationBlockHash: first.blockHash,
+      registrationBlockNumber: first.blockNumber,
+      registrationLogIndex: first.logIndex,
+    });
+    expect(await fixtures.auditActions(accountId)).toEqual(["settlement.wallet_registration_reconciled"]);
   });
 
   it("reports an account that has no registration", async () => {

@@ -3,7 +3,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaSettlementRepository } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
 import type { WalletRegistrationEvidence } from "../src/shared/domain/wallet-registration-evidence.js";
-import { WalletRegistrationFixtures } from "./support/wallet-registration-db.js";
+import { WalletRegistrationFixtures, deferred, withWriteHooks } from "./support/wallet-registration-db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -504,6 +504,60 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
 
       expect(await result).toBe(false);
       expect((await read(accountId)).registrationEvidenceFlag).toBeNull();
+    });
+
+    it("rolls the flag back when the audit row cannot be written", async () => {
+      const { accountId, initial } = await confirmed("f6");
+      const before = await read(accountId);
+      const auditFails = new PrismaSettlementRepository(withWriteHooks(database, { failAuditWrite: new Error("audit write failed") }));
+
+      await expect(
+        auditFails.flagWalletRegistrationEvidence({ accountId, expected: keyOf(initial), flag: "transaction_missing", flaggedAt: T1 }),
+      ).rejects.toThrow("audit write failed");
+
+      expect(await read(accountId)).toEqual(before);
+      expect(await fixtures.auditActions(accountId)).toEqual([]);
+      // Nothing was left half done: the row can still be flagged, once, with its audit row.
+      expect(await repository.flagWalletRegistrationEvidence({ accountId, expected: keyOf(initial), flag: "transaction_missing", flaggedAt: T1 })).toBe(true);
+      expect(await fixtures.auditActions(accountId)).toEqual(["settlement.wallet_registration_evidence_flagged"]);
+    });
+
+    it("keeps the row locked from its decision to its write, so a second flag waits and then finds the row flagged", async () => {
+      const { accountId, initial } = await confirmed("f7");
+      const reachedWrite = deferred();
+      const releaseWrite = deferred();
+      // The first flag stops right before its UPDATE, after it read the row as
+      // unflagged: a second writer must not be able to get in at that point.
+      const pausedBeforeUpdate = new PrismaSettlementRepository(
+        withWriteHooks(database, {
+          beforeRegistrationUpdate: async () => {
+            reachedWrite.resolve();
+            await releaseWrite.promise;
+          },
+        }),
+      );
+
+      let first: Promise<boolean> | undefined;
+      let second: Promise<boolean> | undefined;
+      try {
+        first = pausedBeforeUpdate.flagWalletRegistrationEvidence({ accountId, expected: keyOf(initial), flag: "transaction_missing", flaggedAt: T1 });
+        await reachedWrite.promise;
+
+        second = repository.flagWalletRegistrationEvidence({
+          accountId,
+          expected: keyOf(initial),
+          flag: "event_missing",
+          flaggedAt: new Date("2026-11-13T12:00:00.000Z"),
+        });
+        const state = await Promise.race([second.then(() => "finished"), new Promise((resolve) => setTimeout(() => resolve("waiting"), 300))]);
+        expect(state).toBe("waiting");
+      } finally {
+        releaseWrite.resolve();
+      }
+
+      expect([await first, await second]).toEqual([true, false]);
+      expect(await read(accountId)).toMatchObject({ registrationEvidenceFlag: "transaction_missing", registrationEvidenceFlaggedAt: T1 });
+      expect(await fixtures.auditActions(accountId)).toEqual(["settlement.wallet_registration_evidence_flagged"]);
     });
 
     it("does not flag a row that holds another identity than the one the caller read", async () => {
