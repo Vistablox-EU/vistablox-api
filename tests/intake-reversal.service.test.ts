@@ -229,6 +229,13 @@ describe("GetIntakeReversalPreviewService", () => {
       expect(result.data.pending_operation).toMatchObject({ status, ...expected });
     });
 
+    it("lets the account that approved a claimed but unexecuted operation finish it, and nobody else", async () => {
+      const claimed = { ...pending, status: "approved", approvedByAccountId: "acct_approver" };
+      expect((await previewAs("acct_approver", claimed)).data.pending_operation).toMatchObject({ status: "approved", viewer_can_approve: true, viewer_can_cancel: false });
+      expect((await previewAs("acct_requester", claimed)).data.pending_operation).toMatchObject({ status: "approved", viewer_can_approve: false, viewer_can_cancel: false });
+      expect((await previewAs("acct_second", claimed)).data.pending_operation).toMatchObject({ status: "approved", viewer_can_approve: false, viewer_can_cancel: false });
+    });
+
     it.each([
       ["return_to_draft", "Return to draft"],
       ["withdraw_information_request", "Withdraw information request"],

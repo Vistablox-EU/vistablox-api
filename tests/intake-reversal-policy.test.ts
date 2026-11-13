@@ -5,6 +5,7 @@ import {
   cancellableReversalStatuses,
   evaluateReversalActions,
   getReversalAction,
+  canFinishClaimedApproval,
   reversalApprovalRefusal,
   reversalCommandLabels,
   reversalCommandSchema,
@@ -346,8 +347,27 @@ describe("reversalApprovalRefusal", () => {
   );
 });
 
+describe("canFinishClaimedApproval", () => {
+  it("lets the account that approved an operation finish it", () => {
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: "acct_approver" }, "acct_approver")).toBe(true);
+  });
+
+  it("does not let anyone else finish it", () => {
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: "acct_approver" }, "acct_requester")).toBe(false);
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: "acct_approver" }, "acct_other")).toBe(false);
+  });
+
+  it.each(operationStatuses.filter((status) => status !== "approved"))("has nothing to finish on a %s operation, even for its approver", (status) => {
+    expect(canFinishClaimedApproval({ status, approvedByAccountId: "acct_approver" }, "acct_approver")).toBe(false);
+  });
+
+  it("has nothing to finish before anyone approved", () => {
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: null }, "acct_approver")).toBe(false);
+  });
+});
+
 describe("reversalOperationViewerPermissions", () => {
-  const operation = (status: string) => ({ status, requestedByAccountId: "acct_requester" });
+  const operation = (status: string, approvedByAccountId: string | null = null) => ({ status, requestedByAccountId: "acct_requester", approvedByAccountId });
 
   it.each([
     ["pending_approval", "acct_other", { canApprove: true, canCancel: true }],
@@ -365,5 +385,21 @@ describe("reversalOperationViewerPermissions", () => {
   it.each(["completed", "failed", "cancelled"])("allows nothing on a %s operation", (status) => {
     expect(reversalOperationViewerPermissions(operation(status), "acct_other")).toEqual({ canApprove: false, canCancel: false });
     expect(reversalOperationViewerPermissions(operation(status), "acct_requester")).toEqual({ canApprove: false, canCancel: false });
+  });
+
+  describe("an approval that was claimed but never executed", () => {
+    const claimed = operation("approved", "acct_approver");
+
+    it("lets the account that approved it finish it, but not cancel it", () => {
+      expect(reversalOperationViewerPermissions(claimed, "acct_approver")).toEqual({ canApprove: true, canCancel: false });
+    });
+
+    it.each(["acct_requester", "acct_other"])("offers %s nothing", (viewer) => {
+      expect(reversalOperationViewerPermissions(claimed, viewer)).toEqual({ canApprove: false, canCancel: false });
+    });
+
+    it.each(["completed", "failed", "cancelled", "executing"])("gives its approver nothing once it is %s", (status) => {
+      expect(reversalOperationViewerPermissions(operation(status, "acct_approver"), "acct_approver").canApprove).toBe(false);
+    });
   });
 });

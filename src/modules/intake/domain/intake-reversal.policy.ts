@@ -55,15 +55,27 @@ export function reversalApprovalRefusal(
   return null;
 }
 
+// An approval that committed but whose execution never ran (the process died in
+// between) is finished by the account that gave it, by approving again. Nobody
+// else can: the operation is no longer awaiting approval, and it is past cancelling.
+export function canFinishClaimedApproval(
+  operation: { status: string; approvedByAccountId: string | null },
+  accountId: string,
+): boolean {
+  return operation.status === "approved" && operation.approvedByAccountId === accountId;
+}
+
 // What the viewing account may do with an active operation. Cancelling is open
 // to the requester and to anyone else with access: a wrong request must be
-// possible to withdraw, and a second person to decline it.
+// possible to withdraw, and a second person to decline it. "Approve" also covers
+// finishing an approval the viewer already gave, which the API accepts, so that
+// a client driven by this flag is not left with a case it cannot unpause.
 export function reversalOperationViewerPermissions(
-  operation: { status: string; requestedByAccountId: string },
+  operation: { status: string; requestedByAccountId: string; approvedByAccountId: string | null },
   viewerAccountId: string,
 ): { canApprove: boolean; canCancel: boolean } {
   return {
-    canApprove: reversalApprovalRefusal(operation, viewerAccountId) === null,
+    canApprove: reversalApprovalRefusal(operation, viewerAccountId) === null || canFinishClaimedApproval(operation, viewerAccountId),
     canCancel: (cancellableReversalStatuses as readonly string[]).includes(operation.status),
   };
 }

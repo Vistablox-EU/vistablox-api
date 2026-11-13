@@ -5,7 +5,7 @@ import { z } from "zod";
 import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
-import { activeReversalStatuses, cancellableReversalStatuses, getReversalAction, reversalApprovalRefusal, reversalCommandSchema, reversalFailureCodes } from "../domain/intake-reversal.policy.js";
+import { activeReversalStatuses, cancellableReversalStatuses, canFinishClaimedApproval, getReversalAction, reversalApprovalRefusal, reversalCommandSchema, reversalFailureCodes } from "../domain/intake-reversal.policy.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { appendIntakeCaseEvent } from "./intake-case-event.repository.js";
 import {
@@ -178,7 +178,7 @@ export class PrismaIntakeRepository
     if (operation === null) return null;
     // An approval that committed but whose execution never ran (the process died in between) is finished by the account that gave it.
     // Execution then re-checks everything as usual, and the approval on record stays the original one.
-    if (operation.status === "approved" && operation.approvedByAccountId === input.approverAccountId) return toReversalOperationRecord(operation);
+    if (canFinishClaimedApproval(operation, input.approverAccountId)) return toReversalOperationRecord(operation);
     const refusal = reversalApprovalRefusal(operation, input.approverAccountId);
     if (refusal !== null) throw new ReversalApprovalRefusedError(operation.fromStage, refusal);
     // The check above only reads, so one conditional UPDATE still decides: two approvers racing cannot both claim it, and neither can

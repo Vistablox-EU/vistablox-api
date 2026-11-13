@@ -1864,6 +1864,26 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       expect((await readCase(fixture.caseId)).stage).toBe("submitted");
     });
 
+    it("offers an approval that was claimed but never executed to the account that gave it, and to nobody else, and that account can finish it", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+      const operationId = requested.data.operation_id;
+      await intakeRepository.approveReversalOperation({ caseId: fixture.caseId, operationId, approverAccountId: approverId, approvedAt: now });
+
+      const forApprover = (await previewService.execute(fixture.caseId, approverId)).data;
+      expect(forApprover).toMatchObject({ correction_in_progress: true, available: false });
+      expect(forApprover.pending_operation).toMatchObject({ operation_id: operationId, status: "approved", requested_by_account_id: requesterId, viewer_can_approve: true, viewer_can_cancel: false });
+      for (const viewer of [requesterId, investorId]) {
+        expect((await previewService.execute(fixture.caseId, viewer)).data.pending_operation).toMatchObject({ operation_id: operationId, status: "approved", viewer_can_approve: false, viewer_can_cancel: false });
+      }
+
+      // The flag is not a promise the API would break: approving as that account finishes the correction.
+      const finished = await approve(fixture, operationId, approverId);
+      expect(finished.data).toMatchObject({ status: "completed", approved_by_account_id: approverId });
+      expect((await readCase(fixture.caseId)).stage).toBe("submitted");
+      expect((await previewService.execute(fixture.caseId, approverId)).data).toMatchObject({ correction_in_progress: false, pending_operation: null });
+    });
+
     it("refuses to cancel an approval that was claimed but not yet executed, and one that failed", async () => {
       const claimed = await createCase("pre_offering_open");
       const claimedRequest = await requestReversal(claimed, "reopen_pre_offering");
@@ -1871,8 +1891,8 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       await expect(cancel(claimed, claimedRequest.data.operation_id, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_cancellable" });
       await expect(cancel(claimed, claimedRequest.data.operation_id, approverId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_cancellable" });
       expect(await readOperation(claimedRequest.data.operation_id)).toMatchObject({ status: "approved", approvedByAccountId: approverId });
-      // The claim is still the approver's to finish.
-      expect((await previewService.execute(claimed.caseId, approverId)).data.pending_operation).toMatchObject({ status: "approved", viewer_can_approve: false, viewer_can_cancel: false });
+      // Nobody can cancel it; the claim is the approver's to finish (see the next test).
+      expect((await previewService.execute(claimed.caseId, approverId)).data.pending_operation).toMatchObject({ status: "approved", viewer_can_cancel: false });
 
       const stale = await createCase("pre_offering_open");
       const staleRequest = await requestReversal(stale, "reopen_pre_offering");
