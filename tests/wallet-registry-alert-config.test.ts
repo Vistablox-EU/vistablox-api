@@ -3,6 +3,8 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
+import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 import {
   WALLET_REGISTRY_ALERT_EVENTS,
   evaluateWalletRegistryHealth,
@@ -147,8 +149,61 @@ describe("wallet registration runbook", () => {
     }
   });
 
+  // The mismatch lines come from the reporter, not the policy, so the loop above
+  // does not see them.
+  it("documents every field of both address mismatch lines the reporter writes", () => {
+    const lines: Array<Record<string, unknown>> = [];
+    const logger = { info: () => {}, warn: () => {}, error: (fields: Record<string, unknown>) => void lines.push(fields) };
+    const reporter = new WalletRegistryAlertReporter({
+      logger: logger as never,
+      metrics: new WorkerMetrics(),
+      heartbeats: { recordWatcherHeartbeat: async () => {} },
+      thresholds: {
+        watcherStaleAfterMs: 600_000,
+        cursorLagAlertBlocks: 900n,
+        cursorAheadToleranceBlocks: 32n,
+        pendingOverdueAlertCount: 1,
+        unmatchedEventsAlertCount: 5,
+      },
+      jobs: { watcher: "settlement.confirm_wallet_registrations", health: "settlement.check_wallet_registry_health" },
+    });
+    const signal = {
+      accountId: "acct_a",
+      commitmentMasked: "0xc0de...c0de",
+      storedWalletMasked: "0xabcd...ef01",
+      onChainSenderMasked: "0x9999...bbbb",
+    };
+
+    // The first mismatch of a run, and the one that says the 21st and later are not listed.
+    reporter.announceAddressMismatch(signal, "req_doc", 1);
+    reporter.announceAddressMismatch(signal, "req_doc", 21);
+
+    expect(lines).toHaveLength(2);
+    const row = runbook.split("\n").find((line) => line.startsWith("| `wallet_registry.address_mismatch` |")) ?? "";
+    const common = new Set(["event", "severity", "job", "trace_id"]);
+    for (const line of lines) {
+      for (const field of Object.keys(line).filter((key) => !common.has(key))) {
+        expect([field, row.includes(`\`${field}\``)]).toEqual([field, true]);
+      }
+    }
+  });
+
   it("never contains a full wallet address, commitment or other long hex value", () => {
     expect(runbook).not.toMatch(/0x[0-9a-fA-F]{12,}/);
+  });
+
+  // Compose interpolates the whole file for every subcommand, and
+  // docker-compose.staging.yml requires POSTGRES_PASSWORD and the MinIO keys, so
+  // `docker compose -f docker-compose.staging.yml logs worker` fails with
+  // "required variable ... is missing a value" unless the variables come from
+  // .env.staging. scripts/deploy/staging.sh passes it the same way.
+  it("gives every docker compose command the staging env file, so it runs where the deploy script does", () => {
+    const commands = runbook.split("\n").filter((line) => /\bdocker compose\b/.test(line));
+
+    expect(commands.length).toBeGreaterThanOrEqual(3);
+    for (const command of commands) {
+      expect(command).toContain("docker compose --env-file .env.staging -f docker-compose.staging.yml ");
+    }
   });
 
   it("is linked from the README and from the investor-profile doc", () => {

@@ -1,7 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { ConfirmWalletRegistrationsService } from "../src/modules/settlement/application/confirm-wallet-registrations.service.js";
+import {
+  ConfirmWalletRegistrationsService,
+  type WalletRegistrationMismatchSignal,
+} from "../src/modules/settlement/application/confirm-wallet-registrations.service.js";
+import { RunWalletRegistryWatcherService } from "../src/modules/settlement/application/run-wallet-registry-watcher.service.js";
+import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import { walletRegistrationAddressMismatchEventKey } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
+import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 import type {
   PendingWalletRegistration,
   PivPendingEscrowResolution,
@@ -63,6 +69,8 @@ function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[]; fail
 class FakeSettlementRepository implements SettlementRepository {
   public readonly confirmedAccountIds: string[] = [];
   public readonly recordedMismatches: WalletRegistrationAddressMismatchInput[] = [];
+  // Account ids whose confirm throws once, as a database blip would.
+  public readonly failConfirmOnceFor = new Set<string>();
   private readonly overdueCount: number;
   public overdueCutoff: Date | undefined;
   private readonly byCommitment: Map<string, PendingWalletRegistration>;
@@ -89,6 +97,7 @@ class FakeSettlementRepository implements SettlementRepository {
   }
 
   public async confirmWalletRegistration(accountId: string): Promise<void> {
+    if (this.failConfirmOnceFor.delete(accountId)) throw new Error("database blip");
     this.confirmed.add(accountId);
     this.confirmedAccountIds.push(accountId);
   }
@@ -539,5 +548,159 @@ describe("ConfirmWalletRegistrationsService", () => {
 
       expect(summary.safeHeadBlock).toBe("0");
     });
+  });
+});
+
+// The claim (an audit_log.event_key row) is stored the moment a mismatch is first
+// seen, but a run can fail after that: a later event's write throws, or the
+// cursor read after the run does. The retry re-reads the same event, finds the
+// claim and counts a repeat, so a signal announced only when a run completes is
+// announced at most once. These tests run the real service, runner and reporter
+// together and check what reached the log, not what the pieces were told.
+describe("announcing a first-seen address mismatch when the run later fails", () => {
+  const SECOND_WALLET = "0x1234567890abcdef1234567890abcdef12345678";
+  const SECOND_COMMITMENT = `0x${"beef".repeat(16)}`;
+
+  function assemble(options: { failCursorRead?: boolean } = {}) {
+    // Block 15: a mismatch for acct_01. Block 16: a legitimate registration for
+    // acct_02, whose confirm throws on the first run only.
+    const { chain } = makeFakeChain({
+      latestBlock: 20n,
+      events: [
+        { blockNumber: 15n, wallet: ATTACKER_WALLET, commitment: COMMITMENT },
+        { blockNumber: 16n, wallet: SECOND_WALLET, commitment: SECOND_COMMITMENT },
+      ],
+    });
+    const repository = new FakeSettlementRepository(
+      [
+        { accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT },
+        { accountId: "acct_02", walletAddress: SECOND_WALLET, commitment: SECOND_COMMITMENT },
+      ],
+      10n,
+    );
+    if (options.failCursorRead !== true) repository.failConfirmOnceFor.add("acct_02");
+
+    const logged: Array<{ level: string; fields: Record<string, unknown> }> = [];
+    const at = (level: string) => vi.fn((fields: Record<string, unknown>) => void logged.push({ level, fields }));
+    const metrics = new WorkerMetrics();
+    const reporter = new WalletRegistryAlertReporter({
+      logger: { info: at("info"), warn: at("warn"), error: at("error") } as never,
+      metrics,
+      heartbeats: { recordWatcherHeartbeat: async () => {} },
+      thresholds: {
+        watcherStaleAfterMs: 600_000,
+        cursorLagAlertBlocks: 900n,
+        cursorAheadToleranceBlocks: 32n,
+        pendingOverdueAlertCount: 1,
+        unmatchedEventsAlertCount: 5,
+      },
+      jobs: { watcher: "settlement.confirm_wallet_registrations", health: "settlement.check_wallet_registry_health" },
+    });
+    let cursorReadsLeftToFail = options.failCursorRead === true ? 1 : 0;
+    const runner = new RunWalletRegistryWatcherService(
+      new ConfirmWalletRegistrationsService(repository, chain as never),
+      {
+        getLastProcessedWalletRegistryBlock: async () => {
+          if (cursorReadsLeftToFail > 0) {
+            cursorReadsLeftToFail -= 1;
+            throw new Error("database blip");
+          }
+          return repository.getLastProcessedWalletRegistryBlock();
+        },
+      },
+      reporter,
+      () => "req_run",
+    );
+    const announced = () =>
+      logged.filter((line) => line.fields.event === "wallet_registry.address_mismatch" && line.fields.account_id === "acct_01");
+    return { runner, repository, metrics, announced };
+  }
+
+  it("still announces the mismatch once when a later event in the same run throws", async () => {
+    const { runner, repository, announced, metrics } = assemble();
+
+    await expect(runner.execute()).rejects.toThrow("database blip");
+    // The claim is durable and the run is lost, so this run's log is all there is.
+    expect(repository.recordedMismatches).toHaveLength(1);
+    expect(announced()).toHaveLength(1);
+    expect(announced()[0]).toMatchObject({ level: "error", fields: { severity: "error", trace_id: "req_run" } });
+    expect(metrics.render()).toContain("vistablox_worker_wallet_registration_address_mismatches_total 1");
+
+    // The retry succeeds and reads the same mismatch again: not news.
+    await runner.execute();
+    expect(repository.confirmedAccountIds).toEqual(["acct_02"]);
+    expect(announced()).toHaveLength(1);
+    expect(metrics.render()).toContain("vistablox_worker_wallet_registration_address_mismatches_total 1");
+    expect(metrics.render()).toContain("vistablox_worker_wallet_registration_address_mismatch_duplicates_total 1");
+  });
+
+  it("still announces it once when the run's work is done and the cursor read after it throws", async () => {
+    const { runner, repository, announced } = assemble({ failCursorRead: true });
+
+    await expect(runner.execute()).rejects.toThrow("database blip");
+    expect(repository.recordedMismatches).toHaveLength(1);
+    expect(announced()).toHaveLength(1);
+
+    await runner.execute();
+    expect(announced()).toHaveLength(1);
+  });
+});
+
+describe("the mismatch hook", () => {
+  const SECOND_WALLET = "0x1234567890abcdef1234567890abcdef12345678";
+  const SECOND_COMMITMENT = `0x${"beef".repeat(16)}`;
+
+  it("hands each first-seen mismatch over once, right after its claim and before the next event is processed", async () => {
+    const { chain } = makeFakeChain({
+      latestBlock: 20n,
+      events: [
+        { blockNumber: 15n, wallet: ATTACKER_WALLET, commitment: COMMITMENT },
+        { blockNumber: 15n, wallet: ATTACKER_WALLET, commitment: COMMITMENT },
+        { blockNumber: 16n, wallet: SECOND_WALLET, commitment: SECOND_COMMITMENT },
+      ],
+    });
+    const repository = new FakeSettlementRepository(
+      [
+        { accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT },
+        { accountId: "acct_02", walletAddress: SECOND_WALLET, commitment: SECOND_COMMITMENT },
+      ],
+      10n,
+    );
+    const order: string[] = [];
+    const confirm = repository.confirmWalletRegistration.bind(repository);
+    repository.confirmWalletRegistration = async (accountId: string) => {
+      order.push(`confirm ${accountId}`);
+      await confirm(accountId);
+    };
+    const handedOver: WalletRegistrationMismatchSignal[] = [];
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never);
+
+    const summary = await service.execute({
+      onAddressMismatch: (signal) => {
+        order.push(`hook ${signal.accountId}`);
+        handedOver.push(signal);
+      },
+    });
+
+    expect(order).toEqual(["hook acct_01", "confirm acct_02"]);
+    // The same signal objects as the summary's: nothing is derived twice.
+    expect(handedOver).toEqual(summary.addressMismatches);
+    expect(summary.addressMismatchesRepeated).toBe(1);
+    expect(JSON.stringify(handedOver)).not.toMatch(FULL_HEX_RUN);
+  });
+
+  it("is optional", async () => {
+    const { chain } = makeFakeChain({
+      latestBlock: 20n,
+      events: [{ blockNumber: 15n, wallet: ATTACKER_WALLET, commitment: COMMITMENT }],
+    });
+    const repository = new FakeSettlementRepository(
+      [{ accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT }],
+      10n,
+    );
+
+    const summary = await new ConfirmWalletRegistrationsService(repository, chain as never).execute();
+
+    expect(summary.addressMismatches).toHaveLength(1);
   });
 });

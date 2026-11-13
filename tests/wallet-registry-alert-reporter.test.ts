@@ -124,8 +124,9 @@ describe("reportRun", () => {
     expect(heartbeats).toEqual([{ completedAt: NOW, safeHeadBlock: 117n, cursorBlock: 100n, eventsFound: 7 }]);
   });
 
-  it("announces each first-seen mismatch once as an error event with exactly these fields", async () => {
-    const { reporter, events, metric } = setup();
+  it("does not announce mismatches itself: they were announced as they were claimed", async () => {
+    const { reporter, calls, events, metric } = setup();
+    reporter.runStarted();
 
     await reporter.reportRun(
       summary({ addressMismatches: [mismatch("acct_a")], addressMismatchesRepeated: 3 }),
@@ -133,47 +134,13 @@ describe("reportRun", () => {
       TRACE,
     );
 
-    const lines = events(WALLET_REGISTRY_ALERT_EVENTS.addressMismatch);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toEqual({
-      level: "error",
-      message: "wallet registration event address mismatch -- possible spoofed registration attempt",
-      fields: {
-        event: "wallet_registry.address_mismatch",
-        severity: "error",
-        job: JOBS.watcher,
-        trace_id: TRACE,
-        account_id: "acct_a",
-        commitment_masked: "0xc0de...c0de",
-        stored_wallet_masked: "0xabcd...ef01",
-        on_chain_sender_masked: "0x9999...bbbb",
-      },
-    });
-    expect(metric("vistablox_worker_wallet_registration_address_mismatches_total")).toBe(1);
-    expect(metric("vistablox_worker_wallet_registration_address_mismatch_duplicates_total")).toBe(3);
-  });
-
-  it("says nothing about a mismatch that was only seen again", async () => {
-    const { reporter, events } = setup();
-
-    await reporter.reportRun(summary({ addressMismatches: [], addressMismatchesRepeated: 5 }), 117n, TRACE);
-
     expect(events(WALLET_REGISTRY_ALERT_EVENTS.addressMismatch)).toEqual([]);
-  });
-
-  it("lists at most 20 mismatches per run and counts the rest in one suppressed line", async () => {
-    const { reporter, events, metric } = setup();
-    const many = Array.from({ length: 25 }, (_unused, index) => mismatch(`acct_${index}`));
-
-    await reporter.reportRun(summary({ addressMismatches: many }), 117n, TRACE);
-
-    const lines = events(WALLET_REGISTRY_ALERT_EVENTS.addressMismatch);
-    expect(lines).toHaveLength(21);
-    expect(lines.slice(0, 20).every((line) => typeof line.fields.account_id === "string")).toBe(true);
-    expect(lines[20]?.fields).toMatchObject({ severity: "error", suppressed: 5 });
-    expect(lines[20]?.fields).not.toHaveProperty("account_id");
-    // The counter still sees all of them.
-    expect(metric("vistablox_worker_wallet_registration_address_mismatches_total")).toBe(25);
+    // They stay in the completion line, masked, as part of the run's summary.
+    expect(calls[0]?.fields.addressMismatches).toEqual([mismatch("acct_a")]);
+    // Registered at 0 when the run started (so a rate over it sees the first
+    // mismatch), and not counted again from the summary.
+    expect(metric("vistablox_worker_wallet_registration_address_mismatches_total")).toBe(0);
+    expect(metric("vistablox_worker_wallet_registration_address_mismatch_duplicates_total")).toBe(3);
   });
 
   it.each([
@@ -216,6 +183,55 @@ describe("reportRun", () => {
       // The run's own completion line is still there.
       expect(calls.some((call) => call.message === "case timer job completed")).toBe(true);
     });
+  });
+});
+
+describe("announceAddressMismatch", () => {
+  it("announces a first-seen mismatch as an error event with exactly these fields, and counts it", () => {
+    const { reporter, events, metric } = setup();
+
+    reporter.announceAddressMismatch(mismatch("acct_a"), TRACE, 1);
+
+    const lines = events(WALLET_REGISTRY_ALERT_EVENTS.addressMismatch);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toEqual({
+      level: "error",
+      message: "wallet registration event address mismatch -- possible spoofed registration attempt",
+      fields: {
+        event: "wallet_registry.address_mismatch",
+        severity: "error",
+        job: JOBS.watcher,
+        trace_id: TRACE,
+        account_id: "acct_a",
+        commitment_masked: "0xc0de...c0de",
+        stored_wallet_masked: "0xabcd...ef01",
+        on_chain_sender_masked: "0x9999...bbbb",
+      },
+    });
+    expect(metric("vistablox_worker_wallet_registration_address_mismatches_total")).toBe(1);
+  });
+
+  it("lists at most 20 mismatches per run, then says so once, and still counts every one", () => {
+    const { reporter, events, metric } = setup();
+
+    for (let ordinal = 1; ordinal <= 25; ordinal += 1) {
+      reporter.announceAddressMismatch(mismatch(`acct_${ordinal}`), TRACE, ordinal);
+    }
+
+    const lines = events(WALLET_REGISTRY_ALERT_EVENTS.addressMismatch);
+    expect(lines).toHaveLength(21);
+    expect(lines.slice(0, 20).map((line) => line.fields.account_id)).toEqual(
+      Array.from({ length: 20 }, (_unused, index) => `acct_${index + 1}`),
+    );
+    expect(lines[20]?.level).toBe("error");
+    expect(lines[20]?.fields).toEqual({
+      event: "wallet_registry.address_mismatch",
+      severity: "error",
+      job: JOBS.watcher,
+      trace_id: TRACE,
+      listed_limit: 20,
+    });
+    expect(metric("vistablox_worker_wallet_registration_address_mismatches_total")).toBe(25);
   });
 });
 
@@ -396,6 +412,7 @@ describe("what the reporter writes", () => {
     const quoting = new Error(`Key (wallet_address)=(${FULL_VALUES[0]}) sender ${FULL_VALUES[2]} ${RPC_URL}`);
 
     reporter.runStarted();
+    reporter.announceAddressMismatch(mismatch("acct_a"), TRACE, 1);
     await reporter.reportRun(
       summary({ addressMismatches: [mismatch("acct_a")], newUnmatchedEvents: 9, unmatchedEvents: 9 }),
       117n,

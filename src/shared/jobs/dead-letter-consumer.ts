@@ -33,11 +33,15 @@ function messageOf(output: unknown): string | null {
   return null;
 }
 
-// URLs are stripped before the text is truncated: a failed job's output can
-// carry the RPC URL (a viem error puts "URL: <url>" in its message), whose path
-// holds the provider's API key, and cutting first could leave a partial key
-// that no longer looks like a URL. This line is the retained, alert-hook copy
-// of the failure, so it must not be the place a key ends up in logs.
+// A failed job's output can carry the RPC URL (a viem error puts "URL: <url>" in
+// its message), whose path holds the provider's API key, and this line is the
+// retained, alert-hook copy of the failure, so it must not be the place a key
+// ends up in logs. URLs are stripped before the text is truncated so that a long
+// URL costs the 500 characters one "[url]" and not its own length: the text
+// after it (a viem error's "Details:" line, the reason for the failure) is kept.
+// Secrecy does not depend on the order: a prefix cut out of a URL either still
+// has its "scheme://" and is stripped, or has not reached the path and holds no
+// key.
 function lastErrorOf(output: unknown): string | null {
   const message = messageOf(output);
   return message === null ? null : stripUrls(message).slice(0, MAX_LAST_ERROR_LENGTH);

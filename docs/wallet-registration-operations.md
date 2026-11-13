@@ -32,7 +32,7 @@ Every line carries `event`, `severity`, `job` and `trace_id`. Rules should key o
 
 | Event | Severity | Fields | Meaning and first response |
 | --- | --- | --- | --- |
-| `wallet_registry.address_mismatch` | error | `account_id`, `commitment_masked`, `stored_wallet_masked`, `on_chain_sender_masked` (or `suppressed` when more than 20 in one run) | An event named this account's commitment but was sent from a different address than the one on file: a spoofing attempt, or an investor who registered from another wallet. The claim stays pending. Look the account up (see Reconciliation) and **do not reconcile it with the sender's transaction**, which cannot match by construction. Main has no way to change the address of a pending claim; do not edit rows by hand, escalate to engineering. Announced once; `address_mismatch_unresolved` reminds you while it stays open. |
+| `wallet_registry.address_mismatch` | error | `account_id`, `commitment_masked`, `stored_wallet_masked`, `on_chain_sender_masked` (or `listed_limit` on the one line that says the rest of a run's mismatches, beyond the first 20, are not listed; every one is still counted) | An event named this account's commitment but was sent from a different address than the one on file: a spoofing attempt, or an investor who registered from another wallet. The claim stays pending. Look the account up (see Reconciliation) and **do not reconcile it with the sender's transaction**, which cannot match by construction. Main has no way to change the address of a pending claim; do not edit rows by hand, escalate to engineering. Announced once, as soon as it is recorded, even if that run then fails; `address_mismatch_unresolved` reminds you while it stays open. |
 | `wallet_registry.watcher_stalled` | error | `reason` (`heartbeat_stale` or `no_completed_run_since_start`), `age_seconds`, `stale_after_seconds` | No completed watcher run for the threshold. Check the worker container is up, then the `watcher_failed` and `heartbeat_write_failed` lines just before it (an RPC outage, a wrong `CHAIN_RPC_URL`, a database that will not take writes). A restart gives the worker one full threshold before it can be called stalled again. |
 | `wallet_registry.cursor_lag` | error | `lag_blocks`, `threshold_blocks`, `cursor_block`, `safe_head_block` | The saved cursor is far behind the safe head as of the last run. A run catches up at most 2000 blocks, so after an outage longer than about 100 minutes (2000 blocks plus the 900-block threshold, at 2 seconds a block) this shows for a few minutes while the watcher catches up, then clears itself. If it persists while the heartbeat is fresh, the RPC is failing or slow; look at `watcher_failed`. |
 | `wallet_registry.cursor_ahead_of_chain` | error | `ahead_blocks`, `tolerance_blocks`, `cursor_block`, `safe_head_block` | The cursor is more than 32 blocks past what the RPC says the head is: the RPC points at a lagging node or the wrong chain, or someone raised the cursor. The watcher reads nothing while this holds. Check `CHAIN_NETWORK` against `CHAIN_RPC_URL` before touching the cursor. |
@@ -45,7 +45,7 @@ Every line carries `event`, `severity`, `job` and `trace_id`. Rules should key o
 | `wallet_registry.address_mismatch_unresolved` | warn | `unresolved_count`, `account_ids` (at most 20) | A recorded mismatch whose account's current claim is still unconfirmed and still has that commitment. Repeats every 5 minutes until the claim is confirmed or replaced. |
 | `wallet_registry.health_checked` | info | `watcher_configured`, `heartbeat_age_seconds`, `cursor_block`, `safe_head_block`, `cursor_lag_blocks`, `pending_total`, `pending_overdue`, `unresolved_address_mismatches`, `alerts_active` | Proof of life, every 5 minutes. If this line stops appearing the check or the whole worker has stopped. |
 
-Health events are level-triggered: they repeat every 5 minutes while the condition holds. An address mismatch and a failed run are announced when they happen.
+Health events are level-triggered: they repeat every 5 minutes while the condition holds. An address mismatch and a failed run are announced when they happen. A mismatch is announced from the moment it is recorded, not when its run completes, so a run that fails afterwards still shows it (before that run's `watcher_failed` line); the retry reads the event again and says nothing.
 
 ## Thresholds
 
@@ -63,10 +63,10 @@ The cursor-ahead tolerance is not a setting: it is the watcher's own 32-block ov
 
 ## Reading the log
 
-The worker writes JSON lines to stdout. Show the events from the last hour, errors first:
+The worker writes JSON lines to stdout. Run these from the project directory on the staging host, where `.env.staging` and `docker-compose.staging.yml` are. Compose reads the whole compose file for every subcommand, and that file requires `POSTGRES_PASSWORD` and the MinIO keys, so each command passes `--env-file .env.staging`, as `scripts/deploy/staging.sh` does; without it compose stops with "required variable ... is missing a value". Show the events from the last hour, errors first:
 
-    docker compose -f docker-compose.staging.yml logs --no-log-prefix --since 1h worker | grep '"event":"wallet_registry\.'
-    docker compose -f docker-compose.staging.yml logs --no-log-prefix --since 1h worker | grep '"event":"wallet_registry\.' | grep '"severity":"error"'
+    docker compose --env-file .env.staging -f docker-compose.staging.yml logs --no-log-prefix --since 1h worker | grep '"event":"wallet_registry\.'
+    docker compose --env-file .env.staging -f docker-compose.staging.yml logs --no-log-prefix --since 1h worker | grep '"event":"wallet_registry\.' | grep '"severity":"error"'
 
 A job that exhausted its retries also logs `job dead-lettered after exhausting retries` with the job name and a `last_error` that has URLs replaced by `[url]`.
 
@@ -74,7 +74,7 @@ A job that exhausted its retries also logs `job dead-lettered after exhausting r
 
 The worker serves Prometheus text on loopback port 3001 inside its container (not published). Read it with:
 
-    docker compose -f docker-compose.staging.yml exec worker node -e "fetch('http://127.0.0.1:3001/metrics').then(r=>r.text()).then(console.log)" | grep wallet_registration
+    docker compose --env-file .env.staging -f docker-compose.staging.yml exec worker node -e "fetch('http://127.0.0.1:3001/metrics').then(r=>r.text()).then(console.log)" | grep wallet_registration
 
 Counters (process-local, reset when the worker restarts) are prefixed `vistablox_worker_wallet_registration_`: `runs_total`, `failures_total`, `confirmed_total`, `unmatched_events_total` (every event with no pending claim, including a replay of a registration confirmed a minute ago), `new_unmatched_events_total` (only events in new blocks; the one to rate), `address_mismatches_total` (first-seen only), `address_mismatch_duplicates_total`, `heartbeat_write_failures_total`, `health_check_failures_total`. Gauges set by the health check: `pending_total`, `pending_overdue`, `watcher_heartbeat_age_seconds` (-1 means no heartbeat yet), `cursor_lag_blocks` (negative when the cursor is ahead), `address_mismatch_unresolved`, `health_alerts_active`.
 

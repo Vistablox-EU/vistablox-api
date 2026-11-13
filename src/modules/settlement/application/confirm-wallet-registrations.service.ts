@@ -39,6 +39,24 @@ export interface WalletRegistrationMismatchSignal {
   onChainSenderMasked: string;
 }
 
+/**
+ * What a caller can ask execute() to do while it runs, as opposed to what it
+ * reports when it is done.
+ */
+export interface ConfirmWalletRegistrationsHooks {
+  /**
+   * Called once for each first-seen address mismatch, synchronously, right after
+   * its claim is stored and before the next event is read.
+   *
+   * The claim is durable, so a signal handed over only in the returned summary is
+   * lost whenever the run fails after it: the retry re-reads the event, finds the
+   * claim and counts a repeat. Announcing from here makes the announcement
+   * at-least-once with respect to a failure later in the run. It must not throw
+   * (a throw would fail the run after the claim, which is the loss this prevents).
+   */
+  onAddressMismatch?: (signal: WalletRegistrationMismatchSignal) => void;
+}
+
 export interface ConfirmWalletRegistrationsSummary {
   fromBlock: string;
   toBlock: string;
@@ -82,7 +100,7 @@ export class ConfirmWalletRegistrationsService {
     private readonly pendingWarnAfterMs = WALLET_REGISTRY_PENDING_WARN_AFTER_MS,
   ) {}
 
-  public async execute(): Promise<ConfirmWalletRegistrationsSummary> {
+  public async execute(hooks: ConfirmWalletRegistrationsHooks = {}): Promise<ConfirmWalletRegistrationsSummary> {
     const latestBlock = await this.chain.publicClient.getBlockNumber();
     const cursor = await this.repository.getLastProcessedWalletRegistryBlock();
     const now = this.clock();
@@ -163,12 +181,14 @@ export class ConfirmWalletRegistrationsService {
           detectedAt: this.clock(),
         });
         if (created) {
-          summary.addressMismatches.push({
+          const signal: WalletRegistrationMismatchSignal = {
             accountId: pending.accountId,
             commitmentMasked: maskHexIdentifier(commitment),
             storedWalletMasked: maskHexIdentifier(pending.walletAddress),
             onChainSenderMasked: maskHexIdentifier(wallet),
-          });
+          };
+          summary.addressMismatches.push(signal);
+          hooks.onAddressMismatch?.(signal);
         } else {
           summary.addressMismatchesRepeated += 1;
         }

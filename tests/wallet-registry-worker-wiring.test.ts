@@ -3,13 +3,23 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
+import { withoutComments } from "./support/without-comments.js";
+
 // src/worker.ts is a start-up script that cannot be imported into a test, so
 // what it wires up is checked from its source, the way tests/job-queues.test.ts
 // does for queues in general. Behaviour of what it wires is covered by the
 // service and reporter tests.
-const worker = readFileSync(fileURLToPath(new URL("../src/worker.ts", import.meta.url)), "utf8");
+//
+// Comments are blanked out first: a call that has been commented out must not
+// satisfy a check for the call. `flat` is the same code with every run of
+// whitespace collapsed to one space, for checks that pin a whole statement.
+const worker = withoutComments(readFileSync(fileURLToPath(new URL("../src/worker.ts", import.meta.url)), "utf8"));
+const flat = worker.replace(/\s+/g, " ");
 
-// The text of one `await boss.work("<name>", async () => { ... });` call.
+const escape = (text: string): string => text.replace(/[.*+?^${}()|[\]\\/]/g, "\\$&");
+
+// The text of one `await boss.work("<name>", async () => { ... });` call, from
+// `boss.work` to the closing brace of the handler.
 function handlerOf(name: string): string {
   const start = worker.indexOf(`boss.work("${name}"`);
   expect(start).toBeGreaterThan(-1);
@@ -19,15 +29,26 @@ function handlerOf(name: string): string {
 }
 
 describe("wallet-registry worker wiring", () => {
-  it("creates the health queue as a scheduled queue", () => {
-    expect(worker).toContain('ensureJobQueue(boss, "settlement.check_wallet_registry_health", "scheduled")');
+  it("creates the health queue as a scheduled queue, when the health check exists", () => {
+    expect(flat).toContain(
+      'if (checkWalletRegistryHealth !== undefined) { await ensureJobQueue(boss, "settlement.check_wallet_registry_health", "scheduled"); }',
+    );
   });
 
-  it("schedules the health check every 5 minutes on the scheduled retry profile", () => {
-    const call = worker.match(/boss\.schedule\("settlement\.check_wallet_registry_health",[^)]*\)/s)?.[0] ?? "";
+  it("schedules the health check every 5 minutes on the scheduled retry profile, when the health check exists", () => {
+    expect(flat).toMatch(
+      new RegExp(
+        `if \\(checkWalletRegistryHealth !== undefined\\) \\{ await boss\\.schedule\\("settlement\\.check_wallet_registry_health", "${escape("*/5 * * * *")}", null, \\{[^}]*\\.\\.\\.RETRY_OPTIONS`,
+      ),
+    );
+  });
 
-    expect(call).toContain('"*/5 * * * *"');
-    expect(call).toContain("...RETRY_OPTIONS");
+  it("schedules the watcher every minute, when the watcher exists", () => {
+    expect(flat).toMatch(
+      new RegExp(
+        `if \\(confirmWalletRegistrations !== undefined\\) \\{ await boss\\.schedule\\("settlement\\.confirm_wallet_registrations", "${escape("* * * * *")}", null, \\{[^}]*\\.\\.\\.RETRY_OPTIONS`,
+      ),
+    );
   });
 
   it("consumes the health queue with a literal boss.work, so the queue test can see it", () => {
@@ -60,16 +81,25 @@ describe("wallet-registry worker wiring", () => {
   });
 
   it.each([
-    ["settlement.confirm_wallet_registrations", "runWalletRegistryWatcher.execute()"],
-    ["settlement.check_wallet_registry_health", "checkWalletRegistryHealth.execute()"],
-  ])("%s only delegates to its service and never logs the raw error", (name, call) => {
-    const body = handlerOf(name);
+    ["settlement.confirm_wallet_registrations", "runWalletRegistryWatcher"],
+    ["settlement.check_wallet_registry_health", "checkWalletRegistryHealth"],
+  ])("%s is consumed by a handler that only delegates to its service, and never logs the raw error", (name, service) => {
+    const body = handlerOf(name).replace(/\s+/g, " ");
 
-    expect(body).toContain(`await ${call}`);
+    // Exactly one statement: the call, awaited, so its failure fails the job.
+    expect(body).toBe(`boss.work("${name}", async () => { await ${service}.execute();`);
     // A viem error logged as { err } carries the RPC URL and its provider key;
     // the reporter logs a sanitised message instead.
     expect(body).not.toContain("err:");
     expect(body).not.toContain("logger.");
     expect(body).not.toContain("catch");
+  });
+
+  it.each([
+    ["settlement.confirm_wallet_registrations", "runWalletRegistryWatcher"],
+    ["settlement.check_wallet_registry_health", "checkWalletRegistryHealth"],
+  ])("registers the %s handler only where its service exists", (name, service) => {
+    expect(flat).toContain(`if (${service} !== undefined) {`);
+    expect(flat).toMatch(new RegExp(`if \\(${service} !== undefined\\) \\{[^}]*?await boss\\.work\\("${escape(name)}"`));
   });
 });

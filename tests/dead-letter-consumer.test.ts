@@ -165,15 +165,38 @@ describe("dead-letter consumer", () => {
     ]);
   });
 
-  it("strips URLs before truncating, so a URL straddling the cut cannot survive as a partial key", async () => {
+  // The order is about how much of the error survives, not about secrecy: a
+  // long URL replaced by "[url]" before the cut leaves room for the text after
+  // it (the "Details:" line of a viem error), and cutting first would spend the
+  // 500 characters on the URL and lose that text.
+  it("strips URLs before truncating, so the text after a long URL is kept instead of being cut off with it", async () => {
     const { logger, error } = fakeLogger();
-    const message = `${"x".repeat(480)} https://rpc.example.org/v2/SECRETPROVIDERKEY123456789`;
+    const longUrl = `https://rpc.example.org/v2/${"K".repeat(150)}`;
+    const message = `${"x".repeat(400)} ${longUrl} Details: tail-after-url`;
+    expect(message.indexOf("Details")).toBeGreaterThan(500);
 
     await createDeadLetterHandler(logger)([deadLetterJob({ output: { message } })]);
 
     const lastError = (error.mock.calls[0]?.[0] as { last_error: string }).last_error;
-    expect(lastError).toBe(`${"x".repeat(480)} [url]`);
-    expect(lastError).not.toContain("SECRETPROVIDERKEY");
+    expect(lastError).toBe(`${"x".repeat(400)} [url] Details: tail-after-url`);
+  });
+
+  // True whichever way round the two steps happen, because a cut-off URL prefix
+  // that still has its "scheme://" is stripped and one that has not holds no key.
+  it("never lets a piece of a URL's key into last_error, wherever the 500-character cut falls", async () => {
+    const { logger, error } = fakeLogger();
+    const url = "https://rpc.example.org/v2/SECRETPROVIDERKEY123456789";
+
+    for (let padding = 440; padding <= 520; padding += 1) {
+      await createDeadLetterHandler(logger)([deadLetterJob({ output: { message: `${"x".repeat(padding)} ${url}` } })]);
+    }
+
+    const lastErrors = error.mock.calls.map((call) => (call[0] as { last_error: string }).last_error);
+    expect(lastErrors).toHaveLength(81);
+    for (const lastError of lastErrors) {
+      expect(lastError.length).toBeLessThanOrEqual(500);
+      expect(lastError).not.toMatch(/SECR|ECRE|CRET|RETP|PROV|KEY1|Y123/);
+    }
   });
 
   it("registers a metadata-aware worker on the dead-letter queue whose handler logs", async () => {

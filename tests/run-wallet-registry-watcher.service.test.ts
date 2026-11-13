@@ -1,7 +1,10 @@
 import { HttpRequestError } from "viem";
 import { describe, expect, it, vi } from "vitest";
 
-import type { ConfirmWalletRegistrationsSummary } from "../src/modules/settlement/application/confirm-wallet-registrations.service.js";
+import type {
+  ConfirmWalletRegistrationsHooks,
+  ConfirmWalletRegistrationsSummary,
+} from "../src/modules/settlement/application/confirm-wallet-registrations.service.js";
 import { RunWalletRegistryWatcherService } from "../src/modules/settlement/application/run-wallet-registry-watcher.service.js";
 import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import type { WalletRegistryHeartbeat } from "../src/modules/settlement/repository/wallet-registry-health.repository.js";
@@ -28,7 +31,10 @@ function summary(overrides: Partial<ConfirmWalletRegistrationsSummary> = {}): Co
   };
 }
 
-function setup(confirm: () => Promise<ConfirmWalletRegistrationsSummary>, cursor: () => Promise<bigint | null>) {
+function setup(
+  confirm: (hooks?: ConfirmWalletRegistrationsHooks) => Promise<ConfirmWalletRegistrationsSummary>,
+  cursor: () => Promise<bigint | null>,
+) {
   const logged: Array<{ level: string; fields: Record<string, unknown>; message: string }> = [];
   const at = (level: string) =>
     vi.fn((fields: Record<string, unknown>, message: string) => void logged.push({ level, fields, message }));
@@ -90,6 +96,84 @@ describe("RunWalletRegistryWatcherService", () => {
     await service.execute();
 
     expect(heartbeats[0]).toMatchObject({ cursorBlock: null, safeHeadBlock: 0n });
+  });
+
+  describe("announcing address mismatches", () => {
+    const signal = (accountId: string) => ({
+      accountId,
+      commitmentMasked: "0xc0de...c0de",
+      storedWalletMasked: "0xabcd...ef01",
+      onChainSenderMasked: "0x9999...bbbb",
+    });
+    const announcedAccounts = (logged: Array<{ fields: Record<string, unknown> }>) =>
+      logged.filter((line) => line.fields.event === "wallet_registry.address_mismatch").map((line) => line.fields.account_id);
+
+    it("announces a mismatch as the service hands it over, once, with this run's trace id", async () => {
+      const { service, logged, metrics } = setup(
+        async (hooks) => {
+          hooks?.onAddressMismatch?.(signal("acct_a"));
+          return summary({ addressMismatches: [signal("acct_a")] });
+        },
+        async () => 100n,
+      );
+
+      await service.execute();
+
+      expect(announcedAccounts(logged)).toEqual(["acct_a"]);
+      expect(logged.find((line) => line.fields.account_id === "acct_a")?.fields).toMatchObject({ trace_id: "req_run_1" });
+      expect(metrics.render()).toContain("vistablox_worker_wallet_registration_address_mismatches_total 1");
+    });
+
+    it("announces it before the failure is reported when the run then fails", async () => {
+      const { service, logged } = setup(
+        async (hooks) => {
+          hooks?.onAddressMismatch?.(signal("acct_a"));
+          throw new Error("database blip");
+        },
+        async () => 100n,
+      );
+
+      await expect(service.execute()).rejects.toThrow("database blip");
+
+      expect(announcedAccounts(logged)).toEqual(["acct_a"]);
+      expect(logged.map((line) => line.fields.event)).toEqual([
+        "wallet_registry.address_mismatch",
+        "wallet_registry.watcher_failed",
+      ]);
+    });
+
+    it("announces it when the cursor read after a completed run fails", async () => {
+      const { service, logged, heartbeats } = setup(
+        async (hooks) => {
+          hooks?.onAddressMismatch?.(signal("acct_a"));
+          return summary({ addressMismatches: [signal("acct_a")] });
+        },
+        async () => {
+          throw new Error("database blip");
+        },
+      );
+
+      await expect(service.execute()).rejects.toThrow("database blip");
+
+      expect(announcedAccounts(logged)).toEqual(["acct_a"]);
+      expect(heartbeats).toEqual([]);
+    });
+
+    it("numbers the mismatches of one run, so the reporter can stop listing after 20", async () => {
+      const { service, logged } = setup(
+        async (hooks) => {
+          for (let index = 1; index <= 22; index += 1) hooks?.onAddressMismatch?.(signal(`acct_${index}`));
+          return summary();
+        },
+        async () => 100n,
+      );
+
+      await service.execute();
+
+      const lines = logged.filter((line) => line.fields.event === "wallet_registry.address_mismatch");
+      expect(lines).toHaveLength(21);
+      expect(lines[20]?.fields).toMatchObject({ listed_limit: 20 });
+    });
   });
 
   describe("when the watcher fails", () => {

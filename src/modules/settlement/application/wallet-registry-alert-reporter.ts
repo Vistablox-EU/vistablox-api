@@ -11,10 +11,13 @@ import {
   type WalletRegistryHealthSnapshot,
 } from "../domain/wallet-registry-alert-policy.js";
 import type { WalletRegistryHeartbeatWriter } from "../repository/wallet-registry-health.repository.js";
-import type { ConfirmWalletRegistrationsSummary } from "./confirm-wallet-registrations.service.js";
+import type {
+  ConfirmWalletRegistrationsSummary,
+  WalletRegistrationMismatchSignal,
+} from "./confirm-wallet-registrations.service.js";
 
 // A burst of mismatches in one run is capped so a spammer cannot flood the log;
-// the rest are counted in the metric and in the single "suppressed" line.
+// the rest are counted in the metric and said so in a single line.
 const MAX_MISMATCH_EVENTS_PER_RUN = 20;
 const MAX_ERROR_MESSAGE_LENGTH = 500;
 
@@ -75,12 +78,58 @@ export class WalletRegistryAlertReporter {
   /** Counts a started watcher run; failed runs are counted too. */
   public runStarted(): void {
     this.metrics.increment(METRICS.runs);
+    // Registers the mismatch counter at 0, so a rate over it sees the first one.
+    this.metrics.increment(METRICS.addressMismatches, 0);
   }
 
   /**
-   * One completed watcher run. Never throws: a failure to write the heartbeat
-   * is itself reported, and the health check then reports the stall, which is
-   * the right operator-visible outcome of a database that will not take writes.
+   * One first-seen address mismatch, announced as an error event and counted. The
+   * runner calls it the moment the service has stored the claim, which is before
+   * the run is known to succeed: the claim outlives a failed run and the retry
+   * sees the event as a repeat, so this is the only chance to announce it.
+   *
+   * `ordinal` is 1 for the first mismatch of a run. The first 20 are listed; the
+   * 21st adds one line saying the rest are not, and every one is counted. Never
+   * throws.
+   */
+  public announceAddressMismatch(mismatch: WalletRegistrationMismatchSignal, traceId: string, ordinal: number): void {
+    const job = this.options.jobs.watcher;
+    this.metrics.increment(METRICS.addressMismatches);
+    if (ordinal <= MAX_MISMATCH_EVENTS_PER_RUN) {
+      this.logger.error(
+        {
+          event: WALLET_REGISTRY_ALERT_EVENTS.addressMismatch,
+          severity: "error",
+          job,
+          trace_id: traceId,
+          account_id: mismatch.accountId,
+          commitment_masked: mismatch.commitmentMasked,
+          stored_wallet_masked: mismatch.storedWalletMasked,
+          on_chain_sender_masked: mismatch.onChainSenderMasked,
+        },
+        "wallet registration event address mismatch -- possible spoofed registration attempt",
+      );
+    } else if (ordinal === MAX_MISMATCH_EVENTS_PER_RUN + 1) {
+      this.logger.error(
+        {
+          event: WALLET_REGISTRY_ALERT_EVENTS.addressMismatch,
+          severity: "error",
+          job,
+          trace_id: traceId,
+          listed_limit: MAX_MISMATCH_EVENTS_PER_RUN,
+        },
+        "further wallet registration address mismatches in this run are not listed individually; see address_mismatches_total and the audit rows",
+      );
+    }
+  }
+
+  /**
+   * One completed watcher run. Address mismatches are not announced here (see
+   * announceAddressMismatch); they are in the completion line, masked.
+   *
+   * Never throws: a failure to write the heartbeat is itself reported, and the
+   * health check then reports the stall, which is the right operator-visible
+   * outcome of a database that will not take writes.
    */
   public async reportRun(
     summary: ConfirmWalletRegistrationsSummary,
@@ -96,39 +145,9 @@ export class WalletRegistryAlertReporter {
     this.metrics.increment(METRICS.confirmed, summary.registrationsConfirmed);
     this.metrics.increment(METRICS.unmatchedEvents, summary.unmatchedEvents);
     this.metrics.increment(METRICS.newUnmatchedEvents, summary.newUnmatchedEvents);
-    this.metrics.increment(METRICS.addressMismatches, summary.addressMismatches.length);
     this.metrics.increment(METRICS.addressMismatchDuplicates, summary.addressMismatchesRepeated);
 
     this.logger.info({ trace_id: traceId, job, ...summary }, "case timer job completed");
-
-    const announced = summary.addressMismatches.slice(0, MAX_MISMATCH_EVENTS_PER_RUN);
-    for (const mismatch of announced) {
-      this.logger.error(
-        {
-          event: WALLET_REGISTRY_ALERT_EVENTS.addressMismatch,
-          severity: "error",
-          job,
-          trace_id: traceId,
-          account_id: mismatch.accountId,
-          commitment_masked: mismatch.commitmentMasked,
-          stored_wallet_masked: mismatch.storedWalletMasked,
-          on_chain_sender_masked: mismatch.onChainSenderMasked,
-        },
-        "wallet registration event address mismatch -- possible spoofed registration attempt",
-      );
-    }
-    if (summary.addressMismatches.length > announced.length) {
-      this.logger.error(
-        {
-          event: WALLET_REGISTRY_ALERT_EVENTS.addressMismatch,
-          severity: "error",
-          job,
-          trace_id: traceId,
-          suppressed: summary.addressMismatches.length - announced.length,
-        },
-        "further wallet registration address mismatches in this run were not listed individually",
-      );
-    }
 
     for (const alert of evaluateWalletRegistryRun(
       { newUnmatchedEvents: summary.newUnmatchedEvents },
