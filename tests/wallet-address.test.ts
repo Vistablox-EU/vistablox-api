@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
+import { isAddress } from "viem";
 
 import {
   canonicalWalletAddress,
@@ -40,6 +41,17 @@ describe("canonicalWalletAddress", () => {
       const once = canonicalWalletAddress(vector);
       expect(canonicalWalletAddress(once)).toBe(once);
     }
+  });
+
+  it("drops the EIP-55 checksum: a mistyped checksummed address becomes one viem accepts", () => {
+    // Same address as the first vector with its last hex digit changed, so the
+    // casing no longer matches the checksum. viem's strict check refuses it as
+    // typed (the only typo guard a typed transfer recipient had before this
+    // form) and accepts it once lowercased, because lowercase carries no
+    // checksum to fail.
+    const mistyped = "0x71C7656EC7ab88b098defB751B7401B5f6d8976E";
+    expect(isAddress(mistyped, { strict: true })).toBe(false);
+    expect(isAddress(canonicalWalletAddress(mistyped), { strict: true })).toBe(true);
   });
 
   it("does not validate: an 0X prefix is lowercased, which is why the edge regex runs first", () => {

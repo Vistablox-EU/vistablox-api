@@ -1,6 +1,7 @@
 import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
+import { isAddress } from "viem";
 
 import { createWalletRouter } from "../src/modules/wallet/api/wallet.router.js";
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
@@ -386,8 +387,19 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
     });
   });
 
-  it("canonicalises a mixed-case recipient before the chain reader and the response see it", async () => {
-    const mixedCaseRecipient = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
+  // The second row is the EIP-55 spelling above with its last hex digit
+  // mistyped, so its checksum is wrong. Lowercasing discards the casing that
+  // carries the checksum, so such a recipient is accepted and forwarded: the
+  // edge does not verify EIP-55. Before the canonical form this recipient
+  // reached viem as typed, and viem rejected it with InvalidAddressError (a
+  // 500 at chain-call time), which was the only typo guard a typed recipient
+  // had. Enforcing the checksum at the edge is a decision for the founder, not
+  // something this test changes: see "founder decisions" in the pull request.
+  it.each([
+    ["a valid EIP-55 recipient", "0x71C7656EC7ab88b098defB751B7401B5f6d8976F", true],
+    ["a recipient whose EIP-55 checksum is wrong", "0x71C7656EC7ab88b098defB751B7401B5f6d8976E", false],
+  ])("canonicalises %s before the chain reader and the response see it", async (_label, mixedCaseRecipient, checksumIsValid) => {
+    expect(isAddress(mixedCaseRecipient, { strict: true })).toBe(checksumIsValid);
     const isHolderAuthorized = vi.fn().mockResolvedValue(true);
     const buildTransferRequest = vi.fn().mockReturnValue({
       chainId: 84532,

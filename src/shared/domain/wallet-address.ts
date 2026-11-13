@@ -10,6 +10,11 @@ import { getAddress, isAddress } from "viem";
 // This function does not validate. "0X..." becomes "0x...", so the shape check
 // (the wallet.schemas.ts regex, which runs first and is case-sensitive about
 // the prefix) must stay in front of it wherever input comes from a client.
+//
+// It also discards the EIP-55 checksum, which lives in the letter case. A
+// mixed-case address with a wrong checksum is rejected by viem as typed and
+// accepted once lowercased, so nothing downstream detects a typo in a
+// checksummed address any more.
 export function canonicalWalletAddress(value: string): string {
   return value.trim().toLowerCase();
 }

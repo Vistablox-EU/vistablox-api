@@ -8,6 +8,12 @@ import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-
 // cases them, but a replay must not depend on that having happened). The
 // canonical comparison has to return the stored row for such a row rather
 // than treat the canonical retry as a different address.
+//
+// The transaction double answers the queries of both shapes registerWallet has
+// had: the original (findUnique, then a claim lookup) and the claim-lifecycle
+// one (a row lock and an owner lookup through $queryRaw, which resolve to no
+// rows here). This test is about the replay, which returns before anything is
+// written in either shape, so it does not depend on which one is in force.
 describe("PrismaWalletRepository.registerWallet against a legacy mixed-case row", () => {
   it("returns the stored row for a retry in canonical form instead of reporting a mismatch", async () => {
     const legacyRow = {
@@ -20,7 +26,8 @@ describe("PrismaWalletRepository.registerWallet against a legacy mixed-case row"
     };
     const transaction = {
       walletRegistration: { findUnique: vi.fn().mockResolvedValue(legacyRow), create: vi.fn() },
-      $queryRaw: vi.fn(),
+      $queryRaw: vi.fn().mockResolvedValue([]),
+      $executeRaw: vi.fn(),
       auditLog: { create: vi.fn() },
     };
     const database = {
@@ -37,6 +44,6 @@ describe("PrismaWalletRepository.registerWallet against a legacy mixed-case row"
     expect(result).toBe(legacyRow);
     expect(transaction.walletRegistration.create).not.toHaveBeenCalled();
     expect(transaction.auditLog.create).not.toHaveBeenCalled();
-    expect(transaction.$queryRaw).not.toHaveBeenCalled();
+    expect(transaction.$executeRaw).not.toHaveBeenCalled();
   });
 });

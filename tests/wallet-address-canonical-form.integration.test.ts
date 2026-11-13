@@ -17,6 +17,17 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 //
 // Every address here is random per run and every row is removed again, so the
 // suite can run next to the others against one database.
+//
+// These tests do not assume which unique index guards the address. Today it is
+// the plain index wallet_registrations_wallet_address_key, which makes a
+// pending claim exclusive too. Once claims are confirmed-only
+// (20261113150200_wallet_claims_confirmed_address_uniqueness) it is a partial
+// index on lower(wallet_address) over confirmed rows, and any number of
+// accounts may hold a pending claim on one address. What holds in both states,
+// and is asserted here: every stored spelling is the canonical one, no spelling
+// is a different address, and at most one account ends up confirmed on an
+// address. Assertions that only hold while pending claims are exclusive are
+// gated on the plain index existing.
 describe.skipIf(databaseUrl === undefined)("wallet address canonical form (PostgreSQL integration)", () => {
   const suffix = randomUUID().replace(/-/g, "");
   const pool = new Pool({ connectionString: databaseUrl });
@@ -45,19 +56,39 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form (Postg
   const register = (accountId: string, walletAddress: string, commitment = `commitment_${accountId}`) =>
     repository.registerWallet({ accountId, walletAddress, registrationCommitment: commitment, requestedAt });
 
-  const rowsForAddress = async (address: string) =>
+  const rowsOf = async (address: string) =>
     (
-      await pool.query<{ account_id: string }>(
-        'SELECT "account_id" FROM "settlement"."wallet_registrations" WHERE lower("wallet_address") = lower($1)',
+      await pool.query<{ account_id: string; wallet_address: string; registered_at: Date | null }>(
+        `SELECT "account_id", "wallet_address", "registered_at" FROM "settlement"."wallet_registrations"
+         WHERE lower("wallet_address") = lower($1) ORDER BY "account_id"`,
         [address],
       )
     ).rows;
+  const rowsForAddress = async (address: string) =>
+    (await rowsOf(address)).map((row) => ({ account_id: row.account_id }));
 
+  // Confirming is setting registered_at and nothing else: the chain evidence
+  // columns are not what this suite is about.
+  const confirmedAt = new Date("2026-11-13T10:05:00.000Z");
   const confirm = (accountId: string) =>
-    database.walletRegistration.update({
-      where: { accountId },
-      data: { registeredAt: new Date("2026-11-13T10:05:00.000Z"), registrationTxHash: `0x${randomBytes(32).toString("hex")}` },
-    });
+    database.walletRegistration.update({ where: { accountId }, data: { registeredAt: confirmedAt } });
+  // The same step as a raw statement, so a race can read the SQLSTATE of a loser.
+  const confirmRaw = (accountId: string) =>
+    pool.query('UPDATE "settlement"."wallet_registrations" SET "registered_at" = $2 WHERE "account_id" = $1', [
+      accountId,
+      confirmedAt,
+    ]);
+
+  // True while the plain unique index on wallet_address exists, that is, while
+  // a pending claim excludes every other account.
+  const pendingClaimsAreExclusive = async () =>
+    (
+      await pool.query(
+        `SELECT 1 FROM pg_indexes
+         WHERE schemaname = 'settlement' AND tablename = 'wallet_registrations'
+           AND indexdef ~ 'UNIQUE.*\\(wallet_address\\)$'`,
+      )
+    ).rowCount === 1;
 
   async function cleanUp(ids: string[]) {
     await database.auditLog.deleteMany({ where: { resourceId: { in: ids } } });
@@ -172,9 +203,9 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form (Postg
       expect(await rowsForAddress(canonical)).toEqual([{ account_id: holder }]);
     });
 
-    it("leaves exactly one row per address when accounts race with case variants of it", async () => {
+    it("stores one spelling and lets one account confirm when accounts race with case variants of an address", async () => {
       const racers = await Promise.all(Array.from({ length: 6 }, () => createAccount()));
-      const outcomes: string[] = [];
+      const exclusive = await pendingClaimsAreExclusive();
 
       for (let round = 0; round < 20; round += 1) {
         const canonical = randomAddress();
@@ -187,32 +218,50 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form (Postg
           `0x${canonical.slice(2).toUpperCase()}`,
         ];
         const results = await Promise.allSettled(racers.map((accountId, index) => register(accountId, spellings[index]!)));
+        const winners = racers.filter((_, index) => results[index]!.status === "fulfilled");
 
-        expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+        expect(winners.length).toBeGreaterThanOrEqual(1);
+        // Losers exist only while a pending claim excludes other accounts:
+        // the pre-check saw the winner (address_claimed) or both reached the
+        // insert and the unique index refused the second, which surfaces as a
+        // Prisma P2002 until that race is given a clean answer (issue #154).
+        if (exclusive) expect(winners).toHaveLength(1);
         for (const result of results) {
           if (result.status === "fulfilled") continue;
-          // Losers: the pre-check saw the winner (address_claimed) or both
-          // reached the insert and the unique index refused the second, which
-          // surfaces as a Prisma P2002 until that race is given a clean answer
-          // (issue #154).
           const reason = result.reason as { code?: string; reason?: string };
-          outcomes.push(reason.code ?? reason.reason ?? "unknown");
           expect(reason instanceof WalletAddressConflictError ? reason.reason : reason.code).toMatch(
             /^(address_claimed|P2002)$/,
           );
         }
-        expect(await rowsForAddress(canonical)).toHaveLength(1);
+
+        // One row per successful registration, and every one of them holds the
+        // canonical spelling, whichever spelling its request used.
+        const byAccount = (left: { account_id: string }, right: { account_id: string }) =>
+          left.account_id < right.account_id ? -1 : 1;
+        expect([...(await rowsOf(canonical))].sort(byAccount)).toEqual(
+          winners.map((accountId) => ({ account_id: accountId, wallet_address: canonical, registered_at: null })).sort(byAccount),
+        );
+
+        // Whatever the pending model, the address binds to one account only:
+        // confirm every row at once; the database lets exactly one through
+        // and refuses the rest with a unique violation.
+        const confirmations = await Promise.allSettled(winners.map(confirmRaw));
+        for (const confirmation of confirmations) {
+          if (confirmation.status === "fulfilled") continue;
+          expect(confirmation.reason).toMatchObject({ code: "23505" });
+        }
+        expect((await rowsOf(canonical)).filter((row) => row.registered_at !== null)).toHaveLength(1);
         await cleanUp(racers);
       }
-      expect(outcomes.length).toBe(20 * 5);
     }, 60_000);
   });
 
   describe("database", () => {
-    const insert = (accountId: string, address: string) =>
+    const insert = (accountId: string, address: string, options: { confirmed?: boolean } = {}) =>
       pool.query(
-        'INSERT INTO "settlement"."wallet_registrations" ("account_id", "wallet_address", "registration_commitment") VALUES ($1, $2, $3)',
-        [accountId, address, `commitment_${accountId}`],
+        `INSERT INTO "settlement"."wallet_registrations" ("account_id", "wallet_address", "registration_commitment", "registered_at")
+         VALUES ($1, $2, $3, $4)`,
+        [accountId, address, `commitment_${accountId}`, options.confirmed === true ? confirmedAt : null],
       );
 
     it("refuses a mixed-case INSERT and UPDATE, naming the lowercase check", async () => {
@@ -234,16 +283,17 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form (Postg
       ).rejects.toMatchObject({ code: "23514", constraint: "wallet_registrations_wallet_address_lowercase_check" });
     });
 
-    it("refuses a second account holding the same lowercase address", async () => {
+    it("refuses a second confirmed account holding the same lowercase address", async () => {
       const first = await createAccount();
       const second = await createAccount();
       const canonical = randomAddress();
-      await insert(first, canonical);
-      await confirm(first);
+      await insert(first, canonical, { confirmed: true });
 
-      // The code, not the index name: the index that enforces this is
-      // replaced when claims become confirmed-only.
-      await expect(insert(second, canonical)).rejects.toMatchObject({ code: "23505" });
+      // Both rows are confirmed because a confirmed pair is refused by the
+      // plain unique index and by the confirmed-only one alike; the code, not
+      // the index name, is asserted for the same reason.
+      await expect(insert(second, canonical, { confirmed: true })).rejects.toMatchObject({ code: "23505" });
+      expect(await rowsOf(canonical)).toEqual([{ account_id: first, wallet_address: canonical, registered_at: confirmedAt }]);
     });
 
     it("has the check validated, not merely declared", async () => {

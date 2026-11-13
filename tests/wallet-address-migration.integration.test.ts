@@ -21,6 +21,16 @@ const databaseUrl = process.env.TEST_DATABASE_URL;
 // replaced by the copy's. A SAVEPOINT around each attempted migration lets one
 // transaction observe a refusal and still read the rows afterwards, the same
 // way money-ledger-integrity.integration.test.ts does it.
+//
+// Which unique index guards wallet_address is part of each case, so the copy
+// is given exactly the one the case names instead of inheriting whatever the
+// test database has today (CREATE TABLE ... LIKE copies indexes). "plain" is
+// the index of the initial schema, which is what the database holds when this
+// migration runs, because its directory sorts before the claim-lifecycle one.
+// "confirmed-only" is the index that migration leaves behind: unique on
+// lower(wallet_address) over confirmed rows alone, so pending claims may
+// repeat. The suite therefore passes whether or not the claim-lifecycle
+// migration has been applied to the test database.
 
 const migrationPath = fileURLToPath(
   new URL("../prisma/migrations/20261113150100_wallet_address_canonical_form/migration.sql", import.meta.url),
@@ -52,8 +62,10 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
     notices: string[];
   }
 
+  type Uniqueness = "plain" | "confirmed-only";
+
   // One rolled-back transaction per case, with its own scratch schema.
-  async function withScratchTable(body: (scratch: Scratch) => Promise<void>): Promise<void> {
+  async function withScratchTable(uniqueness: Uniqueness, body: (scratch: Scratch) => Promise<void>): Promise<void> {
     const client = await pool.connect();
     const schema = `wallet_mig_${randomUUID().replace(/-/g, "")}`;
     const notices: string[] = [];
@@ -66,7 +78,30 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
       );
       // The copy starts in the state before the migration.
       await client.query(`ALTER TABLE "${schema}"."wallet_registrations" DROP CONSTRAINT IF EXISTS "${CHECK_NAME}"`);
-      await body({ client, table: `"${schema}"."wallet_registrations"`, schema, notices });
+      const table = `"${schema}"."wallet_registrations"`;
+      // Whatever unique index on the address the live table has, the copy does
+      // not keep it; the case's own index is created below.
+      const copied = await client.query<{ indexname: string }>(
+        `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND indexdef ~ 'UNIQUE' AND indexdef ~ 'wallet_address'`,
+        [schema],
+      );
+      for (const { indexname } of copied.rows) await client.query(`DROP INDEX "${schema}"."${indexname}"`);
+      await client.query(
+        uniqueness === "plain"
+          ? `CREATE UNIQUE INDEX wallet_address_key ON ${table} (wallet_address)`
+          : `CREATE UNIQUE INDEX confirmed_address_key ON ${table} (lower(wallet_address)) WHERE registered_at IS NOT NULL`,
+      );
+      // Guards the setup itself: a case that silently ran against another
+      // index would pass or fail for the wrong reason.
+      const indexes = await client.query<{ indexdef: string }>(
+        `SELECT indexdef FROM pg_indexes WHERE schemaname = $1 AND indexdef ~ 'UNIQUE' AND indexdef ~ 'wallet_address'`,
+        [schema],
+      );
+      expect(indexes.rows).toHaveLength(1);
+      expect(indexes.rows[0]!.indexdef).toMatch(
+        uniqueness === "plain" ? /\(wallet_address\)$/ : /\(lower\(wallet_address\)\) WHERE \(registered_at IS NOT NULL\)$/,
+      );
+      await body({ client, table, schema, notices });
     } finally {
       await client.query("ROLLBACK");
       client.release();
@@ -118,7 +153,7 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
   const lowerAlready = "0x1111111111111111111111111111111111111111";
 
   it("lower-cases mixed-case rows, leaves the others untouched, and adds the check", async () => {
-    await withScratchTable(async (scratch) => {
+    await withScratchTable("plain", async (scratch) => {
       await insertRow(scratch, "acct_a", mixed);
       await insertRow(scratch, "acct_b", lowerAlready);
       await insertRow(scratch, "acct_c", upper);
@@ -140,7 +175,7 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
   });
 
   it("is a no-op the second time it is executed", async () => {
-    await withScratchTable(async (scratch) => {
+    await withScratchTable("plain", async (scratch) => {
       await insertRow(scratch, "acct_a", mixed);
       await insertRow(scratch, "acct_b", lowerAlready);
       await runMigration(scratch);
@@ -161,14 +196,14 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
   });
 
   it("works on an empty table", async () => {
-    await withScratchTable(async (scratch) => {
+    await withScratchTable("plain", async (scratch) => {
       await runMigration(scratch);
       expect(await checkExists(scratch)).toBe(true);
     });
   });
 
   it("refuses a case collision, names it without account ids, and changes nothing", async () => {
-    await withScratchTable(async (scratch) => {
+    await withScratchTable("plain", async (scratch) => {
       const collidingUpper = "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB";
       const collidingMixed = "0xbbbbBBBBbbbbBBBBbbbbBBBBbbbbBBBBbbbbBBBB";
       await insertRow(scratch, "acct_secret_confirmed", collidingUpper, { registered: true });
@@ -198,7 +233,7 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
   });
 
   it("counts every colliding address and lists at most twenty", async () => {
-    await withScratchTable(async (scratch) => {
+    await withScratchTable("plain", async (scratch) => {
       // 22 colliding pairs; every body has hex letters, so upper and lower differ.
       const body = (index: number) => `a${index.toString().padStart(2, "0")}${"b".repeat(37)}`;
       for (let index = 0; index < 22; index += 1) {
@@ -223,20 +258,10 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
   });
 
   it("does not refuse once pending duplicates are legal (confirmed-only uniqueness)", async () => {
-    await withScratchTable(async (scratch) => {
-      // The state after the claim-lifecycle change: no plain unique index on
-      // wallet_address, one unique index on lower(wallet_address) over
-      // confirmed rows only.
-      const plainIndex = await scratch.client.query<{ indexname: string }>(
-        `SELECT indexname FROM pg_indexes WHERE schemaname = $1 AND indexdef ~ 'UNIQUE.*\\(wallet_address\\)$'`,
-        [scratch.schema],
-      );
-      expect(plainIndex.rows).toHaveLength(1);
-      await scratch.client.query(`DROP INDEX "${scratch.schema}"."${plainIndex.rows[0]!.indexname}"`);
-      await scratch.client.query(
-        `CREATE UNIQUE INDEX confirmed_address_key ON ${scratch.table} (lower(wallet_address)) WHERE registered_at IS NOT NULL`,
-      );
-
+    // The state after the claim-lifecycle change: no plain unique index on
+    // wallet_address, one unique index on lower(wallet_address) over
+    // confirmed rows only.
+    await withScratchTable("confirmed-only", async (scratch) => {
       const body = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
       await insertRow(scratch, "acct_pending_a", `0x${body.toUpperCase()}`);
       await insertRow(scratch, "acct_pending_b", `0x${body}`);
@@ -253,8 +278,21 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form migrat
     });
   });
 
+  it("rewrites mixed-case rows the same way under confirmed-only uniqueness", async () => {
+    await withScratchTable("confirmed-only", async (scratch) => {
+      await insertRow(scratch, "acct_a", mixed);
+      await insertRow(scratch, "acct_b", lowerAlready, { registered: true });
+
+      await runMigration(scratch);
+
+      expect(await addresses(scratch)).toEqual({ acct_a: mixed.toLowerCase(), acct_b: lowerAlready });
+      expect(scratch.notices).toContain("wallet_registrations: 1 wallet address(es) rewritten to lower case");
+      expect(await checkExists(scratch)).toBe(true);
+    });
+  });
+
   it("leaves a check that rejects a mixed-case value afterwards", async () => {
-    await withScratchTable(async (scratch) => {
+    await withScratchTable("plain", async (scratch) => {
       await insertRow(scratch, "acct_a", lowerAlready);
       await runMigration(scratch);
 
