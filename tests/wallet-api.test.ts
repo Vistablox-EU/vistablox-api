@@ -281,6 +281,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
   const toWalletAddress = "0x00000000219ab540356cbb839cbe05303d7705fa";
 
   function buildTransferApp(options?: {
+    transferService?: RequestWalletTransferService;
     chainReader?: ReturnType<typeof buildTransferChainReader>;
   }) {
     const repository: WalletRepository = {
@@ -296,7 +297,9 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       listTokenHoldings: vi.fn().mockResolvedValue([{ pivId: "piv_01", tokenId: "7" }]),
     };
     const chainReader = options?.chainReader ?? buildTransferChainReader();
-    const transferService = new RequestWalletTransferService(repository, holdingsReader, chainReader);
+    const transferService =
+      options?.transferService ??
+      new RequestWalletTransferService(repository, holdingsReader, chainReader);
 
     const app = express();
     const authenticated: RequestHandler = (_request, response, next) => {
