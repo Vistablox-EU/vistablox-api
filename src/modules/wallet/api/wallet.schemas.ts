@@ -63,6 +63,19 @@ export const requestWalletTransferResponseSchema = z.object({
       data: z.string().min(1),
       value: z.string().min(1),
     }),
+    // Advisory snapshot the response was prepared from: every read and the
+    // simulation come from this one block. The literals are deliberate: a
+    // 200 whose preview says "no" must never be emitted, so such a value
+    // fails here (500) instead of reaching the client. The contract stays the
+    // final authority; state can change after this block.
+    preflight: z.object({
+      block_number: z.string().regex(/^[0-9]+$/),
+      block_hash: z.string().regex(/^0x[0-9a-f]{64}$/),
+      sender_balance: z.string().regex(/^[0-9]+$/),
+      recipient_authorized: z.literal(true),
+      token_paused: z.literal(false),
+      simulation: z.literal("passed"),
+    }),
   }),
 });
 
