@@ -8,7 +8,7 @@ import { ConfirmWalletRegistrationsService } from "../src/modules/settlement/app
 import { RunWalletRegistryWatcherService } from "../src/modules/settlement/application/run-wallet-registry-watcher.service.js";
 import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import { PrismaSettlementRepository } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
-import { PrismaWalletRegistryHealthRepository } from "../src/modules/settlement/repository/prisma-wallet-registry-health.repository.js";
+import type { WalletRegistryHeartbeat } from "../src/modules/settlement/repository/wallet-registry-health.repository.js";
 import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -19,9 +19,13 @@ const MISMATCH_ACTION = "settlement.wallet_registration_address_mismatch";
 // reporter against PostgreSQL to show that the signal is still announced, once,
 // when a later event in the same run throws, and not again on the retry.
 //
-// The cursor is the one piece of state shared with other test files (one
-// platform.settings row), so it is held in memory here; everything else is the
-// real repository on rows only this file creates.
+// Two pieces of state are shared with other test files, because each is one
+// platform.settings row in a database they all use in parallel: the watcher's
+// cursor, and the watcher heartbeat (whose only owner among the integration
+// tests is wallet-registry-health.integration.test.ts, which deletes it and
+// asserts on it; tests/wallet-registry-heartbeat-isolation.test.ts keeps it so).
+// Both are held in memory here. Everything else is the real repository on rows
+// only this file creates.
 describe.skipIf(databaseUrl === undefined)("address mismatch announcement against PostgreSQL", () => {
   const suffix = randomUUID().replace(/-/g, "");
   const authPool = new Pool({ connectionString: databaseUrl });
@@ -101,12 +105,13 @@ describe.skipIf(databaseUrl === undefined)("address mismatch announcement agains
       },
     };
     const logged: Array<{ level: string; fields: Record<string, unknown> }> = [];
+    const heartbeats: WalletRegistryHeartbeat[] = [];
     const at = (level: string) => (fields: Record<string, unknown>) => void logged.push({ level, fields });
     const metrics = new WorkerMetrics();
     const reporter = new WalletRegistryAlertReporter({
       logger: { info: at("info"), warn: at("warn"), error: at("error") } as never,
       metrics,
-      heartbeats: new PrismaWalletRegistryHealthRepository(database),
+      heartbeats: { recordWatcherHeartbeat: async (input) => void heartbeats.push(input) },
       thresholds: {
         watcherStaleAfterMs: 600_000,
         cursorLagAlertBlocks: 900n,
@@ -129,6 +134,9 @@ describe.skipIf(databaseUrl === undefined)("address mismatch announcement agains
 
     await expect(runner.execute()).rejects.toThrow("database blip");
 
+    // A run that throws is not a completed run: no heartbeat for it.
+    expect(heartbeats).toHaveLength(0);
+
     expect(await auditRowsFor(accountA)).toBe(1);
     expect(announcedFor(accountA)).toHaveLength(1);
     expect(announcedFor(accountA)[0]).toMatchObject({ level: "error", fields: { severity: "error", trace_id: "req_integration" } });
@@ -136,6 +144,9 @@ describe.skipIf(databaseUrl === undefined)("address mismatch announcement agains
     // The retry reads both events again: the claim exists, so A is a repeat; B confirms.
     await runner.execute();
 
+    // The retry completed, and its heartbeat went to the writer above, not to the shared row.
+    expect(heartbeats).toHaveLength(1);
+    expect(heartbeats[0]).toMatchObject({ cursorBlock: 17n, safeHeadBlock: 17n, eventsFound: 2 });
     expect(await auditRowsFor(accountA)).toBe(1);
     expect(announcedFor(accountA)).toHaveLength(1);
     const confirmed = await database.walletRegistration.findUnique({ where: { accountId: accountB } });
