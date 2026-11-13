@@ -42,20 +42,36 @@ export function maskHexIdentifier(value: unknown): string {
   return `${normalised.slice(0, 6)}...${normalised.slice(-4)}`;
 }
 
+// A wallet address is 40 hex digits and a commitment (or a transaction hash)
+// 64; shorter 0x values (a method selector, a block number) are not identifiers.
+const LONG_HEX_VALUE = /0x[0-9a-fA-F]{40,}/g;
+
+/**
+ * Replaces every 0x-prefixed run of 40 or more hex digits in free text with its
+ * masked form (see maskHexIdentifier). For error text, which this module cannot
+ * vouch for: a database unique-violation message or an RPC request body can
+ * carry a wallet address or commitment verbatim.
+ */
+export function maskLongHexValues(text: string): string {
+  return text.replace(LONG_HEX_VALUE, (match) => maskHexIdentifier(match));
+}
+
 /**
  * A copy of `error` that is safe to log, to rethrow into pg-boss and to
- * store: the name is kept, the message and stack have their URLs stripped,
- * and nothing else is carried over. In particular there is no `cause` and no
- * own property, because pg-boss serialises a thrown error with serialize-error
- * and a viem error's url, headers and body properties would otherwise end up
- * in the job's stored output.
+ * store: the name is kept, the message and stack have their URLs stripped and
+ * their long hex values masked, and nothing else is carried over. In
+ * particular there is no `cause` and no own property, because pg-boss
+ * serialises a thrown error with serialize-error and a viem error's url,
+ * headers and body properties would otherwise end up in the job's stored
+ * output.
  */
 export function toSanitizedError(error: unknown): Error {
+  const clean = (text: string) => maskLongHexValues(stripUrls(text));
   if (!(error instanceof Error)) {
-    return new Error(stripUrls(typeof error === "string" ? error : "non-error value thrown"));
+    return new Error(clean(typeof error === "string" ? error : "non-error value thrown"));
   }
-  const sanitized = new Error(stripUrls(error.message));
+  const sanitized = new Error(clean(error.message));
   sanitized.name = error.name;
-  if (typeof error.stack === "string") sanitized.stack = stripUrls(error.stack);
+  if (typeof error.stack === "string") sanitized.stack = clean(error.stack);
   return sanitized;
 }

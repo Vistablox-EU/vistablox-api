@@ -38,8 +38,15 @@ import { RunOperatingDistributionSweepService } from "./modules/rental/applicati
 import { PrismaOperatingDistributionRepository } from "./modules/rental/repository/prisma-operating-distribution.repository.js";
 import { OpenIpoEscrowCampaignService } from "./modules/settlement/application/open-ipo-escrow-campaign.service.js";
 import { FinalizeIpoEscrowCampaignsService } from "./modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
-import { ConfirmWalletRegistrationsService } from "./modules/settlement/application/confirm-wallet-registrations.service.js";
+import {
+  ConfirmWalletRegistrationsService,
+  WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS,
+} from "./modules/settlement/application/confirm-wallet-registrations.service.js";
+import { CheckWalletRegistryHealthService } from "./modules/settlement/application/check-wallet-registry-health.service.js";
+import { RunWalletRegistryWatcherService } from "./modules/settlement/application/run-wallet-registry-watcher.service.js";
+import { WalletRegistryAlertReporter } from "./modules/settlement/application/wallet-registry-alert-reporter.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
+import { PrismaWalletRegistryHealthRepository } from "./modules/settlement/repository/prisma-wallet-registry-health.repository.js";
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
 import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { SCHEDULED_JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
@@ -261,6 +268,60 @@ const confirmWalletRegistrations =
 
 const RETRY_OPTIONS = SCHEDULED_JOB_RETRY_OPTIONS;
 
+// The wallet-registry watcher's alerting (docs/wallet-registration-operations.md).
+// Gated on the registry address alone, not on chainClients, so that "the
+// registry address is set but the CHAIN_* settings are not" -- claims are
+// created and none can ever confirm -- is something the health check can see
+// and report instead of nothing running at all.
+const walletRegistryJobs = {
+  watcher: "settlement.confirm_wallet_registrations",
+  health: "settlement.check_wallet_registry_health",
+} as const;
+const walletRegistryThresholds = {
+  watcherStaleAfterMs: environment.WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES * 60_000,
+  cursorLagAlertBlocks: BigInt(environment.WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS),
+  cursorAheadToleranceBlocks: WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS,
+  pendingOverdueAlertCount: environment.WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT,
+  unmatchedEventsAlertCount: environment.WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT,
+};
+const walletRegistryHealthRepository =
+  environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS === undefined
+    ? undefined
+    : new PrismaWalletRegistryHealthRepository(database);
+const walletRegistryReporter =
+  walletRegistryHealthRepository === undefined
+    ? undefined
+    : new WalletRegistryAlertReporter({
+        logger,
+        metrics,
+        heartbeats: walletRegistryHealthRepository,
+        thresholds: walletRegistryThresholds,
+        jobs: walletRegistryJobs,
+      });
+const runWalletRegistryWatcher =
+  confirmWalletRegistrations === undefined || settlementRepository === undefined || walletRegistryReporter === undefined
+    ? undefined
+    : new RunWalletRegistryWatcherService(
+        confirmWalletRegistrations,
+        settlementRepository,
+        walletRegistryReporter,
+        () => `req_${ulid()}`,
+      );
+const checkWalletRegistryHealth =
+  walletRegistryHealthRepository === undefined || walletRegistryReporter === undefined
+    ? undefined
+    : new CheckWalletRegistryHealthService(
+        walletRegistryHealthRepository,
+        walletRegistryReporter,
+        {
+          thresholds: walletRegistryThresholds,
+          watcherConfigured: confirmWalletRegistrations !== undefined,
+          workerStartedAt: new Date(),
+          pendingOverdueAfterMs: environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000,
+        },
+        () => `req_${ulid()}`,
+      );
+
 async function runJob(name: string, run: (traceId: string) => Promise<JobRunSummary>): Promise<void> {
   const traceId = `req_${ulid()}`;
   try {
@@ -308,6 +369,11 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
 }
 if (confirmWalletRegistrations !== undefined) {
   await ensureJobQueue(boss, "settlement.confirm_wallet_registrations", "scheduled");
+}
+// Exists wherever the registry address is set, even when the watcher above
+// cannot run: that is the case it exists to report.
+if (checkWalletRegistryHealth !== undefined) {
+  await ensureJobQueue(boss, "settlement.check_wallet_registry_health", "scheduled");
 }
 // Reversal (undoing the KYC microservice split): identity's own scheduled
 // jobs, back in this worker alongside everything else -- these used to
@@ -379,6 +445,16 @@ if (confirmWalletRegistrations !== undefined) {
   // finalization, which only needs to happen at deadline-passage
   // granularity and nobody is watching in real time.
   await boss.schedule("settlement.confirm_wallet_registrations", "* * * * *", null, {
+    tz: "UTC",
+    ...RETRY_OPTIONS,
+  });
+}
+if (checkWalletRegistryHealth !== undefined) {
+  // Every 5 minutes: it reads only the database, so it is cheap, and the stale
+  // threshold (10 minutes by default) is a multiple of it. Its
+  // wallet_registry.health_checked line is what an "absent for N minutes" rule
+  // watches.
+  await boss.schedule("settlement.check_wallet_registry_health", "*/5 * * * *", null, {
     tz: "UTC",
     ...RETRY_OPTIONS,
   });
@@ -489,61 +565,20 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
     }
   });
 }
-if (confirmWalletRegistrations !== undefined) {
-  // Same reasoning as finalizeIpoEscrowCampaigns above: its own
-  // block-range/match-count summary is more useful logged directly than
-  // squeezed into JobRunSummary's shape.
+if (runWalletRegistryWatcher !== undefined) {
+  // Its block-range/match-count summary is logged by the reporter rather than
+  // squeezed into JobRunSummary's shape (same reasoning as
+  // finalizeIpoEscrowCampaigns above). The reporter also owns the counters,
+  // the heartbeat and the failure log, and rethrows a failed run with its URLs
+  // stripped: logging the raw error here would put the RPC URL, whose path
+  // holds the provider's key, into the log and into pg-boss's job output.
   await boss.work("settlement.confirm_wallet_registrations", async () => {
-    const traceId = `req_${ulid()}`;
-    try {
-      metrics.increment("vistablox_worker_wallet_registration_runs_total");
-      const summary = await confirmWalletRegistrations.execute();
-      metrics.set("vistablox_worker_wallet_registration_pending_overdue", summary.pendingRegistrationsOverdue);
-      metrics.increment(
-        "vistablox_worker_wallet_registration_confirmed_total",
-        summary.registrationsConfirmed,
-      );
-      metrics.increment(
-        "vistablox_worker_wallet_registration_unmatched_events_total",
-        summary.unmatchedEvents,
-      );
-      metrics.increment(
-        "vistablox_worker_wallet_registration_address_mismatches_total",
-        summary.addressMismatches.length,
-      );
-      logger.info(
-        { trace_id: traceId, job: "settlement.confirm_wallet_registrations", ...summary },
-        "case timer job completed",
-      );
-      if (summary.pendingRegistrationsOverdue > 0) {
-        logger.warn(
-          {
-            trace_id: traceId,
-            job: "settlement.confirm_wallet_registrations",
-            pending_registrations_overdue: summary.pendingRegistrationsOverdue,
-            threshold_minutes: summary.pendingWarnAfterMinutes,
-          },
-          "wallet registrations pending beyond approval threshold",
-        );
-      }
-      if (summary.addressMismatches.length > 0) {
-        logger.warn(
-          {
-            trace_id: traceId,
-            job: "settlement.confirm_wallet_registrations",
-            mismatches: summary.addressMismatches,
-          },
-          "wallet registration event address mismatch -- possible spoofed registration attempt",
-        );
-      }
-    } catch (error) {
-      metrics.increment("vistablox_worker_wallet_registration_failures_total");
-      logger.error(
-        { err: error, trace_id: traceId, job: "settlement.confirm_wallet_registrations" },
-        "case timer job failed",
-      );
-      throw error;
-    }
+    await runWalletRegistryWatcher.execute();
+  });
+}
+if (checkWalletRegistryHealth !== undefined) {
+  await boss.work("settlement.check_wallet_registry_health", async () => {
+    await checkWalletRegistryHealth.execute();
   });
 }
 

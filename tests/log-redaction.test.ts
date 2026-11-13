@@ -1,7 +1,7 @@
 import { HttpRequestError } from "viem";
 import { describe, expect, it } from "vitest";
 
-import { maskHexIdentifier, stripUrls, toSanitizedError } from "../src/shared/logging/log-redaction.js";
+import { maskHexIdentifier, maskLongHexValues, stripUrls, toSanitizedError } from "../src/shared/logging/log-redaction.js";
 
 const RPC_SECRET = "SECRETPROVIDERKEY123";
 const RPC_URL = `https://base-sepolia.g.alchemy.com/v2/${RPC_SECRET}`;
@@ -83,6 +83,29 @@ describe("stripUrls", () => {
   });
 });
 
+describe("maskLongHexValues", () => {
+  it("masks a wallet address and a commitment wherever they sit in free text", () => {
+    const text = `duplicate key (wallet_address)=(${ADDRESS}) for commitment ${COMMITMENT}; retry`;
+
+    expect(maskLongHexValues(text)).toBe(
+      "duplicate key (wallet_address)=(0xabcd...ef01) for commitment 0xab12...ab12; retry",
+    );
+  });
+
+  it("leaves short 0x values, such as a selector or a block number, alone", () => {
+    const text = "selector 0xa9059cbb at block 0x1a2b3c";
+    expect(maskLongHexValues(text)).toBe(text);
+  });
+
+  it("leaves text with no 0x value unchanged", () => {
+    expect(maskLongHexValues("connect ECONNREFUSED 10.0.0.1:5432")).toBe("connect ECONNREFUSED 10.0.0.1:5432");
+  });
+
+  it("masks every occurrence", () => {
+    expect(maskLongHexValues(`${ADDRESS} ${ADDRESS}`)).toBe("0xabcd...ef01 0xabcd...ef01");
+  });
+});
+
 describe("toSanitizedError", () => {
   function leakyViemError(): HttpRequestError {
     const error = new HttpRequestError({ url: RPC_URL, body: { method: "eth_getLogs" }, details: "fetch failed" });
@@ -103,6 +126,18 @@ describe("toSanitizedError", () => {
     expect(sanitized.message).not.toContain(RPC_SECRET);
     expect(sanitized.stack).not.toContain(RPC_SECRET);
     expect(sanitized.message).toContain("fetch failed");
+  });
+
+  it("masks a wallet address or commitment that an error message carries, in the message and the stack", () => {
+    const original = new Error(`unique violation on (wallet_address)=(${ADDRESS}) commitment ${COMMITMENT}`);
+
+    const sanitized = toSanitizedError(original);
+
+    for (const text of [sanitized.message, sanitized.stack ?? ""]) {
+      expect(text).not.toMatch(/0x[0-9a-fA-F]{12,}/);
+      expect(text.toLowerCase()).not.toContain(ADDRESS.slice(2).toLowerCase());
+    }
+    expect(sanitized.message).toContain("0xabcd...ef01");
   });
 
   it("carries no cause and no own properties, so serialising it cannot reach the URL", () => {
