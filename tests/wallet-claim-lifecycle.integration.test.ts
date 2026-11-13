@@ -4,6 +4,7 @@ import { Pool } from "pg";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
+import { isUniqueViolation } from "../src/infrastructure/database/unique-violation.js";
 import { PrismaSettlementRepository } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
 import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
 import {
@@ -123,6 +124,28 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
         database.walletRegistration.update({ where: { accountId: accountB }, data: { registeredAt: new Date() } }),
       ).rejects.toMatchObject({ code: "P2002" });
     });
+  });
+
+  it("reports the same violation as a unique violation of the index, from a typed call and from a raw statement", async () => {
+    const address = nextAddress();
+    await database.walletRegistration.create({
+      data: { accountId: accountA, walletAddress: address, registrationCommitment: nextCommitment(), registeredAt: new Date() },
+    });
+    await database.walletRegistration.create({
+      data: { accountId: accountB, walletAddress: address, registrationCommitment: nextCommitment() },
+    });
+
+    const typed = await database.walletRegistration
+      .updateMany({ where: { accountId: accountB }, data: { registeredAt: new Date() } })
+      .catch((error: unknown) => error);
+    const raw = await database
+      .$executeRaw`UPDATE settlement.wallet_registrations SET registered_at = now() WHERE account_id = ${accountB}`
+      .catch((error: unknown) => error);
+
+    expect(isUniqueViolation(typed, "wallet_registrations_confirmed_address_key")).toBe(true);
+    expect(isUniqueViolation(raw, "wallet_registrations_confirmed_address_key")).toBe(true);
+    expect(isUniqueViolation(typed, "wallet_registrations_pkey")).toBe(false);
+    expect(isUniqueViolation(raw, "wallet_registrations_pkey")).toBe(false);
   });
 
   describe("registerWallet", () => {
