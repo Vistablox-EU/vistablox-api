@@ -223,6 +223,11 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `GET` | `/internal/v1/intake-cases/:case_id` | Founder review detail, current revision, evidence, and request history |
 | `GET` | `/internal/v1/intake-cases/:case_id/workflow` | Backend-owned stage-specific workflow projection and readiness actions |
 | `GET` | `/internal/v1/intake-cases/:case_id/history` | Cursor-paginated immutable intake lifecycle history |
+| `GET` | `/internal/v1/intake-cases/:case_id/reversal-preview` | Corrections the case offers now, plus `pending_operation`: the correction currently pausing the case (`null` when none; `correction_in_progress` is true exactly when it is set), with `viewer_can_approve` / `viewer_can_cancel` computed for the calling staff account, so a second approver can find it |
+| `POST` | `/internal/v1/intake-cases/:case_id/commands/{return-to-draft,reopen-pre-offering,reopen-structuring,reopen-final-offering-review}` | Request a correction (`If-Match-Stage`, `If-Match-Workflow-Sequence` and `Idempotency-Key` headers, body `{reason_code, reason}`); the three reopen commands need a second approver and return `pending_approval` |
+| `GET` | `/internal/v1/intake-cases/:case_id/reversal-operations/:operation_id` | One correction operation and its status |
+| `POST` | `/internal/v1/intake-cases/:case_id/reversal-operations/:operation_id/approve` | A second staff member approves and executes a `pending_approval` correction; `403 intake.reversal_self_approval_forbidden` for the requester, `409 intake.reversal_not_pending_approval` when it is not awaiting approval |
+| `POST` | `/internal/v1/intake-cases/:case_id/reversal-operations/:operation_id/cancel` | Call off a `requested` or `pending_approval` correction (requester or any other staff member; optional body `{note}`, 1-500 characters), which frees the case; cancelling again returns `200`, past that point `409 intake.reversal_not_cancellable` |
 | `POST` | `/internal/v1/intake-cases/:case_id/information-requests` | Publish an owner request and start the configured response window |
 | `POST` | `/internal/v1/intake-cases/:case_id/decisions` | Approve with IPO terms or reject a submitted case |
 | `POST` | `/internal/v1/intake-cases/:case_id/close` | Withdraw (any pre-terminal stage) or late-stage reject (`pre_offering_open` only) a case |

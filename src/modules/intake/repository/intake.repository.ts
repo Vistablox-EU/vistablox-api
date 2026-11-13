@@ -310,6 +310,10 @@ export interface IntakeReversalSnapshot {
   } | null;
   legalExecutionCompleted: boolean;
   appraisalCompleted: boolean;
+  // The one correction currently pausing the case (requested, pending approval,
+  // approved or executing), if any. correctionInProgress is true exactly when it
+  // is not null, because both come from the same read.
+  activeOperation: IntakeReversalOperationRecord | null;
   correctionInProgress: boolean;
 }
 
@@ -740,6 +744,10 @@ export interface IntakeRepository {
   }): Promise<IntakeReversalOperationRecord>;
   getReversalOperation?(caseId: string, operationId: string): Promise<IntakeReversalOperationRecord | null>;
   approveReversalOperation?(input: { caseId: string; operationId: string; approverAccountId: string; approvedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
+  // Calls off an operation that has not been approved yet. Returns null when the
+  // operation is not on the case, and the stored record when it was already
+  // cancelled. Throws ReversalNotCancellableError once it is past cancelling.
+  cancelReversalOperation?(input: { caseId: string; operationId: string; cancelledByAccountId: string; note: string | null; cancelledAt: Date; traceId: string }): Promise<IntakeReversalOperationRecord | null>;
   executeReversalOperation?(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null>;
 }
 
@@ -764,5 +772,25 @@ export class CaseReviewConflictError extends Error {
   ) {
     super(`Case cannot ${action} from stage ${currentStage}`);
     this.name = "CaseReviewConflictError";
+  }
+}
+
+// Both are still conflicts (a caller that only knows CaseReviewConflictError
+// treats them as one), but they say why, so the service can answer with the
+// error the client can act on.
+export class ReversalApprovalRefusedError extends CaseReviewConflictError {
+  public constructor(
+    currentStage: string,
+    public readonly reason: "self_approval" | "not_pending_approval",
+  ) {
+    super(currentStage, "approve this reversal");
+    this.name = "ReversalApprovalRefusedError";
+  }
+}
+
+export class ReversalNotCancellableError extends CaseReviewConflictError {
+  public constructor(currentStage: string) {
+    super(currentStage, "cancel this reversal");
+    this.name = "ReversalNotCancellableError";
   }
 }

@@ -8,6 +8,8 @@ import type { SessionResolver } from "../src/modules/auth/application/shared/ses
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import {
   CaseReviewConflictError,
+  ReversalApprovalRefusedError,
+  ReversalNotCancellableError,
   type IntakeReversalOperationRecord,
   type IntakeReversalSnapshot,
   type IntakeRepository,
@@ -27,6 +29,7 @@ function snapshot(overrides: Partial<IntakeReversalSnapshot> = {}): IntakeRevers
     offering: null,
     legalExecutionCompleted: false,
     appraisalCompleted: false,
+    activeOperation: null,
     correctionInProgress: false,
     ...overrides,
   };
@@ -98,6 +101,7 @@ interface BuildOptions {
   create?: ReturnType<typeof vi.fn>;
   execute?: ReturnType<typeof vi.fn>;
   approve?: ReturnType<typeof vi.fn>;
+  cancel?: ReturnType<typeof vi.fn>;
   get?: ReturnType<typeof vi.fn>;
 }
 
@@ -127,6 +131,7 @@ function buildApp(options: BuildOptions = {}) {
     createReversalOperation: options.create ?? vi.fn().mockResolvedValue(operation()),
     getReversalOperation: options.get ?? vi.fn().mockResolvedValue(operation()),
     approveReversalOperation: options.approve ?? vi.fn().mockResolvedValue(operation({ status: "approved", approvedByAccountId: "acct_founder" })),
+    cancelReversalOperation: options.cancel ?? vi.fn().mockResolvedValue(operation({ status: "cancelled", completedAt: null })),
     executeReversalOperation: options.execute ?? vi.fn().mockResolvedValue(operation()),
   };
   // Only the reversal methods are reachable from these routes; the rest of the
@@ -189,6 +194,7 @@ const routes = [
   { name: "POST commands/reopen-structuring", send: (app: App) => withRequestHeaders(request(app).post(`${base}/commands/reopen-structuring`)).send(validBody) },
   { name: "POST commands/reopen-final-offering-review", send: (app: App) => withRequestHeaders(request(app).post(`${base}/commands/reopen-final-offering-review`)).send(validBody) },
   { name: "POST reversal-operations/:id/approve", send: (app: App) => request(app).post(`${base}/reversal-operations/rev_01/approve`) },
+  { name: "POST reversal-operations/:id/cancel", send: (app: App) => request(app).post(`${base}/reversal-operations/rev_01/cancel`) },
   { name: "GET reversal-operations/:id", send: (app: App) => request(app).get(`${base}/reversal-operations/rev_01`) },
 ] as const;
 
@@ -255,6 +261,52 @@ describe("GET /reversal-preview", () => {
       correction_in_progress: false,
       actions: [{ action: "reopen_pre_offering", target_stage: "submitted", requires_second_approval: true, blockers: [] }],
     });
+  });
+
+  it("shows no pending operation when nothing pauses the case", async () => {
+    const { app } = buildApp();
+    const response = await request(app).get(`${base}/reversal-preview`);
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ correction_in_progress: false, pending_operation: null });
+  });
+
+  it("shows the correction pausing the case, judged for the signed-in account", async () => {
+    const pending = (requestedByAccountId: string) =>
+      operation({
+        operationId: "rev_pending",
+        command: "reopen_pre_offering",
+        fromStage: "pre_offering_open",
+        toStage: "submitted",
+        status: "pending_approval",
+        reasonCode: "duplicate_case",
+        reason: "Duplicate of case_99",
+        requestedByAccountId,
+        createdAt: new Date("2026-10-01T08:30:00.000Z"),
+        completedAt: null,
+      });
+    const paused = (requestedByAccountId: string) =>
+      snapshot({ stage: "pre_offering_open", offering: offering(), activeOperation: pending(requestedByAccountId), correctionInProgress: true });
+    const shape = {
+      operation_id: "rev_pending",
+      command: "reopen_pre_offering",
+      command_label: "Reopen review",
+      from_stage: "pre_offering_open",
+      to_stage: "submitted",
+      status: "pending_approval",
+      reason_code: "duplicate_case",
+      reason: "Duplicate of case_99",
+      requested_at: "2026-10-01T08:30:00.000Z",
+    };
+
+    // The signed-in account is acct_founder.
+    const other = await request(buildApp({ snapshot: paused("acct_someone_else") }).app).get(`${base}/reversal-preview`);
+    expect(other.status).toBe(200);
+    expect(other.body.data).toMatchObject({ correction_in_progress: true, available: false, actions: [] });
+    expect(other.body.data.pending_operation).toEqual({ ...shape, requested_by_account_id: "acct_someone_else", viewer_can_approve: true, viewer_can_cancel: true });
+
+    const own = await request(buildApp({ snapshot: paused("acct_founder") }).app).get(`${base}/reversal-preview`);
+    expect(own.status).toBe(200);
+    expect(own.body.data.pending_operation).toEqual({ ...shape, requested_by_account_id: "acct_founder", viewer_can_approve: false, viewer_can_cancel: true });
   });
 
   it("answers 404 for an unknown case", async () => {
@@ -505,6 +557,145 @@ describe("POST /reversal-operations/:operation_id/approve", () => {
       execute: vi.fn().mockResolvedValue(operation({ status: "failed", completedAt: null, failedAt: new Date(), failureCode: "case_changed", failureDetail: "stale" })),
     });
     const response = await request(app).post(`${base}/reversal-operations/rev_01/approve`);
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("intake.reversal_conflict");
+  });
+
+  it("answers 403 with the documented envelope when the requester approves their own request", async () => {
+    const { app, reversal } = buildApp({
+      approve: vi.fn().mockRejectedValue(new ReversalApprovalRefusedError("pre_offering_open", "self_approval")),
+    });
+    const response = await request(app).post(`${base}/reversal-operations/rev_01/approve`).set("x-trace-id", "trace_self");
+    expect(response.status).toBe(403);
+    expect(response.body).toEqual({
+      type: "https://api.vistablox.io/errors/intake.reversal_self_approval_forbidden",
+      code: "intake.reversal_self_approval_forbidden",
+      title: "Approval by the requester not allowed",
+      status: 403,
+      detail: "You requested this correction, so another staff member has to approve it.",
+      trace_id: "trace_self",
+    });
+    expect(reversal.executeReversalOperation).not.toHaveBeenCalled();
+  });
+
+  it("answers 409 with the documented envelope when the operation is not awaiting approval", async () => {
+    const { app, reversal } = buildApp({
+      approve: vi.fn().mockRejectedValue(new ReversalApprovalRefusedError("pre_offering_open", "not_pending_approval")),
+    });
+    const response = await request(app).post(`${base}/reversal-operations/rev_01/approve`).set("x-trace-id", "trace_pending");
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      type: "https://api.vistablox.io/errors/intake.reversal_not_pending_approval",
+      code: "intake.reversal_not_pending_approval",
+      title: "Correction not awaiting approval",
+      status: 409,
+      detail: "This correction is not awaiting approval. Refresh to see its current state.",
+      trace_id: "trace_pending",
+    });
+    expect(reversal.executeReversalOperation).not.toHaveBeenCalled();
+  });
+});
+
+describe("POST /reversal-operations/:operation_id/cancel", () => {
+  const cancelPath = `${base}/reversal-operations/rev_01/cancel`;
+  const cancelled = (overrides: Partial<IntakeReversalOperationRecord> = {}) =>
+    operation({ command: "reopen_pre_offering", fromStage: "pre_offering_open", toStage: "submitted", status: "cancelled", completedAt: null, startedAt: null, ...overrides });
+
+  it("cancels as the signed-in account, with no body at all, and returns the cancelled operation", async () => {
+    const { app, reversal } = buildApp({ cancel: vi.fn().mockResolvedValue(cancelled()) });
+
+    const response = await request(app).post(cancelPath).set("x-trace-id", "trace_cancel");
+
+    expect(response.status).toBe(200);
+    expect(reversal.cancelReversalOperation).toHaveBeenCalledWith({
+      caseId,
+      operationId: "rev_01",
+      cancelledByAccountId: "acct_founder",
+      note: null,
+      cancelledAt: expect.any(Date),
+      traceId: "trace_cancel",
+    });
+    expect(response.body).toEqual({
+      data: {
+        operation_id: "rev_01",
+        case_id: caseId,
+        command: "reopen_pre_offering",
+        from_stage: "pre_offering_open",
+        to_stage: "submitted",
+        status: "cancelled",
+        reason_code: "wrong_case_selected",
+        requested_by_account_id: "acct_founder",
+        approved_by_account_id: null,
+        reversal_of_event_id: "evt_submitted",
+        completed_at: null,
+        failed_at: null,
+        failure_code: null,
+        failure_detail: null,
+      },
+    });
+    expect(reversal.approveReversalOperation).not.toHaveBeenCalled();
+    expect(reversal.executeReversalOperation).not.toHaveBeenCalled();
+  });
+
+  it("trims the note and passes it on", async () => {
+    const { app, reversal } = buildApp({ cancel: vi.fn().mockResolvedValue(cancelled()) });
+    const response = await request(app).post(cancelPath).send({ note: "  Requested against the wrong case  " });
+    expect(response.status).toBe(200);
+    expect(reversal.cancelReversalOperation).toHaveBeenCalledWith(expect.objectContaining({ note: "Requested against the wrong case" }));
+  });
+
+  it("accepts an empty JSON object and a note of exactly 500 characters", async () => {
+    const { app } = buildApp({ cancel: vi.fn().mockResolvedValue(cancelled()) });
+    expect((await request(app).post(cancelPath).send({})).status).toBe(200);
+    expect((await request(app).post(cancelPath).send({ note: "x".repeat(500) })).status).toBe(200);
+  });
+
+  it.each([
+    ["a blank note", { note: "   " }],
+    ["an empty note", { note: "" }],
+    ["an over-long note", { note: "x".repeat(501) }],
+    ["a note that is not a string", { note: 7 }],
+    ["a null note", { note: null }],
+  ])("rejects %s with 422 and field errors, and cancels nothing", async (_name, body) => {
+    const { app, reversal } = buildApp();
+    const response = await request(app).post(cancelPath).send(body);
+    expect(response.status).toBe(422);
+    expect(response.body.code).toBe("validation.invalid_field");
+    expect(response.body.field_errors.length).toBeGreaterThan(0);
+    expectNoRepositoryCalls(reversal);
+  });
+
+  it("answers 200 with the operation when it was already cancelled", async () => {
+    const { app } = buildApp({ cancel: vi.fn().mockResolvedValue(cancelled({ requestedByAccountId: "acct_someone_else" })) });
+    const response = await request(app).post(cancelPath);
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ operation_id: "rev_01", status: "cancelled", requested_by_account_id: "acct_someone_else" });
+  });
+
+  it("answers 404 for an unknown operation", async () => {
+    const { app } = buildApp({ cancel: vi.fn().mockResolvedValue(null) });
+    const response = await request(app).post(`${base}/reversal-operations/rev_missing/cancel`);
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe("intake.reversal_operation_not_found");
+  });
+
+  it("answers 409 with the documented envelope when the operation is past cancelling", async () => {
+    const { app } = buildApp({ cancel: vi.fn().mockRejectedValue(new ReversalNotCancellableError("pre_offering_open")) });
+    const response = await request(app).post(cancelPath).set("x-trace-id", "trace_late");
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      type: "https://api.vistablox.io/errors/intake.reversal_not_cancellable",
+      code: "intake.reversal_not_cancellable",
+      title: "Correction cannot be cancelled",
+      status: 409,
+      detail: "This correction can no longer be cancelled: it has been approved, has already run or has failed.",
+      trace_id: "trace_late",
+    });
+  });
+
+  it("answers 409, not 500, for any other conflict the repository detects", async () => {
+    const { app } = buildApp({ cancel: vi.fn().mockRejectedValue(new CaseReviewConflictError("submitted", "cancel this reversal")) });
+    const response = await request(app).post(cancelPath);
     expect(response.status).toBe(409);
     expect(response.body.code).toBe("intake.reversal_conflict");
   });

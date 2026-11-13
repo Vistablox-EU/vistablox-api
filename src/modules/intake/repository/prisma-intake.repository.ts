@@ -5,7 +5,7 @@ import { z } from "zod";
 import { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
-import { getReversalAction, reversalCommandSchema, reversalFailureCodes } from "../domain/intake-reversal.policy.js";
+import { activeReversalStatuses, cancellableReversalStatuses, getReversalAction, reversalApprovalRefusal, reversalCommandSchema, reversalFailureCodes } from "../domain/intake-reversal.policy.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { appendIntakeCaseEvent } from "./intake-case-event.repository.js";
 import {
@@ -53,7 +53,7 @@ import type {
   ThreadLane,
   WithdrawnInformationRequest,
 } from "./intake.repository.js";
-import { CaseReviewConflictError } from "./intake.repository.js";
+import { CaseReviewConflictError, ReversalApprovalRefusedError, ReversalNotCancellableError } from "./intake.repository.js";
 
 const propertyFloorSettingSchema = z.object({
   amount: z.string().regex(/^\d+\.\d{2}$/),
@@ -123,6 +123,11 @@ export class PrismaIntakeRepository
     const offering = row.pivs[0]?.offerings[0];
     const reservations = offering?.reservations ?? [];
     const fundedStates = new Set(["eurc_reserved", "reconfirmation_pending", "eurc_finalized"]);
+    // One read answers both "is a correction in progress" and "which one", so the two can never disagree.
+    const activeOperation = await client.intakeCaseReversalOperation.findFirst({
+      where: { caseId, status: { in: [...activeReversalStatuses] }, ...(excludeOperationId === undefined ? {} : { id: { not: excludeOperationId } }) },
+      orderBy: [{ createdAt: "desc" }, { id: "desc" }],
+    });
     return {
       caseId: row.id,
       stage: row.stage,
@@ -142,7 +147,8 @@ export class PrismaIntakeRepository
       },
       legalExecutionCompleted: row.legalExecutionEventRefs.length > 0,
       appraisalCompleted: row.appraisalCompletedAt !== null,
-      correctionInProgress: await client.intakeCaseReversalOperation.count({ where: { caseId, status: { in: ["requested", "pending_approval", "approved", "executing"] }, ...(excludeOperationId === undefined ? {} : { id: { not: excludeOperationId } }) } }) > 0,
+      activeOperation: activeOperation === null ? null : toReversalOperationRecord(activeOperation),
+      correctionInProgress: activeOperation !== null,
     };
   }
 
@@ -173,10 +179,42 @@ export class PrismaIntakeRepository
     // An approval that committed but whose execution never ran (the process died in between) is finished by the account that gave it.
     // Execution then re-checks everything as usual, and the approval on record stays the original one.
     if (operation.status === "approved" && operation.approvedByAccountId === input.approverAccountId) return toReversalOperationRecord(operation);
-    // One conditional UPDATE decides, so two approvers racing cannot both claim it and the requester cannot approve their own request.
+    const refusal = reversalApprovalRefusal(operation, input.approverAccountId);
+    if (refusal !== null) throw new ReversalApprovalRefusedError(operation.fromStage, refusal);
+    // The check above only reads, so one conditional UPDATE still decides: two approvers racing cannot both claim it, and neither can
+    // the requester (or anyone) claim an operation that was cancelled or claimed since the read.
     const claimed = await this.database.intakeCaseReversalOperation.updateMany({ where: { id: operation.id, status: "pending_approval", requestedByAccountId: { not: input.approverAccountId } }, data: { status: "approved", approvedByAccountId: input.approverAccountId, approvedAt: input.approvedAt } });
-    if (claimed.count === 0) throw new CaseReviewConflictError(operation.fromStage, "approve this reversal");
+    if (claimed.count === 0) {
+      // Lost a race: say why from what is stored now, not from the read the claim was based on.
+      const current = await this.database.intakeCaseReversalOperation.findFirst({ where: { id: operation.id } });
+      const lostBecause = current === null ? null : reversalApprovalRefusal(current, input.approverAccountId);
+      throw lostBecause === null ? new CaseReviewConflictError(operation.fromStage, "approve this reversal") : new ReversalApprovalRefusedError(operation.fromStage, lostBecause);
+    }
     return toReversalOperationRecord(await this.database.intakeCaseReversalOperation.findUniqueOrThrow({ where: { id: operation.id } }));
+  }
+
+  public async cancelReversalOperation(input: { caseId: string; operationId: string; cancelledByAccountId: string; note: string | null; cancelledAt: Date; traceId: string }): Promise<IntakeReversalOperationRecord | null> {
+    return this.database.$transaction(async (transaction) => {
+      // The same case lock execution takes, so a cancel and an execution of a requested operation cannot interleave.
+      await transaction.$queryRaw`SELECT case_id FROM intake.intake_cases WHERE case_id = ${input.caseId} FOR UPDATE`;
+      const operation = await transaction.intakeCaseReversalOperation.findFirst({ where: { id: input.operationId, caseId: input.caseId } });
+      if (operation === null) return null;
+      // Cancelling twice is not an error, and records nothing the second time.
+      if (operation.status === "cancelled") return toReversalOperationRecord(operation);
+      // Approval does not take the case lock, so only this conditional UPDATE decides between a cancel and an approval racing for the row.
+      const cancellation = { cancelled_by_account_id: input.cancelledByAccountId, cancelled_at: input.cancelledAt.toISOString(), note: input.note };
+      const metadata = typeof operation.metadata === "object" && operation.metadata !== null && !Array.isArray(operation.metadata) ? operation.metadata : {};
+      const cancelled = await transaction.intakeCaseReversalOperation.updateMany({ where: { id: operation.id, status: { in: [...cancellableReversalStatuses] } }, data: { status: "cancelled", metadata: { ...metadata, cancellation } } });
+      if (cancelled.count === 0) {
+        const current = await transaction.intakeCaseReversalOperation.findUniqueOrThrow({ where: { id: operation.id } });
+        if (current.status === "cancelled") return toReversalOperationRecord(current);
+        throw new ReversalNotCancellableError(current.fromStage);
+      }
+      const details = { operation_id: operation.id, command: operation.command, previous_status: operation.status, note: input.note };
+      await transaction.auditLog.create({ data: { id: `audit_${ulid()}`, actorAccountId: input.cancelledByAccountId, action: "intake.correction_cancelled", resourceType: "intake_case", resourceId: input.caseId, changes: details, createdAt: input.cancelledAt } });
+      await appendIntakeCaseEvent(transaction, { caseId: input.caseId, eventKey: `case:${input.caseId}:correction-cancelled:${operation.id}`, eventType: "correction_cancelled", actorType: "staff", actorAccountId: input.cancelledByAccountId, traceId: input.traceId, relatedResourceType: "intake_case_reversal_operation", relatedResourceId: operation.id, metadata: details, occurredAt: input.cancelledAt });
+      return toReversalOperationRecord(await transaction.intakeCaseReversalOperation.findUniqueOrThrow({ where: { id: operation.id } }));
+    });
   }
 
   public async executeReversalOperation(input: { caseId: string; operationId: string; actorAccountId: string; traceId: string; completedAt: Date }): Promise<IntakeReversalOperationRecord | null> {

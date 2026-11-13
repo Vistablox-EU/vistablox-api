@@ -11,12 +11,13 @@ import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-k
 import { createIntakeOperationsRouter } from "../src/modules/intake/api/intake-operations.router.js";
 import {
   ApproveIntakeReversalService,
+  CancelIntakeReversalService,
   GetIntakeReversalOperationService,
   GetIntakeReversalPreviewService,
   RequestIntakeReversalService,
 } from "../src/modules/intake/application/intake-reversal.service.js";
 import { appendIntakeCaseEvent } from "../src/modules/intake/repository/intake-case-event.repository.js";
-import { CaseReviewConflictError } from "../src/modules/intake/repository/intake.repository.js";
+import { CaseReviewConflictError, ReversalApprovalRefusedError } from "../src/modules/intake/repository/intake.repository.js";
 import { PrismaIntakeRepository } from "../src/modules/intake/repository/prisma-intake.repository.js";
 import { OpenOfferingForApprovedCaseService } from "../src/modules/offering/application/open-offering-for-approved-case.service.js";
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
@@ -69,6 +70,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
   let offeringRepository: PrismaOfferingRepository;
   let requestService: RequestIntakeReversalService;
   let approveService: ApproveIntakeReversalService;
+  let cancelService: CancelIntakeReversalService;
   let previewService: GetIntakeReversalPreviewService;
 
   const requesterId = `acct_rev_requester_${suffix}`;
@@ -85,6 +87,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
     requestService = new RequestIntakeReversalService(intakeRepository, () => now);
     approveService = new ApproveIntakeReversalService(intakeRepository, () => now);
+    cancelService = new CancelIntakeReversalService(intakeRepository, () => now);
     previewService = new GetIntakeReversalPreviewService(intakeRepository);
 
     for (const accountId of [requesterId, approverId, applicantId, investorId]) {
@@ -349,6 +352,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         offering: null,
         legalExecutionCompleted: false,
         appraisalCompleted: false,
+        activeOperation: null,
         correctionInProgress: false,
       });
     });
@@ -552,7 +556,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         await addHistoricInformationRequest(fixture.caseId, status);
       }
 
-      const preview = await previewService.execute(fixture.caseId);
+      const preview = await previewService.execute(fixture.caseId, requesterId);
       expect(preview.data.actions.map((action) => action.action)).toEqual(["return_to_draft"]);
       const result = await requestReversal(fixture, "return_to_draft");
 
@@ -563,7 +567,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     it("no longer offers the same correction once it has run", async () => {
       const fixture = await createCase("submitted");
       await requestReversal(fixture, "return_to_draft");
-      const preview = await previewService.execute(fixture.caseId);
+      const preview = await previewService.execute(fixture.caseId, requesterId);
       expect(preview.data).toMatchObject({ stage: "draft", available: false, correction_in_progress: false });
     });
   });
@@ -632,8 +636,8 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       const requested = await requestReversal(fixture, "reopen_pre_offering");
 
       await expect(approve(fixture, requested.data.operation_id, requesterId)).rejects.toMatchObject({
-        status: 409,
-        code: "intake.reversal_conflict",
+        status: 403,
+        code: "intake.reversal_self_approval_forbidden",
       });
 
       expect(await readOperation(requested.data.operation_id)).toMatchObject({ status: "pending_approval", approvedByAccountId: null });
@@ -648,8 +652,9 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       const requested = await requestReversal(fixture, "reopen_pre_offering");
       await approve(fixture, requested.data.operation_id);
 
-      await expect(approve(fixture, requested.data.operation_id, requesterId)).rejects.toMatchObject({ status: 409 });
-      await expect(approve(fixture, requested.data.operation_id)).rejects.toMatchObject({ status: 409 });
+      // Once it ran, it is simply not awaiting approval any more, whoever asks.
+      await expect(approve(fixture, requested.data.operation_id, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_pending_approval" });
+      await expect(approve(fixture, requested.data.operation_id)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_pending_approval" });
       expect(await readAudit(fixture.caseId, "intake.reopen_pre_offering")).toHaveLength(1);
     });
 
@@ -669,7 +674,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     it("cannot approve a single-person operation, which is already running on its own", async () => {
       const fixture = await createCase("submitted");
       const done = await requestReversal(fixture, "return_to_draft");
-      await expect(approve(fixture, done.data.operation_id)).rejects.toMatchObject({ status: 409 });
+      await expect(approve(fixture, done.data.operation_id)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_pending_approval" });
     });
   });
 
@@ -1183,8 +1188,8 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     it("is not finished by the requester, nor by an account that did not approve it", async () => {
       const { fixture, operationId } = await claimWithoutExecuting("reopen_structuring", "post_ipo_structuring");
 
-      await expect(approve(fixture, operationId, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_conflict" });
-      await expect(approve(fixture, operationId, investorId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_conflict" });
+      await expect(approve(fixture, operationId, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_pending_approval" });
+      await expect(approve(fixture, operationId, investorId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_pending_approval" });
 
       expect(await readOperation(operationId)).toMatchObject({ status: "approved", approvedByAccountId: approverId });
       expect((await readCase(fixture.caseId)).stage).toBe("post_ipo_structuring");
@@ -1512,7 +1517,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     it("does not offer a second rewind, and refuses to create one with a 409 domain error", async () => {
       const { fixture } = await reopenStructuring();
 
-      const preview = await previewService.execute(fixture.caseId);
+      const preview = await previewService.execute(fixture.caseId, requesterId);
       expect(preview.data).toMatchObject({ available: false, correction_in_progress: false, actions: [] });
       await expect(requestReversal(fixture, "reopen_pre_offering")).rejects.toMatchObject({
         status: 409,
@@ -1680,6 +1685,254 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
     });
   });
 
+  describe("finding and cancelling a pending correction", () => {
+    const cancel = (fixture: Fixture, operationId: string, accountId = requesterId, note?: string) =>
+      cancelService.execute({ caseId: fixture.caseId, operationId, accountId, traceId: uid("trace_rev"), note });
+    const auditOf = (caseId: string, action: string) => readAudit(caseId, action);
+
+    it("shows a second staff member the pending operation to approve, and the requester the same one without the right to", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const requested = await requestReversal(fixture, "reopen_pre_offering", { reason: "Offering terms were entered on the wrong case" });
+      const operationId = requested.data.operation_id;
+      const requestedAt = (await readOperation(operationId)).createdAt.toISOString();
+      const expected = {
+        operation_id: operationId,
+        command: "reopen_pre_offering",
+        command_label: "Reopen review",
+        from_stage: "pre_offering_open",
+        to_stage: "submitted",
+        status: "pending_approval",
+        reason_code: "operator_input_error",
+        reason: "Offering terms were entered on the wrong case",
+        requested_by_account_id: requesterId,
+        requested_at: requestedAt,
+      };
+
+      const forSecondStaff = await previewService.execute(fixture.caseId, approverId);
+      expect(forSecondStaff.data).toMatchObject({ correction_in_progress: true, available: false, actions: [] });
+      expect(forSecondStaff.data.pending_operation).toEqual({ ...expected, viewer_can_approve: true, viewer_can_cancel: true });
+
+      const forRequester = await previewService.execute(fixture.caseId, requesterId);
+      expect(forRequester.data.correction_in_progress).toBe(true);
+      expect(forRequester.data.pending_operation).toEqual({ ...expected, viewer_can_approve: false, viewer_can_cancel: true });
+    });
+
+    it("lets the second staff member approve the operation they found in the preview, which clears the pending operation", async () => {
+      const fixture = await createCase("pre_offering_open");
+      await requestReversal(fixture, "reopen_pre_offering");
+
+      const found = (await previewService.execute(fixture.caseId, approverId)).data.pending_operation;
+      expect(found).not.toBeNull();
+      const approved = await approve(fixture, found?.operation_id ?? "", approverId);
+
+      expect(approved.data).toMatchObject({ status: "completed", requested_by_account_id: requesterId, approved_by_account_id: approverId });
+      const after = await previewService.execute(fixture.caseId, approverId);
+      expect(after.data).toMatchObject({ stage: "submitted", correction_in_progress: false, pending_operation: null });
+    });
+
+    it("keeps correction_in_progress and the pending operation in step through a correction's life", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const inStep = async () => {
+        const snapshot = await intakeRepository.getIntakeReversalSnapshot(fixture.caseId);
+        expect(snapshot?.correctionInProgress).toBe(snapshot?.activeOperation !== null);
+        const preview = await previewService.execute(fixture.caseId, approverId);
+        expect(preview.data.correction_in_progress).toBe(preview.data.pending_operation !== null);
+        return preview.data.correction_in_progress;
+      };
+      expect(await inStep()).toBe(false);
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+      expect(await inStep()).toBe(true);
+      await cancel(fixture, requested.data.operation_id);
+      expect(await inStep()).toBe(false);
+      const again = await requestReversal(fixture, "reopen_pre_offering");
+      expect(await inStep()).toBe(true);
+      await approve(fixture, again.data.operation_id);
+      expect(await inStep()).toBe(false);
+    });
+
+    it("lets the requester cancel, recording who, why and when everywhere the other transitions record themselves", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const before = await readCase(fixture.caseId);
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+      const operationId = requested.data.operation_id;
+
+      const cancelled = await cancel(fixture, operationId, requesterId, "Requested against the wrong case");
+
+      expect(cancelled.data).toMatchObject({ operation_id: operationId, status: "cancelled", approved_by_account_id: null, completed_at: null, failed_at: null });
+      const stored = await readOperation(operationId);
+      expect(stored).toMatchObject({ status: "cancelled", approvedByAccountId: null, completedAt: null, failedAt: null, startedAt: null });
+      expect(stored.metadata).toEqual({ cancellation: { cancelled_by_account_id: requesterId, cancelled_at: now.toISOString(), note: "Requested against the wrong case" } });
+
+      const [audit] = await auditOf(fixture.caseId, "intake.correction_cancelled");
+      expect(audit).toMatchObject({
+        actorAccountId: requesterId,
+        resourceType: "intake_case",
+        changes: { operation_id: operationId, command: "reopen_pre_offering", previous_status: "pending_approval", note: "Requested against the wrong case" },
+      });
+      expect(await auditOf(fixture.caseId, "intake.correction_cancelled")).toHaveLength(1);
+
+      const event = (await readEvents(fixture.caseId)).at(-1);
+      expect(event).toMatchObject({
+        eventType: "correction_cancelled",
+        actorType: "staff",
+        actorAccountId: requesterId,
+        fromStage: null,
+        toStage: null,
+        relatedResourceType: "intake_case_reversal_operation",
+        relatedResourceId: operationId,
+        reversalOfEventId: null,
+        metadata: { operation_id: operationId, command: "reopen_pre_offering", previous_status: "pending_approval", note: "Requested against the wrong case" },
+      });
+
+      // The case itself is untouched: only the ledger moved (once for the request, once for the cancel).
+      expect(await readCase(fixture.caseId)).toMatchObject({ stage: "pre_offering_open", approvedAt: before.approvedAt, workflowEventSequence: before.workflowEventSequence + 2 });
+      expect((await database.offering.findUniqueOrThrow({ where: { id: fixture.offeringId! } })).status).toBe("pre_offering");
+      expect(await auditOf(fixture.caseId, "intake.reopen_pre_offering")).toHaveLength(0);
+    });
+
+    it("no longer reports the case as being corrected, and offers the correction again", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+      await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(true);
+
+      await cancel(fixture, requested.data.operation_id);
+
+      await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(false);
+      const preview = await previewService.execute(fixture.caseId, approverId);
+      expect(preview.data).toMatchObject({ correction_in_progress: false, pending_operation: null, available: true });
+      expect(preview.data.actions.map((action) => action.action)).toEqual(["reopen_pre_offering"]);
+      // ... and a fresh request, with fresh headers, goes through as a new operation.
+      const again = await requestReversal(fixture, "reopen_pre_offering");
+      expect(again.data.status).toBe("pending_approval");
+      expect(again.data.operation_id).not.toBe(requested.data.operation_id);
+      expect(await readOperation(requested.data.operation_id)).toMatchObject({ status: "cancelled" });
+    });
+
+    it("lets a second staff member cancel it as well, in their name", async () => {
+      const fixture = await createCase("post_ipo_structuring");
+      const requested = await requestReversal(fixture, "reopen_structuring");
+
+      const cancelled = await cancel(fixture, requested.data.operation_id, approverId);
+
+      expect(cancelled.data).toMatchObject({ status: "cancelled", requested_by_account_id: requesterId });
+      expect((await readOperation(requested.data.operation_id)).metadata).toEqual({ cancellation: { cancelled_by_account_id: approverId, cancelled_at: now.toISOString(), note: null } });
+      expect(await auditOf(fixture.caseId, "intake.correction_cancelled")).toMatchObject([{ actorAccountId: approverId, changes: { note: null } }]);
+      expect((await readCase(fixture.caseId)).stage).toBe("post_ipo_structuring");
+    });
+
+    it("answers a repeated cancel with the operation unchanged, without recording it again", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+      await cancel(fixture, requested.data.operation_id, requesterId, "first");
+      const sequence = (await readCase(fixture.caseId)).workflowEventSequence;
+      const stored = await readOperation(requested.data.operation_id);
+
+      const again = await cancel(fixture, requested.data.operation_id, approverId, "second");
+
+      expect(again.data).toMatchObject({ operation_id: requested.data.operation_id, status: "cancelled" });
+      expect(await readOperation(requested.data.operation_id)).toEqual(stored);
+      expect(await auditOf(fixture.caseId, "intake.correction_cancelled")).toHaveLength(1);
+      expect((await readEvents(fixture.caseId)).filter((event) => event.eventType === "correction_cancelled")).toHaveLength(1);
+      expect((await readCase(fixture.caseId)).workflowEventSequence).toBe(sequence);
+    });
+
+    it("cancels an operation that is still only requested, and it can then never be executed", async () => {
+      const fixture = await createCase("submitted");
+      const row = await requestReversalOperationRow(fixture);
+      expect(row.status).toBe("requested");
+
+      const cancelled = await cancel(fixture, row.operationId, approverId);
+      expect(cancelled.data.status).toBe("cancelled");
+
+      const executed = await intakeRepository.executeReversalOperation({ caseId: fixture.caseId, operationId: row.operationId, actorAccountId: requesterId, traceId: uid("trace"), completedAt: now });
+      expect(executed).toMatchObject({ status: "cancelled", completedAt: null });
+      expect((await readCase(fixture.caseId)).stage).toBe("submitted");
+      await expect(snapshotCorrectionsInProgress(fixture.caseId)).resolves.toBe(false);
+    });
+
+    it("refuses to cancel a correction that already ran, with a 409 domain error, and records nothing", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+      await approve(fixture, requested.data.operation_id);
+
+      await expect(cancel(fixture, requested.data.operation_id, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_cancellable" });
+      await expect(cancel(fixture, requested.data.operation_id, approverId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_cancellable" });
+
+      expect(await readOperation(requested.data.operation_id)).toMatchObject({ status: "completed" });
+      expect(await auditOf(fixture.caseId, "intake.correction_cancelled")).toHaveLength(0);
+      expect((await readEvents(fixture.caseId)).filter((event) => event.eventType === "correction_cancelled")).toHaveLength(0);
+      expect((await readCase(fixture.caseId)).stage).toBe("submitted");
+    });
+
+    it("refuses to cancel an approval that was claimed but not yet executed, and one that failed", async () => {
+      const claimed = await createCase("pre_offering_open");
+      const claimedRequest = await requestReversal(claimed, "reopen_pre_offering");
+      await intakeRepository.approveReversalOperation({ caseId: claimed.caseId, operationId: claimedRequest.data.operation_id, approverAccountId: approverId, approvedAt: now });
+      await expect(cancel(claimed, claimedRequest.data.operation_id, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_cancellable" });
+      await expect(cancel(claimed, claimedRequest.data.operation_id, approverId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_cancellable" });
+      expect(await readOperation(claimedRequest.data.operation_id)).toMatchObject({ status: "approved", approvedByAccountId: approverId });
+      // The claim is still the approver's to finish.
+      expect((await previewService.execute(claimed.caseId, approverId)).data.pending_operation).toMatchObject({ status: "approved", viewer_can_approve: false, viewer_can_cancel: false });
+
+      const stale = await createCase("pre_offering_open");
+      const staleRequest = await requestReversal(stale, "reopen_pre_offering");
+      await bumpSequence(stale.caseId);
+      await expect(approve(stale, staleRequest.data.operation_id)).rejects.toMatchObject({ status: 409, code: "intake.reversal_conflict" });
+      expect(await readOperation(staleRequest.data.operation_id)).toMatchObject({ status: "failed" });
+      await expect(cancel(stale, staleRequest.data.operation_id)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_cancellable" });
+    });
+
+    it("reports an unknown operation, or one that belongs to another case, as not found and leaves it pending", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const other = await createCase("pre_offering_open");
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+
+      await expect(cancel(fixture, `rev_missing_${suffix}`)).rejects.toMatchObject({ status: 404, code: "intake.reversal_operation_not_found" });
+      await expect(cancel(other, requested.data.operation_id)).rejects.toMatchObject({ status: 404, code: "intake.reversal_operation_not_found" });
+      expect(await readOperation(requested.data.operation_id)).toMatchObject({ status: "pending_approval" });
+    });
+
+    it("turns an approval of a cancelled operation away as not awaiting approval, whoever asks, and runs nothing", async () => {
+      const fixture = await createCase("pre_offering_open");
+      const requested = await requestReversal(fixture, "reopen_pre_offering");
+      await cancel(fixture, requested.data.operation_id);
+
+      await expect(approve(fixture, requested.data.operation_id, approverId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_pending_approval" });
+      await expect(approve(fixture, requested.data.operation_id, requesterId)).rejects.toMatchObject({ status: 409, code: "intake.reversal_not_pending_approval" });
+
+      expect(await readOperation(requested.data.operation_id)).toMatchObject({ status: "cancelled", approvedByAccountId: null });
+      expect((await readCase(fixture.caseId)).stage).toBe("pre_offering_open");
+      expect(await auditOf(fixture.caseId, "intake.reopen_pre_offering")).toHaveLength(0);
+    });
+
+    it("lets exactly one of a simultaneous approval and cancellation win, and says why to the other", async () => {
+      for (let attempt = 0; attempt < 6; attempt++) {
+        const fixture = await createCase("pre_offering_open");
+        const requested = await requestReversal(fixture, "reopen_pre_offering");
+        const operationId = requested.data.operation_id;
+
+        const [approval, cancellation] = await Promise.allSettled([
+          intakeRepository.approveReversalOperation({ caseId: fixture.caseId, operationId, approverAccountId: approverId, approvedAt: now }),
+          intakeRepository.cancelReversalOperation({ caseId: fixture.caseId, operationId, cancelledByAccountId: requesterId, note: null, cancelledAt: now, traceId: uid("trace") }),
+        ]);
+
+        const stored = await readOperation(operationId);
+        if (approval.status === "fulfilled") {
+          expect(cancellation.status).toBe("rejected");
+          expect(cancellation.status === "rejected" && cancellation.reason).toMatchObject({ name: "ReversalNotCancellableError" });
+          expect(stored).toMatchObject({ status: "approved", approvedByAccountId: approverId });
+        } else {
+          expect(cancellation.status).toBe("fulfilled");
+          expect(approval.reason).toBeInstanceOf(ReversalApprovalRefusedError);
+          expect(approval.reason).toMatchObject({ reason: "not_pending_approval" });
+          expect(stored).toMatchObject({ status: "cancelled", approvedByAccountId: null });
+        }
+        // Whichever won, the loser left nothing behind: at most one cancellation is on record.
+        expect(await auditOf(fixture.caseId, "intake.correction_cancelled")).toHaveLength(stored.status === "cancelled" ? 1 : 0);
+      }
+    });
+  });
+
   describe("HTTP surface over the real repository", () => {
     function httpApp() {
       const authenticate: RequestHandler = (httpRequest, response, next) => {
@@ -1726,6 +1979,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
           requestService,
           approveService,
           new GetIntakeReversalOperationService(intakeRepository),
+          cancelService,
         ),
       );
       server.use(errorHandler);
@@ -1772,7 +2026,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       expect(fetched.body.data).toMatchObject({ operation_id: operationId, status: "completed" });
     });
 
-    it("answers a self-approval with a 409 domain error, not a 500", async () => {
+    it("answers a self-approval with a 403 domain error, not a 500", async () => {
       const fixture = await createCase("pre_offering_open");
       const requested = await postCommand(fixture, "reopen-pre-offering", requesterId);
 
@@ -1780,8 +2034,8 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         .post(`/internal/v1/intake-cases/${fixture.caseId}/reversal-operations/${requested.body.data.operation_id}/approve`)
         .set("x-test-account", requesterId);
 
-      expect(response.status).toBe(409);
-      expect(response.body).toMatchObject({ code: "intake.reversal_conflict", status: 409 });
+      expect(response.status).toBe(403);
+      expect(response.body).toMatchObject({ code: "intake.reversal_self_approval_forbidden", status: 403 });
     });
 
     it("answers a stale approval with a 409 domain error and then offers the correction again", async () => {
@@ -1849,7 +2103,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
 
       const other = await request(httpApp()).post(approvalPath).set("x-test-account", investorId);
       expect(other.status).toBe(409);
-      expect(other.body.code).toBe("intake.reversal_conflict");
+      expect(other.body.code).toBe("intake.reversal_not_pending_approval");
 
       const resumed = await request(httpApp()).post(approvalPath).set("x-test-account", approverId);
       expect(resumed.status).toBe(200);
@@ -1862,6 +2116,94 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       const response = await postCommand(fixture, "return-to-draft", requesterId, { "If-Match-Workflow-Sequence": "0" });
       expect(response.status).toBe(409);
       expect(response.body.code).toBe("intake.reversal_conflict");
+    });
+
+    describe("finding and cancelling a pending correction", () => {
+      const preview = (fixture: Fixture, account: string) =>
+        request(httpApp()).get(`/internal/v1/intake-cases/${fixture.caseId}/reversal-preview`).set("x-test-account", account);
+      const operationRoute = (fixture: Fixture, operationId: string, action: "approve" | "cancel") =>
+        `/internal/v1/intake-cases/${fixture.caseId}/reversal-operations/${operationId}/${action}`;
+      const post = (fixture: Fixture, operationId: string, action: "approve" | "cancel", account: string) =>
+        request(httpApp()).post(operationRoute(fixture, operationId, action)).set("x-test-account", account);
+
+      it("lets a second staff member find the pending correction in the preview and approve it, while the requester is turned away", async () => {
+        const fixture = await createCase("pre_offering_open");
+        const requested = await postCommand(fixture, "reopen-pre-offering", requesterId);
+        const operationId = requested.body.data.operation_id as string;
+
+        const asSecond = await preview(fixture, approverId);
+        expect(asSecond.status).toBe(200);
+        expect(asSecond.body.data).toMatchObject({ correction_in_progress: true });
+        expect(asSecond.body.data.pending_operation).toMatchObject({ operation_id: operationId, status: "pending_approval", requested_by_account_id: requesterId, viewer_can_approve: true, viewer_can_cancel: true });
+
+        const asRequester = await preview(fixture, requesterId);
+        expect(asRequester.body.data.pending_operation).toMatchObject({ operation_id: operationId, viewer_can_approve: false, viewer_can_cancel: true });
+
+        const refused = await post(fixture, asRequester.body.data.pending_operation.operation_id, "approve", requesterId);
+        expect(refused.status).toBe(403);
+        expect(refused.body).toMatchObject({ code: "intake.reversal_self_approval_forbidden", status: 403 });
+
+        const approved = await post(fixture, asSecond.body.data.pending_operation.operation_id, "approve", approverId);
+        expect(approved.status).toBe(200);
+        expect(approved.body.data).toMatchObject({ status: "completed", approved_by_account_id: approverId });
+        expect((await preview(fixture, approverId)).body.data).toMatchObject({ stage: "submitted", correction_in_progress: false, pending_operation: null });
+      });
+
+      it("cancels a pending correction for either party, stops reporting it, and offers the correction again", async () => {
+        const fixture = await createCase("pre_offering_open");
+        const first = await postCommand(fixture, "reopen-pre-offering", requesterId);
+
+        const byRequester = await request(httpApp())
+          .post(operationRoute(fixture, first.body.data.operation_id, "cancel"))
+          .set("x-test-account", requesterId)
+          .send({ note: "Wrong case" });
+        expect(byRequester.status).toBe(200);
+        expect(byRequester.body.data).toMatchObject({ operation_id: first.body.data.operation_id, status: "cancelled", completed_at: null });
+        const afterFirst = await preview(fixture, approverId);
+        expect(afterFirst.body.data).toMatchObject({ correction_in_progress: false, pending_operation: null, available: true });
+        expect(afterFirst.body.data.actions.map((action: { action: string }) => action.action)).toEqual(["reopen_pre_offering"]);
+
+        const second = await postCommand(fixture, "reopen-pre-offering", requesterId);
+        expect(second.status).toBe(200);
+        expect(second.body.data.status).toBe("pending_approval");
+        const byOther = await post(fixture, second.body.data.operation_id, "cancel", approverId);
+        expect(byOther.status).toBe(200);
+        expect(byOther.body.data).toMatchObject({ operation_id: second.body.data.operation_id, status: "cancelled", requested_by_account_id: requesterId });
+        expect((await preview(fixture, requesterId)).body.data).toMatchObject({ correction_in_progress: false, pending_operation: null });
+        expect((await readCase(fixture.caseId)).stage).toBe("pre_offering_open");
+      });
+
+      it("answers a repeated cancel with 200, a cancel after the correction ran with 409, and an unknown operation with 404", async () => {
+        const fixture = await createCase("pre_offering_open");
+        const requested = await postCommand(fixture, "reopen-pre-offering", requesterId);
+        const operationId = requested.body.data.operation_id as string;
+
+        expect((await post(fixture, operationId, "cancel", requesterId)).status).toBe(200);
+        const again = await post(fixture, operationId, "cancel", requesterId);
+        expect(again.status).toBe(200);
+        expect(again.body.data).toMatchObject({ status: "cancelled" });
+
+        const ran = await createCase("pre_offering_open");
+        const ranRequest = await postCommand(ran, "reopen-pre-offering", requesterId);
+        expect((await post(ran, ranRequest.body.data.operation_id, "approve", approverId)).status).toBe(200);
+        const late = await post(ran, ranRequest.body.data.operation_id, "cancel", requesterId);
+        expect(late.status).toBe(409);
+        expect(late.body).toMatchObject({ code: "intake.reversal_not_cancellable", status: 409 });
+
+        const missing = await post(fixture, `rev_missing_${suffix}`, "cancel", requesterId);
+        expect(missing.status).toBe(404);
+        expect(missing.body.code).toBe("intake.reversal_operation_not_found");
+      });
+
+      it("answers approving a cancelled correction with the not-awaiting-approval 409", async () => {
+        const fixture = await createCase("pre_offering_open");
+        const requested = await postCommand(fixture, "reopen-pre-offering", requesterId);
+        await post(fixture, requested.body.data.operation_id, "cancel", requesterId);
+
+        const response = await post(fixture, requested.body.data.operation_id, "approve", approverId);
+        expect(response.status).toBe(409);
+        expect(response.body).toMatchObject({ code: "intake.reversal_not_pending_approval", status: 409 });
+      });
     });
   });
 });
