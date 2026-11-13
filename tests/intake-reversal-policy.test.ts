@@ -1,9 +1,15 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  activeReversalStatuses,
+  cancellableReversalStatuses,
   evaluateReversalActions,
   getReversalAction,
+  canFinishClaimedApproval,
+  reversalApprovalRefusal,
+  reversalCommandLabels,
   reversalCommandSchema,
+  reversalOperationViewerPermissions,
   type ReversalCommand,
   type ReversalSnapshot,
 } from "../src/modules/intake/domain/intake-reversal.policy.js";
@@ -287,6 +293,113 @@ describe("intake reversal policy", () => {
           }),
         ),
       ).toEqual(["reopen_final_offering_review"]);
+    });
+  });
+});
+
+const operationStatuses = ["requested", "pending_approval", "approved", "executing", "completed", "failed", "cancelled"] as const;
+
+describe("reversalCommandLabels", () => {
+  it("labels every command", () => {
+    expect(Object.keys(reversalCommandLabels).sort()).toEqual([...reversalCommandSchema.options].sort());
+  });
+
+  it("is the label every offered action carries", () => {
+    const offered = [
+      snapshot(),
+      snapshot({ stage: "waiting_on_applicant", activeInformationRequest: true }),
+      snapshot({ stage: "pre_offering_open", offering: offering() }),
+      snapshot({ stage: "post_ipo_structuring", offering: offering() }),
+      snapshot({ stage: "approved_for_final_offering", offering: offering() }),
+    ].flatMap((current) => evaluateReversalActions(current));
+    expect(offered.map((action) => action.command).sort()).toEqual([...reversalCommandSchema.options].sort());
+    for (const action of offered) expect(action.label).toBe(reversalCommandLabels[action.command]);
+  });
+});
+
+describe("operation statuses", () => {
+  it("treats a correction as in progress until it completes, fails or is cancelled", () => {
+    expect([...activeReversalStatuses]).toEqual(["requested", "pending_approval", "approved", "executing"]);
+  });
+
+  it("allows cancelling only before approval", () => {
+    expect([...cancellableReversalStatuses]).toEqual(["requested", "pending_approval"]);
+  });
+});
+
+describe("reversalApprovalRefusal", () => {
+  const operation = (status: string) => ({ status, requestedByAccountId: "acct_requester" });
+
+  it("lets a different account approve an operation that is waiting for approval", () => {
+    expect(reversalApprovalRefusal(operation("pending_approval"), "acct_other")).toBeNull();
+  });
+
+  it("turns the requester away from their own pending operation", () => {
+    expect(reversalApprovalRefusal(operation("pending_approval"), "acct_requester")).toBe("self_approval");
+  });
+
+  it.each(operationStatuses.filter((status) => status !== "pending_approval"))(
+    "says an operation that is %s is not awaiting approval, whoever asks (including its requester)",
+    (status) => {
+      expect(reversalApprovalRefusal(operation(status), "acct_other")).toBe("not_pending_approval");
+      expect(reversalApprovalRefusal(operation(status), "acct_requester")).toBe("not_pending_approval");
+    },
+  );
+});
+
+describe("canFinishClaimedApproval", () => {
+  it("lets the account that approved an operation finish it", () => {
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: "acct_approver" }, "acct_approver")).toBe(true);
+  });
+
+  it("does not let anyone else finish it", () => {
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: "acct_approver" }, "acct_requester")).toBe(false);
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: "acct_approver" }, "acct_other")).toBe(false);
+  });
+
+  it.each(operationStatuses.filter((status) => status !== "approved"))("has nothing to finish on a %s operation, even for its approver", (status) => {
+    expect(canFinishClaimedApproval({ status, approvedByAccountId: "acct_approver" }, "acct_approver")).toBe(false);
+  });
+
+  it("has nothing to finish before anyone approved", () => {
+    expect(canFinishClaimedApproval({ status: "approved", approvedByAccountId: null }, "acct_approver")).toBe(false);
+  });
+});
+
+describe("reversalOperationViewerPermissions", () => {
+  const operation = (status: string, approvedByAccountId: string | null = null) => ({ status, requestedByAccountId: "acct_requester", approvedByAccountId });
+
+  it.each([
+    ["pending_approval", "acct_other", { canApprove: true, canCancel: true }],
+    ["pending_approval", "acct_requester", { canApprove: false, canCancel: true }],
+    ["requested", "acct_other", { canApprove: false, canCancel: true }],
+    ["requested", "acct_requester", { canApprove: false, canCancel: true }],
+    ["approved", "acct_other", { canApprove: false, canCancel: false }],
+    ["approved", "acct_requester", { canApprove: false, canCancel: false }],
+    ["executing", "acct_other", { canApprove: false, canCancel: false }],
+    ["executing", "acct_requester", { canApprove: false, canCancel: false }],
+  ])("%s, viewed by %s: %j", (status, viewer, expected) => {
+    expect(reversalOperationViewerPermissions(operation(status), viewer)).toEqual(expected);
+  });
+
+  it.each(["completed", "failed", "cancelled"])("allows nothing on a %s operation", (status) => {
+    expect(reversalOperationViewerPermissions(operation(status), "acct_other")).toEqual({ canApprove: false, canCancel: false });
+    expect(reversalOperationViewerPermissions(operation(status), "acct_requester")).toEqual({ canApprove: false, canCancel: false });
+  });
+
+  describe("an approval that was claimed but never executed", () => {
+    const claimed = operation("approved", "acct_approver");
+
+    it("lets the account that approved it finish it, but not cancel it", () => {
+      expect(reversalOperationViewerPermissions(claimed, "acct_approver")).toEqual({ canApprove: true, canCancel: false });
+    });
+
+    it.each(["acct_requester", "acct_other"])("offers %s nothing", (viewer) => {
+      expect(reversalOperationViewerPermissions(claimed, viewer)).toEqual({ canApprove: false, canCancel: false });
+    });
+
+    it.each(["completed", "failed", "cancelled", "executing"])("gives its approver nothing once it is %s", (status) => {
+      expect(reversalOperationViewerPermissions(operation(status, "acct_approver"), "acct_approver").canApprove).toBe(false);
     });
   });
 });
