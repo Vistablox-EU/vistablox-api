@@ -1,30 +1,47 @@
 import { Prisma } from "../../generated/prisma/client.js";
 
 /**
- * True when `error` is a Prisma unique violation (P2002) of the named
- * constraint or index.
+ * True when `error` is Postgres' unique_violation (SQLSTATE 23505) raised by
+ * the named constraint or index.
  *
- * Checking the name matters: one UPDATE can run into more than one unique
- * constraint, and an unrelated one (another account's address claim, say) must
- * not be mistaken for the one the caller handles.
- *
- * Where the name sits depends on what Prisma knows about the index. For a
- * constraint declared in schema.prisma, `meta.target` carries the field names or
- * the name. For a partial index created in raw SQL (which Prisma cannot model),
- * Prisma 7 with the pg adapter leaves `meta.target` empty and the name is only
- * in `meta.driverAdapterError.cause.constraint.index` and in the message. All
- * three places are checked, so the answer does not depend on which one a given
- * Prisma or driver version fills in.
+ * Prisma reports the same database error under two codes depending on the call
+ * that hit it: P2002 for a typed call such as `updateMany`, and P2010 for a raw
+ * statement such as `$executeRaw`. Both carry the driver adapter's error under
+ * `meta.driverAdapterError`, with the violated constraint in `cause.constraint`
+ * (`index` for a unique index, `name` for a constraint). A partial or expression
+ * index that schema.prisma cannot describe has no `meta.target` field list, so
+ * the name is the only reliable key; the message is the last-resort fallback,
+ * the same way `constraintMatches` in prisma-device.repository.ts treats it.
  */
-export function isUniqueViolationOf(error: unknown, constraintName: string): boolean {
-  if (!(error instanceof Prisma.PrismaClientKnownRequestError) || error.code !== "P2002") return false;
-  const meta = error.meta as
-    | { target?: unknown; driverAdapterError?: { cause?: { constraint?: { index?: unknown } } } }
-    | undefined;
-  const driverIndex = meta?.driverAdapterError?.cause?.constraint?.index;
-  if (typeof driverIndex === "string" && driverIndex === constraintName) return true;
-  const target = meta?.target;
-  if (typeof target === "string" && target.includes(constraintName)) return true;
-  if (Array.isArray(target) && target.some((field) => String(field).includes(constraintName))) return true;
+export function isUniqueViolation(error: unknown, constraintName: string): boolean {
+  if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
+  if (error.code !== "P2002" && error.code !== "P2010") return false;
+
+  const cause = readDriverCause(error.meta);
+  if (cause !== undefined) {
+    if (cause.originalCode !== undefined && cause.originalCode !== "23505") return false;
+    if (cause.constraint?.index === constraintName || cause.constraint?.name === constraintName) {
+      return true;
+    }
+  }
+  if (error.code === "P2002") {
+    const target = error.meta?.["target"];
+    if (typeof target === "string" && target === constraintName) return true;
+    if (Array.isArray(target) && target.some((entry) => entry === constraintName)) return true;
+  }
   return error.message.includes(constraintName);
+}
+
+interface DriverCause {
+  originalCode?: string;
+  constraint?: { index?: string; name?: string };
+}
+
+function readDriverCause(meta: unknown): DriverCause | undefined {
+  if (typeof meta !== "object" || meta === null) return undefined;
+  const driverAdapterError = (meta as { driverAdapterError?: unknown }).driverAdapterError;
+  if (typeof driverAdapterError !== "object" || driverAdapterError === null) return undefined;
+  const cause = (driverAdapterError as { cause?: unknown }).cause;
+  if (typeof cause !== "object" || cause === null) return undefined;
+  return cause as DriverCause;
 }

@@ -2,7 +2,7 @@ import { ulid } from "ulid";
 
 import type { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
-import { isUniqueViolationOf } from "../../../infrastructure/database/unique-violation.js";
+import { isUniqueViolation } from "../../../infrastructure/database/unique-violation.js";
 import {
   normalizeChainHash,
   type WalletRegistrationEvidence,
@@ -374,7 +374,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
       // Another row already holds this (transaction hash, log index). The
       // statement did not apply, so registered_at and the evidence are still
       // all NULL on this row.
-      if (isUniqueViolationOf(error, CHAIN_EVENT_UNIQUE_INDEX)) return "event_taken";
+      if (isUniqueViolation(error, CHAIN_EVENT_UNIQUE_INDEX)) return "event_taken";
       throw error;
     }
   }
@@ -417,7 +417,12 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
                       blockNumber: current.registrationBlockNumber,
                       logIndex: current.registrationLogIndex,
                     }),
-              next: evidenceForAudit({ ...input.next, transactionHash: normalizeChainHash(input.next.transactionHash), blockHash: normalizeChainHash(input.next.blockHash) }),
+              next: evidenceForAudit({
+                transactionHash: normalizeChainHash(input.next.transactionHash),
+                blockHash: normalizeChainHash(input.next.blockHash),
+                blockNumber: input.next.blockNumber,
+                logIndex: input.next.logIndex,
+              }),
               previous_flag: current.registrationEvidenceFlag,
             },
             createdAt: input.changedAt,
@@ -428,7 +433,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     } catch (error) {
       // Raised outside the transaction on purpose: a failed statement aborts
       // the Postgres transaction, so there is nothing to continue inside it.
-      if (isUniqueViolationOf(error, CHAIN_EVENT_UNIQUE_INDEX)) return "event_taken";
+      if (isUniqueViolation(error, CHAIN_EVENT_UNIQUE_INDEX)) return "event_taken";
       throw error;
     }
   }

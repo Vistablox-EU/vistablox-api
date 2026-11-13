@@ -1,7 +1,7 @@
 import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
-import { isUniqueViolationOf } from "../../../infrastructure/database/unique-violation.js";
+import { isUniqueViolation } from "../../../infrastructure/database/unique-violation.js";
 import {
   normalizeChainHash,
   type WalletRegistrationEvidenceFlag,
@@ -271,7 +271,7 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
     } catch (error) {
       // Outside the transaction on purpose: a failed statement aborts it. The
       // whole reconcile rolled back, so nothing was written.
-      if (isUniqueViolationOf(error, CHAIN_EVENT_UNIQUE_INDEX)) return { kind: "conflict", reason: "event_taken" };
+      if (isUniqueViolation(error, CHAIN_EVENT_UNIQUE_INDEX)) return { kind: "conflict", reason: "event_taken" };
       throw error;
     }
   }
