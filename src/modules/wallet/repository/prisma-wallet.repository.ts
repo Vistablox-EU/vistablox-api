@@ -1,6 +1,7 @@
 import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import { canonicalWalletAddress } from "../../../shared/domain/wallet-address.js";
 import {
   WalletAddressConflictError,
   type RegisteredWallet,
@@ -18,6 +19,10 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
     registrationCommitment: string;
     requestedAt: Date;
   }): Promise<RegisteredWallet> {
+    // The HTTP edge already canonicalises, but this is the persistence boundary
+    // and other callers can skip the edge: whatever spelling arrives, one
+    // address is stored, compared and audited in one form.
+    const walletAddress = canonicalWalletAddress(input.walletAddress);
     return this.database.$transaction(async (transaction) => {
       const existingForAccount = await transaction.walletRegistration.findUnique({
         where: { accountId: input.accountId },
@@ -30,7 +35,13 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
           registrationBlockNumber: true,
         },
       });
-      if (existingForAccount !== null && existingForAccount.walletAddress === input.walletAddress) {
+      // The stored value is compared in canonical form too, so a row that
+      // predates the lowercase check (or a spelling change on retry) is still a
+      // replay and returns the stored row.
+      if (
+        existingForAccount !== null &&
+        canonicalWalletAddress(existingForAccount.walletAddress) === walletAddress
+      ) {
         // Idempotent replay of the same request: return the existing
         // registration rather than creating a second one.
         return existingForAccount;
@@ -43,11 +54,17 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
       // own. Checking address_mismatch first would misreport a genuine
       // address-uniqueness violation as "you're trying to change your own
       // address" whenever both conditions happen to be true at once.
-      const claimedByOther = await transaction.walletRegistration.findUnique({
-        where: { walletAddress: input.walletAddress },
-        select: { accountId: true },
-      });
-      if (claimedByOther !== null && claimedByOther.accountId !== input.accountId) {
+      //
+      // lower(wallet_address) = $1 rather than Prisma's `mode: "insensitive"`:
+      // that compiles to ILIKE, where % and _ in the value are wildcards, so an
+      // address containing one would match other accounts' rows. The value is
+      // already canonical (lowercase), and the column is lowercase too, but the
+      // lower() keeps this correct for a row that predates the check.
+      const claimedByOther = await transaction.$queryRaw<Array<{ account_id: string }>>`
+        SELECT "account_id" FROM "settlement"."wallet_registrations"
+        WHERE lower("wallet_address") = ${walletAddress} AND "account_id" <> ${input.accountId}
+        LIMIT 1`;
+      if (claimedByOther.length > 0) {
         throw new WalletAddressConflictError("address_claimed");
       }
 
@@ -58,7 +75,7 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
       const created = await transaction.walletRegistration.create({
         data: {
           accountId: input.accountId,
-          walletAddress: input.walletAddress,
+          walletAddress,
           registrationCommitment: input.registrationCommitment,
           requestedAt: input.requestedAt,
         },
@@ -78,7 +95,7 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
           action: "settlement.wallet_registration_requested",
           resourceType: "account",
           resourceId: input.accountId,
-          changes: { wallet_address: input.walletAddress },
+          changes: { wallet_address: walletAddress },
           createdAt: input.requestedAt,
         },
       });
