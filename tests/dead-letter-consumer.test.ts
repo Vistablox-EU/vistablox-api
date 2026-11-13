@@ -135,6 +135,47 @@ describe("dead-letter consumer", () => {
     expect((error.mock.calls[0]?.[0] as { last_error: string }).last_error).toHaveLength(500);
   });
 
+  // The failed output of a job that used a viem client holds the RPC URL, with
+  // the provider's API key in its path (viem puts "URL: <url>" in its message).
+  // The dead-letter line is the retained, alert-hook copy of that text.
+  it("strips a URL from last_error so a provider key in an RPC URL never reaches the log", async () => {
+    const { logger, error } = fakeLogger();
+    const secretUrl = "https://base-sepolia.g.alchemy.com/v2/SECRETPROVIDERKEY123";
+
+    await createDeadLetterHandler(logger)([
+      deadLetterJob({ output: { message: `HTTP request failed.\n\nURL: ${secretUrl}\n\nDetails: fetch failed` } }),
+    ]);
+
+    const lastError = (error.mock.calls[0]?.[0] as { last_error: string }).last_error;
+    expect(lastError).toBe("HTTP request failed.\n\nURL: [url]\n\nDetails: fetch failed");
+    expect(JSON.stringify(error.mock.calls)).not.toContain("SECRETPROVIDERKEY123");
+  });
+
+  it("strips a URL from the wrapped { value } forms too", async () => {
+    const { logger, error } = fakeLogger();
+
+    await createDeadLetterHandler(logger)([
+      deadLetterJob({ output: { value: "gave up on wss://rpc.example.org/ws?apikey=SECRETPROVIDERKEY123" } }),
+      deadLetterJob({ output: { value: { message: "postgresql://user:SECRETPASSWORD@db:5432/x refused" } } }),
+    ]);
+
+    expect(error.mock.calls.map((call) => (call[0] as { last_error: string }).last_error)).toEqual([
+      "gave up on [url]",
+      "[url] refused",
+    ]);
+  });
+
+  it("strips URLs before truncating, so a URL straddling the cut cannot survive as a partial key", async () => {
+    const { logger, error } = fakeLogger();
+    const message = `${"x".repeat(480)} https://rpc.example.org/v2/SECRETPROVIDERKEY123456789`;
+
+    await createDeadLetterHandler(logger)([deadLetterJob({ output: { message } })]);
+
+    const lastError = (error.mock.calls[0]?.[0] as { last_error: string }).last_error;
+    expect(lastError).toBe(`${"x".repeat(480)} [url]`);
+    expect(lastError).not.toContain("SECRETPROVIDERKEY");
+  });
+
   it("registers a metadata-aware worker on the dead-letter queue whose handler logs", async () => {
     const { logger, error } = fakeLogger();
     const work = vi.fn().mockResolvedValue("worker-id");

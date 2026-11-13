@@ -1,6 +1,7 @@
 import type { Logger } from "pino";
 import type { JobWithMetadata, PgBoss } from "pg-boss";
 
+import { stripUrls } from "../logging/log-redaction.js";
 import { DEAD_LETTER_QUEUE } from "./job-queues.js";
 
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -32,8 +33,14 @@ function messageOf(output: unknown): string | null {
   return null;
 }
 
+// URLs are stripped before the text is truncated: a failed job's output can
+// carry the RPC URL (a viem error puts "URL: <url>" in its message), whose path
+// holds the provider's API key, and cutting first could leave a partial key
+// that no longer looks like a URL. This line is the retained, alert-hook copy
+// of the failure, so it must not be the place a key ends up in logs.
 function lastErrorOf(output: unknown): string | null {
-  return messageOf(output)?.slice(0, MAX_LAST_ERROR_LENGTH) ?? null;
+  const message = messageOf(output);
+  return message === null ? null : stripUrls(message).slice(0, MAX_LAST_ERROR_LENGTH);
 }
 
 /**
