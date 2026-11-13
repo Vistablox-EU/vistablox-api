@@ -5,6 +5,10 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { Prisma } from "../src/generated/prisma/client.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
+import { CheckWalletRegistryHealthService } from "../src/modules/settlement/application/check-wallet-registry-health.service.js";
+import { RunWalletRegistryWatcherService } from "../src/modules/settlement/application/run-wallet-registry-watcher.service.js";
+import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
+import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 import { PrismaWalletRegistryHealthRepository } from "../src/modules/settlement/repository/prisma-wallet-registry-health.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -301,6 +305,87 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
 
       expect(await database.platformSetting.count({ where: { key: HEARTBEAT_KEY } })).toBe(1);
       expect((await repository.readWalletRegistryHealth(new Date())).heartbeat?.safeHeadBlock).toBe(100n);
+    });
+  });
+
+  // The two jobs as the worker wires them: a completed watcher run writes the
+  // heartbeat through the reporter into the real table, and the health check
+  // reads it back and judges it.
+  describe("watcher run followed by a health check", () => {
+    const thresholds = {
+      watcherStaleAfterMs: 600_000,
+      cursorLagAlertBlocks: 900n,
+      cursorAheadToleranceBlocks: 32n,
+      // Other test files share this database, so claims pending there must not
+      // decide the outcome here.
+      pendingOverdueAlertCount: 1_000_000,
+      unmatchedEventsAlertCount: 5,
+    };
+
+    function wire() {
+      const logged: Array<{ level: string; fields: Record<string, unknown> }> = [];
+      const at = (level: string) => (fields: Record<string, unknown>) => void logged.push({ level, fields });
+      const reporter = new WalletRegistryAlertReporter({
+        logger: { info: at("info"), warn: at("warn"), error: at("error") } as never,
+        metrics: new WorkerMetrics(),
+        heartbeats: repository,
+        thresholds,
+        jobs: { watcher: "settlement.confirm_wallet_registrations", health: "settlement.check_wallet_registry_health" },
+      });
+      const check = (clock?: () => Date) =>
+        new CheckWalletRegistryHealthService(
+          repository,
+          reporter,
+          {
+            thresholds,
+            watcherConfigured: true,
+            workerStartedAt: new Date(Date.now() - 3_600_000),
+            pendingOverdueAfterMs: 5 * 60_000,
+            ...(clock === undefined ? {} : { clock }),
+          },
+          () => "req_integration",
+        );
+      return { reporter, logged, check };
+    }
+
+    it("reads a fresh heartbeat as a healthy watcher, and the same heartbeat as stalled once it ages", async () => {
+      const { reporter, logged, check } = wire();
+      const run = new RunWalletRegistryWatcherService(
+        {
+          execute: async () => ({
+            fromBlock: "1",
+            toBlock: "5000",
+            safeHeadBlock: "5000",
+            eventsFound: 2,
+            registrationsConfirmed: 0,
+            unmatchedEvents: 0,
+            newUnmatchedEvents: 0,
+            addressMismatches: [],
+            addressMismatchesRepeated: 0,
+            pendingRegistrationsOverdue: 0,
+            pendingWarnAfterMinutes: 5,
+          }),
+        },
+        { getLastProcessedWalletRegistryBlock: async () => 4990n },
+        reporter,
+        () => "req_integration",
+      );
+
+      await run.execute();
+      await check().execute();
+
+      const healthChecked = logged.find((entry) => entry.fields.event === "wallet_registry.health_checked");
+      expect(healthChecked?.fields).toMatchObject({
+        watcher_configured: true,
+        cursor_block: "4990",
+        safe_head_block: "5000",
+        cursor_lag_blocks: "10",
+      });
+      expect(logged.filter((entry) => entry.fields.severity === "error")).toEqual([]);
+
+      // The same row, judged an hour from now: no run since, so stalled.
+      await check(() => new Date(Date.now() + 3_600_000)).execute();
+      expect(logged.some((entry) => entry.fields.event === "wallet_registry.watcher_stalled")).toBe(true);
     });
   });
 });
