@@ -208,7 +208,7 @@ Request body:
 }
 ```
 
-`document_type` is a closed enum of the 11 document kinds `AD-037`/`VISTABLOX_BACKEND_DISCUSSION.md`'s "Mandatory Core Pack" table names (`ecsp_kiis`, `priips_kid`, `final_offer_summary`, `final_terms_sheet`, `issuer_offeror_structure_sheet`, `investor_rights_payout_waterfall_summary`, `risk_factors_summary`, `property_appraisal_summary`, `fees_costs_tax_liquidity_summary`, `withdrawal_cancellation_supplement_rights_notice`, `full_prospectus`) — rejected with `422` if duplicated within one request. `document_ref` is a trusted, already-uploaded storage reference (`z.string().trim().min(1).max(500)`), the exact same shape intake's own document intake already uses (`submitInitialCaseBodySchema`'s `document_type`/`document_ref` pair) — this codebase has no file-upload endpoint for any document kind, disclosure documents included, so getting the underlying file into MinIO is a process this API does not perform. `is_core_reading` is never client-supplied: it's computed server-side from `document_type` (`isCoreReadingDocumentType`, `domain/disclosure-pack.policy.ts`), true for every mandatory type except `full_prospectus` — CORE_TABLES.md's own comment on that column already frames this as deterministic ("false only for the full prospectus").
+`document_type` is a closed enum of the 11 document kinds `AD-037`/`VISTABLOX_BACKEND_DISCUSSION.md`'s "Mandatory Core Pack" table names (`ecsp_kiis`, `priips_kid`, `final_offer_summary`, `final_terms_sheet`, `issuer_offeror_structure_sheet`, `investor_rights_payout_waterfall_summary`, `risk_factors_summary`, `property_appraisal_summary`, `fees_costs_tax_liquidity_summary`, `withdrawal_cancellation_supplement_rights_notice`, `full_prospectus`) — rejected with `422` if duplicated within one request. `document_ref` is the `document_ref` an earlier upload to *this* offering returned (see "Uploading disclosure documents" below): the object key in the disclosures bucket. It is no longer a trusted string. Inside the publish transaction, under the same `offerings` row lock, every ref is resolved against `platform.stored_documents` — it must be an accepted (`upload_status = 'accepted'`), non-deleted row with this `offering_id` in the disclosures bucket — and a request quoting anything else is refused as a whole with `422 offering.disclosure_document_unknown`, whose `field_errors` name each offending entry (`documents.<index>.document_ref`); nothing is written. A process started without document storage (`MINIO_*`/`MINIO_DISCLOSURES_BUCKET` unset) accepts no ref at all, since it cannot have taken an upload either. `is_core_reading` is never client-supplied: it's computed server-side from `document_type` (`isCoreReadingDocumentType`, `domain/disclosure-pack.policy.ts`), true for every mandatory type except `full_prospectus` — CORE_TABLES.md's own comment on that column already frames this as deterministic ("false only for the full prospectus").
 
 This is deliberately **one reusable staff primitive**, not logic wired into any single flow. The documented model implies at least three distinct moments a new version gets published — an initial pre-offering pack (whatever `hasDisclosurePack` gates ordinary reservations on), the version-locked pack tied to `final_offering_published_at` (`AD-037`), and a republished pack after a materiality reset (`AD-038`, still a manual follow-up call — see the previous section) — but all three are the same mechanical action, so this endpoint doesn't hard-code which moment it's being called for. It only requires the offering still be `pre_offering` (`404 offering.not_found` for an unknown offering, `409 offering.disclosure_pack_not_available` otherwise — `AD-046` puts post-finalization content changes through a separate amendment/consent path this codebase does not build).
 
@@ -230,5 +230,57 @@ Response (`201`):
   }
 }
 ```
+
+### Uploading disclosure documents
+
+The files a pack is built from are uploaded through the same staff-gated router (`admin_operations` role plus staff WebAuthn), one file per request, the way intake's case-document upload already works — a raw body, described by headers, not a multipart form. Routes are mounted only when document storage is configured (`MINIO_ENDPOINT`/`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`/`MINIO_DISCLOSURES_BUCKET`; the same gate the investor download's `MinioDisclosureDocumentStore` has), exactly as intake's upload routes are.
+
+`POST /internal/v1/offerings/:offering_id/documents` — body: the file bytes. Headers:
+
+- `Content-Type`: one of `application/pdf`, `image/jpeg`, `image/png`, `image/webp`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (intake's allowlist, unchanged); anything else is `422 offering.document_mime_unsupported`.
+- `X-Document-Type`: one of the 11 `document_type` values above; anything else is `422 offering.document_type_unsupported`.
+- `X-Original-Filename`: optional, the name the file had on the staff member's machine, for display only (the storage key never contains it). Headers cannot carry every character a filename can, so a value containing `%` is percent-decoded (`decodeURIComponent`), falling back to the raw header when it is not valid encoding; a value without `%` is taken verbatim. Capped at 255 characters; defaults to `document`.
+
+The body is capped at 100 MB (`413 offering.document_too_large`), must not be empty (`422 offering.document_empty`), is SHA-256 hashed while streaming, and is handed to ClamAV before any byte is kept: `503 offering.document_scanner_unavailable` when the scanner cannot be reached (fail closed — nothing is stored), `422 offering.document_malware_detected` on a hit. `404 offering.not_found` for an unknown offering. A clean file is written to the disclosures bucket under `offerings/{offering_id}/{document_id}` (`objectKey`, `src/infrastructure/storage/storage-buckets.ts` — a server-generated key, the same one the investor download later reads through `MinioDisclosureDocumentStore.get`), then a `platform.stored_documents` row is created (`offering_id`, `document_type`, bucket, key, content type, size, checksum, `upload_status: "accepted"`, `classification: "disclosure"`, `original_filename`) together with an `offering.disclosure_document_uploaded` audit-log entry in one transaction; if that transaction fails the object is deleted again rather than left orphaned. Response (`201`):
+
+```json
+{
+  "data": {
+    "document_id": "doc_...",
+    "document_type": "final_terms_sheet",
+    "document_ref": "offerings/offering_.../doc_...",
+    "content_type": "application/pdf",
+    "size_bytes": 184233,
+    "sha256_checksum": "…64 hex…",
+    "original_filename": "Final terms – v1.pdf",
+    "uploaded_at": "2026-11-13T10:00:00.000Z"
+  }
+}
+```
+
+`document_ref` is the value to quote in `POST .../disclosure-packs`. Uploading does not publish anything by itself: an upload that is never quoted in a pack is simply never visible to an investor, and re-uploading a corrected file is a new upload with a new `document_ref` — there is no replace-in-place, so a pack version that quoted the old key keeps pointing at the bytes investors actually saw.
+
+`GET /internal/v1/offerings/:offering_id/documents` lists the offering's accepted, non-deleted uploads, newest first, optionally narrowed with `?document_type=` (`422` for a value outside the enum; `404 offering.not_found` for an unknown offering). Response (`200`):
+
+```json
+{
+  "data": [
+    {
+      "document_id": "doc_...",
+      "document_type": "final_terms_sheet",
+      "document_ref": "offerings/offering_.../doc_...",
+      "content_type": "application/pdf",
+      "size_bytes": 184233,
+      "original_filename": "Final terms – v1.pdf",
+      "uploaded_at": "2026-11-13T10:00:00.000Z",
+      "published_in_pack_id": "pack_..."
+    }
+  ]
+}
+```
+
+`published_in_pack_id` is the most recent `disclosure_packs` row (highest version, current or superseded) whose documents reference this `document_ref`, or `null` for an upload no pack has quoted yet — what the admin uses to tell "uploaded" from "published".
+
+`GET /internal/v1/offerings/:offering_id/documents?document_ref=<key>` streams that one upload back to staff (`Content-Type` and `Content-Length` from the metadata row, `Cache-Control: private, no-store`, `Content-Disposition: inline` with a sanitised filename, `X-Content-Type-Options: nosniff` — the same shape as intake's `GET /:case_id/documents?document_ref=`). A ref that is not one of this offering's accepted uploads is `404 offering.document_not_found`; a row whose object has gone missing from storage is `503 offering.document_storage_inconsistent`.
 
 `is_complete` reports whether every one of the 11 mandatory document types is present in *this* pack — informational only, not a hard gate on *this* endpoint itself. A pack published before final terms is legitimately allowed to be partial (`hasDisclosurePack` only ever required at least one document, never all eleven), so requiring full completeness on every publish would make the initial pre-offering moment unbuildable. `AD-037`'s "must be blocked if the pack is incomplete" is enforced downstream, in two places, both re-deriving completeness from the offering's current pack under their own row lock rather than trusting a stale `is_complete` value from whenever the pack was published: `publishFinalOfferingTerms` (stage 1 — see above), the primary gate, since it requires a complete pack before it will open the reconfirmation window at all; and `reconfirmReservation` (stage 2), defensively, for the narrower case of a pack that regresses to incomplete via a later republish after publish already succeeded.

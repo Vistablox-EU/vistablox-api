@@ -97,6 +97,41 @@ describe("PublishDisclosurePackService", () => {
     ).rejects.toMatchObject({ code: "offering.not_found", status: 404 });
   });
 
+  it("rejects document_refs that are not accepted uploads of the offering with a 422 naming each bad ref", async () => {
+    const service = new PublishDisclosurePackService(
+      repository({
+        publishDisclosurePack: vi.fn().mockResolvedValue({
+          published: null,
+          conflict: "unknown_document_refs",
+          unknownDocumentRefs: ["documents/not-uploaded.pdf", "documents/other-offering.pdf"],
+        }),
+      }),
+      () => now,
+    );
+
+    await expect(
+      service.execute({
+        accountId: "account_staff",
+        offeringId: "offering_01",
+        traceId: "req_01",
+        body: {
+          documents: [
+            { document_type: "ecsp_kiis", document_ref: "offerings/offering_01/doc_ok" },
+            { document_type: "final_terms_sheet", document_ref: "documents/not-uploaded.pdf" },
+            { document_type: "full_prospectus", document_ref: "documents/other-offering.pdf" },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: "offering.disclosure_document_unknown",
+      status: 422,
+      fieldErrors: [
+        { field: "documents.1.document_ref", code: "offering.disclosure_document_unknown" },
+        { field: "documents.2.document_ref", code: "offering.disclosure_document_unknown" },
+      ],
+    });
+  });
+
   it("reports a 409 when the offering is not open for a disclosure pack update", async () => {
     const service = new PublishDisclosurePackService(
       repository({

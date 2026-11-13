@@ -105,6 +105,7 @@ model StoredDocument {
   deletionReason   String?   @map("deletion_reason")
   sourceDocumentId String?   @map("source_document_id")
   variantType      String?   @map("variant_type")
+  originalFilename String?   @map("original_filename")
   room             PropertyRoom? @relation("RoomPhotos", fields: [roomId], references: [id])
   sourceDocument   StoredDocument? @relation("DocumentVariants", fields: [sourceDocumentId], references: [id])
   variants         StoredDocument[] @relation("DocumentVariants")
