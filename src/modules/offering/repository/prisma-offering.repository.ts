@@ -396,6 +396,11 @@ export class PrismaOfferingRepository
       throw new Error("Offering progress query did not return an aggregate row");
     }
 
+    const confirmedWallet =
+      account.walletRegistration !== null && account.walletRegistration.registeredAt !== null
+        ? account.walletRegistration
+        : null;
+
     return {
       id: offering.id,
       status: asInvestorOfferingStatus(offering.status),
@@ -442,11 +447,18 @@ export class PrismaOfferingRepository
         ),
         kycEligibilityState: kycSnapshot?.eligibilityState ?? null,
         kycRenewalDueAt: kycSnapshot?.renewalDueAt ?? null,
-        walletProvisioned: account.walletRegistration !== null,
-        walletAddress: account.walletRegistration?.walletAddress ?? null,
-        payoutWalletRegistered:
-          account.walletRegistration !== null &&
-          account.walletRegistration.registeredAt !== null,
+        // Only a CONFIRMED registration (registered_at set) counts. A pending
+        // claim proves nothing about who controls the address, and its own
+        // account may still replace it in place, so it must neither make the
+        // payment account "ready" nor be handed to the Coinbase onramp as the
+        // delivery address: a replaced pending address would otherwise
+        // redirect the purchase, on a fresh request and on the replay of an
+        // idempotent one alike. A confirmed registration cannot be replaced
+        // through the API (address_mismatch), so the address read here is the
+        // same on every replay.
+        walletProvisioned: confirmedWallet !== null,
+        walletAddress: confirmedWallet?.walletAddress ?? null,
+        payoutWalletRegistered: confirmedWallet !== null,
         recoveryCooldownEndsAt: account.recoveryCases[0]?.cooldownEndsAt ?? null,
       },
     };
