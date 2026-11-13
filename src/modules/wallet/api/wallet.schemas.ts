@@ -1,10 +1,16 @@
 import { z } from "zod";
 
+import { canonicalWalletAddress } from "../../../shared/domain/wallet-address.js";
+
 const dateTime = z.iso.datetime();
+// Any hex case is accepted, but only the canonical lowercase spelling leaves
+// this schema: the services, the repository and the database never see another
+// one. The regex runs first and a failed regex skips the transform.
 const ethAddress = z
   .string()
   .trim()
-  .regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 20-byte, 0x-prefixed hex address");
+  .regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 20-byte, 0x-prefixed hex address")
+  .transform(canonicalWalletAddress);
 
 export const registerWalletBodySchema = z.object({
   wallet_address: ethAddress,
