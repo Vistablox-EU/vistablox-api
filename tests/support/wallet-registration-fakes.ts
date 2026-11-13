@@ -382,7 +382,9 @@ export class FakeEvidenceReader implements WalletRegistrationEvidenceReader {
     commitment: string;
   }): Promise<RegistrationEventLookup> {
     this.lookupCalls.push(input);
-    const entry = this.lookups.get(input.transactionHash);
+    // A transaction that holds several registrations is scripted per commitment
+    // ("<transaction hash>:<commitment>"); otherwise per transaction.
+    const entry = this.lookups.get(`${input.transactionHash}:${input.commitment}`) ?? this.lookups.get(input.transactionHash);
     if (entry instanceof Error) throw entry;
     if (entry === undefined) throw new Error(`no scripted lookup for ${input.transactionHash}`);
     return entry;

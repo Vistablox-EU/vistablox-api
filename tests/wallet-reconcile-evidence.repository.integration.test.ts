@@ -295,4 +295,22 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRepository.reconcileWall
       registrationEvidenceFlag: null,
     });
   });
+
+  it("reads the flag back through findByAccountId for a flagged registration", async () => {
+    const row = await registeredWith("r13");
+    await database.walletRegistration.update({
+      where: { accountId: row.accountId },
+      data: { registrationEvidenceFlaggedAt: NOW, registrationEvidenceFlag: "event_missing" },
+    });
+
+    const wallet = await repository.findByAccountId(row.accountId);
+
+    expect(wallet).toMatchObject({
+      registeredAt: EARLIER,
+      registrationTxHash: row.evidence.transactionHash,
+      registrationEvidenceVerifiedAt: null,
+      registrationEvidenceFlaggedAt: NOW,
+      registrationEvidenceFlag: "event_missing",
+    });
+  });
 });

@@ -84,10 +84,13 @@ export function finalCursor(toBlock: bigint, rewinds: readonly bigint[]): bigint
 
 /**
  * The cursor position that makes the next run read the block of a confirmation
- * that was found reorganized (the block before it, because the scan starts
- * overlap blocks before the cursor anyway), or null when the block is already
- * deeper than the final depth: a rescan that far back would hold up new
- * confirmations for a long time, so such a row is flagged for staff instead.
+ * that was found reorganized, or of an event whose refresh had to wait for
+ * another row (the block before it, because the scan starts overlap blocks
+ * before the cursor anyway). Null when the block is already deeper than the
+ * final depth: a rescan that far back would hold up new confirmations for a
+ * long time, so a reorganized row is flagged for staff instead and a deferred
+ * refresh is left to the staff reconcile. The bound is also what stops a row
+ * that never moves from keeping the cursor back for good.
  */
 export function rewindTargetFor(storedBlockNumber: bigint, head: bigint): bigint | null {
   if (head - storedBlockNumber >= WALLET_REGISTRY_EVIDENCE_FINAL_DEPTH) return null;

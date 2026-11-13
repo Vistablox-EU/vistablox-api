@@ -322,6 +322,43 @@ describe("ConfirmWalletRegistrationsService: events for rows that are already re
 
     expect(summary).toMatchObject({ evidenceRefreshDeferred: 1, evidenceRefreshed: 0 });
     expect(repository.row("acct_01")).toMatchObject({ blockHash: hash("99"), logIndex: 5 });
+    // The cursor goes back to the block before the event, so the next run reads it again and retries.
+    expect(summary.cursorRewoundTo).toBe("94");
+    expect(repository.cursorWrites).toEqual([94n]);
+  });
+
+  it("does not hold the cursor back for a deferred refresh once the event's block is as deep as the final depth", async () => {
+    const depth = WALLET_REGISTRY_EVIDENCE_FINAL_DEPTH;
+    const rows = () => [
+      confirmedRow(pendingSeed, { ...identityAt(95n), blockHash: hash("99"), logIndex: 5 }),
+      confirmedRow({ accountId: "acct_x", walletAddress: "0x999", commitment: "0xc9" }, { ...identityAt(95n), blockHash: hash("98") }),
+    ];
+    // A row that never moves (its own event is gone) must not stall the watcher for good.
+    const justInside = harness({ latest: 95n + depth - 1n, cursor: 100n, rows: rows(), events: [event95] });
+    const atDepth = harness({ latest: 95n + depth, cursor: 100n, rows: rows(), events: [event95] });
+
+    const inside = await justInside.service.execute();
+    const deep = await atDepth.service.execute();
+
+    expect(inside).toMatchObject({ evidenceRefreshDeferred: 1, cursorRewoundTo: "94" });
+    expect(deep).toMatchObject({ evidenceRefreshDeferred: 1, cursorRewoundTo: null });
+    expect(await atDepth.repository.getLastProcessedWalletRegistryBlock()).toBe(95n + depth - 3n);
+  });
+
+  it("does not rewind for a refresh another run already did", async () => {
+    const { service, repository } = harness({
+      latest: 100n,
+      cursor: 90n,
+      rows: [confirmedRow(pendingSeed, { ...identityAt(95n), blockHash: hash("99"), logIndex: 5 })],
+      events: [event95],
+    });
+    // The row changes between the read and the compare-and-set write.
+    const replace = vi.spyOn(repository, "replaceWalletRegistrationEvidence").mockResolvedValue("stale");
+
+    const summary = await service.execute();
+
+    expect(replace).toHaveBeenCalledTimes(1);
+    expect(summary).toMatchObject({ evidenceRefreshed: 0, evidenceRefreshDeferred: 0, cursorRewoundTo: null });
   });
 
   it("counts only events that belong to no row as unmatched", async () => {
@@ -533,5 +570,213 @@ describe("ConfirmWalletRegistrationsService: re-checking recorded confirmations"
 
     expect(summary.evidenceRechecked).toBe(0);
     expect(reader.hashCalls).toEqual([]);
+  });
+});
+
+describe("ConfirmWalletRegistrationsService: a bundled transaction mined again with shifted log indexes", () => {
+  const BUNDLE_TX = hash("bb");
+  const OLD_BLOCK_HASH = hash("a0");
+  const NEW_BLOCK_HASH = hash("a1");
+  const NEW_BLOCK = 587n;
+  const seeds = ["a", "b", "c", "d"].map((letter, index) => ({
+    accountId: `acct_${letter}`,
+    walletAddress: `0x${letter}`,
+    commitment: `0xc${letter}`,
+    index,
+  }));
+  // Four registrations of one transaction at log indexes 3, 5, 7, 9; mined again they sit at 5, 7, 9, 11, so
+  // each one's new identity is the old identity of the next row until that row has moved too.
+  const oldIdentity = (index: number): WalletRegistrationEvidence => ({
+    transactionHash: BUNDLE_TX,
+    blockHash: OLD_BLOCK_HASH,
+    blockNumber: 500n,
+    logIndex: 3 + index * 2,
+  });
+  const reminedEvents = (): FakeEvent[] =>
+    seeds.map((seed) => ({
+      blockNumber: NEW_BLOCK,
+      wallet: seed.walletAddress,
+      commitment: seed.commitment,
+      transactionHash: BUNDLE_TX,
+      blockHash: NEW_BLOCK_HASH,
+      logIndex: 5 + seed.index * 2,
+    }));
+
+  function bundle(flagged: boolean) {
+    const options = { latestBlock: 593n, events: reminedEvents() };
+    const { chain } = makeFakeChain(options);
+    const repository = new FakeWalletRegistrationRepository(
+      seeds.map(({ index, ...seed }) => {
+        const row = confirmedRow(seed, oldIdentity(index));
+        return flagged ? { ...row, flaggedAt: NOW, flag: "transaction_missing" as const } : row;
+      }),
+      560n,
+    );
+    const reader = new FakeEvidenceReader();
+    // The old block is gone from the chain; the transaction is in the new one.
+    reader.canonicalHashes.set(500n, hash("ee"));
+    reader.canonicalHashes.set(NEW_BLOCK, NEW_BLOCK_HASH);
+    for (const seed of seeds) {
+      reader.lookups.set(`${BUNDLE_TX}:${seed.commitment}`, {
+        kind: "found",
+        evidence: { ...oldIdentity(seed.index), blockHash: NEW_BLOCK_HASH, blockNumber: NEW_BLOCK, logIndex: 5 + seed.index * 2 },
+        chainTimestamp: NOW,
+      });
+    }
+    const service = new ConfirmWalletRegistrationsService(repository, chain as never, () => NOW, undefined, reader);
+    // One run a minute, 30 blocks a minute.
+    const advance = () => {
+      options.latestBlock += 30n;
+    };
+    return { service, repository, advance };
+  }
+
+  const logIndexes = (repository: FakeWalletRegistrationRepository) =>
+    seeds.map((seed) => repository.row(seed.accountId).logIndex);
+
+  it("brings flagged rows to the new identities over the next runs and then stops rewinding", async () => {
+    const { service, repository, advance } = bundle(true);
+    const summaries = [];
+    for (let run = 0; run < 6; run += 1) {
+      summaries.push(await service.execute());
+      advance();
+    }
+
+    // Each run moves the row at the end of the chain of collisions; the rewind is what brings the next run back.
+    expect(summaries.map((summary) => summary.evidenceRefreshed)).toEqual([1, 1, 1, 1, 0, 0]);
+    expect(summaries.map((summary) => summary.evidenceRefreshDeferred)).toEqual([3, 2, 1, 0, 0, 0]);
+    expect(summaries.map((summary) => summary.cursorRewoundTo)).toEqual(["586", "586", "586", null, null, null]);
+    expect(logIndexes(repository)).toEqual([5, 7, 9, 11]);
+    for (const seed of seeds) {
+      expect(repository.row(seed.accountId)).toMatchObject({ blockHash: NEW_BLOCK_HASH, blockNumber: NEW_BLOCK, flag: null, flaggedAt: null });
+    }
+    expect(repository.writesOf("replace:refreshed")).toHaveLength(4);
+    expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(593n + 30n * 5n - 3n);
+  });
+
+  it("converges the same way for rows that were never flagged", async () => {
+    const { service, repository, advance } = bundle(false);
+    const summaries = [];
+    for (let run = 0; run < 6; run += 1) {
+      summaries.push(await service.execute());
+      advance();
+    }
+
+    expect(logIndexes(repository)).toEqual([5, 7, 9, 11]);
+    for (const seed of seeds) {
+      expect(repository.row(seed.accountId)).toMatchObject({ blockHash: NEW_BLOCK_HASH, flag: null });
+    }
+    expect(summaries.at(-1)).toMatchObject({ evidenceRefreshDeferred: 0, cursorRewoundTo: null });
+  });
+});
+
+describe("ConfirmWalletRegistrationsService: the cursor and the row changes of the re-check", () => {
+  const rowAt = (blockNumber: bigint, accountId = "acct_01", commitment = COMMITMENT) =>
+    confirmedRow({ accountId, walletAddress: WALLET, commitment }, identityAt(blockNumber));
+  const reorganized = (reader: FakeEvidenceReader, block = 95n) => {
+    reader.canonicalHashes.set(block, hash("cc"));
+  };
+
+  it("leaves the row unflagged when the cursor write fails, so the next run flags it and rewinds", async () => {
+    const { service, repository, reader } = harness({ latest: 100n, cursor: 90n, rows: [rowAt(95n)] });
+    reorganized(reader);
+    reader.lookups.set(defaultTransactionHash(95n), { kind: "transaction_not_found" });
+    repository.failSetCursor = true;
+
+    await expect(service.execute()).rejects.toThrow("cursor write failed");
+
+    // A flagged row is no longer a re-check candidate: flagging first would lose the rewind for good.
+    expect(repository.row("acct_01")).toMatchObject({ flag: null, flaggedAt: null });
+    expect(repository.writes).toEqual([]);
+
+    repository.failSetCursor = false;
+    const rerun = await service.execute();
+
+    expect(rerun).toMatchObject({ evidenceRechecked: 1, evidenceFlagged: 1, cursorRewoundTo: "94" });
+    expect(repository.row("acct_01").flag).toBe("transaction_missing");
+    expect(repository.cursorWrites).toEqual([94n]);
+  });
+
+  it("leaves the row on its old evidence when the cursor write fails before a refresh", async () => {
+    const { service, repository, reader } = harness({ latest: 100n, cursor: 90n, rows: [rowAt(95n)] });
+    reorganized(reader);
+    reader.lookups.set(defaultTransactionHash(95n), {
+      kind: "found",
+      evidence: { transactionHash: defaultTransactionHash(95n), blockHash: hash("dd"), blockNumber: 96n, logIndex: 2 },
+      chainTimestamp: NOW,
+    });
+    repository.failSetCursor = true;
+
+    await expect(service.execute()).rejects.toThrow("cursor write failed");
+
+    expect(repository.row("acct_01")).toMatchObject({ blockHash: defaultBlockHash(95n), logIndex: 0 });
+    repository.failSetCursor = false;
+    expect(await service.execute()).toMatchObject({ evidenceRefreshed: 1, cursorRewoundTo: "94" });
+  });
+
+  it("has written the rewound cursor before the first flag or refresh of the run", async () => {
+    const { service, repository, reader } = harness({
+      latest: 100n,
+      cursor: 90n,
+      rows: [rowAt(95n, "acct_01", "0xc1"), rowAt(93n, "acct_02", "0xc2")],
+    });
+    for (const block of [95n, 93n]) reorganized(reader, block);
+    reader.lookups.set(defaultTransactionHash(93n), { kind: "transaction_not_found" });
+    reader.lookups.set(defaultTransactionHash(95n), {
+      kind: "found",
+      evidence: { transactionHash: defaultTransactionHash(95n), blockHash: hash("dd"), blockNumber: 96n, logIndex: 2 },
+      chainTimestamp: NOW,
+    });
+    const cursorWritesSeenByRowWrites: number[] = [];
+    for (const method of ["flagWalletRegistrationEvidence", "replaceWalletRegistrationEvidence"] as const) {
+      const original = repository[method].bind(repository) as (input: never) => Promise<unknown>;
+      vi.spyOn(repository, method).mockImplementation((async (input: never) => {
+        cursorWritesSeenByRowWrites.push(repository.cursorWrites.length);
+        return original(input);
+      }) as never);
+    }
+
+    const summary = await service.execute();
+
+    expect(summary).toMatchObject({ evidenceFlagged: 1, evidenceRefreshed: 1, cursorRewoundTo: "92" });
+    expect(cursorWritesSeenByRowWrites).toEqual([1, 1]);
+    expect(repository.cursorWrites).toEqual([92n]);
+  });
+
+  it("keeps the rewound cursor when writing the flag fails, and counts the error", async () => {
+    const { service, repository, reader } = harness({ latest: 100n, cursor: 90n, rows: [rowAt(95n)] });
+    reorganized(reader);
+    reader.lookups.set(defaultTransactionHash(95n), { kind: "transaction_not_found" });
+    vi.spyOn(repository, "flagWalletRegistrationEvidence").mockRejectedValue(new Error("db down at postgres://secret"));
+
+    const summary = await service.execute();
+
+    expect(summary).toMatchObject({ evidenceFlagged: 0, evidenceRecheckErrors: 1, cursorRewoundTo: "94" });
+    expect(repository.cursorWrites).toEqual([94n]);
+    expect(JSON.stringify(summary)).not.toContain("secret");
+    // The row is still a candidate, so the next run flags it.
+    vi.restoreAllMocks();
+    expect(await service.execute()).toMatchObject({ evidenceFlagged: 1, cursorRewoundTo: "94" });
+  });
+
+  it("does not let a failing row stop the others from being flagged or refreshed", async () => {
+    const { service, repository, reader } = harness({
+      latest: 100n,
+      cursor: 90n,
+      rows: [rowAt(95n, "acct_01", "0xc1"), rowAt(93n, "acct_02", "0xc2")],
+    });
+    for (const block of [95n, 93n]) reorganized(reader, block);
+    for (const block of [95n, 93n]) reader.lookups.set(defaultTransactionHash(block), { kind: "transaction_not_found" });
+    const original = repository.flagWalletRegistrationEvidence.bind(repository);
+    vi.spyOn(repository, "flagWalletRegistrationEvidence").mockImplementation(async (input) => {
+      if (input.accountId === "acct_02") throw new Error("db down");
+      return original(input);
+    });
+
+    const summary = await service.execute();
+
+    expect(summary).toMatchObject({ evidenceFlagged: 1, evidenceRecheckErrors: 1, cursorRewoundTo: "92" });
+    expect(repository.row("acct_01").flag).toBe("transaction_missing");
+    expect(repository.row("acct_02").flag).toBeNull();
   });
 });

@@ -193,6 +193,71 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       });
     });
 
+    it("clears the flag and its timestamp on a flagged row and keeps the flag it had in the audit row", async () => {
+      const { accountId, initial } = await confirmed("e1f");
+      await repository.flagWalletRegistrationEvidence({
+        accountId,
+        expected: keyOf(initial),
+        flag: "transaction_missing",
+        flaggedAt: T0,
+      });
+      expect(await read(accountId)).toMatchObject({ registrationEvidenceFlag: "transaction_missing", registrationEvidenceFlaggedAt: T0 });
+      const next = evidence({ transactionHash: initial.transactionHash, blockHash: hex("34"), blockNumber: 102n, logIndex: 7 });
+
+      const outcome = await repository.replaceWalletRegistrationEvidence({
+        accountId,
+        expected: keyOf(initial),
+        next,
+        reason: "refreshed",
+        changedAt: T1,
+      });
+
+      expect(outcome).toBe("replaced");
+      expect(await read(accountId)).toMatchObject({
+        registeredAt: T0,
+        registrationBlockHash: hex("34"),
+        registrationBlockNumber: 102n,
+        registrationLogIndex: 7,
+        registrationEvidenceVerifiedAt: null,
+        registrationEvidenceFlaggedAt: null,
+        registrationEvidenceFlag: null,
+      });
+      expect(await fixtures.auditActions(accountId)).toEqual([
+        "settlement.wallet_registration_evidence_flagged",
+        "settlement.wallet_registration_evidence_refreshed",
+      ]);
+      const refreshed = await database.auditLog.findFirstOrThrow({
+        where: { resourceId: accountId, action: "settlement.wallet_registration_evidence_refreshed" },
+      });
+      expect(refreshed.changes).toEqual({
+        previous: { tx_hash: initial.transactionHash, block_hash: hex("22"), block_number: "100", log_index: 3 },
+        next: { tx_hash: next.transactionHash, block_hash: hex("34"), block_number: "102", log_index: 7 },
+        previous_flag: "transaction_missing",
+      });
+    });
+
+    it("clears the flag when the flagged row's own event is replaced by the identical identity", async () => {
+      const { accountId, initial } = await confirmed("e1g");
+      await repository.flagWalletRegistrationEvidence({ accountId, expected: keyOf(initial), flag: "event_missing", flaggedAt: T0 });
+
+      const outcome = await repository.replaceWalletRegistrationEvidence({
+        accountId,
+        expected: keyOf(initial),
+        next: initial,
+        reason: "refreshed",
+        changedAt: T1,
+      });
+
+      expect(outcome).toBe("replaced");
+      expect(await read(accountId)).toMatchObject({
+        registrationTxHash: initial.transactionHash,
+        registrationBlockHash: initial.blockHash,
+        registrationLogIndex: initial.logIndex,
+        registrationEvidenceFlaggedAt: null,
+        registrationEvidenceFlag: null,
+      });
+    });
+
     it("records evidence on a row that was confirmed without any and says so in the audit row", async () => {
       const registration = await fixtures.createRegistration({ registeredAt: T0 });
       const next = evidence({ transactionHash: uniqueTx("e2") });
@@ -405,6 +470,15 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
         registrationTxHash: initial.transactionHash,
       });
       expect(await fixtures.auditActions(accountId)).toEqual(["settlement.wallet_registration_evidence_flagged"]);
+      const audit = await database.auditLog.findFirstOrThrow({ where: { resourceType: "wallet_registration", resourceId: accountId } });
+      expect(audit).toMatchObject({ actorAccountId: null, createdAt: T1 });
+      expect(audit.changes).toEqual({
+        flag: "transaction_missing",
+        tx_hash: initial.transactionHash,
+        block_hash: initial.blockHash,
+        block_number: "100",
+        log_index: 3,
+      });
     });
 
     it("does not flag over a row that changed while it waited for the lock", async () => {
@@ -513,6 +587,29 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
         evidenceFlag: null,
       });
       expect(await repository.findWalletRegistrationByCommitment(`0xnone${fixtures.suffix}`)).toBeNull();
+    });
+
+    it("returns the flag of a flagged row, which is what makes the watcher refresh it instead of treating the event as a replay", async () => {
+      const row = await fixtures.createRegistration({ commitment: `0xflagged${fixtures.suffix}` });
+      const initial = evidence({ transactionHash: uniqueTx("h2") });
+      await repository.confirmWalletRegistration({ accountId: row.accountId, registeredAt: T0, evidence: initial });
+      await repository.flagWalletRegistrationEvidence({
+        accountId: row.accountId,
+        expected: keyOf(initial),
+        flag: "transaction_reverted",
+        flaggedAt: T1,
+      });
+
+      expect(await repository.findWalletRegistrationByCommitment(`0xflagged${fixtures.suffix}`)).toEqual({
+        accountId: row.accountId,
+        walletAddress: row.walletAddress,
+        registeredAt: T0,
+        transactionHash: initial.transactionHash,
+        blockNumber: 100n,
+        blockHash: initial.blockHash,
+        logIndex: 3,
+        evidenceFlag: "transaction_reverted",
+      });
     });
   });
 

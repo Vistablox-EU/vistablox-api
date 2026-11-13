@@ -7,6 +7,7 @@ import {
   isValidChainHash,
   normalizeChainHash,
   type WalletRegistrationEvidence,
+  type WalletRegistrationEvidenceFlag,
 } from "../../../shared/domain/wallet-registration-evidence.js";
 import {
   WALLET_REGISTRY_EVIDENCE_FINAL_DEPTH,
@@ -91,7 +92,9 @@ export interface ConfirmWalletRegistrationsSummary {
   evidenceRecorded: number;
   // Evidence replaced because the transaction was mined again in another block.
   evidenceRefreshed: number;
-  // A refresh that ran into another row holding the new identity; retried by a later run.
+  // A refresh that ran into another row holding the new identity. The cursor is
+  // held back to the block of the event (while that block is within the final
+  // depth), so a later run reads the event again and retries.
   evidenceRefreshDeferred: number;
   evidenceRechecked: number;
   evidenceVerified: number;
@@ -124,7 +127,16 @@ export interface ConfirmWalletRegistrationsSummary {
  * (registered_at stays: the registry holds no state, the wallet's signature is
  * what proved control, and releasing the registration would let the address be
  * claimed twice). Either way the cursor is moved back so the next run reads the
- * blocks again.
+ * blocks again. A refresh that has to wait for another row to move first (log
+ * indexes shifted, so the new identity is still another row's old one) holds the
+ * cursor back the same way, which is what lets a bundle of three or more
+ * registrations settle one row per run.
+ *
+ * Order matters for the re-check: every confirmation is judged against the chain
+ * first (reads only), then the cursor is written, and only then are rows
+ * flagged, refreshed or marked verified. A flagged row leaves the re-check set,
+ * so a rewind that existed only in memory when the run died would never be
+ * proposed again.
  */
 export class ConfirmWalletRegistrationsService {
   private readonly evidenceReaderOverride: WalletRegistrationEvidenceReader | undefined;
@@ -210,19 +222,28 @@ export class ConfirmWalletRegistrationsService {
     )) as unknown as ReadonlyArray<WalletRegisteredEvent>;
     summary.eventsFound = events.length;
 
+    const rewinds: bigint[] = [];
     for (const event of events) {
       const { wallet, commitment } = event.args;
       if (wallet === undefined || commitment === undefined) {
         continue; // Defensive only -- the ABI guarantees both are present.
       }
-      await this.processEvent(event, wallet, commitment, summary);
+      const rewind = await this.processEvent(event, wallet, commitment, latestBlock, summary);
+      if (rewind !== null) rewinds.push(rewind);
     }
 
-    const rewinds = await this.recheckEvidence(latestBlock, summary);
+    const checks = await this.judgeRecordedEvidence(latestBlock, summary);
+    for (const check of checks) {
+      if (check.rewind !== null) rewinds.push(check.rewind);
+    }
 
     const cursorAfter = finalCursor(toBlock, rewinds);
     if (cursorAfter < toBlock) summary.cursorRewoundTo = cursorAfter.toString();
     await this.repository.setLastProcessedWalletRegistryBlock(cursorAfter);
+
+    // Only now: the rewind is stored, so a row these changes take out of the
+    // re-check set (a flag) cannot lose it.
+    await this.applyEvidenceChanges(checks, summary);
 
     return summary;
   }
@@ -231,29 +252,31 @@ export class ConfirmWalletRegistrationsService {
     event: WalletRegisteredEvent,
     wallet: string,
     commitment: string,
+    head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
-  ): Promise<void> {
+  ): Promise<bigint | null> {
     const evidence = toEvidence(event);
     const record = await this.repository.findWalletRegistrationByCommitment(commitment);
     if (record === null) {
       summary.unmatchedEvents += 1;
-      return;
+      return null;
     }
 
     if (record.registeredAt === null) {
-      await this.processPendingEvent(record, evidence, wallet, commitment, summary);
-      return;
+      return this.processPendingEvent(record, evidence, wallet, commitment, head, summary);
     }
-    await this.processRegisteredEvent(record, evidence, wallet, summary);
+    return this.processRegisteredEvent(record, evidence, wallet, head, summary);
   }
 
+  /** Returns the cursor position a deferred refresh asks for, or null. */
   private async processPendingEvent(
     record: WalletRegistrationRecord,
     evidence: WalletRegistrationEvidence | null,
     wallet: string,
     commitment: string,
+    head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
-  ): Promise<void> {
+  ): Promise<bigint | null> {
     if (record.walletAddress.toLowerCase() !== wallet.toLowerCase()) {
       summary.addressMismatches.push(
         `account_id=${record.accountId} commitment=${commitment}: stored wallet ${record.walletAddress} != on-chain sender ${wallet}`,
@@ -268,7 +291,7 @@ export class ConfirmWalletRegistrationsService {
         onChainSender: wallet,
         detectedAt: this.clock(),
       });
-      return;
+      return null;
     }
 
     if (evidence === null) {
@@ -276,7 +299,7 @@ export class ConfirmWalletRegistrationsService {
       // blank-evidence rows this job exists to avoid. The row stays pending;
       // the overdue count and the manual reconcile cover it.
       summary.eventsWithoutIdentity += 1;
-      return;
+      return null;
     }
 
     const outcome = await this.repository.confirmWalletRegistration({
@@ -293,31 +316,34 @@ export class ConfirmWalletRegistrationsService {
       // read and the write. Classify against what it holds now, once.
       const reread = await this.repository.findWalletRegistrationByCommitment(commitment);
       if (reread !== null && reread.registeredAt !== null) {
-        await this.processRegisteredEvent(reread, evidence, wallet, summary);
+        return this.processRegisteredEvent(reread, evidence, wallet, head, summary);
       }
     }
+    return null;
   }
 
+  /** Returns the cursor position a deferred refresh asks for, or null. */
   private async processRegisteredEvent(
     record: WalletRegistrationRecord,
     evidence: WalletRegistrationEvidence | null,
     wallet: string,
+    head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
-  ): Promise<void> {
+  ): Promise<bigint | null> {
     if (evidence === null) {
       summary.eventsWithoutIdentity += 1;
-      return;
+      return null;
     }
     const decision = decideRegisteredRowEvent(record, wallet, evidence);
     if (decision === "replay") {
       summary.eventsReplayed += 1;
-      return;
+      return null;
     }
     if (decision === "conflict") {
       // No mismatch audit row: whether and how to record a second event for a
       // confirmed registration is a policy of its own.
       summary.conflictingEvents += 1;
-      return;
+      return null;
     }
     const outcome = await this.repository.replaceWalletRegistrationEvidence({
       accountId: record.accountId,
@@ -332,41 +358,58 @@ export class ConfirmWalletRegistrationsService {
     } else if (outcome === "event_taken") {
       // A reorganization that shifts log indexes can make this row's new
       // identity equal another row's old one until that row is refreshed too.
-      // The next run retries.
+      // Hold the cursor back to this event's block so the next run reads it
+      // again and retries, for as long as the block is within the final depth
+      // (a row that never moves must not stall the watcher; past that depth the
+      // staff reconcile is the way). A refresh the re-check defers does the same.
       summary.evidenceRefreshDeferred += 1;
+      return rewindTargetFor(evidence.blockNumber, head);
     }
     // "stale": another run changed the row first; nothing left to do here.
+    return null;
   }
 
   /**
-   * Compares the recorded block of recent confirmations with the chain.
-   * Returns the cursor positions that make the next run re-read the blocks
-   * whose confirmations changed. Each row is handled on its own: one that
-   * fails is counted and never stops the others or the cursor write.
+   * Compares the recorded block of recent confirmations with the chain, reads
+   * only. Each row is handled on its own: one that fails is counted and never
+   * stops the others. Returns, per row, the cursor position that makes the next
+   * run re-read the blocks whose confirmation changed and the row change to
+   * make once that position is stored.
    */
-  private async recheckEvidence(head: bigint, summary: ConfirmWalletRegistrationsSummary): Promise<bigint[]> {
-    const rewinds: bigint[] = [];
+  private async judgeRecordedEvidence(head: bigint, summary: ConfirmWalletRegistrationsSummary): Promise<EvidenceCheck[]> {
+    const checks: EvidenceCheck[] = [];
     const candidates = await this.repository.listWalletRegistrationsForEvidenceRecheck(
       WALLET_REGISTRY_EVIDENCE_RECHECK_BATCH,
     );
     for (const candidate of candidates) {
       summary.evidenceRechecked += 1;
       try {
-        const rewind = await this.recheckOne(candidate, head, summary);
-        if (rewind !== null) rewinds.push(rewind);
+        checks.push(await this.judgeOne(candidate, head, summary));
       } catch {
         // Not logged with its message: viem errors embed the RPC URL.
         summary.evidenceRecheckErrors += 1;
       }
     }
-    return rewinds;
+    return checks;
   }
 
-  private async recheckOne(
+  private async applyEvidenceChanges(checks: readonly EvidenceCheck[], summary: ConfirmWalletRegistrationsSummary): Promise<void> {
+    for (const check of checks) {
+      if (check.apply === null) continue;
+      try {
+        await check.apply();
+      } catch {
+        // The row stays a candidate and the rewind is already stored: the next run judges it again.
+        summary.evidenceRecheckErrors += 1;
+      }
+    }
+  }
+
+  private async judgeOne(
     candidate: WalletRegistrationRecheckCandidate,
     head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
-  ): Promise<bigint | null> {
+  ): Promise<EvidenceCheck> {
     const { evidence } = candidate;
     const expected = {
       transactionHash: evidence.transactionHash,
@@ -378,20 +421,23 @@ export class ConfirmWalletRegistrationsService {
     if (canonical === null) {
       // The node does not have the block (lagging, or pruned): no verdict.
       summary.evidenceRecheckErrors += 1;
-      return null;
+      return NO_CHANGE;
     }
 
     if (canonical === evidence.blockHash.toLowerCase()) {
       // Still canonical. Final once deep enough; otherwise look again next run.
-      if (head - evidence.blockNumber >= WALLET_REGISTRY_EVIDENCE_FINAL_DEPTH) {
-        const marked = await this.repository.markWalletRegistrationEvidenceVerified({
-          accountId: candidate.accountId,
-          expected,
-          verifiedAt: this.clock(),
-        });
-        if (marked) summary.evidenceVerified += 1;
-      }
-      return null;
+      if (head - evidence.blockNumber < WALLET_REGISTRY_EVIDENCE_FINAL_DEPTH) return NO_CHANGE;
+      return {
+        rewind: null,
+        apply: async () => {
+          const marked = await this.repository.markWalletRegistrationEvidenceVerified({
+            accountId: candidate.accountId,
+            expected,
+            verifiedAt: this.clock(),
+          });
+          if (marked) summary.evidenceVerified += 1;
+        },
+      };
     }
 
     // The block at that height is not the one recorded. Ask where the
@@ -408,38 +454,58 @@ export class ConfirmWalletRegistrationsService {
         // The node contradicts itself (the block at that height differs, yet
         // the receipt sits in the recorded block): no verdict, no flag.
         summary.evidenceRecheckErrors += 1;
-        return null;
+        return NO_CHANGE;
       }
       if (head - lookup.evidence.blockNumber < WALLET_REGISTRY_CONFIRMATION_DEPTH) {
-        return rewind; // mined again but not deep enough to record yet; look again later
+        return { rewind, apply: null }; // mined again but not deep enough to record yet; look again later
       }
-      const outcome = await this.repository.replaceWalletRegistrationEvidence({
-        accountId: candidate.accountId,
-        expected,
-        next: lookup.evidence,
-        reason: "refreshed",
-        changedAt: this.clock(),
-      });
-      if (outcome === "replaced") summary.evidenceRefreshed += 1;
-      else if (outcome === "event_taken") summary.evidenceRefreshDeferred += 1;
-      return rewind;
+      const next = lookup.evidence;
+      return {
+        rewind,
+        apply: async () => {
+          const outcome = await this.repository.replaceWalletRegistrationEvidence({
+            accountId: candidate.accountId,
+            expected,
+            next,
+            reason: "refreshed",
+            changedAt: this.clock(),
+          });
+          if (outcome === "replaced") summary.evidenceRefreshed += 1;
+          else if (outcome === "event_taken") summary.evidenceRefreshDeferred += 1;
+        },
+      };
     }
 
-    const flagged = await this.repository.flagWalletRegistrationEvidence({
-      accountId: candidate.accountId,
-      expected,
-      flag:
-        lookup.kind === "transaction_not_found"
-          ? "transaction_missing"
-          : lookup.kind === "transaction_reverted"
-            ? "transaction_reverted"
-            : "event_missing",
-      flaggedAt: this.clock(),
-    });
-    if (flagged) summary.evidenceFlagged += 1;
-    return rewind;
+    const flag: WalletRegistrationEvidenceFlag =
+      lookup.kind === "transaction_not_found"
+        ? "transaction_missing"
+        : lookup.kind === "transaction_reverted"
+          ? "transaction_reverted"
+          : "event_missing";
+    return {
+      rewind,
+      apply: async () => {
+        const flagged = await this.repository.flagWalletRegistrationEvidence({
+          accountId: candidate.accountId,
+          expected,
+          flag,
+          flaggedAt: this.clock(),
+        });
+        if (flagged) summary.evidenceFlagged += 1;
+      },
+    };
   }
 }
+
+// What judging one recorded confirmation decided: where the cursor has to go,
+// and the change to the row (null when there is none). The change is made only
+// after the cursor is stored.
+interface EvidenceCheck {
+  rewind: bigint | null;
+  apply: (() => Promise<void>) | null;
+}
+
+const NO_CHANGE: EvidenceCheck = { rewind: null, apply: null };
 
 // The event's identity as the stored form wants it, or null when the node did
 // not give a complete one (a removed log, a log of a pending block) or gave
