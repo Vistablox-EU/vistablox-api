@@ -1105,8 +1105,17 @@ export class PrismaOfferingRepository
           reservation.reservation_stage,
           wallet.wallet_address
         FROM offering.reservations AS reservation
+        -- Only a CONFIRMED registration (registered_at set) feeds the copied
+        -- holder address. A pending claim proves nothing about who controls
+        -- the address and its own account may still replace it, and this
+        -- column is the destination of operating distributions. The record
+        -- keeps position_ledger.holder_wallet_address null until address
+        -- proof (CORE_TABLES.md). The condition sits in the ON clause so a
+        -- reservation without a confirmed wallet still commits, with a null
+        -- address, instead of dropping out of the loop below.
         LEFT JOIN settlement.wallet_registrations AS wallet
           ON wallet.account_id = reservation.account_id
+          AND wallet.registered_at IS NOT NULL
         WHERE reservation.offering_id = ${input.offeringId}
           AND reservation.reservation_stage IN ('awaiting_reconfirmation', 'reconfirmed')
         FOR UPDATE OF reservation

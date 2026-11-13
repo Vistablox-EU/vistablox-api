@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Pool } from "pg";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, type TestContext } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { isUniqueViolation } from "../src/infrastructure/database/unique-violation.js";
@@ -18,8 +18,14 @@ import {
 // index wallet_registrations_confirmed_address_key.
 //
 // Every address, commitment and account id is derived from a per-run suffix
-// and is lowercase, so this file cannot collide with another test file that
-// shares the database and survives a lowercase CHECK on wallet_address.
+// and is lowercase, and every test but two writes only lowercase addresses
+// (the repository canonicalises what it is given). Those two tests insert a
+// mixed-case row directly, to stand in for a row written before the canonical
+// form; that is impossible once the wallet_registrations_wallet_address_
+// lowercase_check constraint exists (the canonical-form change, #147), and the
+// case they cover cannot occur then either. They detect the constraint and
+// report as skipped rather than fail or pass vacuously.
+const LOWERCASE_CHECK = "wallet_registrations_wallet_address_lowercase_check";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL integration", () => {
@@ -54,6 +60,15 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       registeredAt: new Date(),
     });
 
+  // True when the database refuses a wallet_address that is not already
+  // lowercase, so a legacy mixed-case row cannot be inserted.
+  let lowercaseCheckPresent = false;
+  const skipWithoutMixedCaseRows = (context: TestContext): void => {
+    if (lowercaseCheckPresent) {
+      context.skip(`${LOWERCASE_CHECK} is present: a mixed-case wallet_address cannot be stored`);
+    }
+  };
+
   const auditRows = (resourceId: string, action: string) =>
     database.auditLog.findMany({
       where: { resourceId, action: `settlement.wallet_registration_${action}` },
@@ -68,6 +83,11 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       );
       await database.account.create({ data: { id: accountId, betterAuthUserId: betterAuthUserIds[index]! } });
     }
+    const { rows } = await authPool.query(
+      "SELECT 1 FROM pg_constraint WHERE conrelid = 'settlement.wallet_registrations'::regclass AND conname = $1",
+      [LOWERCASE_CHECK],
+    );
+    lowercaseCheckPresent = rows.length > 0;
   });
 
   afterEach(async () => {
@@ -111,7 +131,8 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect(await database.walletRegistration.count({ where: { walletAddress: address } })).toBe(2);
     });
 
-    it("rejects a second confirmed row for an address in any case, at the database", async () => {
+    it("rejects a second confirmed row for an address in any case, at the database", async (context) => {
+      skipWithoutMixedCaseRows(context);
       const address = nextAddress();
       await database.walletRegistration.create({
         data: { accountId: accountA, walletAddress: address, registrationCommitment: nextCommitment(), registeredAt: new Date() },
@@ -175,6 +196,34 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       // B can still replace the dead claim with an address of its own.
       const own = nextAddress();
       await expect(register(accountB, own)).resolves.toMatchObject({ walletAddress: own, registeredAt: null });
+    });
+
+    it("does not let a pending claim be replaced onto an address another account has confirmed, and leaves the claim as it was", async () => {
+      const own = nextAddress();
+      const elsewhere = nextAddress();
+      const pending = await register(accountB, own);
+      const owner = await register(accountA, elsewhere);
+      await confirm(accountA, elsewhere, owner.registrationCommitment);
+
+      await expect(register(accountB, elsewhere)).rejects.toMatchObject({ reason: "address_claimed" });
+      await expect(register(accountB, elsewhere.toUpperCase().replace("0X", "0x"))).rejects.toMatchObject({
+        reason: "address_claimed",
+      });
+
+      // The refused replace wrote nothing: same address, same commitment, still
+      // pending, still matchable by the event watcher, and no `replaced` audit row.
+      const row = await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountB } });
+      expect(row).toMatchObject({
+        walletAddress: own,
+        registrationCommitment: pending.registrationCommitment,
+        requestedAt: pending.requestedAt,
+        registeredAt: null,
+      });
+      expect(await settlementRepository.findPendingWalletRegistrationByCommitment(pending.registrationCommitment)).toMatchObject({
+        accountId: accountB,
+        walletAddress: own,
+      });
+      expect(await auditRows(accountB, "replaced")).toHaveLength(0);
     });
 
     it("replays a confirmed registration, and rejects a different address as a mismatch (or as claimed when that address is confirmed elsewhere)", async () => {
@@ -249,7 +298,8 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect((await auditRows(accountA, "requested"))[0]!.changes).toEqual({ wallet_address: address });
     });
 
-    it("treats a legacy mixed-case row as the same address: replay, block and resolve case-insensitively", async () => {
+    it("treats a legacy mixed-case row as the same address: replay, block and resolve case-insensitively", async (context) => {
+      skipWithoutMixedCaseRows(context);
       const address = nextAddress();
       const legacy = `0x${address.slice(2).toUpperCase()}`;
       const commitment = nextCommitment();
