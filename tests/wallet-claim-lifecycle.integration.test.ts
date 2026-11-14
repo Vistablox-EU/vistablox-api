@@ -408,11 +408,11 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect(await snapshot(accountA)).toEqual(before);
       expect(before).toMatchObject({ walletAddress: x, registrationCommitment: first.registrationCommitment, registeredAt: null });
       // The old commitment still matches for the event watcher; the refused one was never stored.
-      expect(await settlementRepository.findPendingWalletRegistrationByCommitment(first.registrationCommitment)).toMatchObject({
+      expect(await settlementRepository.findWalletRegistrationByCommitment(first.registrationCommitment)).toMatchObject({
         accountId: accountA,
         walletAddress: x,
       });
-      expect(await settlementRepository.findPendingWalletRegistrationByCommitment(refusedCommitment)).toBeNull();
+      expect(await settlementRepository.findWalletRegistrationByCommitment(refusedCommitment)).toBeNull();
       expect(await auditRows(accountA, "replaced")).toHaveLength(0);
       expect(await auditRows(accountA, "requested")).toHaveLength(1);
       expect(
@@ -685,13 +685,13 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
         const row = await snapshot(accountA);
         expect(row.walletAddress).toBe(x);
         expect(row.registrationCommitment).toBe(old.registrationCommitment);
-        expect(await settlementRepository.findPendingWalletRegistrationByCommitment(refusedCommitment)).toBeNull();
+        expect(await settlementRepository.findWalletRegistrationByCommitment(refusedCommitment)).toBeNull();
         expect(await auditRows(accountA, "replaced")).toHaveLength(0);
 
         // Original pending claim (the confirmation reported stale) or confirmed
         // on the original address (it reported confirmed); never a mix.
         expect(confirmed.status).toBe("fulfilled");
-        const outcome = (confirmed as PromiseFulfilledResult<{ outcome: string }>).value.outcome;
+        const outcome = (confirmed as PromiseFulfilledResult<Awaited<ReturnType<typeof confirm>>>).value;
         if (outcome === "confirmed") {
           expect(row.registeredAt).not.toBeNull();
           expect(await auditRows(accountA, "confirmed")).toHaveLength(1);
