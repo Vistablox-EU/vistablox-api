@@ -53,6 +53,26 @@ export class PublishDisclosurePackService {
         detail: "This offering is not currently open for a disclosure pack update.",
       });
     }
+    if (result.conflict === "unknown_document_refs") {
+      const unknown = new Set(result.unknownDocumentRefs ?? []);
+      throw new AppError({
+        code: "offering.disclosure_document_unknown",
+        title: "Disclosure document unknown",
+        status: 422,
+        detail: "Every document_ref must be a document uploaded to this offering.",
+        fieldErrors: input.body.documents.flatMap((document, index) =>
+          unknown.has(document.document_ref)
+            ? [
+                {
+                  field: `documents.${index}.document_ref`,
+                  code: "offering.disclosure_document_unknown",
+                  message: `"${document.document_ref}" is not an accepted upload of this offering.`,
+                },
+              ]
+            : [],
+        ),
+      });
+    }
 
     const published = result.published;
     if (published === null) {
