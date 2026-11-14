@@ -39,6 +39,7 @@ describe("PrismaWalletRepository.registerWallet against a legacy mixed-case row"
       walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
       registrationCommitment: "commitment_new",
       requestedAt: new Date("2026-11-13T10:00:00.000Z"),
+      freshAuthentication: false,
     });
 
     expect(result).toBe(legacyRow);

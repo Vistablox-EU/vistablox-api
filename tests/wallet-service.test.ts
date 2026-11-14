@@ -1,9 +1,14 @@
+import type { Request, Response } from "express";
 import { describe, expect, it, vi } from "vitest";
 
+import { createRequireFreshAuthentication } from "../src/modules/auth/api/customer/require-fresh-authentication.js";
+import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer/customer-session.repository.js";
+import { AppError } from "../src/shared/errors/app-error.js";
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
 import { GetWalletAccountForOperationsService } from "../src/modules/wallet/application/get-wallet-account-for-operations.service.js";
 import {
   WalletAddressConflictError,
+  WalletReplacementFreshAuthenticationRequiredError,
   type WalletRepository,
 } from "../src/modules/wallet/repository/wallet.repository.js";
 import type { KycEligibilityReader, KycEligibilitySnapshot } from "../src/modules/identity/repository/kyc-eligibility-reader.js";
@@ -59,7 +64,7 @@ describe("RegisterWalletService", () => {
       () => "commitment_01",
     );
 
-    const result = await service.execute({ accountId, walletAddress });
+    const result = await service.execute({ accountId, walletAddress, freshAuthentication: false });
 
     expect(result).toEqual({
       data: {
@@ -76,7 +81,104 @@ describe("RegisterWalletService", () => {
       walletAddress,
       registrationCommitment: "commitment_01",
       requestedAt: now,
+      freshAuthentication: false,
     });
+  });
+
+  it("forwards the caller's freshness to the repository unchanged, true or false, and never decides it itself", async () => {
+    for (const freshAuthentication of [true, false]) {
+      const repository = buildRepository();
+      const service = new RegisterWalletService(
+        repository,
+        buildKycEligibilityReader(),
+        TEST_REGISTRY_ADDRESS,
+        () => now,
+        () => "commitment_01",
+      );
+
+      await service.execute({ accountId, walletAddress, freshAuthentication });
+
+      expect(repository.registerWallet).toHaveBeenCalledWith(
+        expect.objectContaining({ freshAuthentication }),
+      );
+    }
+  });
+
+  it("maps a refused replacement of a pending claim to the shared fresh-authentication 403", async () => {
+    const repository = buildRepository({
+      registerWallet: vi.fn().mockRejectedValue(new WalletReplacementFreshAuthenticationRequiredError()),
+    });
+    const service = new RegisterWalletService(
+      repository,
+      buildKycEligibilityReader(),
+      TEST_REGISTRY_ADDRESS,
+      () => now,
+    );
+
+    const error = await service
+      .execute({ accountId, walletAddress, freshAuthentication: false })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error).toMatchObject({
+      code: "authentication.fresh_auth_required",
+      title: "Fresh authentication required",
+      status: 403,
+      message: "Sign in again on this device before continuing.",
+      type: "https://api.vistablox.io/errors/authentication.fresh_auth_required",
+    });
+    expect((error as AppError).fieldErrors).toBeUndefined();
+  });
+
+  it("answers with the same envelope the real fresh-authentication middleware produces", async () => {
+    const repository = buildRepository({
+      registerWallet: vi.fn().mockRejectedValue(new WalletReplacementFreshAuthenticationRequiredError()),
+    });
+    const service = new RegisterWalletService(
+      repository,
+      buildKycEligibilityReader(),
+      TEST_REGISTRY_ADDRESS,
+      () => now,
+    );
+
+    const serviceError = await service
+      .execute({ accountId, walletAddress, freshAuthentication: false })
+      .catch((caught: unknown) => caught);
+
+    // The middleware built by the real factory, refusing a request that has no
+    // authentication context (never fresh, and it asks no repository).
+    const sessions: CustomerSessionRepository = { listForAccount: vi.fn(), findOwnedProviderSessionId: vi.fn() };
+    const next = vi.fn();
+    await createRequireFreshAuthentication(sessions)({} as Request, { locals: {} } as unknown as Response, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    const middlewareError = next.mock.calls[0]![0] as unknown;
+
+    expect(middlewareError).toBeInstanceOf(AppError);
+    expect(serviceError).toBeInstanceOf(AppError);
+    const expected = middlewareError as AppError;
+    expect(serviceError).toMatchObject({
+      code: expected.code,
+      title: expected.title,
+      status: expected.status,
+      message: expected.message,
+      type: expected.type,
+    });
+    expect((serviceError as AppError).fieldErrors).toEqual(expected.fieldErrors);
+  });
+
+  it("passes an unrelated repository error through unchanged", async () => {
+    const failure = new Error("connection reset");
+    const repository = buildRepository({ registerWallet: vi.fn().mockRejectedValue(failure) });
+    const service = new RegisterWalletService(
+      repository,
+      buildKycEligibilityReader(),
+      TEST_REGISTRY_ADDRESS,
+      () => now,
+    );
+
+    await expect(
+      service.execute({ accountId, walletAddress, freshAuthentication: true }),
+    ).rejects.toBe(failure);
   });
 
   it("reports the wallet as registered once registeredAt is set", async () => {
@@ -95,7 +197,7 @@ describe("RegisterWalletService", () => {
       () => now,
     );
 
-    const result = await service.execute({ accountId, walletAddress });
+    const result = await service.execute({ accountId, walletAddress, freshAuthentication: false });
 
     expect(result.data).toMatchObject({ status: "registered", registered_at: now.toISOString() });
   });
@@ -104,7 +206,7 @@ describe("RegisterWalletService", () => {
     const repository = buildRepository();
     const service = new RegisterWalletService(repository, buildKycEligibilityReader(), undefined, () => now);
 
-    await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
+    await expect(service.execute({ accountId, walletAddress, freshAuthentication: false })).rejects.toMatchObject({
       code: "wallet.on_chain_registration_unavailable",
       status: 503,
     });
@@ -120,7 +222,7 @@ describe("RegisterWalletService", () => {
       () => now,
     );
 
-    await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
+    await expect(service.execute({ accountId, walletAddress, freshAuthentication: false })).rejects.toMatchObject({
       code: "identity.kyc_required",
       status: 403,
     });
@@ -136,7 +238,7 @@ describe("RegisterWalletService", () => {
       () => now,
     );
 
-    await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
+    await expect(service.execute({ accountId, walletAddress, freshAuthentication: false })).rejects.toMatchObject({
       code: "identity.kyc_required",
       status: 403,
     });
@@ -153,7 +255,7 @@ describe("RegisterWalletService", () => {
       () => now,
     );
 
-    await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
+    await expect(service.execute({ accountId, walletAddress, freshAuthentication: false })).rejects.toMatchObject({
       code: "wallet.registration_address_mismatch",
       status: 409,
     });
@@ -170,7 +272,7 @@ describe("RegisterWalletService", () => {
       () => now,
     );
 
-    await expect(service.execute({ accountId, walletAddress })).rejects.toMatchObject({
+    await expect(service.execute({ accountId, walletAddress, freshAuthentication: false })).rejects.toMatchObject({
       code: "wallet.address_already_claimed",
       status: 409,
     });

@@ -2,7 +2,7 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createWalletRouter } from "../src/modules/wallet/api/wallet.router.js";
+import { createWalletRouter, type WalletFreshAuthenticationProbe } from "../src/modules/wallet/api/wallet.router.js";
 import {
   registerWalletBodySchema,
   requestWalletTransferBodySchema,
@@ -19,7 +19,11 @@ import type { PivTokenHoldingsReader } from "../src/modules/settlement/repositor
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+// The router asks this for every valid customer POST /wallet; these tests are
+// not about the freshness of the session.
+const freshProbe: WalletFreshAuthenticationProbe = async () => true;
+
+const ZERO_ADDRESS ="0x0000000000000000000000000000000000000000";
 const REGISTRY_ADDRESS = "0x1234567890123456789012345678901234567890";
 const CHECKSUMMED = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
 const LOWERCASE = "0x71c7656ec7ab88b098defb751b7401b5f6d8976f";
@@ -142,6 +146,7 @@ function buildGuardedApp(options: { registryConfigured: boolean } = { registryCo
   const app = mount(
     createWalletRouter(
       authenticated,
+      freshProbe,
       new RegisterWalletService(
         repository,
         untouchable<KycEligibilityReader>("kycEligibilityReader", calls),
@@ -302,6 +307,7 @@ function buildStubbedApp() {
   const app = mount(
     createWalletRouter(
       authenticated,
+      freshProbe,
       { execute: registerExecute } as unknown as RegisterWalletService,
       { execute: vi.fn() } as unknown as GetWalletStatusService,
       undefined,

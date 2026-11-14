@@ -54,7 +54,13 @@ describe.skipIf(databaseUrl === undefined)("wallet address canonical form (Postg
   }
 
   const register = (accountId: string, walletAddress: string, commitment = `commitment_${accountId}`) =>
-    repository.registerWallet({ accountId, walletAddress, registrationCommitment: commitment, requestedAt });
+    repository.registerWallet({
+      accountId,
+      walletAddress,
+      registrationCommitment: commitment,
+      requestedAt,
+      freshAuthentication: false,
+    });
 
   const rowsOf = async (address: string) =>
     (
