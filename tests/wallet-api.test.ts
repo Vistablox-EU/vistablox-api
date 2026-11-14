@@ -585,41 +585,15 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
     ["a recipient whose EIP-55 checksum is wrong", "0x71C7656EC7ab88b098defB751B7401B5f6d8976E", false],
   ])("canonicalises %s before the chain reader and the response see it", async (_label, mixedCaseRecipient, checksumIsValid) => {
     expect(isAddress(mixedCaseRecipient, { strict: true })).toBe(checksumIsValid);
-    const isHolderAuthorized = vi.fn().mockResolvedValue(true);
-    const buildTransferRequest = vi.fn().mockReturnValue({
-      chainId: 84532,
-      to: "0xproperty",
-      data: "0xdeadbeef",
-      value: "0",
-    });
-    const repository: WalletRepository = {
-      registerWallet: vi.fn(),
-      findByAccountId: vi.fn().mockResolvedValue({
-        walletAddress: "0x00000000219ab540356cbb839cbe05303d7705fa",
-        registrationCommitment: "commitment_01",
-        requestedAt: new Date("2026-09-02T10:00:00.000Z"),
-        registeredAt: new Date("2026-09-02T10:05:00.000Z"),
-      }),
-    };
-    const transferService = new RequestWalletTransferService(
-      repository,
-      { listTokenHoldings: vi.fn().mockResolvedValue([{ pivId: "piv_01", tokenId: "7" }]) },
-      {
-        getTokenBalance: vi.fn().mockResolvedValue(10n),
-        isHolderAuthorized,
-        isTokenPaused: vi.fn().mockResolvedValue(false),
-        buildTransferRequest,
-      },
-    );
-    const { app } = buildTransferApp({ transferService });
+    const chainReader = buildTransferChainReader();
+    const { app } = buildTransferApp({ chainReader });
 
     const response = await request(app)
       .post("/v1/investor-profile/wallet/transfers")
       .send({ piv_id: "piv_01", to_wallet_address: `  ${mixedCaseRecipient} `, amount: "3" });
 
     expect(response.status).toBe(200);
-    expect(isHolderAuthorized).toHaveBeenCalledWith(mixedCaseRecipient.toLowerCase(), "7");
-    expect(buildTransferRequest).toHaveBeenCalledWith(
+    expect(chainReader.readTransferSnapshot).toHaveBeenCalledWith(
       expect.objectContaining({ to: mixedCaseRecipient.toLowerCase() }),
     );
     expect(response.body.data.to_wallet_address).toBe(mixedCaseRecipient.toLowerCase());
