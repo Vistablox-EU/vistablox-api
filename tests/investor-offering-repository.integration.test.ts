@@ -240,10 +240,13 @@ describe.skipIf(databaseUrl === undefined)(
     });
 
     afterAll(async () => {
-      await database.moneyEvent.deleteMany({
-        where: { reservationId: { in: Object.values(reservationIds) } },
-      });
-      await database.reservation.deleteMany({ where: { offeringId } });
+      // money_events is append-only (its trigger rejects every UPDATE and
+      // DELETE), and its reservation_id foreign key is ON DELETE RESTRICT --
+      // so once beforeAll records money events, their reservations, the
+      // offering, PIV, case, property, the account and its auth_user all
+      // become permanently undeletable. Every id here is uniquely suffixed per
+      // run, so leaving them behind cannot collide with a later run; only the
+      // rows nothing restricts are cleaned up.
       await database.materialityRecord.deleteMany({ where: { offeringId } });
       await database.disclosureDocument.deleteMany({
         where: {
@@ -253,17 +256,9 @@ describe.skipIf(databaseUrl === undefined)(
         },
       });
       await database.disclosurePack.deleteMany({ where: { offeringId } });
-      await database.offering.deleteMany({ where: { id: offeringId } });
-      await database.piv.deleteMany({ where: { id: pivId } });
-      await database.intakeCase.deleteMany({ where: { id: caseId } });
-      await database.property.deleteMany({ where: { id: propertyId } });
       await database.walletRegistration.deleteMany({ where: { accountId } });
       await database.kycEligibility.deleteMany({ where: { accountId } });
       await database.loginMethod.deleteMany({ where: { accountId } });
-      await database.account.deleteMany({ where: { id: accountId } });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [
-        betterAuthUserId,
-      ]);
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
@@ -369,6 +364,8 @@ describe.skipIf(databaseUrl === undefined)(
     const suffix = randomUUID();
     const accountId = `account_reserve_${suffix}`;
     const betterAuthUserId = `auth_reserve_${suffix}`;
+    const otherAccountId = `account_reserve_other_${suffix}`;
+    const otherBetterAuthUserId = `auth_reserve_other_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
     // PgBoss's constructor eagerly validates its connection string, so it
@@ -376,10 +373,6 @@ describe.skipIf(databaseUrl === undefined)(
     // describe block's comment for why).
     let boss: PgBoss;
     let repository: PrismaOfferingRepository;
-    const offeringIds: string[] = [];
-    const pivIds: string[] = [];
-    const caseIds: string[] = [];
-    const propertyIds: string[] = [];
 
     async function createOffering(input: {
       targetRaiseEur: string;
@@ -422,10 +415,6 @@ describe.skipIf(databaseUrl === undefined)(
           status: input.status ?? "pre_offering",
         },
       });
-      propertyIds.push(propertyId);
-      caseIds.push(caseId);
-      pivIds.push(pivId);
-      offeringIds.push(offeringId);
       return offeringId;
     }
 
@@ -438,18 +427,24 @@ describe.skipIf(databaseUrl === undefined)(
         [betterAuthUserId, "Reservation Creation Investor", `reserve-${suffix}@example.test`, true, "customer"],
       );
       await database.account.create({ data: { id: accountId, betterAuthUserId } });
+      await authPool.query(
+        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
+        [otherBetterAuthUserId, "Reservation Creation Other Investor", `reserve-other-${suffix}@example.test`, true, "customer"],
+      );
+      await database.account.create({ data: { id: otherAccountId, betterAuthUserId: otherBetterAuthUserId } });
     });
 
     afterAll(async () => {
-      await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
+      // createReservation records a money event in the same transaction, and
+      // money_events is append-only (its trigger rejects every UPDATE and
+      // DELETE) with an ON DELETE RESTRICT foreign key to reservations. So
+      // most of the reservations created here, and through the foreign keys
+      // their offerings, PIVs, cases, properties, the accounts and their
+      // auth_user rows, are permanently undeletable. Rather than sort out
+      // which few are not, everything is left behind: every id here is
+      // uniquely suffixed per run, so that cannot collide with a later run.
+      // Only the audit rows are deleted.
       await database.auditLog.deleteMany({ where: { resourceType: "reservation" } });
-      await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
-      await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
-      await database.piv.deleteMany({ where: { id: { in: pivIds } } });
-      await database.intakeCase.deleteMany({ where: { id: { in: caseIds } } });
-      await database.property.deleteMany({ where: { id: { in: propertyIds } } });
-      await database.account.deleteMany({ where: { id: accountId } });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
@@ -470,6 +465,7 @@ describe.skipIf(databaseUrl === undefined)(
       expect(result).toEqual({
         conflict: null,
         reservation: { reservationId, createdAt: new Date("2026-09-02T10:00:00.000Z") },
+        reused: false,
       });
       const reservation = await database.reservation.findUnique({ where: { id: reservationId } });
       expect(reservation).toMatchObject({ offeringId, accountId, reservationStage: "initiated" });
@@ -506,7 +502,7 @@ describe.skipIf(databaseUrl === undefined)(
         createdAt: new Date(),
       });
 
-      expect(result).toEqual({ conflict: "capacity_exceeded", reservation: null });
+      expect(result).toEqual({ conflict: "capacity_exceeded", reservation: null, reused: false });
       expect(await database.reservation.findUnique({ where: { id: rejectedId } })).toBeNull();
     });
 
@@ -523,7 +519,209 @@ describe.skipIf(databaseUrl === undefined)(
         createdAt: new Date(),
       });
 
-      expect(result).toEqual({ conflict: "offering_not_open", reservation: null });
+      expect(result).toEqual({ conflict: "offering_not_open", reservation: null, reused: false });
+    });
+
+    it("returns the existing reservation for a retried client idempotency key, without a second hold, money event or audit row", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const firstId = `reservation_${randomUUID()}`;
+      const clientIdempotencyKey = `operation_${randomUUID()}`;
+      const firstCreatedAt = new Date("2026-09-02T10:00:00.000Z");
+
+      const first = await repository.createReservation({
+        reservationId: firstId,
+        offeringId,
+        accountId,
+        clientIdempotencyKey,
+        amountEur: "400.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: firstCreatedAt,
+      });
+      expect(first).toEqual({
+        conflict: null,
+        reservation: { reservationId: firstId, createdAt: firstCreatedAt },
+        reused: false,
+      });
+
+      // The retry carries a freshly generated candidate id, exactly as
+      // CreateReservationService does. The repository must hand back the id
+      // that was actually persisted and must not persist the candidate.
+      const candidateId = `reservation_${randomUUID()}`;
+      const replay = await repository.createReservation({
+        reservationId: candidateId,
+        offeringId,
+        accountId,
+        clientIdempotencyKey,
+        amountEur: "400.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T10:05:00.000Z"),
+      });
+      expect(replay).toEqual({
+        conflict: null,
+        reservation: { reservationId: firstId, createdAt: firstCreatedAt },
+        reused: true,
+        replay: { amountEur: "400.00", reservationStage: "initiated", latestCapitalState: "initiated" },
+      });
+
+      expect(await database.reservation.findUnique({ where: { id: candidateId } })).toBeNull();
+      expect(await database.reservation.count({ where: { offeringId } })).toBe(1);
+      expect(await database.moneyEvent.count({ where: { reservationId: firstId } })).toBe(1);
+      expect(
+        await database.auditLog.count({
+          where: { resourceType: "reservation", resourceId: { in: [firstId, candidateId] } },
+        }),
+      ).toBe(1);
+
+      // A replay must not hold capacity twice: the remaining 600.00 is still
+      // fully reservable under a different key.
+      const remainder = await repository.createReservation({
+        reservationId: `reservation_${randomUUID()}`,
+        offeringId,
+        accountId,
+        clientIdempotencyKey: `operation_${randomUUID()}`,
+        amountEur: "600.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T10:06:00.000Z"),
+      });
+      expect(remainder.conflict).toBeNull();
+      expect(remainder.reused).toBe(false);
+    });
+
+    it("scopes a client idempotency key to its offering, so the same key on another offering creates a new reservation", async () => {
+      const clientIdempotencyKey = `operation_${randomUUID()}`;
+      const firstOfferingId = await createOffering({ targetRaiseEur: "1000.00" });
+      const secondOfferingId = await createOffering({ targetRaiseEur: "1000.00" });
+
+      const reserveOn = (offeringId: string) =>
+        repository.createReservation({
+          reservationId: `reservation_${randomUUID()}`,
+          offeringId,
+          accountId,
+          clientIdempotencyKey,
+          amountEur: "100.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date("2026-09-02T11:00:00.000Z"),
+        });
+      const first = await reserveOn(firstOfferingId);
+      const second = await reserveOn(secondOfferingId);
+
+      for (const outcome of [first, second]) {
+        expect(outcome.conflict).toBeNull();
+        expect(outcome.reservation).not.toBeNull();
+        expect(outcome.reused).toBe(false);
+      }
+      expect(first.reservation?.reservationId).not.toBe(second.reservation?.reservationId);
+    });
+
+    it("scopes a client idempotency key to its account, so another account reusing the key never receives the first account's reservation", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const clientIdempotencyKey = `operation_${randomUUID()}`;
+      const ownerReservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId: ownerReservationId,
+        offeringId,
+        accountId,
+        clientIdempotencyKey,
+        amountEur: "300.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T12:00:00.000Z"),
+      });
+
+      const otherReservationId = `reservation_${randomUUID()}`;
+      const other = await repository.createReservation({
+        reservationId: otherReservationId,
+        offeringId,
+        accountId: otherAccountId,
+        clientIdempotencyKey,
+        amountEur: "200.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T12:01:00.000Z"),
+      });
+
+      expect(other.conflict).toBeNull();
+      expect(other.reused).toBe(false);
+      expect(other.reservation?.reservationId).toBe(otherReservationId);
+      expect(other.replay).toBeUndefined();
+      expect(await database.reservation.findUnique({ where: { id: otherReservationId } })).toMatchObject({
+        accountId: otherAccountId,
+        clientIdempotencyKey,
+      });
+
+      // And the owner's own retry still resolves to the owner's reservation.
+      const ownerRetry = await repository.createReservation({
+        reservationId: `reservation_${randomUUID()}`,
+        offeringId,
+        accountId,
+        clientIdempotencyKey,
+        amountEur: "300.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T12:02:00.000Z"),
+      });
+      expect(ownerRetry.reused).toBe(true);
+      expect(ownerRetry.reservation?.reservationId).toBe(ownerReservationId);
+    });
+
+    it("reports the stored reservation's amount, stage and latest money state on a key hit, so the caller can refuse an unsafe retry", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      const clientIdempotencyKey = `operation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId,
+        clientIdempotencyKey,
+        amountEur: "250.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-02T13:00:00.000Z"),
+      });
+      const retry = () =>
+        repository.createReservation({
+          reservationId: `reservation_${randomUUID()}`,
+          offeringId,
+          accountId,
+          clientIdempotencyKey,
+          amountEur: "250.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date("2026-09-02T13:30:00.000Z"),
+        });
+      const moneyEvent = (capitalState: string, recordedAt: string) =>
+        repository.recordMoneyEvent({
+          reservationId,
+          provider: "coinbase_cdp",
+          providerReference: `ref_${capitalState}`,
+          capitalState,
+          amountEur: "250.00",
+          amountEurc: null,
+          recordedAt: new Date(recordedAt),
+        });
+
+      expect((await retry()).replay).toEqual({
+        amountEur: "250.00",
+        reservationStage: "initiated",
+        latestCapitalState: "initiated",
+      });
+
+      // The newest money event decides, not the first.
+      await moneyEvent("eurc_purchase_pending", "2026-09-02T13:01:00.000Z");
+      expect((await retry()).replay?.latestCapitalState).toBe("eurc_purchase_pending");
+      await moneyEvent("eurc_reserved", "2026-09-02T13:02:00.000Z");
+      expect((await retry()).replay?.latestCapitalState).toBe("eurc_reserved");
+
+      await database.reservation.update({ where: { id: reservationId }, data: { reservationStage: "lapsed" } });
+      expect((await retry()).replay).toEqual({
+        amountEur: "250.00",
+        reservationStage: "lapsed",
+        latestCapitalState: "eurc_reserved",
+      });
     });
 
     it("serializes concurrent reservations so combined capacity is never oversold (AD-146)", async () => {
@@ -787,8 +985,6 @@ describe.skipIf(databaseUrl === undefined)(
     let repository: PrismaOfferingRepository;
     const offeringIds: string[] = [];
     const pivIds: string[] = [];
-    const caseIds: string[] = [];
-    const propertyIds: string[] = [];
 
     async function createOffering(input: { targetRaiseEur: string; status?: string }): Promise<{
       offeringId: string;
@@ -829,16 +1025,38 @@ describe.skipIf(databaseUrl === undefined)(
           status: input.status ?? "pre_offering",
         },
       });
-      propertyIds.push(propertyId);
-      caseIds.push(caseId);
       pivIds.push(pivId);
       offeringIds.push(offeringId);
       return { offeringId, pivId };
     }
 
+    // publishDisclosurePack only accepts a document_ref that is an accepted,
+    // non-deleted stored_documents row of the offering in the disclosures
+    // bucket — what POST /internal/v1/offerings/:offering_id/documents
+    // writes (offering-document-upload.integration.test.ts covers that path
+    // end to end). Tests here seed those rows directly.
+    const disclosuresBucket = `vistablox-disclosures-${suffix}`;
+    async function seedUploadedDocuments(offeringId: string, documentRefs: string[]): Promise<void> {
+      await database.storedDocument.createMany({
+        data: documentRefs.map((documentRef) => ({
+          id: `doc_${randomUUID().replaceAll("-", "")}`,
+          bucket: disclosuresBucket,
+          objectKey: documentRef,
+          documentType: "final_terms_sheet",
+          offeringId,
+          contentType: "application/pdf",
+          sizeBytes: BigInt(1024),
+          sha256Checksum: "0".repeat(64),
+          uploadStatus: "accepted",
+          classification: "disclosure",
+        })),
+      });
+    }
+
     // reconfirmReservation requires a complete current pack (AD-037) —
     // every mandatory document type, matching disclosureDocumentTypes.
     async function publishCompleteDisclosurePack(offeringId: string, publishedAt: Date): Promise<void> {
+      await seedUploadedDocuments(offeringId, disclosureDocumentTypes.map((documentType) => `documents/${documentType}.pdf`));
       const result = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -856,7 +1074,7 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
+      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss), { disclosuresBucket });
       await boss.start();
       // publishFinalOfferingTerms enqueues the AD-214/AD-145 window-opened
       // notification handoff inside its own transaction — the queue must
@@ -920,25 +1138,23 @@ describe.skipIf(databaseUrl === undefined)(
         where: { disclosurePack: { offeringId: { in: offeringIds } } },
       });
       await database.disclosurePack.deleteMany({ where: { offeringId: { in: offeringIds } } });
-      await database.moneyEvent.deleteMany({ where: { reservation: { offeringId: { in: offeringIds } } } });
+      await database.storedDocument.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.auditLog.deleteMany({ where: { resourceId: { in: offeringIds }, resourceType: "offering" } });
       // Separate from the resourceId-scoped delete above: this FK is on
       // actorAccountId, and the founder account acted on plenty of audit
       // log rows whose resourceType/resourceId isn't "offering" (disclosure
       // packs, materiality records, reconfirmations).
       await database.auditLog.deleteMany({ where: { actorAccountId: founderAccountId } });
-      await database.reservation.deleteMany({ where: { offeringId: { in: offeringIds } } });
-      await database.offering.deleteMany({ where: { id: { in: offeringIds } } });
-      await database.piv.deleteMany({ where: { id: { in: pivIds } } });
-      await database.intakeCase.deleteMany({ where: { id: { in: caseIds } } });
-      await database.property.deleteMany({ where: { id: { in: propertyIds } } });
       await database.walletRegistration.deleteMany({ where: { accountId: fundedAccountId } });
-      await database.account.deleteMany({
-        where: { id: { in: [fundedAccountId, unfundedAccountId, founderAccountId] } },
-      });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [
-        [`auth_${fundedAccountId}`, `auth_${unfundedAccountId}`, `auth_${founderAccountId}`],
-      ]);
+      // Every reservation created here goes through createReservation, which
+      // records a money event in the same transaction, and money_events is
+      // append-only (its trigger rejects every UPDATE and DELETE) with an ON
+      // DELETE RESTRICT foreign key to reservations. So the reservations, and
+      // through the foreign keys their offerings, PIVs, cases, properties,
+      // the accounts and their auth_user rows, are permanently undeletable.
+      // Every id here is uniquely suffixed per run, so leaving them behind
+      // cannot collide with a later run; positions, disclosure rows, wallet
+      // registrations and audit rows above are the deletable part.
       await Promise.all([boss.stop(), database.$disconnect(), authPool.end()]);
     });
 
@@ -1501,6 +1717,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
       // Every mandatory type except full_prospectus — deliberately incomplete.
       const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
+      await seedUploadedDocuments(offeringId, partialTypes.map((documentType) => `documents/${documentType}.pdf`));
       const publishedPack = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -1559,6 +1776,7 @@ describe.skipIf(databaseUrl === undefined)(
       // publishFinalOfferingTerms itself already requires completeness: a
       // later republish (e.g. materiality-triggered) that lands incomplete.
       const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
+      await seedUploadedDocuments(offeringId, partialTypes.map((documentType) => `documents/${documentType}-v2.pdf`));
       const republishedPack = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -1935,6 +2153,7 @@ describe.skipIf(databaseUrl === undefined)(
     it("publishes an initial disclosure pack as version 1, with no prior pack to supersede", async () => {
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
       const publishedAt = new Date("2026-09-01T09:00:00.000Z");
+      await seedUploadedDocuments(offeringId, ["documents/kiis-v1.pdf", "documents/terms-v1.pdf"]);
 
       const result = await repository.publishDisclosurePack({
         offeringId,
@@ -1979,6 +2198,20 @@ describe.skipIf(databaseUrl === undefined)(
 
     it("supersedes the prior current pack and increments the version, reporting completeness once every mandatory document is present", async () => {
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      await seedUploadedDocuments(offeringId, [
+        "documents/kiis-v1.pdf",
+        "documents/kiis-v2.pdf",
+        "documents/kid-v2.pdf",
+        "documents/offer-summary-v2.pdf",
+        "documents/terms-v2.pdf",
+        "documents/structure-v2.pdf",
+        "documents/rights-v2.pdf",
+        "documents/risks-v2.pdf",
+        "documents/appraisal-v2.pdf",
+        "documents/fees-v2.pdf",
+        "documents/withdrawal-v2.pdf",
+        "documents/prospectus-v2.pdf",
+      ]);
       const first = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -2047,6 +2280,93 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       expect(result).toEqual({ published: null, conflict: "offering_not_found" });
+    });
+
+    it("refuses a document_ref that is not an accepted upload of the offering, writing nothing", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const { offeringId: otherOfferingId } = await createOffering({ targetRaiseEur: "1000.00" });
+      await seedUploadedDocuments(offeringId, ["documents/kiis-uploaded.pdf"]);
+      // Right bucket and key, but another offering's upload.
+      await seedUploadedDocuments(otherOfferingId, ["documents/terms-other-offering.pdf"]);
+      // This offering's row, but not accepted / soft-deleted.
+      await database.storedDocument.createMany({
+        data: [
+          {
+            id: `doc_${randomUUID().replaceAll("-", "")}`,
+            bucket: disclosuresBucket,
+            objectKey: "documents/summary-quarantined.pdf",
+            documentType: "final_offer_summary",
+            offeringId,
+            contentType: "application/pdf",
+            sizeBytes: BigInt(1024),
+            sha256Checksum: "0".repeat(64),
+            uploadStatus: "quarantined",
+            classification: "disclosure",
+          },
+          {
+            id: `doc_${randomUUID().replaceAll("-", "")}`,
+            bucket: disclosuresBucket,
+            objectKey: "documents/prospectus-deleted.pdf",
+            documentType: "full_prospectus",
+            offeringId,
+            contentType: "application/pdf",
+            sizeBytes: BigInt(1024),
+            sha256Checksum: "0".repeat(64),
+            uploadStatus: "accepted",
+            classification: "disclosure",
+            deletedAt: new Date("2026-09-01T00:00:00.000Z"),
+          },
+        ],
+      });
+
+      const result = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: founderAccountId,
+        documents: [
+          { documentType: "ecsp_kiis", documentRef: "documents/kiis-uploaded.pdf" },
+          { documentType: "final_terms_sheet", documentRef: "documents/terms-other-offering.pdf" },
+          { documentType: "final_offer_summary", documentRef: "documents/summary-quarantined.pdf" },
+          { documentType: "full_prospectus", documentRef: "documents/prospectus-deleted.pdf" },
+          { documentType: "priips_kid", documentRef: "documents/never-uploaded.pdf" },
+        ],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+
+      expect(result).toEqual({
+        published: null,
+        conflict: "unknown_document_refs",
+        unknownDocumentRefs: [
+          "documents/terms-other-offering.pdf",
+          "documents/summary-quarantined.pdf",
+          "documents/prospectus-deleted.pdf",
+          "documents/never-uploaded.pdf",
+        ],
+      });
+      expect(await database.disclosurePack.count({ where: { offeringId } })).toBe(0);
+      expect(
+        await database.auditLog.count({ where: { resourceId: offeringId, action: "offering.disclosure_pack_published" } }),
+      ).toBe(0);
+    });
+
+    it("accepts no document_ref at all when built without a disclosures bucket", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      await seedUploadedDocuments(offeringId, ["documents/kiis-uploaded.pdf"]);
+      const unconfigured = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
+
+      const result = await unconfigured.publishDisclosurePack({
+        offeringId,
+        accountId: founderAccountId,
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-uploaded.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+
+      expect(result).toEqual({
+        published: null,
+        conflict: "unknown_document_refs",
+        unknownDocumentRefs: ["documents/kiis-uploaded.pdf"],
+      });
     });
 
     it("reports not_open once the offering has already committed to final_offering", async () => {
@@ -2240,6 +2560,7 @@ describe.skipIf(databaseUrl === undefined)(
         ipoValueEur: "220000.00",
         traceId: `trace_${suffix}`,
         openedAt: new Date("2026-09-01T19:00:00.000Z"),
+        openEscrowCampaign: true,
       });
       pivId = opened.pivId;
       offeringId = opened.offeringId;
@@ -2267,6 +2588,7 @@ describe.skipIf(databaseUrl === undefined)(
         ipoValueEur: "220000.00",
         traceId: `trace_replay_${suffix}`,
         openedAt: new Date("2026-09-01T19:05:00.000Z"),
+        openEscrowCampaign: true,
       });
 
       expect(replayed).toEqual(opened);

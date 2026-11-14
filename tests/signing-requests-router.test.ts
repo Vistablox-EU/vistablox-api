@@ -2,13 +2,13 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createSigningRequestsRouter } from "../src/modules/auth/api/signing-requests.router.js";
-import type { AuthContext } from "../src/modules/auth/api/auth-context.js";
-import { IssueDeviceChallengeService } from "../src/modules/auth/application/device-challenge-issuance.service.js";
-import { TxSignatureInvalidError } from "../src/modules/auth/application/signing-request-errors.js";
-import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
-import type { DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
-import type { SigningRequestRepository } from "../src/modules/auth/repository/signing-request.repository.js";
+import { createSigningRequestsRouter } from "../src/modules/auth/api/customer/signing-requests.router.js";
+import type { AuthContext } from "../src/modules/auth/api/shared/auth-context.js";
+import { IssueDeviceChallengeService } from "../src/modules/auth/application/customer/device-challenge-issuance.service.js";
+import { TxSignatureInvalidError } from "../src/modules/auth/application/customer/signing-request-errors.js";
+import type { DeviceChallengeRepository } from "../src/modules/auth/repository/customer/device-challenge.repository.js";
+import type { DeviceRepository } from "../src/modules/auth/repository/customer/device.repository.js";
+import type { SigningRequestRepository } from "../src/modules/auth/repository/customer/signing-request.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 

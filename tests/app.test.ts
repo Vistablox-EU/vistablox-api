@@ -8,7 +8,7 @@ import { createApp } from "../src/app.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
 import type { DatabaseProbe } from "../src/infrastructure/database/database-probe.js";
 import type { RateLimitStore } from "../src/infrastructure/rate-limit/rate-limit-store.js";
-import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
+import type { SessionResolver } from "../src/modules/auth/application/shared/session-resolver.js";
 import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
 import {
   GetKycAccountForOperationsService,

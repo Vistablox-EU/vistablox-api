@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { findRegistrationAccountId } from "../src/modules/auth/infrastructure/better-auth-registration-account-guard.plugin.js";
+import { findRegistrationAccountId } from "../src/modules/auth/infrastructure/customer/better-auth-registration-account-guard.plugin.js";
 
 describe("Better Auth registration account guard", () => {
   it("identifies the earliest-linked account as the registration account", () => {

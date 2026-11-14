@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { StaffIdentityProvider } from "../src/modules/auth/application/staff-identity-provider.js";
+import type { StaffIdentityProvider } from "../src/modules/auth/application/staff/staff-identity-provider.js";
 import {
   AcceptStaffInvitationService,
   IssueStaffInvitationService,
-} from "../src/modules/auth/application/staff-invitation.service.js";
+} from "../src/modules/auth/application/staff/staff-invitation.service.js";
 import type {
   StaffInvitationRecord,
   StaffInvitationRepository,
-} from "../src/modules/auth/repository/staff-invitation.repository.js";
+} from "../src/modules/auth/repository/staff/staff-invitation.repository.js";
 
 const now = new Date("2026-08-31T18:30:00.000Z");
 const invitation: StaffInvitationRecord = {

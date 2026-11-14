@@ -17,4 +17,11 @@ describe("document storage boundaries", () => {
       .toBe("intake/case_01/revisions/2/doc_01");
     expect(() => objectKey({ area: "kyc", subjectId: "../account", documentId: "secret" })).toThrow();
   });
+
+  it("accepts the upper-case ULIDs real offering and case ids embed", () => {
+    expect(objectKey({ area: "offerings", subjectId: "offering_01M7AGKPB4F22YKF7Y3SJFB4W1", documentId: "doc_0a1b" }))
+      .toBe("offerings/offering_01M7AGKPB4F22YKF7Y3SJFB4W1/doc_0a1b");
+    expect(() => objectKey({ area: "offerings", subjectId: "offering 01", documentId: "doc_01" })).toThrow();
+    expect(() => objectKey({ area: "offerings", subjectId: "offering_01", documentId: "doc/../01" })).toThrow();
+  });
 });

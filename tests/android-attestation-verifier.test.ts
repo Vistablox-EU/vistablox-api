@@ -20,7 +20,7 @@ import {
   verifyPlayIntegrityToken,
   type AndroidAttestationRevocationList,
   type PlayIntegrityVerdictDecoder,
-} from "../src/modules/auth/application/android-attestation-verifier.js";
+} from "../src/modules/auth/application/customer/android-attestation-verifier.js";
 import { computeDeviceBinding } from "../src/modules/auth/domain/device-binding.js";
 
 cryptoProvider.set(webcrypto);

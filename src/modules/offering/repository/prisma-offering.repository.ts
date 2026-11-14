@@ -88,6 +88,13 @@ export class PrismaOfferingRepository
     private readonly database: DatabaseClient,
     private readonly pgBoss: PgBoss,
     private readonly kycEligibilityReader: KycEligibilityReader,
+    /**
+     * `disclosuresBucket` is where staff uploads land (MINIO_DISCLOSURES_BUCKET);
+     * publishDisclosurePack only accepts document_refs that are accepted rows
+     * there. Left unset, no ref is accepted — a process without storage
+     * configured cannot have taken an upload either.
+     */
+    private readonly options: { disclosuresBucket?: string | undefined } = {},
   ) {}
 
   public async openOfferingForApprovedCase(
@@ -119,7 +126,8 @@ export class PrismaOfferingRepository
         where: { id: input.caseId },
         select: { ipoEndAt: true },
       });
-      if (intakeCase.ipoEndAt === null) {
+      const ipoEndAt = intakeCase.ipoEndAt;
+      if (input.openEscrowCampaign && ipoEndAt === null) {
         throw new Error(
           `Intake case ${input.caseId} has no ipo_end_at set; cannot open an IPO escrow campaign without a deadline.`,
         );
@@ -178,18 +186,34 @@ export class PrismaOfferingRepository
       // creation of a Piv: the existingPiv branch above (a replay of this
       // job) must not re-open an already-open campaign, which the escrow
       // contract itself would reject anyway (CampaignAlreadyOpened).
-      await enqueueTransactionalJob(
-        this.pgBoss,
-        transaction,
-        "settlement.open_ipo_escrow_campaign",
-        {
-          piv_id: piv.id,
-          token_id: tokenId.toString(),
-          target_amount_eurc: toEurcMicros(input.ipoValueEur).toString(),
-          deadline_unix: Math.floor(intakeCase.ipoEndAt.getTime() / 1_000),
-        },
-        input.traceId,
-      );
+      //
+      // Skipped while token settlement is dormant (AD-234): the worker then
+      // neither creates nor consumes this queue, so enqueueing would throw
+      // "Queue ... does not exist" and roll back the Piv and Offering with it.
+      // Not "enqueue anyway and let it wait": the payload freezes the target
+      // amount and deadline at enqueue time, and by the time a consumer
+      // exists they can be stale (a deadline that has passed is rejected by
+      // the escrow contract), while an unconsumed job is deleted when its
+      // retention (pg-boss: 14 days from enqueue, by default) runs out, so
+      // campaigns would be lost without any signal. Piv/Offering rows opened
+      // while dormant therefore have no campaign job; opening them once
+      // settlement is activated is an explicit activation step, safe to
+      // re-run because OpenIpoEscrowCampaignService skips a campaign that is
+      // already open on-chain.
+      if (input.openEscrowCampaign && ipoEndAt !== null) {
+        await enqueueTransactionalJob(
+          this.pgBoss,
+          transaction,
+          "settlement.open_ipo_escrow_campaign",
+          {
+            piv_id: piv.id,
+            token_id: tokenId.toString(),
+            target_amount_eurc: toEurcMicros(input.ipoValueEur).toString(),
+            deadline_unix: Math.floor(ipoEndAt.getTime() / 1_000),
+          },
+          input.traceId,
+        );
+      }
 
       return { pivId: piv.id, offeringId: offering.id };
     });
@@ -513,13 +537,25 @@ export class PrismaOfferingRepository
               clientIdempotencyKey,
             },
           },
-          select: { id: true, createdAt: true },
+          select: { id: true, createdAt: true, amountEur: true, reservationStage: true },
         });
         if (existing !== null) {
+          // Same ordering the funded-amount and expiry queries use: the latest
+          // money event decides the reservation's capital state.
+          const latestMoneyEvent = await transaction.moneyEvent.findFirst({
+            where: { reservationId: existing.id },
+            orderBy: [{ recordedAt: "desc" }, { id: "desc" }],
+            select: { capitalState: true },
+          });
           return {
             reservation: { reservationId: existing.id, createdAt: existing.createdAt },
             conflict: null,
             reused: true,
+            replay: {
+              amountEur: existing.amountEur.toFixed(2),
+              reservationStage: existing.reservationStage,
+              latestCapitalState: latestMoneyEvent?.capitalState ?? null,
+            },
           };
         }
       }
@@ -1287,6 +1323,29 @@ export class PrismaOfferingRepository
       // a separate amendment/consent path this codebase does not build.
       if (offering.status !== "pre_offering") {
         return { published: null, conflict: "not_open" as const };
+      }
+
+      // Every document_ref must be one of this offering's own accepted
+      // uploads (OfferingDocumentRepository), checked under the same lock so
+      // a pack can never be published against a reference nothing serves.
+      const requestedRefs = [...new Set(input.documents.map((document) => document.documentRef))];
+      const knownRows =
+        this.options.disclosuresBucket === undefined
+          ? []
+          : await transaction.storedDocument.findMany({
+              where: {
+                offeringId: input.offeringId,
+                bucket: this.options.disclosuresBucket,
+                objectKey: { in: requestedRefs },
+                uploadStatus: "accepted",
+                deletedAt: null,
+              },
+              select: { objectKey: true },
+            });
+      const knownRefs = new Set(knownRows.map((row) => row.objectKey));
+      const unknownDocumentRefs = requestedRefs.filter((ref) => !knownRefs.has(ref));
+      if (unknownDocumentRefs.length > 0) {
+        return { published: null, conflict: "unknown_document_refs" as const, unknownDocumentRefs };
       }
 
       const current = await transaction.disclosurePack.findFirst({

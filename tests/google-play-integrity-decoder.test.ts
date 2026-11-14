@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { describe, expect, it } from "vitest";
 
-import { base64DigestToHex } from "../src/modules/auth/infrastructure/google-play-integrity.decoder.js";
+import { base64DigestToHex } from "../src/modules/auth/infrastructure/customer/google-play-integrity.decoder.js";
 
 // Google's Play Integrity API returns certificateSha256Digest as base64,
 // while verifyPlayIntegrityToken compares against ANDROID_ATTESTATION_CERT_DIGESTS

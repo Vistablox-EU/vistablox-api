@@ -6,13 +6,13 @@ import {
   RequestDeviceReplacementService,
   VerifyDeviceReplacementService,
   type DeviceReplacementConfig,
-} from "../src/modules/auth/application/device-replacement.service.js";
+} from "../src/modules/auth/application/customer/device-replacement.service.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import type {
   DeviceReplacementCode,
   DeviceReplacementRepository,
   DeviceReplacementTarget,
-} from "../src/modules/auth/repository/device-replacement.repository.js";
+} from "../src/modules/auth/repository/customer/device-replacement.repository.js";
 
 const HOUR = 60 * 60 * 1000;
 

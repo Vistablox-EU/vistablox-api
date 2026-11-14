@@ -4,6 +4,16 @@ export interface OpenOfferingForApprovedCaseInput {
   ipoValueEur: string;
   traceId: string;
   openedAt: Date;
+  /**
+   * Whether to durably hand off to the job that opens this Piv's IPO escrow
+   * campaign on-chain (AD-256). False while token settlement is dormant
+   * (AD-234): no worker consumes that job or even creates its queue, and
+   * enqueueing into a missing queue fails the whole open. When false,
+   * Piv/Offering creation does not depend on a campaign job; when true it
+   * also needs the case's ipo_end_at and an existing queue, and fails as a
+   * whole (nothing is created) without them.
+   */
+  openEscrowCampaign: boolean;
 }
 
 export interface OpenedOffering {

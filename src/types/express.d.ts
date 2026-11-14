@@ -1,6 +1,6 @@
 import type { Logger } from "pino";
 
-import type { AuthContext } from "../modules/auth/api/auth-context.js";
+import type { AuthContext } from "../modules/auth/api/shared/auth-context.js";
 
 declare global {
   namespace Express {

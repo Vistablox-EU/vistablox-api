@@ -7,8 +7,10 @@ import path from "node:path";
 // picks up via its existing `COPY src ./src` -- contracts/ itself is
 // deliberately excluded from that build (see contracts/README context: an
 // isolated toolchain, kept out of the API/worker's own dependency tree and
-// image). Re-run this manually after changing a contract's public interface;
-// it is not part of `npm run build`.
+// image). Re-run this manually (after `npm run contracts:compile`) when a
+// contract's public interface changes; it is not part of `npm run build`. The
+// `contracts` job in .github/workflows/ci.yml re-runs it and fails if the
+// committed ABIs then differ.
 
 const root = path.join(import.meta.dirname, "..");
 const CONTRACTS = ["VistaBloxProperty", "VistaBloxIpoEscrow", "VistaBloxWalletRegistry"];

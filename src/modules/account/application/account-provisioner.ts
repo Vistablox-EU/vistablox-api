@@ -1,4 +1,4 @@
-import type { AuthUserSnapshot } from "../../auth/infrastructure/better-auth.factory.js";
+import type { AuthUserSnapshot } from "../../auth/infrastructure/shared/better-auth.factory.js";
 import type { AccountRepository } from "../repository/account.repository.js";
 import type { LoginMethodType } from "../repository/account.repository.js";
 

@@ -13,9 +13,21 @@ export const openOfferingForApprovedCaseJobSchema = z.object({
   trace_id: z.string().trim().min(1),
 });
 
+export interface OpenOfferingForApprovedCaseOptions {
+  /**
+   * True only where this process also consumes the escrow campaign job (the
+   * chain settlement bundle is configured). Required rather than defaulted so
+   * a new wiring has to decide: guessing true re-creates the failure this
+   * flag exists for (enqueueing into a queue no one created), guessing false
+   * silently never opens a campaign.
+   */
+  openEscrowCampaign: boolean;
+}
+
 export class OpenOfferingForApprovedCaseService {
   public constructor(
     private readonly repository: OfferingIntakeHandoffRepository,
+    private readonly options: OpenOfferingForApprovedCaseOptions,
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
@@ -27,6 +39,7 @@ export class OpenOfferingForApprovedCaseService {
       ipoValueEur: parsed.ipo_value_eur,
       traceId: parsed.trace_id,
       openedAt: this.clock(),
+      openEscrowCampaign: this.options.openEscrowCampaign,
     });
   }
 }

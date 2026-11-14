@@ -1,14 +1,14 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { StaffAccountAdministrator } from "../src/modules/auth/application/staff-account-administrator.js";
+import type { StaffAccountAdministrator } from "../src/modules/auth/application/staff/staff-account-administrator.js";
 import {
   GrantStaffRoleService,
   ListStaffAccountsService,
   OffboardStaffAccountService,
   RecoverStaffAccountService,
   RevokeStaffRoleService,
-} from "../src/modules/auth/application/staff-account-lifecycle.service.js";
-import type { StaffAccountLifecycleRepository } from "../src/modules/auth/repository/staff-account-lifecycle.repository.js";
+} from "../src/modules/auth/application/staff/staff-account-lifecycle.service.js";
+import type { StaffAccountLifecycleRepository } from "../src/modules/auth/repository/staff/staff-account-lifecycle.repository.js";
 
 const now = new Date("2026-08-31T20:00:00.000Z");
 const target = {

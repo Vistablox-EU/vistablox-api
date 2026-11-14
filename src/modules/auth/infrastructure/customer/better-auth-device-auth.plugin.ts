@@ -1,0 +1,476 @@
+import type { BetterAuthPlugin } from "better-auth";
+import { APIError, createAuthEndpoint, getSessionFromCtx } from "better-auth/api";
+import { deleteSessionCookie, setSessionCookie } from "better-auth/cookies";
+import { z } from "zod";
+
+import type { AccountRepository } from "../../../account/repository/account.repository.js";
+import { isAndroidAttestationError } from "../../application/customer/android-attestation-verifier.js";
+import {
+  DeviceAlreadyEnrolledError,
+  DeviceChallengeExpiredError,
+  DeviceChallengeReplayedError,
+  DeviceLoginFailedError,
+  MobilePlatformUnsupportedError,
+} from "../../application/customer/device-auth-errors.js";
+import {
+  DeviceChallengePurposeMismatchError,
+  DeviceJwsDpopMismatchError,
+  DeviceJwsInvalidError,
+} from "../../application/customer/device-auth-jws-verifier.js";
+import type { EnrolDeviceService } from "../../application/customer/device-enrolment.service.js";
+import type { LoginDeviceService } from "../../application/customer/device-login.service.js";
+import { mobileAttestationSchema } from "../../application/customer/mobile-attestation.schemas.js";
+import { sessionsToSupersede } from "../../domain/device-session-supersede.js";
+import { markDiscardedCeremonySession, markSupersededDeviceSession } from "./device-ceremony-session.js";
+import { recordVerifiedLoginDpopJkt } from "./device-login-audit-context.js";
+import {
+  assertDpopKeyMatchesPendingSession,
+  requireDpopProofForSessionCreation,
+  type DpopCreationContext,
+  type DpopSessionCreationOptions,
+} from "../shared/dpop-session-creation.js";
+
+export interface BetterAuthDeviceAuthPluginOptions {
+  accounts: AccountRepository;
+  enrolDevice: EnrolDeviceService;
+  loginDevice: LoginDeviceService;
+  dpop: DpopSessionCreationOptions | undefined;
+}
+
+const enrolVerifyBodySchema = z.object({
+  challenge: z.string().min(1),
+  jws: z.string().min(1),
+  attestation: mobileAttestationSchema,
+});
+
+// device_id is optional (contract 3.1): LoginDeviceService resolves the
+// device from the request's DPoP key and checks a sent device_id against it.
+const loginVerifyBodySchema = z.object({
+  device_id: z.string().min(1).optional(),
+  challenge: z.string().min(1),
+  jws: z.string().min(1),
+});
+
+/**
+ * Device-key enrolment (E2) and login (L2), section 3.4/3.5 of
+ * docs/plans/device-bound-auth-backend.md. These endpoints do their own
+ * full verification (challenge, device-auth JWS, Android attestation) --
+ * they are never called with a pre-trusted userId, and are safe even
+ * though better-auth auto-mounts them at /api/auth/device/... too (an
+ * unused, never client-facing path; mobile only ever calls the /v1
+ * wrapper in device-auth.router.ts, which relays here via auth.api.*).
+ * Registered after bearer()/the DPoP plugin, same ordering rule as every
+ * other plugin in this factory's plugins array.
+ */
+export function createBetterAuthDeviceAuthPlugin(
+  options: BetterAuthDeviceAuthPluginOptions,
+): BetterAuthPlugin {
+  return {
+    id: "vistablox-device-auth",
+    endpoints: {
+      enrolVerify: createAuthEndpoint(
+        "/device/enrol/verify",
+        { method: "POST", body: enrolVerifyBodySchema },
+        async (ctx) => {
+          const dpopContext: DpopCreationContext = {
+            headers: ctx.headers,
+            request: ctx.request,
+            path: ctx.path,
+          };
+
+          const current = await getSessionFromCtx(ctx);
+          const level = (current?.session as Record<string, unknown> | undefined)
+            ?.authenticationLevel;
+          if (current === null || level !== "oauth_pending") {
+            // Contract 3.6: DEVICE_JWS_INVALID is 400.
+            throw APIError.from("BAD_REQUEST", {
+              code: "DEVICE_JWS_INVALID",
+              message: "A pending Google/Apple sign-in session is required before enrolling a device.",
+            });
+          }
+
+          // The pending session must ALREADY be bound to this exact DPoP key
+          // -- not merely presenting *a* valid proof. An unbound session
+          // (Phase 1 allows sign-in without a DPoP proof) must be refused
+          // outright here, not silently bound to whatever key shows up:
+          // otherwise a stolen oauth_pending bearer token plus an
+          // attacker's own DPoP key would be enough to enrol a device on
+          // someone else's account. assertDpopKeyMatchesPendingSession also
+          // does the actual verify+record (once, cached for the
+          // session.create.before hook this same request is about to fire)
+          // -- see isSessionUpgradeCeremonyPath's own comment for why the
+          // generic DPoP plugin hook does not also do this for this path.
+          const boundJkt = (current.session as Record<string, unknown>).dpopJkt;
+          if (typeof boundJkt !== "string") {
+            // Contract 3.6: DEVICE_JWS_INVALID is 400.
+            throw APIError.from("BAD_REQUEST", {
+              code: "DEVICE_JWS_INVALID",
+              message: "This session is not yet bound to a device key.",
+            });
+          }
+          await assertDpopKeyMatchesPendingSession(dpopContext, boundJkt, options.dpop);
+
+          const account = await options.accounts.findByBetterAuthUserId(current.user.id);
+          if (account === null) {
+            throw APIError.from("INTERNAL_SERVER_ERROR", {
+              code: "device.account_mapping_missing",
+              message: "The authenticated identity is not linked to a VistaBlox account.",
+            });
+          }
+          if (account.status !== "active") {
+            throw accountRestricted();
+          }
+
+          try {
+            const device = await options.enrolDevice.execute({
+              accountId: account.accountId,
+              betterAuthUserId: current.user.id,
+              dpopJkt: boundJkt,
+              challenge: ctx.body.challenge,
+              jws: ctx.body.jws,
+              attestation: {
+                platform: ctx.body.attestation.platform,
+                keyAttestationChain:
+                  ctx.body.attestation.platform === "android"
+                    ? ctx.body.attestation.key_attestation_chain
+                    : [],
+                integrityToken:
+                  ctx.body.attestation.platform === "android"
+                    ? ctx.body.attestation.integrity_token
+                    : undefined,
+                model: undefined,
+                osVersion: undefined,
+                appVersion: undefined,
+              },
+            });
+
+            let ceremonySessionToken: string | null = null;
+            try {
+              // Just the userId: internalAdapter.createSession's 2nd param
+              // is dontRememberMe (a boolean), not a context -- the request
+              // context it needs comes from tryGetCurrentAuthEndpointContext's
+              // continuation-local lookup automatically, confirmed against
+              // internal-adapter.mjs directly rather than assumed.
+              // session.create.after hooks must not throw: a throw there
+              // would reject this call after the row exists but before its
+              // token is tracked, so the failure cleanup below couldn't
+              // discard it. The audit plugin swallows its own errors (see
+              // tests/better-auth-audit.plugin.test.ts).
+              const session = await ctx.context.internalAdapter.createSession(current.user.id);
+              if (session === null) {
+                throw APIError.from("INTERNAL_SERVER_ERROR", {
+                  code: "device.session_creation_failed",
+                  message: "Could not create a session for the enrolled device.",
+                });
+              }
+              ceremonySessionToken = session.token;
+              await setSessionCookie(ctx, { session, user: current.user });
+              // The pending session's job is done -- mirrors the passkey
+              // ceremony's own priorSessionToken/deleteSession pattern (E2
+              // "rotates" per the wire contract, section 3.1).
+              await ctx.context.internalAdapter.deleteSession(current.session.token);
+              // Its own try/catch: nothing the supersede step throws may reach
+              // the cleanup below and discard this session or roll back the
+              // device. Supersede failures never affect the enrolment.
+              try {
+                await supersedeEarlierDeviceSessions(
+                  ctx,
+                  { userId: current.user.id, dpopJkt: boundJkt },
+                  "enrolment",
+                );
+              } catch (supersedeError) {
+                ctx.context.logger?.error?.("failed to supersede earlier sessions after a device enrolment", {
+                  supersedeError,
+                });
+              }
+
+              return ctx.json({
+                device_id: device.deviceId,
+                status: "active" as const,
+                session_expires_at: session.expiresAt.toISOString(),
+                authentication_level: "device_biometric" as const,
+              });
+            } catch (error) {
+              // The device row is already committed (Prisma) by this
+              // point; internalAdapter.createSession uses a different
+              // client (better-auth's own pg Pool), so this couldn't have
+              // been one transaction. Compensate rather than leave an
+              // orphaned active device blocking every retry via the
+              // one-active-device-per-account constraint -- confirmed
+              // live on staging: a real enrolment crashed exactly here and
+              // did exactly that, before this existed. Best-effort: if the
+              // rollback itself fails, still surface the original error,
+              // not the cleanup failure. The session this enrolment created
+              // (if it got that far) goes first, so no device_biometric
+              // session is ever left alive without its device row.
+              if (ceremonySessionToken !== null) {
+                await discardCeremonySession(ctx, ceremonySessionToken, "enrolment");
+              }
+              await options.enrolDevice.rollback(device.deviceId).catch((rollbackError: unknown) => {
+                ctx.context.logger?.warn?.("failed to roll back an orphaned device after a failed enrolment", {
+                  deviceId: device.deviceId,
+                  rollbackError,
+                });
+              });
+              throw error;
+            }
+          } catch (error) {
+            logAttestationRejection(ctx, error);
+            throw toApiError(error);
+          }
+        },
+      ),
+      loginVerify: createAuthEndpoint(
+        "/device/login/verify",
+        { method: "POST", body: loginVerifyBodySchema },
+        async (ctx) => {
+          const dpopContext: DpopCreationContext = {
+            headers: ctx.headers,
+            request: ctx.request,
+            path: ctx.path,
+          };
+          // Contract 3.5: L2's auth is "none" -- a stale Authorization
+          // header must never be a reason to fail (there's no session yet
+          // for a bearer token to belong to).
+          const dpopClaims = await requireDpopProofForSessionCreation(
+            dpopContext,
+            options.dpop,
+            true,
+          );
+          // For the audit trail: a failed L2 is attributed to the device this
+          // verified key belongs to, not to whatever device_id the body names.
+          recordVerifiedLoginDpopJkt(ctx.context, dpopClaims.jkt);
+
+          let ceremonySessionToken: string | null = null;
+          try {
+            const device = await options.loginDevice.execute({
+              deviceId: ctx.body.device_id,
+              dpopJkt: dpopClaims.jkt,
+              challenge: ctx.body.challenge,
+              jws: ctx.body.jws,
+            });
+
+            // A closed/suspended account otherwise keeps its devices fully
+            // able to log in -- device status and account status are
+            // separate, and closing/restricting an account today doesn't
+            // touch its devices at all.
+            const account = await options.accounts.findByBetterAuthUserId(device.betterAuthUserId);
+            if (account === null || account.status !== "active") {
+              throw accountRestricted();
+            }
+
+            // As in E2: session.create.after hooks must not throw, or the
+            // session would exist untracked by the cleanup below.
+            const session = await ctx.context.internalAdapter.createSession(
+              device.betterAuthUserId,
+            );
+            if (session === null) {
+              throw APIError.from("INTERNAL_SERVER_ERROR", {
+                code: "device.session_creation_failed",
+                message: "Could not create a session for this device.",
+              });
+            }
+            ceremonySessionToken = session.token;
+            const user = await ctx.context.internalAdapter.findUserById(device.betterAuthUserId);
+            if (user === null) {
+              throw APIError.from("INTERNAL_SERVER_ERROR", {
+                code: "device.account_mapping_missing",
+                message: "The device's account could not be found.",
+              });
+            }
+            await setSessionCookie(ctx, { session, user });
+            // Its own try/catch: nothing the supersede step throws may reach
+            // the cleanup below and discard this session. Supersede failures
+            // never affect the login.
+            try {
+              await supersedeEarlierDeviceSessions(
+                ctx,
+                { userId: device.betterAuthUserId, dpopJkt: dpopClaims.jkt },
+                "login",
+              );
+            } catch (supersedeError) {
+              ctx.context.logger?.error?.("failed to supersede earlier sessions after a device login", {
+                supersedeError,
+              });
+            }
+
+            return ctx.json({
+              device_id: device.deviceId,
+              session_expires_at: session.expiresAt.toISOString(),
+              authentication_level: "device_biometric" as const,
+            });
+          } catch (error) {
+            // A login that fails after its session row exists (user lookup,
+            // cookie) must not leave that session alive.
+            if (ceremonySessionToken !== null) {
+              await discardCeremonySession(ctx, ceremonySessionToken, "login");
+            }
+            logAttestationRejection(ctx, error);
+            throw toApiError(error);
+          }
+        },
+      ),
+    },
+  };
+}
+
+/**
+ * A device ceremony (E2/L2) that fails after internalAdapter.createSession
+ * must neither leave that session alive nor hand it out. It:
+ * - expires the session cookie setSessionCookie may already have queued on
+ *   this response, so no Set-Cookie carries it and bearer() adds no
+ *   set-auth-token (it skips an expired cookie);
+ * - clears the new-session marker after hooks read, so none of them treats
+ *   the failed ceremony as having produced a session;
+ * - deletes the session row.
+ * Best-effort: a cleanup failure is logged, never thrown. The caller always
+ * rethrows the ceremony's original error.
+ */
+async function discardCeremonySession(
+  ctx: Parameters<typeof deleteSessionCookie>[0],
+  sessionToken: string,
+  ceremony: "enrolment" | "login",
+): Promise<void> {
+  try {
+    deleteSessionCookie(ctx);
+  } catch (cookieError) {
+    ctx.context.logger?.warn?.(`failed to expire the session cookie of a failed device ${ceremony}`, {
+      cookieError,
+    });
+  }
+  (ctx.context as { newSession?: unknown }).newSession = null;
+  // Lets the audit plugin record this delete as a failed ceremony, not as
+  // E2's ordinary rotation of the pending session.
+  markDiscardedCeremonySession(ctx.context, sessionToken);
+  await ctx.context.internalAdapter.deleteSession(sessionToken).catch((sessionError: unknown) => {
+    // Error level: a failed delete here leaves a live session behind.
+    ctx.context.logger?.error?.(`failed to delete the session of a failed device ${ceremony}`, {
+      sessionError,
+    });
+  });
+}
+
+/**
+ * A successful E2/L2 leaves the phone exactly one live session. After the
+ * new session exists and has been handed out, every live device_biometric
+ * session of this user bound to the same DPoP key (the same device) except
+ * the newest is revoked (domain/device-session-supersede.ts). Usually the
+ * newest is the session just created. When two ceremonies from the phone
+ * overlap, it's the later one, and the earlier ceremony's own session goes
+ * too, so two overlapping logins can never revoke each other's sessions and
+ * leave none. Web, staff and other devices' sessions are untouched.
+ *
+ * The match is the one POST /v1/auth/sessions/devices/:jkt/revoke uses. The
+ * deletes go through internalAdapter.deleteSession, the path better-auth's
+ * own revoke-session takes, so the audit trail and the session mirror record
+ * each one, with reason "superseded".
+ *
+ * Best-effort: a failure is logged at error level and never fails the
+ * ceremony. The phone already holds its new session, and an earlier one that
+ * survives still ends at its own idle and absolute limits.
+ */
+async function supersedeEarlierDeviceSessions(
+  ctx: Parameters<typeof deleteSessionCookie>[0],
+  input: { userId: string; dpopJkt: string },
+  ceremony: "enrolment" | "login",
+): Promise<void> {
+  let sessions: Array<{ id: string; token: string } & Record<string, unknown>>;
+  try {
+    sessions = (await ctx.context.internalAdapter.listSessions(input.userId)) as Array<
+      { id: string; token: string } & Record<string, unknown>
+    >;
+  } catch (listError) {
+    ctx.context.logger?.error?.(`failed to list the sessions a device ${ceremony} supersedes`, {
+      listError,
+    });
+    return;
+  }
+  const superseded = sessionsToSupersede(sessions, input.dpopJkt, new Date());
+  for (const earlier of superseded) {
+    markSupersededDeviceSession(ctx.context, earlier.token);
+    await ctx.context.internalAdapter.deleteSession(earlier.token).catch((sessionError: unknown) => {
+      // Error level: a failed delete here leaves an earlier session alive.
+      ctx.context.logger?.error?.(`failed to revoke a session superseded by a device ${ceremony}`, {
+        sessionError,
+      });
+    });
+  }
+}
+
+// Contract error code ACCOUNT_RESTRICTED (403) -- "Account frozen or
+// closed", section 3.6. A closed/suspended account's devices otherwise stay
+// fully able to enrol/log in: device status is entirely separate from
+// account status, and closing an account today doesn't touch its devices.
+export function accountRestricted(): APIError {
+  return APIError.from("FORBIDDEN", {
+    code: "ACCOUNT_RESTRICTED",
+    message: "This account can't be used right now.",
+  });
+}
+
+// Structural, not better-auth's own Logger type: this file doesn't need
+// the rest of that type's surface, just .warn, and staying structural
+// avoids depending on an internal type this codebase doesn't otherwise
+// import from.
+interface MinimalContextLogger {
+  context: { logger?: { warn?: (message: string, data?: Record<string, unknown>) => void } };
+  path?: string;
+}
+
+// The client-facing message never carries an AndroidAttestationInvalidError's
+// specific reason (see toApiError below) -- it's still worth keeping
+// somewhere, so a real rejection has more to go on in the logs than "it
+// failed". Only Android-attestation errors carry a reason (their
+// constructor's whole argument); every other device-auth error's message
+// is already the safe, generic one (see each class's own doc comment).
+export function logAttestationRejection(ctx: MinimalContextLogger, error: unknown): void {
+  if (isAndroidAttestationError(error)) {
+    ctx.context.logger?.warn?.("device-auth attestation rejected", {
+      code: error.code,
+      reason: error.message,
+      path: ctx.path ?? "unknown",
+    });
+  }
+}
+
+// HTTP status per contract section 3.6 -- not a blanket 401. Attacker-
+// reachable detail is still kept out of the response either way: every one
+// of these error classes' own .message is written to be safe to return
+// as-is (see each class's own doc comment), never the verifier's specific
+// internal rejection reason (that's logged server-side only -- see
+// AndroidAttestationInvalidError's construction sites, which never surface
+// their `reason` argument to the client).
+export function toApiError(error: unknown): APIError {
+  if (error instanceof APIError) return error;
+  if (
+    error instanceof DeviceChallengeExpiredError ||
+    error instanceof DeviceChallengeReplayedError ||
+    error instanceof DeviceChallengePurposeMismatchError ||
+    error instanceof DeviceJwsInvalidError ||
+    error instanceof DeviceJwsDpopMismatchError
+  ) {
+    return APIError.from("BAD_REQUEST", { code: error.code, message: error.message });
+  }
+  if (isAndroidAttestationError(error)) {
+    // Never the verifier's specific internal reason (error.message) -- it's
+    // an oracle a forger could use to iterate towards a chain that passes.
+    // The caller logs the real reason server-side before calling this.
+    return APIError.from("BAD_REQUEST", {
+      code: error.code,
+      message: "This device can't be used for VistaBlox.",
+    });
+  }
+  if (error instanceof DeviceAlreadyEnrolledError) {
+    return APIError.from("CONFLICT", { code: error.code, message: error.message });
+  }
+  if (error instanceof DeviceLoginFailedError) {
+    return APIError.from("UNAUTHORIZED", { code: error.code, message: error.message });
+  }
+  if (error instanceof MobilePlatformUnsupportedError) {
+    return APIError.from("BAD_REQUEST", {
+      code: error.code,
+      message: "This mobile platform is not supported yet.",
+    });
+  }
+  throw error;
+}

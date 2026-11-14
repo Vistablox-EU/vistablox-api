@@ -6,10 +6,12 @@ import type { CoinbaseCdpClient } from "./coinbase-cdp-client.js";
 import { subtractCurrencyFloorZero, toCents } from "../domain/currency.js";
 import {
   computeReservationBlockers,
+  isReservationExpired,
+  isReservationFunded,
   type ReservationBlocker,
 } from "../domain/reservation-eligibility.policy.js";
 import type { OfferingRepository } from "../repository/offering.repository.js";
-import type { ReservationRepository } from "../repository/reservation.repository.js";
+import type { ReservationRepository, ReusedReservationState } from "../repository/reservation.repository.js";
 
 const blockerMessages: Record<ReservationBlocker, string> = {
   account_restricted: "The account is not active.",
@@ -113,9 +115,9 @@ export class CreateReservationService {
       throw reservationNotAvailableError(["payment_account_not_ready"]);
     }
 
-    const reservationId = this.generateReservationId();
+    const candidateReservationId = this.generateReservationId();
     const created = await this.reservations.createReservation({
-      reservationId,
+      reservationId: candidateReservationId,
       offeringId: input.offeringId,
       accountId: input.accountId,
       clientIdempotencyKey: input.clientIdempotencyKey ?? null,
@@ -138,6 +140,26 @@ export class CreateReservationService {
         title: "Internal server error",
         status: 500,
         detail: "Reservation creation returned neither a reservation nor a conflict.",
+      });
+    }
+
+    // On an idempotent replay the repository returns the reservation that was
+    // already persisted, not the candidate id generated above (which was never
+    // saved). Everything below must use the persisted id: the money event has
+    // a foreign key to it, and the client is handed it back.
+    const reservationId = reservation.reservationId;
+
+    // A retry is only served while the stored reservation is still exactly
+    // what the client asked for and can still be paid. Before the persisted-id
+    // fix above, every replay failed on the money event's foreign key, which
+    // accidentally also stopped the cases below; now that a replay can
+    // succeed, they must be refused deliberately.
+    if (created.reused === true) {
+      this.assertReplayable({
+        replay: created.replay,
+        reservationCreatedAt: reservation.createdAt,
+        requestedAmountEur: input.amountEur,
+        now,
       });
     }
 
@@ -188,6 +210,59 @@ export class CreateReservationService {
       },
     };
   }
+
+  private assertReplayable(input: {
+    replay: ReusedReservationState | undefined;
+    reservationCreatedAt: Date;
+    requestedAmountEur: string;
+    now: Date;
+  }): void {
+    const { replay } = input;
+    // Fail closed: a key hit whose state we were not told cannot be judged safe.
+    if (replay === undefined) throw reservationReplayUnavailableError();
+    // AD-147: a reused key with a different body is a conflict, never a
+    // silent success. The amount is the only body field the key can disagree
+    // on, and recording the retry's amount against the stored hold would put
+    // a figure in money_events that no reservation holds.
+    if (toCents(replay.amountEur) !== toCents(input.requestedAmountEur)) {
+      throw idempotencyKeyReusedError();
+    }
+    // A replay re-arms payment for the original hold; it must never revive or
+    // extend one. A funded reservation would get a newer, unfunded-looking
+    // money event (defeating the sweeper's funded check), and a lapsed or
+    // expired one holds no capacity, so a payment through a new session would
+    // never be matched to it.
+    if (
+      replay.reservationStage !== "initiated" ||
+      isReservationFunded(replay.latestCapitalState) ||
+      isReservationExpired({
+        createdAt: input.reservationCreatedAt,
+        now: input.now,
+        expiryMinutes: this.expiryMinutes,
+      })
+    ) {
+      throw reservationReplayUnavailableError();
+    }
+  }
+}
+
+function idempotencyKeyReusedError(): AppError {
+  return new AppError({
+    code: "offering.idempotency_key_reused",
+    title: "Idempotency key already used",
+    status: 409,
+    detail: "This Idempotency-Key was already used to create a reservation for a different amount.",
+  });
+}
+
+function reservationReplayUnavailableError(): AppError {
+  return new AppError({
+    code: "offering.reservation_replay_unavailable",
+    title: "Reservation can no longer be retried",
+    status: 409,
+    detail:
+      "The reservation created under this Idempotency-Key can no longer be paid through a new payment session. Check your reservations to see its current state.",
+  });
 }
 
 function reservationNotAvailableError(blockers: ReservationBlocker[]): AppError {

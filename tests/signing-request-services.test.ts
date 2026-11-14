@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { CancelPendingSigningRequestsForDeviceService } from "../src/modules/auth/application/cancel-signing-requests.service.js";
-import { PrepareSigningRequestService } from "../src/modules/auth/application/prepare-signing-request.service.js";
-import type { Device } from "../src/modules/auth/repository/device.repository.js";
-import type { CreateSigningRequestInput, SigningRequest } from "../src/modules/auth/repository/signing-request.repository.js";
+import { CancelPendingSigningRequestsForDeviceService } from "../src/modules/auth/application/customer/cancel-signing-requests.service.js";
+import { PrepareSigningRequestService } from "../src/modules/auth/application/customer/prepare-signing-request.service.js";
+import type { Device } from "../src/modules/auth/repository/customer/device.repository.js";
+import type { CreateSigningRequestInput, SigningRequest } from "../src/modules/auth/repository/customer/signing-request.repository.js";
 
 const DEVICE: Device = {
   deviceId: "dev_1",

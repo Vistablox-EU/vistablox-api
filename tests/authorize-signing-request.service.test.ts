@@ -1,11 +1,11 @@
 import { SignJWT, calculateJwkThumbprint, exportJWK, generateKeyPair, type CryptoKey, type JWK } from "jose";
 import { describe, expect, it } from "vitest";
 
-import { AuthorizeSigningRequestService } from "../src/modules/auth/application/authorize-signing-request.service.js";
+import { AuthorizeSigningRequestService } from "../src/modules/auth/application/customer/authorize-signing-request.service.js";
 import {
   DeviceChallengeExpiredError,
   DeviceChallengeReplayedError,
-} from "../src/modules/auth/application/device-auth-errors.js";
+} from "../src/modules/auth/application/customer/device-auth-errors.js";
 import {
   SigningRequestAlreadyConsumedError,
   SigningRequestCancelledError,
@@ -14,14 +14,14 @@ import {
   TxFieldMismatchError,
   TxSignatureInvalidError,
   TxWrongDeviceError,
-} from "../src/modules/auth/application/signing-request-errors.js";
+} from "../src/modules/auth/application/customer/signing-request-errors.js";
 import { SIGNING_JWS_PURPOSE } from "../src/modules/auth/domain/signing-request.policy.js";
-import type { Device, DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
-import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
+import type { Device, DeviceRepository } from "../src/modules/auth/repository/customer/device.repository.js";
+import type { DeviceChallengeRepository } from "../src/modules/auth/repository/customer/device-challenge.repository.js";
 import type {
   SigningRequest,
   SigningRequestRepository,
-} from "../src/modules/auth/repository/signing-request.repository.js";
+} from "../src/modules/auth/repository/customer/signing-request.repository.js";
 
 const JWS_TYP = "vistablox-device-auth+jwt";
 const ACCOUNT_ID = "acc_1";

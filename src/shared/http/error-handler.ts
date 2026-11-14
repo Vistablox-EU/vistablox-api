@@ -2,6 +2,7 @@ import type { ErrorRequestHandler } from "express";
 import { ZodError } from "zod";
 
 import { AppError } from "../errors/app-error.js";
+import { translateBodyParserError } from "./body-parser-error.js";
 import { errorResponseSchema, type ErrorResponse } from "./error-schema.js";
 
 export const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
@@ -9,7 +10,8 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
     next(error);
     return;
   }
-  const normalized = normalizeError(error);
+  const rejectedBody = translateBodyParserError(error);
+  const normalized = rejectedBody?.error ?? normalizeError(error);
   const traceId = String(response.locals.traceId ?? "unknown");
 
   const payload: ErrorResponse = {
@@ -22,7 +24,19 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
     ...(normalized.fieldErrors === undefined ? {} : { field_errors: normalized.fieldErrors }),
   };
 
-  if (normalized.status >= 500) {
+  if (rejectedBody !== undefined) {
+    // The client's mistake, not ours. Log what identifies the failure but not
+    // the parser's error object, which holds the request body.
+    response.locals.logger?.warn(
+      {
+        trace_id: traceId,
+        status: normalized.status,
+        code: normalized.code,
+        parser_error: rejectedBody.parserError,
+      },
+      "request body rejected",
+    );
+  } else if (normalized.status >= 500) {
     response.locals.logger?.error({ err: error, trace_id: traceId }, "request failed");
   }
 

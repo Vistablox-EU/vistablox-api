@@ -8,7 +8,7 @@ import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaProfileRepository } from "../src/modules/profile/repository/prisma-profile.repository.js";
 import { PrismaAccountPreferencesRepository } from "../src/modules/profile/repository/prisma-account-preferences.repository.js";
 import { defaultAccountPreferences } from "../src/modules/profile/repository/account-preferences.repository.js";
-import { PrismaAccountClosureRepository } from "../src/modules/auth/repository/prisma-account-closure.repository.js";
+import { PrismaAccountClosureRepository } from "../src/modules/auth/repository/shared/prisma-account-closure.repository.js";
 import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
 import { PrismaInvestorActivityRepository } from "../src/modules/investor-activity/repository/prisma-investor-activity.repository.js";
 import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
@@ -268,28 +268,19 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
     await database.positionLedger.deleteMany({
       where: { accountId: { in: [accountId, otherAccountId] } },
     });
-    await database.moneyEvent.deleteMany({
-      where: { reservation: { accountId } },
-    });
-    await database.reservation.deleteMany({
-      where: { accountId: { in: [accountId, otherAccountId] } },
-    });
-    await database.offering.deleteMany({ where: { id: offeringId } });
-    await database.piv.deleteMany({ where: { id: pivId } });
-    await database.intakeCase.deleteMany({ where: { id: caseId } });
-    await database.property.deleteMany({ where: { id: propertyId } });
     await database.walletRegistration.deleteMany({
       where: { accountId: { in: [accountId, otherAccountId] } },
     });
     await database.kycEligibility.deleteMany({ where: { accountId } });
     await database.loginMethod.deleteMany({ where: { accountId } });
-    await database.account.deleteMany({
-      where: { id: { in: [accountId, otherAccountId] } },
-    });
-    await authPool.query('DELETE FROM "auth_user" WHERE "id" IN ($1, $2)', [
-      betterAuthUserId,
-      otherBetterAuthUserId,
-    ]);
+    // money_events is append-only (its trigger rejects every UPDATE and
+    // DELETE) with an ON DELETE RESTRICT foreign key to reservations, so the
+    // reservation that has money events -- and through the foreign keys the
+    // offering, PIV, case, property, the account that holds it and its
+    // auth_user row -- is permanently undeletable. The rest of the fixture is
+    // left in place with it. Every id here is uniquely suffixed per run, so
+    // that cannot collide with a later run; the rows above are the deletable
+    // part.
     await Promise.all([database.$disconnect(), authPool.end()]);
   });
 
@@ -439,6 +430,40 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
       expect(pendingPage.map((row) => row.positionStatus)).toEqual([
         "pending_internal_settlement",
       ]);
+    });
+
+    it("reads an escrow-minted position, which has no reservation, alongside reservation-backed ones", async () => {
+      // recordEscrowMintedPosition writes no reservation_id (AD-256), and the
+      // offering is only reachable through the reservation, so both come back
+      // null. The router's response schema must accept that.
+      const escrowPositionId = `position_escrow_${suffix}`;
+      await database.positionLedger.create({
+        data: {
+          id: escrowPositionId,
+          pivId,
+          accountId,
+          unitCount: "1000.000000",
+          costBasisEur: "1000.00",
+          positionStatus: "active",
+          activatedAt: new Date("2026-09-07T12:00:00.000Z"),
+        },
+      });
+      try {
+        const page = await investorActivityRepository.listCurrentPositions({ accountId, limit: 10 });
+        expect(page.find((row) => row.positionId === escrowPositionId)).toMatchObject({
+          reservationId: null,
+          offeringId: null,
+          pivId,
+          unitCount: "1000.000000",
+          costBasisEur: "1000.00",
+        });
+        expect(page.find((row) => row.positionId === `position_active_${suffix}`)).toMatchObject({
+          reservationId: reservationIds[0],
+          offeringId,
+        });
+      } finally {
+        await database.positionLedger.delete({ where: { id: escrowPositionId } });
+      }
     });
 
     it("summarizes reservation and active-position counts", async () => {

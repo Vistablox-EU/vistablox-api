@@ -1,8 +1,8 @@
 import { Pool } from "pg";
 import { describe, expect, it, vi } from "vitest";
 
-import { isDeviceSessionLookupWrapped } from "../src/modules/auth/infrastructure/better-auth-device-session-lifetime.plugin.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
+import { isDeviceSessionLookupWrapped } from "../src/modules/auth/infrastructure/customer/better-auth-device-session-lifetime.plugin.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 
 // The real factory, no database: the pool below is never connected to,
 // because building better-auth's context doesn't query the database.
