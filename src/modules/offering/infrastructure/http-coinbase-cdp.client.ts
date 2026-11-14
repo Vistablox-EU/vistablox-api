@@ -3,6 +3,7 @@ import { randomBytes } from "node:crypto";
 import { importJWK, importPKCS8, SignJWT } from "jose";
 import { z } from "zod";
 
+import { toChecksumWalletAddress } from "../../../shared/domain/wallet-address.js";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type {
   CoinbaseCdpClient,
@@ -73,7 +74,8 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
     blockchain: string;
   }): Promise<CreateOnrampSessionTokenResult> {
     const response = await this.request("POST", "/onramp/v1/token", {
-      addresses: [{ address: input.walletAddress, blockchains: [input.blockchain] }],
+      // The API's canonical form is lowercase; Coinbase is shown EIP-55.
+      addresses: [{ address: toChecksumWalletAddress(input.walletAddress), blockchains: [input.blockchain] }],
     });
     const parsed = createTokenResponseSchema.safeParse(await safeJson(response));
     if (!parsed.success) throw invalidProviderResponseError(parsed.error);

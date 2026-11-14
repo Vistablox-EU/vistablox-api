@@ -2,6 +2,7 @@ import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { isUniqueViolation } from "../../../infrastructure/database/unique-violation.js";
+import { canonicalWalletAddress } from "../../../shared/domain/wallet-address.js";
 import {
   normalizeChainHash,
   type WalletRegistrationEvidenceFlag,
@@ -91,7 +92,10 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
     registrationCommitment: string;
     requestedAt: Date;
   }): Promise<RegisteredWallet> {
-    const address = input.walletAddress.trim().toLowerCase();
+    // The HTTP edge already canonicalises, but this is the persistence boundary
+    // and other callers can skip the edge: whatever spelling arrives, one
+    // address is stored, compared and audited in one form.
+    const address = canonicalWalletAddress(input.walletAddress);
     return this.database.$transaction(async (transaction) => {
       // Two passes: the first can lose the insert race to a concurrent
       // request of the same account (ON CONFLICT DO NOTHING reports 0 rows),
@@ -120,7 +124,10 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
             AND registered_at IS NOT NULL
         `;
         const claimedByOther = owners.some((owner) => owner.account_id !== input.accountId);
-        const ownAddressMatches = own !== null && own.walletAddress.toLowerCase() === address;
+        // The stored value is compared in canonical form too, so a row that
+        // predates the lowercase check is still a replay of the same address.
+        const ownAddressMatches =
+          own !== null && canonicalWalletAddress(own.walletAddress) === address;
 
         // The more specific conflict wins: when the address is confirmed for a
         // different account, report that, even if this account's own
