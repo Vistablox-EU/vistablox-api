@@ -91,9 +91,8 @@ function walletNotRegisteredError(detail: string): AppError {
 
 // A transfer is prepared only for a confirmed wallet registration
 // (registered_at set). A pending claim is an address the customer typed and
-// proves nothing about who controls it, and several accounts may hold a
-// pending claim on one address, so it is treated as no wallet. The first check
-// made, before the holdings or the chain are read.
+// proves nothing about who controls it, so it is treated as no wallet. The
+// first check made, before the holdings or the chain are read.
 export class RequestWalletTransferService {
   public constructor(
     private readonly walletRepository: WalletRepository,

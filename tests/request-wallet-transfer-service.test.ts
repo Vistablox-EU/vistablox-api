@@ -40,9 +40,11 @@ function buildHoldingsReader(
 }
 
 function build(chainReader = buildTransferChainReader()) {
+  const walletRepository = buildRepository();
   return {
     chainReader,
-    service: new RequestWalletTransferService(buildRepository(), buildHoldingsReader(), chainReader),
+    walletRepository,
+    service: new RequestWalletTransferService(walletRepository, buildHoldingsReader(), chainReader),
   };
 }
 
@@ -52,7 +54,7 @@ function execute(service: RequestWalletTransferService, amount = "3") {
 
 describe("RequestWalletTransferService", () => {
   it("builds an unsigned transfer transaction and the preflight from one snapshot", async () => {
-    const { chainReader, service } = build();
+    const { chainReader, walletRepository, service } = build();
 
     const result = await execute(service);
 
@@ -81,6 +83,43 @@ describe("RequestWalletTransferService", () => {
       tokenId,
       amount: "3",
     });
+    // The wallet row is read once: the same read that passed the confirmed
+    // check supplies `from`, so nothing can change between check and use.
+    expect(walletRepository.findByAccountId).toHaveBeenCalledTimes(1);
+    expect(walletRepository.findByAccountId).toHaveBeenCalledWith(accountId);
+  });
+
+  // The guarantee that makes the confirmed-only check race-free is that the
+  // row that passes it is the row that is used. A second read after the check
+  // (a "re-fetch to be sure") would reopen the check-then-use gap, and with a
+  // stable fake it would still pass every other test, so this one makes later
+  // reads answer differently and looks at where `from` came from.
+  it("takes from and from_wallet_address from the one row that passed the confirmed check", async () => {
+    const laterAddress = "0x00000000000000000000000000000000000000aa";
+    const confirmedRow = {
+      walletAddress,
+      registrationCommitment: "commitment_01",
+      requestedAt: new Date("2026-09-02T10:00:00.000Z"),
+      registeredAt: new Date("2026-09-02T10:05:00.000Z"),
+    };
+    const findByAccountId = vi
+      .fn()
+      .mockResolvedValueOnce(confirmedRow)
+      .mockResolvedValue({ ...confirmedRow, walletAddress: laterAddress });
+    const chainReader = buildTransferChainReader();
+    const service = new RequestWalletTransferService(
+      buildRepository({ findByAccountId }),
+      buildHoldingsReader(),
+      chainReader,
+    );
+
+    const result = await execute(service);
+
+    expect(result.data.from_wallet_address).toBe(walletAddress);
+    expect(chainReader.readTransferSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ from: walletAddress }),
+    );
+    expect(findByAccountId).toHaveBeenCalledTimes(1);
   });
 
   it("allows transferring exactly the whole balance", async () => {
