@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { Pool } from "pg";
-import { afterAll, afterEach, beforeAll, describe, expect, it, type TestContext } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { isUniqueViolation } from "../src/infrastructure/database/unique-violation.js";
@@ -18,14 +18,15 @@ import {
 // index wallet_registrations_confirmed_address_key.
 //
 // Every address, commitment and account id is derived from a per-run suffix
-// and is lowercase, and every test but two writes only lowercase addresses
-// (the repository canonicalises what it is given). Those two tests insert a
-// mixed-case row directly, to stand in for a row written before the canonical
-// form; that is impossible once the wallet_registrations_wallet_address_
-// lowercase_check constraint exists (the canonical-form change, #147), and the
-// case they cover cannot occur then either. They detect the constraint and
-// report as skipped rather than fail or pass vacuously.
+// and is lowercase: the database refuses any other spelling
+// (wallet_registrations_wallet_address_lowercase_check, the canonical-form
+// change, #147), so a mixed-case row cannot be created here, not even directly.
+// The two tests that are about letter case therefore pin what is left of it
+// with the constraint in force: a case variant is refused at the database, and
+// a caller's mixed-case spelling is matched against the stored lowercase row.
+// Neither skips: CI fails the job on any skipped test.
 const LOWERCASE_CHECK = "wallet_registrations_wallet_address_lowercase_check";
+const CONFIRMED_ADDRESS_INDEX = "wallet_registrations_confirmed_address_key";
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
 describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL integration", () => {
@@ -70,13 +71,14 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       evidence: nextEvidence(),
     });
 
-  // True when the database refuses a wallet_address that is not already
-  // lowercase, so a legacy mixed-case row cannot be inserted.
-  let lowercaseCheckPresent = false;
-  const skipWithoutMixedCaseRows = (context: TestContext): void => {
-    if (lowercaseCheckPresent) {
-      context.skip(`${LOWERCASE_CHECK} is present: a mixed-case wallet_address cannot be stored`);
-    }
+  // The same address spelt with upper-case hex digits: what a caller may still
+  // send and the database no longer stores. The guard makes the one run in about
+  // three million whose random suffix has no letter at all fail loudly, since
+  // the "variant" would then be the address itself and prove nothing.
+  const upperCaseSpelling = (address: string): string => {
+    const spelling = `0x${address.slice(2).toUpperCase()}`;
+    expect(spelling).not.toBe(address);
+    return spelling;
   };
 
   const auditRows = (resourceId: string, action: string) =>
@@ -93,11 +95,6 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       );
       await database.account.create({ data: { id: accountId, betterAuthUserId: betterAuthUserIds[index]! } });
     }
-    const { rows } = await authPool.query(
-      "SELECT 1 FROM pg_constraint WHERE conrelid = 'settlement.wallet_registrations'::regclass AND conname = $1",
-      [LOWERCASE_CHECK],
-    );
-    lowercaseCheckPresent = rows.length > 0;
   });
 
   afterEach(async () => {
@@ -141,19 +138,60 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect(await database.walletRegistration.count({ where: { walletAddress: address } })).toBe(2);
     });
 
-    it("rejects a second confirmed row for an address in any case, at the database", async (context) => {
-      skipWithoutMixedCaseRows(context);
+    it("refuses a second confirmed row for an address in any case: a case variant at the lowercase CHECK, an exact duplicate at the confirmed-address unique index", async () => {
       const address = nextAddress();
+      const variant = upperCaseSpelling(address);
       await database.walletRegistration.create({
         data: { accountId: accountA, walletAddress: address, registrationCommitment: nextCommitment(), registeredAt: new Date() },
       });
-      await database.walletRegistration.create({
-        data: { accountId: accountB, walletAddress: address.toUpperCase().replace("0X", "0x"), registrationCommitment: nextCommitment() },
-      });
+      const insertRow = (accountId: string, walletAddress: string, confirmed: boolean) =>
+        authPool.query(
+          "INSERT INTO settlement.wallet_registrations (account_id, wallet_address, registration_commitment, registered_at) VALUES ($1, $2, $3, $4)",
+          [accountId, walletAddress, nextCommitment(), confirmed ? new Date() : null],
+        );
+      const lowercaseCheckViolation = { code: "23514", constraint: LOWERCASE_CHECK };
+      const confirmedAddressViolation = { code: "23505", constraint: CONFIRMED_ADDRESS_INDEX };
 
+      // A case variant of the confirmed address cannot be stored at all: not as
+      // a pending claim and not as a confirmed row. The CHECK refuses it before
+      // any index sees the row, so a second spelling never even reaches the
+      // unique index.
+      await expect(insertRow(accountB, variant, false)).rejects.toMatchObject(lowercaseCheckViolation);
+      await expect(insertRow(accountB, variant, true)).rejects.toMatchObject(lowercaseCheckViolation);
+
+      // An exact duplicate is stored as a pending claim (pending claims overlap
+      // by design). Moving that claim onto the variant is refused by the CHECK too.
+      await database.walletRegistration.create({
+        data: { accountId: accountB, walletAddress: address, registrationCommitment: nextCommitment() },
+      });
+      await expect(
+        authPool.query("UPDATE settlement.wallet_registrations SET wallet_address = $2 WHERE account_id = $1", [accountB, variant]),
+      ).rejects.toMatchObject(lowercaseCheckViolation);
+
+      // Confirming the duplicate beside the first one is refused by the partial
+      // unique index, from a typed call (P2002), from a raw UPDATE and as an INSERT
+      // of an already confirmed row (both 23505, naming the index).
       await expect(
         database.walletRegistration.update({ where: { accountId: accountB }, data: { registeredAt: new Date() } }),
       ).rejects.toMatchObject({ code: "P2002" });
+      await expect(
+        authPool.query("UPDATE settlement.wallet_registrations SET registered_at = now() WHERE account_id = $1", [accountB]),
+      ).rejects.toMatchObject(confirmedAddressViolation);
+      await expect(insertRow(accountC, address, true)).rejects.toMatchObject(confirmedAddressViolation);
+
+      // Every refused statement wrote nothing: in any case, one account holds the
+      // address confirmed, and the other still holds only its pending claim.
+      const { rows } = await authPool.query<{ account_id: string; wallet_address: string; confirmed: boolean }>(
+        `SELECT account_id, wallet_address, registered_at IS NOT NULL AS confirmed
+         FROM settlement.wallet_registrations
+         WHERE lower(wallet_address) = lower($1)
+         ORDER BY account_id`,
+        [variant],
+      );
+      expect(rows).toEqual([
+        { account_id: accountA, wallet_address: address, confirmed: true },
+        { account_id: accountB, wallet_address: address, confirmed: false },
+      ]);
     });
   });
 
@@ -308,19 +346,27 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect((await auditRows(accountA, "requested"))[0]!.changes).toEqual({ wallet_address: address });
     });
 
-    it("treats a legacy mixed-case row as the same address: replay, block and resolve case-insensitively", async (context) => {
-      skipWithoutMixedCaseRows(context);
+    it("treats a mixed-case spelling of a stored address as the same address: replay, block and resolve case-insensitively", async () => {
       const address = nextAddress();
-      const legacy = `0x${address.slice(2).toUpperCase()}`;
+      const spelling = upperCaseSpelling(address);
       const commitment = nextCommitment();
       await database.walletRegistration.create({
-        data: { accountId: accountA, walletAddress: legacy, registrationCommitment: commitment, registeredAt: new Date() },
+        data: { accountId: accountA, walletAddress: address, registrationCommitment: commitment, registeredAt: new Date() },
       });
 
-      await expect(register(accountA, address)).resolves.toMatchObject({ walletAddress: legacy, registrationCommitment: commitment });
-      await expect(register(accountB, address)).rejects.toMatchObject({ reason: "address_claimed" });
+      // The row is stored lowercase (the CHECK allows nothing else); the caller
+      // spells the address differently. registerWallet canonicalises the input.
+      await expect(register(accountA, spelling)).resolves.toMatchObject({ walletAddress: address, registrationCommitment: commitment });
+      await expect(register(accountB, spelling)).rejects.toMatchObject({ reason: "address_claimed" });
+      await expect(settlementRepository.resolveAccountIdForWallet(spelling)).resolves.toBe(accountA);
       await expect(settlementRepository.resolveAccountIdForWallet(address)).resolves.toBe(accountA);
-      await expect(settlementRepository.resolveAccountIdForWallet(legacy)).resolves.toBe(accountA);
+
+      // The replay and the refused claim wrote nothing.
+      const rows = await database.walletRegistration.findMany({ where: { accountId: { in: accountIds } } });
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ accountId: accountA, walletAddress: address, registrationCommitment: commitment });
+      expect(await auditRows(accountA, "requested")).toHaveLength(0);
+      expect(await auditRows(accountB, "requested")).toHaveLength(0);
     });
 
     it("survives 8 parallel identical registrations: no rejection, one row, one requested audit row", async () => {
