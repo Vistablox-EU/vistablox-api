@@ -18,6 +18,8 @@ export function objectKey(input: {
 }): string {
   const key = [input.area, input.subjectId, input.revision === undefined ? undefined : `revisions/${input.revision}`, input.documentId]
     .filter((part): part is string => part !== undefined).join("/");
-  if (!/^[a-z0-9][a-z0-9/_-]{0,511}$/.test(key) || key.includes("..")) throw new Error("Invalid object key components");
+  // Subject IDs embed ULIDs (`offering_01M7AG…`, `case_01HX…`), which are
+  // upper-case Crockford base32, so the character class must be case-insensitive.
+  if (!/^[A-Za-z0-9][A-Za-z0-9/_-]{0,511}$/.test(key) || key.includes("..")) throw new Error("Invalid object key components");
   return key;
 }

@@ -117,6 +117,7 @@ function fakeEmailSender(overrides: Partial<EmailSender> = {}): EmailSender {
     sendAccountRecoveryRejectedEmail: vi.fn(),
     sendAccountRecoveryCompletedEmail: vi.fn(),
     sendPasskeyRecoveryEmail: vi.fn(),
+    sendDeviceReplacementCodeEmail: vi.fn(),
     ...overrides,
   };
 }

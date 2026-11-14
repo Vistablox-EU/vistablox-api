@@ -2,23 +2,41 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createCustomerSessionRouter } from "../src/modules/auth/api/customer-session.router.js";
+import { createCustomerSessionRouter } from "../src/modules/auth/api/customer/customer-session.router.js";
 import {
   ListOwnSessionsService,
   RevokeAllOwnSessionsService,
   RevokeDeviceSessionsService,
   RevokeOwnSessionService,
-} from "../src/modules/auth/application/customer-session.service.js";
-import type { SessionRevoker } from "../src/modules/auth/application/session-revoker.js";
-import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer-session.repository.js";
+} from "../src/modules/auth/application/customer/customer-session.service.js";
+import type { SessionRevoker } from "../src/modules/auth/application/customer/session-revoker.js";
+import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer/customer-session.repository.js";
+import { AppError } from "../src/shared/errors/app-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
+
+// The listing judges expiry against "now"; pin it so fixtures stay valid.
+const NOW = new Date("2026-09-01T09:02:00.000Z");
 
 function fakeRevoker(overrides: Partial<SessionRevoker> = {}): SessionRevoker {
   return { revoke: vi.fn(), revokeAll: vi.fn(), revokeByDpopKey: vi.fn(), ...overrides };
 }
 
-function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker) {
+function freshAuthRejected(): RequestHandler {
+  const error = new AppError({
+    code: "authentication.fresh_auth_required",
+    title: "Fresh authentication required",
+    status: 403,
+    detail: "Sign in again on this device before continuing.",
+  });
+  return (_request, _response, next) => next(error);
+}
+
+function buildApp(
+  repository: CustomerSessionRepository,
+  revoker: SessionRevoker,
+  freshAuthentication?: RequestHandler,
+) {
   const app = express();
   const authenticated: RequestHandler = (_request, response, next) => {
     response.locals.authContext = {
@@ -33,7 +51,8 @@ function buildApp(repository: CustomerSessionRepository, revoker: SessionRevoker
     "/v1/auth/sessions",
     createCustomerSessionRouter(
       authenticated,
-      new ListOwnSessionsService(repository),
+      freshAuthentication ?? ((_request, _response, next) => next()),
+      new ListOwnSessionsService(repository, () => NOW),
       new RevokeOwnSessionService(repository, revoker),
       new RevokeAllOwnSessionsService(revoker),
       new RevokeDeviceSessionsService(revoker),
@@ -57,6 +76,7 @@ describe("customer session API", () => {
           status: "active",
           revocationReason: null,
           betterAuthSessionId: "auth_session_current",
+          providerSession: null,
         },
       ]),
       findOwnedProviderSessionId: vi.fn(),
@@ -80,6 +100,65 @@ describe("customer session API", () => {
         revocation_reason: null,
         is_current: true,
       },
+    ]);
+  });
+
+  it("does not list a session that is still marked active but can no longer authenticate", async () => {
+    // The staging symptom: rows whose status column was never moved off
+    // 'active' after both of their limits passed. The mobile app keeps only
+    // status === 'active', so listing them offered dead sessions with a Revoke
+    // button. Expired sessions are left out; revoked ones stay, as before.
+    const row = (overrides: Record<string, unknown>) => ({
+      sessionId: "sess_live",
+      channel: "mobile",
+      deviceLabel: null,
+      authMethodAtLogin: "device_biometric",
+      createdAt: new Date("2026-09-01T09:00:00.000Z"),
+      lastSeenAt: new Date("2026-09-01T09:00:00.000Z"),
+      status: "active",
+      revocationReason: null,
+      betterAuthSessionId: "auth_session_live",
+      providerSession: {
+        authenticationLevel: "device_biometric",
+        createdAt: new Date("2026-09-01T09:00:00.000Z"),
+        updatedAt: new Date("2026-09-01T09:00:00.000Z"),
+        expiresAt: new Date("2026-09-01T09:30:00.000Z"),
+      },
+      ...overrides,
+    });
+    const longAgo = new Date("2026-08-31T09:00:00.000Z");
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn().mockResolvedValue([
+        row({}),
+        row({
+          sessionId: "sess_expired",
+          betterAuthSessionId: "auth_session_expired",
+          providerSession: {
+            authenticationLevel: "device_biometric",
+            createdAt: longAgo,
+            updatedAt: longAgo,
+            expiresAt: new Date(longAgo.getTime() + 30 * 60_000),
+          },
+        }),
+        row({
+          sessionId: "sess_revoked",
+          betterAuthSessionId: "auth_session_revoked",
+          status: "revoked",
+          revocationReason: "sign_out",
+          providerSession: null,
+        }),
+      ]),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(buildApp(repository, fakeRevoker())).get("/v1/auth/sessions");
+
+    expect(response.status).toBe(200);
+    expect(
+      response.body.data.map((s: { session_id: string; status: string }) => [s.session_id, s.status]),
+    ).toEqual([
+      ["sess_live", "active"],
+      ["sess_revoked", "revoked"],
     ]);
   });
 
@@ -142,5 +221,53 @@ describe("customer session API", () => {
     expect(response.headers["cache-control"]).toBe("no-store");
     expect(response.body).toEqual({ data: { revoked_count: 2 } });
     expect(revokeByDpopKey).toHaveBeenCalledWith("jkt_abc123", expect.any(Object));
+  });
+
+  it("requires fresh authentication before revoking all sessions", async () => {
+    const revokeAll = vi.fn();
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(
+      buildApp(repository, fakeRevoker({ revokeAll }), freshAuthRejected()),
+    ).post("/v1/auth/sessions/revoke-all");
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(revokeAll).not.toHaveBeenCalled();
+  });
+
+  it("requires fresh authentication before revoking a single session", async () => {
+    const revoke = vi.fn();
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(
+      buildApp(repository, fakeRevoker({ revoke }), freshAuthRejected()),
+    ).post("/v1/auth/sessions/sess_01/revoke");
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(revoke).not.toHaveBeenCalled();
+  });
+
+  it("requires fresh authentication before revoking a device key", async () => {
+    const revokeByDpopKey = vi.fn();
+    const repository: CustomerSessionRepository = {
+      listForAccount: vi.fn(),
+      findOwnedProviderSessionId: vi.fn(),
+    };
+
+    const response = await request(
+      buildApp(repository, fakeRevoker({ revokeByDpopKey }), freshAuthRejected()),
+    ).post("/v1/auth/sessions/devices/jkt_abc123/revoke");
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authentication.fresh_auth_required");
+    expect(revokeByDpopKey).not.toHaveBeenCalled();
   });
 });

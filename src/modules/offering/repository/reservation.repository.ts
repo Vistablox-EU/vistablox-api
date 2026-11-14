@@ -2,6 +2,7 @@ export interface CreateReservationInput {
   reservationId: string;
   offeringId: string;
   accountId: string;
+  clientIdempotencyKey?: string | null;
   amountEur: string;
   disclosurePackVersionAtReservation: string | null;
   traceId: string;
@@ -15,9 +16,26 @@ export interface CreatedReservation {
 
 export type CreateReservationConflict = "offering_not_open" | "capacity_exceeded";
 
+/**
+ * What a client-idempotency-key hit found: the stored reservation's amount,
+ * lifecycle stage and latest money state, read in the same transaction (under
+ * the same offering lock) as the lookup. The caller needs it to decide whether
+ * a retry may be served at all -- a key hit on a reservation that has since
+ * been funded, lapsed, or was created for a different amount must not be
+ * treated like a fresh, still-payable one.
+ */
+export interface ReusedReservationState {
+  amountEur: string;
+  reservationStage: string;
+  latestCapitalState: string | null;
+}
+
 export interface CreateReservationResult {
   reservation: CreatedReservation | null;
   conflict: CreateReservationConflict | null;
+  reused?: boolean;
+  /** Present exactly when `reused` is true. */
+  replay?: ReusedReservationState;
 }
 
 export interface AdvanceReservationCapitalStateInput {

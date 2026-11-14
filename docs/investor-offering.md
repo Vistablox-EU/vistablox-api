@@ -20,9 +20,19 @@ Current-pack documents are accessible to any authenticated customer, matching `A
 
 The download response uses `Content-Disposition: attachment`, `X-Content-Type-Options: nosniff`, and `Cache-Control: private, no-store`. Object-store failures are mapped to provider-neutral `503` errors before streaming starts. See [`document-storage.md`](document-storage.md) for the runtime and deployment implementation.
 
+## Opening an offering while token settlement is dormant
+
+`case_timers.pre_offering_open_handoff` (`OpenOfferingForApprovedCaseService`, run by the worker) creates the `Piv` and `Offering` for an approved case. When the worker also runs the on-chain settlement bundle (`AD-256`), the same transaction enqueues `settlement.open_ipo_escrow_campaign`. `AD-234` launches production with token settlement dormant, so the bundle is unconfigured there: the worker neither creates nor consumes that queue, and the open does not enqueue the job (`openEscrowCampaign: false`, derived in `src/worker.ts` from the same condition that registers the queue and its consumer). Enqueueing anyway would fail the whole open with pg-boss's `Queue ... does not exist` and roll back the `Piv`/`Offering`, so no approved case could become a listing.
+
+The job is not enqueued "just in case" for two reasons. A job left waiting carries the target amount and deadline frozen at enqueue time, which can be stale by the time a consumer exists (the escrow contract rejects a deadline that has passed), and pg-boss deletes a job that is still unconsumed when its retention runs out (14 days from enqueue by default), so campaigns would be lost without any signal. Offerings opened while dormant therefore have no campaign job. For an offering whose `ipo_end_at` passes while settlement is dormant, a campaign can never be opened. For one whose window is still running at activation, activation has to open the campaign as an explicit step; `OpenIpoEscrowCampaignService` skips a campaign that is already open on-chain, so repeating that step is safe. That step is not built yet.
+
+The design record does not say what a `Pre-offering open` offering does while settlement is dormant (`AD-278` has `openCampaign` happen when a case enters that state; `AD-234` and `AD-256` keep the escrow behind activation). This change picks "open the offering, defer the campaign" so approved cases become listings at all; it is a choice for the founder to confirm, not something the record decided.
+
+A `case_timers.pre_offering_open_handoff` job that already ran out of retries before this change stays failed (pg-boss deletes failed jobs seven days after they complete); re-queue any such job, and check for `pre_offering_open` cases that have no `Piv`, after deploying.
+
 ## Reservation creation
 
-`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
+`POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Requires an `Idempotency-Key` header (AD-057/AD-147 — reservation funding initiation is a high-risk write, deduplicated through the shared `audit.idempotency_keys` table under the `offering.reservation.create` endpoint). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
 
 ```json
 {
@@ -40,6 +50,17 @@ The download response uses `Content-Disposition: attachment`, `X-Content-Type-Op
 The reservation row and its first `money.money_events` row (`capital_state: "initiated"`) are written inside one transaction that also re-verifies, under a row lock on the `offerings` row, that the offering is still `pre_offering` and that the requested amount still fits the offering's remaining capacity (`AD-146`: the same check `GetInvestorOfferingService`'s `reservation.blockers` reports is advisory only — this is the atomic, authoritative one, sharing its rule set via `domain/reservation-eligibility.policy.ts` so the two can never disagree). A losing concurrent request gets `409 offering.reservation_not_available` (offering closed between read and write) or `422 offering.reservation_amount_exceeds_capacity` (amount no longer fits), never a silent oversell.
 
 After the reservation is durably created, the CDP onramp session token call happens synchronously in the request path, the same way `StartKycSessionService` calls Didit — not through a job (`AD-145` governs cross-domain *state transitions*, not a single external call whose whole purpose is "start now, hand the client a URL"). If that call fails, a `purchase_failed` money event is recorded and the error propagates; the reservation row is deliberately left in place rather than unwound, because the already-decided capacity policy (reserve immediately, auto-expire if unfunded) already covers this case identically to an investor who simply never completes the purchase.
+
+### Retrying a reservation request (`Idempotency-Key`)
+
+The request requires an `Idempotency-Key` header of at most 128 characters (`400 idempotency.key_required` otherwise). The key is stored on the reservation (`client_idempotency_key`, unique per account, offering and key); a lookup under the same `offerings` row lock that guards capacity returns the existing reservation instead of creating a second hold, so a client that lost the response can retry safely. Keys are scoped to the account and the offering: another account, or the same key on another offering, is an unrelated request.
+
+A retry is served only while the stored reservation is still what the client asked for and can still be paid. It gets a fresh onramp session for the original `reservation_id` and the original `expires_at`; a retry never creates a new hold, never extends an existing one, and never revives one that has ended:
+
+- `409 offering.idempotency_key_reused`: the key was already used for a different `amount_eur` (`AD-147`).
+- `409 offering.reservation_replay_unavailable`: the stored reservation is no longer payable through a new session: it is past its 15-minute hold, its `reservation_stage` is no longer `initiated` (`lapsed`, `cancelled`, `awaiting_reconfirmation`, ...), or its latest `capital_state` is already funded (`eurc_reserved`, `reconfirmation_pending`, `eurc_finalized`). The client should read its reservations for the current state instead of retrying again.
+
+If the onramp session call fails on a retry, the error is returned and no `purchase_failed` money event is recorded: only a first attempt marks a reservation failed, so the original reservation keeps its state and the client can retry again until the hold ends.
 
 ## Unfunded reservation expiry
 
@@ -73,7 +94,7 @@ See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/B
 
 ### 1. Publishing final terms (founder-triggered)
 
-`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
+`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Requires an `Idempotency-Key` header (AD-057/AD-147 — a finalization-batch action; endpoint `offering.finalize`). Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
 
 ```json
 {
@@ -98,7 +119,7 @@ No position is created here. The transaction also sets `final_offering_published
 
 ### 2. Investor reconfirmation (investor-triggered, during the open window)
 
-`POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm` is each investor's own explicit action, customer-only (same auth as the rest of `offering.router.ts`). Response (`200`):
+`POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm` is each investor's own explicit action, customer-only (same auth as the rest of `offering.router.ts`). Requires an `Idempotency-Key` header (AD-057/AD-147 — investor reconfirmation submission; endpoint `offering.reservation.reconfirm`; the request itself posts no body). Response (`200`):
 
 ```json
 {
@@ -120,7 +141,7 @@ Reconfirming does **not** yet create a position — it only marks the reservatio
 
 Unlike the KYC renewal reminder (`isRenewalReminderDue`, which counts back a fixed lead time from a single known due date), a reconfirmation reminder repeats indefinitely until the window closes, so there's no one calendar date to match against. `isReconfirmationReminderDue` (`domain/reconfirmation-reminder.policy.ts`) instead derives due-ness from time elapsed since the last reminder actually sent — or since `final_offering_published_at`, if none has been sent yet — compared against `effectiveRightsEndAt`. That makes it robust to a missed or delayed job tick: an overdue reminder stays due until it's actually sent, rather than being silently skipped once its one matching instant passes. "Last reminder actually sent" is derived from the `audit.audit_log` row each send writes (`offering.reconfirmation_reminder_sent`, `resourceType: "reservation"`) rather than a new column, the same general-purpose-event-history use of the audit log `AD-152`'s `trace_id` already establishes elsewhere. A reservation with no contact email on file is skipped without failing the run (matching every other reminder job's `contactEmail: null` handling) and is not counted as acted-on.
 
-The single notification `PAYMENT_FLOWS.md`'s Withdrawal/Cancellation Window table names separately — the window's `Start event` meaning "final terms are locked, the final package is visible in-app, **and investor notification is sent**," which `AD-214`'s own decision text frames as running "in addition to — not instead of" this repeating reminder job — is also now built, as its own AD-145 cross-domain handoff rather than a synchronous send inside the founder's `/finalize` request. Inside the same transaction that moves reservations to `awaiting_reconfirmation`, `publishFinalOfferingTerms` durably enqueues `case_timers.offering_reconfirmation_window_opened` (`enqueueTransactionalJob`, the same pattern `case_timers.pre_offering_open_handoff` already established for intake-to-offering) with the offering ID and the list of reservation IDs that just moved — never a synchronous email in the founder's own request, and never enqueued at all when nothing moved (an all-cancelled publish, though `target_not_reached` would already have blocked that case in practice). The consumer (`NotifyReconfirmationWindowOpenedService`) re-resolves each reservation's contact email and window end from the database rather than trusting the payload — the same "never trust a payload snapshot" discipline `OpenOfferingForApprovedCaseService` already applies — and is itself replay-safe: whether a notification was already sent is derived from the same `audit.audit_log` general-event-history pattern the reminder job uses (`offering.reconfirmation_window_opened_notification_sent`), so a pg-boss retry or duplicate delivery can never double-email an investor.
+The single notification `PAYMENT_FLOWS.md`'s Withdrawal/Cancellation Window table names separately — the window's `Start event` meaning "final terms are locked, the final package is visible in-app, **and investor notification is sent**," which `AD-214`'s own decision text frames as running "in addition to — not instead of" this repeating reminder job — is also now built, as its own AD-145 cross-domain handoff rather than a synchronous send inside the founder's `/finalize` request. Inside the same transaction that moves reservations to `awaiting_reconfirmation`, `publishFinalOfferingTerms` durably enqueues `case_timers.offering_reconfirmation_window_opened` (`enqueueTransactionalJob`, the same pattern `case_timers.pre_offering_open_handoff` already established for intake-to-offering) with the offering ID and the list of reservation IDs that just moved — never a synchronous email in the founder's own request, and never enqueued at all when nothing moved (an all-cancelled publish, though `target_not_reached` would already have blocked that case in practice). The consumer (`NotifyReconfirmationWindowOpenedService`) re-resolves each reservation's contact email and window end from the database rather than trusting the payload — the same "never trust a payload snapshot" discipline `OpenOfferingForApprovedCaseService` already applies — and is itself replay-safe: whether a notification was already sent is derived from the same `audit.audit_log` general-event-history pattern the reminder job uses (`offering.reconfirmation_window_opened_notification_sent`), so a pg-boss retry or duplicate delivery after the audit row exists sends nothing; the email and the audit row are two separate steps, though, so a retry after a failed audit write sends the email again.
 
 ### 3. Window-close commit (scheduled batch, not a person)
 
@@ -187,7 +208,7 @@ Request body:
 }
 ```
 
-`document_type` is a closed enum of the 11 document kinds `AD-037`/`VISTABLOX_BACKEND_DISCUSSION.md`'s "Mandatory Core Pack" table names (`ecsp_kiis`, `priips_kid`, `final_offer_summary`, `final_terms_sheet`, `issuer_offeror_structure_sheet`, `investor_rights_payout_waterfall_summary`, `risk_factors_summary`, `property_appraisal_summary`, `fees_costs_tax_liquidity_summary`, `withdrawal_cancellation_supplement_rights_notice`, `full_prospectus`) — rejected with `422` if duplicated within one request. `document_ref` is a trusted, already-uploaded storage reference (`z.string().trim().min(1).max(500)`), the exact same shape intake's own document intake already uses (`submitInitialCaseBodySchema`'s `document_type`/`document_ref` pair) — this codebase has no file-upload endpoint for any document kind, disclosure documents included, so getting the underlying file into MinIO is a process this API does not perform. `is_core_reading` is never client-supplied: it's computed server-side from `document_type` (`isCoreReadingDocumentType`, `domain/disclosure-pack.policy.ts`), true for every mandatory type except `full_prospectus` — CORE_TABLES.md's own comment on that column already frames this as deterministic ("false only for the full prospectus").
+`document_type` is a closed enum of the 11 document kinds `AD-037`/`VISTABLOX_BACKEND_DISCUSSION.md`'s "Mandatory Core Pack" table names (`ecsp_kiis`, `priips_kid`, `final_offer_summary`, `final_terms_sheet`, `issuer_offeror_structure_sheet`, `investor_rights_payout_waterfall_summary`, `risk_factors_summary`, `property_appraisal_summary`, `fees_costs_tax_liquidity_summary`, `withdrawal_cancellation_supplement_rights_notice`, `full_prospectus`) — rejected with `422` if duplicated within one request. `document_ref` is the `document_ref` an earlier upload to *this* offering returned (see "Uploading disclosure documents" below): the object key in the disclosures bucket. It is no longer a trusted string. Inside the publish transaction, under the same `offerings` row lock, every ref is resolved against `platform.stored_documents` — it must be an accepted (`upload_status = 'accepted'`), non-deleted row with this `offering_id` in the disclosures bucket — and a request quoting anything else is refused as a whole with `422 offering.disclosure_document_unknown`, whose `field_errors` name each offending entry (`documents.<index>.document_ref`); nothing is written. A process started without document storage (`MINIO_*`/`MINIO_DISCLOSURES_BUCKET` unset) accepts no ref at all, since it cannot have taken an upload either. `is_core_reading` is never client-supplied: it's computed server-side from `document_type` (`isCoreReadingDocumentType`, `domain/disclosure-pack.policy.ts`), true for every mandatory type except `full_prospectus` — CORE_TABLES.md's own comment on that column already frames this as deterministic ("false only for the full prospectus").
 
 This is deliberately **one reusable staff primitive**, not logic wired into any single flow. The documented model implies at least three distinct moments a new version gets published — an initial pre-offering pack (whatever `hasDisclosurePack` gates ordinary reservations on), the version-locked pack tied to `final_offering_published_at` (`AD-037`), and a republished pack after a materiality reset (`AD-038`, still a manual follow-up call — see the previous section) — but all three are the same mechanical action, so this endpoint doesn't hard-code which moment it's being called for. It only requires the offering still be `pre_offering` (`404 offering.not_found` for an unknown offering, `409 offering.disclosure_pack_not_available` otherwise — `AD-046` puts post-finalization content changes through a separate amendment/consent path this codebase does not build).
 
@@ -209,5 +230,57 @@ Response (`201`):
   }
 }
 ```
+
+### Uploading disclosure documents
+
+The files a pack is built from are uploaded through the same staff-gated router (`admin_operations` role plus staff WebAuthn), one file per request, the way intake's case-document upload already works — a raw body, described by headers, not a multipart form. Routes are mounted only when document storage is configured (`MINIO_ENDPOINT`/`MINIO_ACCESS_KEY`/`MINIO_SECRET_KEY`/`MINIO_DISCLOSURES_BUCKET`; the same gate the investor download's `MinioDisclosureDocumentStore` has), exactly as intake's upload routes are.
+
+`POST /internal/v1/offerings/:offering_id/documents` — body: the file bytes. Headers:
+
+- `Content-Type`: one of `application/pdf`, `image/jpeg`, `image/png`, `image/webp`, `application/vnd.openxmlformats-officedocument.wordprocessingml.document`, `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` (intake's allowlist, unchanged); anything else is `422 offering.document_mime_unsupported`.
+- `X-Document-Type`: one of the 11 `document_type` values above; anything else is `422 offering.document_type_unsupported`.
+- `X-Original-Filename`: optional, the name the file had on the staff member's machine, for display only (the storage key never contains it). Headers cannot carry every character a filename can, so a value containing `%` is percent-decoded (`decodeURIComponent`), falling back to the raw header when it is not valid encoding; a value without `%` is taken verbatim. Capped at 255 characters; defaults to `document`.
+
+The body is capped at 100 MB (`413 offering.document_too_large`), must not be empty (`422 offering.document_empty`), is SHA-256 hashed while streaming, and is handed to ClamAV before any byte is kept: `503 offering.document_scanner_unavailable` when the scanner cannot be reached (fail closed — nothing is stored), `422 offering.document_malware_detected` on a hit. `404 offering.not_found` for an unknown offering. A clean file is written to the disclosures bucket under `offerings/{offering_id}/{document_id}` (`objectKey`, `src/infrastructure/storage/storage-buckets.ts` — a server-generated key, the same one the investor download later reads through `MinioDisclosureDocumentStore.get`), then a `platform.stored_documents` row is created (`offering_id`, `document_type`, bucket, key, content type, size, checksum, `upload_status: "accepted"`, `classification: "disclosure"`, `original_filename`) together with an `offering.disclosure_document_uploaded` audit-log entry in one transaction; if that transaction fails the object is deleted again rather than left orphaned. Response (`201`):
+
+```json
+{
+  "data": {
+    "document_id": "doc_...",
+    "document_type": "final_terms_sheet",
+    "document_ref": "offerings/offering_.../doc_...",
+    "content_type": "application/pdf",
+    "size_bytes": 184233,
+    "sha256_checksum": "…64 hex…",
+    "original_filename": "Final terms – v1.pdf",
+    "uploaded_at": "2026-11-13T10:00:00.000Z"
+  }
+}
+```
+
+`document_ref` is the value to quote in `POST .../disclosure-packs`. Uploading does not publish anything by itself: an upload that is never quoted in a pack is simply never visible to an investor, and re-uploading a corrected file is a new upload with a new `document_ref` — there is no replace-in-place, so a pack version that quoted the old key keeps pointing at the bytes investors actually saw.
+
+`GET /internal/v1/offerings/:offering_id/documents` lists the offering's accepted, non-deleted uploads, newest first, optionally narrowed with `?document_type=` (`422` for a value outside the enum; `404 offering.not_found` for an unknown offering). Response (`200`):
+
+```json
+{
+  "data": [
+    {
+      "document_id": "doc_...",
+      "document_type": "final_terms_sheet",
+      "document_ref": "offerings/offering_.../doc_...",
+      "content_type": "application/pdf",
+      "size_bytes": 184233,
+      "original_filename": "Final terms – v1.pdf",
+      "uploaded_at": "2026-11-13T10:00:00.000Z",
+      "published_in_pack_id": "pack_..."
+    }
+  ]
+}
+```
+
+`published_in_pack_id` is the most recent `disclosure_packs` row (highest version, current or superseded) whose documents reference this `document_ref`, or `null` for an upload no pack has quoted yet — what the admin uses to tell "uploaded" from "published".
+
+`GET /internal/v1/offerings/:offering_id/documents?document_ref=<key>` streams that one upload back to staff (`Content-Type` and `Content-Length` from the metadata row, `Cache-Control: private, no-store`, `Content-Disposition: inline` with a sanitised filename, `X-Content-Type-Options: nosniff` — the same shape as intake's `GET /:case_id/documents?document_ref=`). A ref that is not one of this offering's accepted uploads is `404 offering.document_not_found`; a row whose object has gone missing from storage is `503 offering.document_storage_inconsistent`.
 
 `is_complete` reports whether every one of the 11 mandatory document types is present in *this* pack — informational only, not a hard gate on *this* endpoint itself. A pack published before final terms is legitimately allowed to be partial (`hasDisclosurePack` only ever required at least one document, never all eleven), so requiring full completeness on every publish would make the initial pre-offering moment unbuildable. `AD-037`'s "must be blocked if the pack is incomplete" is enforced downstream, in two places, both re-deriving completeness from the offering's current pack under their own row lock rather than trusting a stale `is_complete` value from whenever the pack was published: `publishFinalOfferingTerms` (stage 1 — see above), the primary gate, since it requires a complete pack before it will open the reconfirmation window at all; and `reconfirmReservation` (stage 2), defensively, for the narrower case of a pack that regresses to incomplete via a later republish after publish already succeeded.

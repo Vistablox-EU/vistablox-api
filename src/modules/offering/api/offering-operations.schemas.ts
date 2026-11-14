@@ -100,3 +100,48 @@ export const publishDisclosurePackResponseSchema = z.object({
 
 export type PublishDisclosurePackBody = z.infer<typeof publishDisclosurePackBodySchema>;
 export type PublishDisclosurePackResponse = z.infer<typeof publishDisclosurePackResponseSchema>;
+
+const sha256HexSchema = z.string().regex(/^[a-f0-9]{64}$/);
+
+export const uploadOfferingDocumentResponseSchema = z.object({
+  data: z.object({
+    document_id: z.string().min(1),
+    document_type: z.enum(disclosureDocumentTypes),
+    document_ref: z.string().min(1),
+    content_type: z.string().min(1),
+    size_bytes: z.number().int().positive(),
+    sha256_checksum: sha256HexSchema,
+    original_filename: z.string().min(1).max(255),
+    uploaded_at: z.iso.datetime(),
+  }),
+});
+
+export type UploadOfferingDocumentResponse = z.infer<typeof uploadOfferingDocumentResponseSchema>;
+
+/**
+ * One route, two reads: without `document_ref` it lists the offering's
+ * accepted uploads (optionally one `document_type`); with it, it streams
+ * that one document. Mirrors intake's GET /:case_id/documents.
+ */
+export const offeringDocumentsQuerySchema = z.object({
+  document_type: z.enum(disclosureDocumentTypes).optional(),
+  document_ref: z.string().trim().min(1).max(1024).optional(),
+});
+
+export const listOfferingDocumentsResponseSchema = z.object({
+  data: z.array(
+    z.object({
+      document_id: z.string().min(1),
+      document_type: z.enum(disclosureDocumentTypes),
+      document_ref: z.string().min(1),
+      content_type: z.string().min(1),
+      size_bytes: z.number().int().positive(),
+      original_filename: z.string().min(1).max(255),
+      uploaded_at: z.iso.datetime(),
+      published_in_pack_id: z.string().min(1).nullable(),
+    }),
+  ),
+});
+
+export type OfferingDocumentsQuery = z.infer<typeof offeringDocumentsQuerySchema>;
+export type ListOfferingDocumentsResponse = z.infer<typeof listOfferingDocumentsResponseSchema>;

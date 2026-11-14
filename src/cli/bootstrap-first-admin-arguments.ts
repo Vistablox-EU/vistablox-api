@@ -16,7 +16,7 @@ accepted revokes the earlier link and issues a new one.
   --check          read-only: print counts only, change nothing
   --help           show this help`;
 
-// Same rules as the HTTP invitation body (staff-invitation.schemas.ts).
+// Same rules as the HTTP invitation body (staff-invitation-issue.schemas.ts).
 const issueArgumentsSchema = z.object({
   email: z.email().transform((value) => value.trim().toLowerCase()),
   displayName: z.string().trim().min(1).max(200),

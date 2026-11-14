@@ -16,8 +16,8 @@ import {
 import { TransitionCaseToPostIpoStructuringService } from "./modules/intake/application/post-ipo-structuring-handoff.service.js";
 import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
 import { PrismaKycRepository } from "./modules/identity/repository/prisma-kyc.repository.js";
-import { PrismaDpopReplayRepository } from "./modules/auth/repository/prisma-dpop-replay.repository.js";
-import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/prisma-device-challenge.repository.js";
+import { PrismaDpopReplayRepository } from "./modules/auth/repository/shared/prisma-dpop-replay.repository.js";
+import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/customer/prisma-device-challenge.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { ProcessDiditWebhookService } from "./modules/identity/application/kyc.service.js";
 import { RunKycRenewalTimerService } from "./modules/identity/application/kyc-renewal.service.js";
@@ -41,11 +41,14 @@ import { FinalizeIpoEscrowCampaignsService } from "./modules/settlement/applicat
 import { ConfirmWalletRegistrationsService } from "./modules/settlement/application/confirm-wallet-registrations.service.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
-import { JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
+import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
+import { SCHEDULED_JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
+import { registerDeadLetterConsumer } from "./shared/jobs/dead-letter-consumer.js";
+import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 import { WorkerHeartbeat } from "./shared/health/worker-heartbeat.js";
 import { WorkerMetrics } from "./shared/health/worker-metrics.js";
-import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/prisma-account-recovery.repository.js";
+import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/staff/prisma-account-recovery.repository.js";
 
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
@@ -154,7 +157,6 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 );
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(intakeRepository);
 const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(intakeRepository);
-const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
 const sendReconfirmationReminders = new SendReconfirmationRemindersService(offeringRepository, emailSender);
@@ -226,21 +228,25 @@ const chainClients =
 // all-configured-together-or-none per environment.ts's own refine --
 // separate from chainClients's own base-connectivity gate above, since
 // confirmWalletRegistrations below needs none of these four.
-const settlementBundleConfigured =
-  chainClients !== undefined &&
-  environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS !== undefined &&
-  environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS !== undefined &&
-  environment.EURC_TOKEN_ADDRESS !== undefined &&
-  environment.PIV_TREASURY_ADDRESS !== undefined;
+const settlementBundleConfigured = isSettlementBundleConfigured(environment);
 const openIpoEscrowCampaign =
   chainClients === undefined || !settlementBundleConfigured
     ? undefined
     : new OpenIpoEscrowCampaignService(chainClients);
+// Opening an offering hands off to the escrow campaign job only where this
+// process also creates and consumes that job's queue (AD-256). While token
+// settlement is dormant (AD-234) that bundle is unconfigured, no such queue
+// exists, and enqueueing into it would fail the whole offering open -- so the
+// flag is derived from the same condition that decides whether the queue and
+// its consumer are registered below, and cannot drift from it.
+const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository, {
+  openEscrowCampaign: openIpoEscrowCampaign !== undefined,
+});
 const settlementRepository = chainClients === undefined ? undefined : new PrismaSettlementRepository(database);
 const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
-    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients);
+    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger);
 const confirmWalletRegistrations =
   chainClients === undefined ||
   settlementRepository === undefined ||
@@ -253,7 +259,7 @@ const confirmWalletRegistrations =
         environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000,
       );
 
-const RETRY_OPTIONS = JOB_RETRY_OPTIONS;
+const RETRY_OPTIONS = SCHEDULED_JOB_RETRY_OPTIONS;
 
 async function runJob(name: string, run: (traceId: string) => Promise<JobRunSummary>): Promise<void> {
   const traceId = `req_${ulid()}`;
@@ -269,48 +275,53 @@ async function runJob(name: string, run: (traceId: string) => Promise<JobRunSumm
 await boss.start();
 
 // pg-boss v12 requires a queue to exist (queue.name has a foreign key from
-// job.name) before scheduling or working it; createQueue is ON CONFLICT DO
-// NOTHING, so this is safe to run on every worker start.
-await boss.createQueue("case_timers.applicant_reminders");
-await boss.createQueue("case_timers.response_window_expiry");
-await boss.createQueue("case_timers.pre_offering_open_handoff");
-await boss.createQueue("case_timers.reservation_unfunded_expiry");
-await boss.createQueue("case_timers.offering_reconfirmation_window_close");
-await boss.createQueue("case_timers.offering_reconfirmation_reminders");
-await boss.createQueue("case_timers.offering_reconfirmation_window_opened");
-await boss.createQueue("case_timers.post_ipo_structuring_handoff");
+// job.name) before scheduling or working it. ensureJobQueue creates the queue
+// if it is missing and applies its dead-letter queue and retry settings if it
+// is not (createQueue alone is ON CONFLICT DO NOTHING and would leave a queue
+// from an earlier release as it was), so it is safe to run on every worker
+// start. "event" queues are the ones application code enqueues into one job at
+// a time; "scheduled" queues are fired by the boss.schedule calls below.
+await ensureDeadLetterQueue(boss);
+await ensureJobQueue(boss, "case_timers.applicant_reminders", "scheduled");
+await ensureJobQueue(boss, "case_timers.response_window_expiry", "scheduled");
+await ensureJobQueue(boss, "case_timers.pre_offering_open_handoff", "event");
+await ensureJobQueue(boss, "case_timers.reservation_unfunded_expiry", "scheduled");
+await ensureJobQueue(boss, "case_timers.offering_reconfirmation_window_close", "scheduled");
+await ensureJobQueue(boss, "case_timers.offering_reconfirmation_reminders", "scheduled");
+await ensureJobQueue(boss, "case_timers.offering_reconfirmation_window_opened", "event");
+await ensureJobQueue(boss, "case_timers.post_ipo_structuring_handoff", "event");
 // Only registered when Coinbase CDP credentials are configured — unlike
 // every other job here, this one's sole dependency (the onramp REST client)
 // is genuinely optional, matching how server.ts only wires reservation
 // creation itself when the same credentials are present.
 if (pollOnrampTransactions !== undefined) {
-  await boss.createQueue("case_timers.reservation_onramp_poll");
+  await ensureJobQueue(boss, "case_timers.reservation_onramp_poll", "scheduled");
 }
 if (runOperatingDistributionSweep !== undefined) {
-  await boss.createQueue("rental.operating_distribution_sweep");
+  await ensureJobQueue(boss, "rental.operating_distribution_sweep", "scheduled");
 }
 if (openIpoEscrowCampaign !== undefined) {
-  await boss.createQueue("settlement.open_ipo_escrow_campaign");
+  await ensureJobQueue(boss, "settlement.open_ipo_escrow_campaign", "event");
 }
 if (finalizeIpoEscrowCampaigns !== undefined) {
-  await boss.createQueue("settlement.finalize_ipo_escrow_campaigns");
+  await ensureJobQueue(boss, "settlement.finalize_ipo_escrow_campaigns", "scheduled");
 }
 if (confirmWalletRegistrations !== undefined) {
-  await boss.createQueue("settlement.confirm_wallet_registrations");
+  await ensureJobQueue(boss, "settlement.confirm_wallet_registrations", "scheduled");
 }
 // Reversal (undoing the KYC microservice split): identity's own scheduled
 // jobs, back in this worker alongside everything else -- these used to
 // live only in src/kyc-server.ts.
-await boss.createQueue("maintenance.dpop_replay_prune");
-await boss.createQueue("maintenance.device_challenge_prune");
-await boss.createQueue("maintenance.kyc_renewal");
-await boss.createQueue("maintenance.kyc_stuck_session_expiry");
-await boss.createQueue("maintenance.kyc_stuck_session_reconciliation");
-await boss.createQueue("maintenance.account_recovery_alert");
+await ensureJobQueue(boss, "maintenance.dpop_replay_prune", "scheduled");
+await ensureJobQueue(boss, "maintenance.device_challenge_prune", "scheduled");
+await ensureJobQueue(boss, "maintenance.kyc_renewal", "scheduled");
+await ensureJobQueue(boss, "maintenance.kyc_stuck_session_expiry", "scheduled");
+await ensureJobQueue(boss, "maintenance.kyc_stuck_session_reconciliation", "scheduled");
+await ensureJobQueue(boss, "maintenance.account_recovery_alert", "scheduled");
 // Reversal (undoing the KYC microservice split): the Didit webhook's own
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
 // The webhook itself is received and durably enqueued by server.ts/app.ts.
-await boss.createQueue("provider_events.didit_webhook");
+await ensureJobQueue(boss, "provider_events.didit_webhook", "event");
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
   tz: "UTC",
@@ -453,11 +464,22 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
   await boss.work("settlement.finalize_ipo_escrow_campaigns", async () => {
     const traceId = `req_${ulid()}`;
     try {
-      const summary = await finalizeIpoEscrowCampaigns.execute();
-      logger.info(
-        { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
-        "case timer job completed",
-      );
+      const summary = await finalizeIpoEscrowCampaigns.execute(traceId);
+      // The service swallows per-campaign failures into summary.errors (one
+      // bad campaign must not stop the others) and has already logged each at
+      // error level with its piv_id/token_id; a run that had any is not
+      // "completed" cleanly, so it must not be logged as if it were.
+      if (summary.errors.length > 0) {
+        logger.error(
+          { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
+          "case timer job completed with campaign errors",
+        );
+      } else {
+        logger.info(
+          { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
+          "case timer job completed",
+        );
+      }
     } catch (error) {
       logger.error(
         { err: error, trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns" },
@@ -684,6 +706,13 @@ await boss.work("provider_events.didit_webhook", async (jobs) => {
     }
   }
 });
+
+// A job sent from this release on that fails after its last retry lands in the
+// dead-letter queue (ensureJobQueue, above); a job queued by an earlier release
+// keeps the settings it was sent with and does not. This logs each entry at
+// error level, at least once, which is what an alert on a terminally failed job
+// keys on.
+await registerDeadLetterConsumer(boss, logger);
 
 logger.info("VistaBlox worker started");
 heartbeat.markReady();

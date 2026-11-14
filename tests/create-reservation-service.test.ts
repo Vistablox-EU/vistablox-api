@@ -6,10 +6,12 @@ import type {
   InvestorOfferingDetailRecord,
   OfferingRepository,
 } from "../src/modules/offering/repository/offering.repository.js";
+import { FUNDED_CAPITAL_STATES } from "../src/modules/offering/domain/reservation-eligibility.policy.js";
 import type {
   CreateReservationInput,
   CreateReservationResult,
   ReservationRepository,
+  ReusedReservationState,
 } from "../src/modules/offering/repository/reservation.repository.js";
 
 const now = new Date("2026-09-02T10:00:00.000Z");
@@ -105,6 +107,48 @@ function coinbase(overrides: Partial<CoinbaseCdpClient> = {}): CoinbaseCdpClient
   };
 }
 
+// What PrismaOfferingRepository.createReservation reports on a client
+// idempotency key hit: the already-persisted reservation plus its stored
+// amount, stage and latest money state.
+function replayedReservation(
+  state: Partial<ReusedReservationState> = {},
+  persisted: { reservationId?: string; createdAt?: Date } = {},
+): ReservationRepository & { createReservation: ReturnType<typeof vi.fn> } {
+  return reservationRepository({
+    createReservation: vi.fn().mockResolvedValue({
+      reservation: {
+        reservationId: persisted.reservationId ?? "reservation_existing",
+        createdAt: persisted.createdAt ?? now,
+      },
+      conflict: null,
+      reused: true,
+      replay: {
+        amountEur: "1000.00",
+        reservationStage: "initiated",
+        latestCapitalState: "eurc_purchase_pending",
+        ...state,
+      },
+    }),
+  });
+}
+
+function replayService(reservations: ReservationRepository, cdp: CoinbaseCdpClient = coinbase()) {
+  return new CreateReservationService(offeringRepository(detail()), reservations, cdp, {
+    clock: () => now,
+    generateReservationId: () => "reservation_never_persisted",
+    fundingRailAvailable: true,
+    buildRedirectUrl: (reservationId) => `https://app.example.test/reservations/${reservationId}`,
+  });
+}
+
+const replayRequest = {
+  offeringId: "offering_01",
+  accountId: "account_01",
+  amountEur: "1000.00",
+  clientIdempotencyKey: "operation_01",
+  traceId: "req_01",
+};
+
 describe("CreateReservationService", () => {
   it("creates a reservation and an onramp session when the funding rail is enabled", async () => {
     const reservations = reservationRepository();
@@ -119,6 +163,7 @@ describe("CreateReservationService", () => {
     const result = await service.execute({
       offeringId: "offering_01",
       accountId: "account_01",
+      clientIdempotencyKey: null,
       amountEur: "1000.00",
       traceId: "req_01",
     });
@@ -140,6 +185,7 @@ describe("CreateReservationService", () => {
       reservationId: "reservation_01",
       offeringId: "offering_01",
       accountId: "account_01",
+      clientIdempotencyKey: null,
       amountEur: "1000.00",
       disclosurePackVersionAtReservation: "2",
       traceId: "req_01",
@@ -268,5 +314,138 @@ describe("CreateReservationService", () => {
     expect(reservations.recordMoneyEvent).toHaveBeenCalledWith(
       expect.objectContaining({ reservationId: "reservation_01", capitalState: "purchase_failed" }),
     );
+  });
+
+  describe("idempotent replay", () => {
+    it("uses the persisted reservation id, not the freshly generated one, and keeps the original expiry", async () => {
+      // The generated id is never saved on a replay: the repository returns
+      // the already-persisted reservation instead. Everything downstream (the
+      // money event's foreign key, the onramp partner ref, the redirect URL and
+      // the id handed back to the client) must follow the persisted id, and the
+      // expiry must follow the persisted createdAt (5 minutes before "now"),
+      // not the clock.
+      const persistedCreatedAt = new Date(now.getTime() - 5 * 60_000);
+      const reservations = replayedReservation({}, { createdAt: persistedCreatedAt });
+      const cdp = coinbase();
+
+      const result = await replayService(reservations, cdp).execute(replayRequest);
+
+      expect(result.data.reservation_id).toBe("reservation_existing");
+      expect(result.data.amount_eur).toBe("1000.00");
+      expect(result.data.expires_at).toBe(new Date(persistedCreatedAt.getTime() + 15 * 60_000).toISOString());
+      expect(reservations.recordMoneyEvent).toHaveBeenCalledTimes(1);
+      expect(reservations.recordMoneyEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ reservationId: "reservation_existing", capitalState: "eurc_purchase_pending" }),
+      );
+      expect(cdp.buildOnrampUrl).toHaveBeenCalledWith(
+        expect.objectContaining({
+          partnerUserRef: "reservation_existing",
+          redirectUrl: "https://app.example.test/reservations/reservation_existing",
+        }),
+      );
+    });
+
+    it.each([null, "initiated", "eurc_purchase_pending", "purchase_failed"])(
+      "still serves a retry while the reservation is unfunded (latest state: %s)",
+      async (latestCapitalState) => {
+        const reservations = replayedReservation({ latestCapitalState });
+
+        const result = await replayService(reservations).execute(replayRequest);
+
+        expect(result.data.reservation_id).toBe("reservation_existing");
+        expect(reservations.recordMoneyEvent).toHaveBeenCalledWith(
+          expect.objectContaining({ reservationId: "reservation_existing", capitalState: "eurc_purchase_pending" }),
+        );
+      },
+    );
+
+    it("does not mark the reservation failed if a new onramp token cannot be issued for a retry", async () => {
+      const reservations = replayedReservation();
+      const failingCoinbase = coinbase({
+        createOnrampSessionToken: vi.fn().mockRejectedValue(new Error("coinbase unavailable")),
+      });
+
+      await expect(replayService(reservations, failingCoinbase).execute(replayRequest)).rejects.toThrow(
+        "coinbase unavailable",
+      );
+
+      expect(reservations.createReservation).toHaveBeenCalledWith(
+        expect.objectContaining({ clientIdempotencyKey: "operation_01" }),
+      );
+      expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
+    });
+
+    // Each of these used to be masked by the replay crashing on the money
+    // event's foreign key. Now that a replay can succeed they must be refused
+    // before any payment session is created or any money event is written.
+    it.each([
+      ...FUNDED_CAPITAL_STATES.map((latestCapitalState) => ({
+        label: `funded (${latestCapitalState})`,
+        state: { latestCapitalState },
+      })),
+      { label: "lapsed", state: { reservationStage: "lapsed", latestCapitalState: "purchase_failed" } },
+      { label: "cancelled", state: { reservationStage: "cancelled" } },
+      { label: "awaiting reconfirmation", state: { reservationStage: "awaiting_reconfirmation" } },
+    ])("refuses a retry once the reservation is $label", async ({ state }) => {
+      const reservations = replayedReservation(state);
+      const cdp = coinbase();
+
+      await expect(replayService(reservations, cdp).execute(replayRequest)).rejects.toMatchObject({
+        code: "offering.reservation_replay_unavailable",
+        status: 409,
+      });
+
+      expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+      expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
+    });
+
+    it("refuses a retry after the 15-minute hold has expired, even before the sweeper has lapsed it", async () => {
+      const reservations = replayedReservation({}, { createdAt: new Date(now.getTime() - 15 * 60_000 - 1) });
+      const cdp = coinbase();
+
+      await expect(replayService(reservations, cdp).execute(replayRequest)).rejects.toMatchObject({
+        code: "offering.reservation_replay_unavailable",
+      });
+      expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+      expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
+    });
+
+    it("serves a retry made exactly at the expiry boundary, matching the sweeper's strict comparison", async () => {
+      const reservations = replayedReservation({}, { createdAt: new Date(now.getTime() - 15 * 60_000) });
+
+      await expect(replayService(reservations).execute(replayRequest)).resolves.toMatchObject({
+        data: { reservation_id: "reservation_existing" },
+      });
+    });
+
+    it("refuses a reused key carrying a different amount, and never records the retry's amount", async () => {
+      const reservations = replayedReservation({ amountEur: "400.00" });
+      const cdp = coinbase();
+
+      await expect(replayService(reservations, cdp).execute(replayRequest)).rejects.toMatchObject({
+        code: "offering.idempotency_key_reused",
+        status: 409,
+      });
+
+      expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+      expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
+    });
+
+    it("fails closed if the repository reports a key hit without the stored reservation's state", async () => {
+      const reservations = reservationRepository({
+        createReservation: vi.fn().mockResolvedValue({
+          reservation: { reservationId: "reservation_existing", createdAt: now },
+          conflict: null,
+          reused: true,
+        }),
+      });
+      const cdp = coinbase();
+
+      await expect(replayService(reservations, cdp).execute(replayRequest)).rejects.toMatchObject({
+        code: "offering.reservation_replay_unavailable",
+      });
+      expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+      expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
+    });
   });
 });

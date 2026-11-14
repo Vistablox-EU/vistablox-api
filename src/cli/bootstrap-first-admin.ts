@@ -27,10 +27,10 @@ import {
 } from "../config/environment.js";
 import { createPrismaClient } from "../infrastructure/database/prisma.js";
 import { SmtpEmailSender } from "../infrastructure/email/smtp-email-sender.js";
-import { BootstrapFirstAdminService } from "../modules/auth/application/staff-bootstrap.service.js";
-import { BetterAuthStaffIdentityProvider } from "../modules/auth/infrastructure/better-auth-staff-identity.provider.js";
-import { createBetterAuth } from "../modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaStaffBootstrapRepository } from "../modules/auth/repository/prisma-staff-bootstrap.repository.js";
+import { BootstrapFirstAdminService } from "../modules/auth/application/staff/staff-bootstrap.service.js";
+import { BetterAuthStaffIdentityProvider } from "../modules/auth/infrastructure/staff/better-auth-staff-identity.provider.js";
+import { createBetterAuth } from "../modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaStaffBootstrapRepository } from "../modules/auth/repository/staff/prisma-staff-bootstrap.repository.js";
 import { AppError } from "../shared/errors/app-error.js";
 import {
   BOOTSTRAP_FIRST_ADMIN_USAGE,

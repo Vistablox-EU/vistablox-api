@@ -21,7 +21,7 @@ import type { GetOperationsReadinessService } from "../application/get-operation
 import type { UploadCaseDocumentService } from "../application/upload-case-document.service.js";
 import type { GetCaseDocumentService } from "../application/get-case-document.service.js";
 import type { GetIntakeCaseHistoryService, GetIntakeWorkflowService } from "../application/get-intake-workflow.service.js";
-import { ApproveIntakeReversalService, GetIntakeReversalOperationService, GetIntakeReversalPreviewService, RequestIntakeReversalService } from "../application/intake-reversal.service.js";
+import { ApproveIntakeReversalService, CancelIntakeReversalService, GetIntakeReversalOperationService, GetIntakeReversalPreviewService, RequestIntakeReversalService } from "../application/intake-reversal.service.js";
 import {
   ListCaseMessagesForOperationsService,
   PostCaseMessageForOperationsService,
@@ -71,6 +71,7 @@ import {
   reversalCommandParamsSchema,
   reversalOperationParamsSchema,
   reversalRequestBodySchema,
+  reversalCancelBodySchema,
   reversalPreviewResponseSchema,
   reversalOperationResponseSchema,
 } from "./intake-operations.schemas.js";
@@ -107,6 +108,7 @@ export function createIntakeOperationsRouter(
   requestReversal?: RequestIntakeReversalService,
   approveReversal?: ApproveIntakeReversalService,
   getReversalOperation?: GetIntakeReversalOperationService,
+  cancelReversal?: CancelIntakeReversalService,
 ): Router {
   const router = Router();
   const staffOnly = [
@@ -182,7 +184,8 @@ export function createIntakeOperationsRouter(
 
   if (reversalPreview !== undefined) router.get("/:case_id/reversal-preview", ...staffOnly, async (request, response) => {
     const params = reversalCommandParamsSchema.parse(request.params);
-    response.json(reversalPreviewResponseSchema.parse(await reversalPreview.execute(params.case_id)));
+    const authContext = requireAuthContext(response.locals.authContext);
+    response.json(reversalPreviewResponseSchema.parse(await reversalPreview.execute(params.case_id, authContext.accountId)));
   });
 
   if (requestReversal !== undefined) {
@@ -208,6 +211,12 @@ export function createIntakeOperationsRouter(
     const params = reversalOperationParamsSchema.parse(request.params);
     const authContext = requireAuthContext(response.locals.authContext);
     response.json(reversalOperationResponseSchema.parse(await approveReversal.execute({ caseId: params.case_id, operationId: params.operation_id, accountId: authContext.accountId, traceId: String(response.locals.traceId) })));
+  });
+  if (cancelReversal !== undefined) router.post("/:case_id/reversal-operations/:operation_id/cancel", ...staffOnly, async (request, response) => {
+    const params = reversalOperationParamsSchema.parse(request.params);
+    const authContext = requireAuthContext(response.locals.authContext);
+    const body = reversalCancelBodySchema.parse(request.body ?? {});
+    response.json(reversalOperationResponseSchema.parse(await cancelReversal.execute({ caseId: params.case_id, operationId: params.operation_id, accountId: authContext.accountId, traceId: String(response.locals.traceId), note: body.note })));
   });
   if (getReversalOperation !== undefined) router.get("/:case_id/reversal-operations/:operation_id", ...staffOnly, async (request, response) => {
     const params = reversalOperationParamsSchema.parse(request.params);

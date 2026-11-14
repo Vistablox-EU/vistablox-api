@@ -7,7 +7,7 @@ import {
   createBetterAuthDeviceSessionLifetimePlugin,
   createDeviceSessionLifetime,
   isDeviceSessionLookupWrapped,
-} from "../src/modules/auth/infrastructure/better-auth-device-session-lifetime.plugin.js";
+} from "../src/modules/auth/infrastructure/customer/better-auth-device-session-lifetime.plugin.js";
 
 // A real better-auth instance (in-memory database, same session settings
 // as better-auth.factory.ts: expiresIn 30 min, updateAge 5 min, bearer

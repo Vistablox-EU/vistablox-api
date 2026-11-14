@@ -3,7 +3,7 @@ import { webcrypto } from "node:crypto";
 import { SignJWT, calculateJwkThumbprint, exportJWK, type JWK } from "jose";
 import { describe, expect, it } from "vitest";
 
-import { DeviceJwsInvalidError, verifyDeviceAuthJws } from "../src/modules/auth/application/device-auth-jws-verifier.js";
+import { DeviceJwsInvalidError, verifyDeviceAuthJws } from "../src/modules/auth/application/customer/device-auth-jws-verifier.js";
 
 const JWS_TYP = "vistablox-device-auth+jwt";
 

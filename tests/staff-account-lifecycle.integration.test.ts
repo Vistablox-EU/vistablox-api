@@ -4,9 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
-import { BetterAuthStaffAccountAdministrator } from "../src/modules/auth/infrastructure/better-auth-staff-account-administrator.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaStaffAccountLifecycleRepository } from "../src/modules/auth/repository/prisma-staff-account-lifecycle.repository.js";
+import { BetterAuthStaffAccountAdministrator } from "../src/modules/auth/infrastructure/staff/better-auth-staff-account-administrator.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaStaffAccountLifecycleRepository } from "../src/modules/auth/repository/staff/prisma-staff-account-lifecycle.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 

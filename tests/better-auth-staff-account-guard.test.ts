@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { BetterAuthSessionResolver } from "../src/modules/auth/infrastructure/better-auth-session.resolver.js";
-import { createBetterAuthStaffAccountGuardPlugin } from "../src/modules/auth/infrastructure/better-auth-staff-account-guard.plugin.js";
+import { BetterAuthSessionResolver } from "../src/modules/auth/infrastructure/shared/better-auth-session.resolver.js";
+import { createBetterAuthStaffAccountGuardPlugin } from "../src/modules/auth/infrastructure/staff/better-auth-staff-account-guard.plugin.js";
 
 describe("Better Auth staff account guard", () => {
   it("blocks session creation for a disabled identity", async () => {

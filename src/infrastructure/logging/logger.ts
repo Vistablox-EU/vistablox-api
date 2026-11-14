@@ -11,6 +11,8 @@ export function createLogger(level: string, destination?: DestinationStream): Lo
         "req.headers['x-csrf-token']",
         "req.headers['x-internal-signature']",
         "req.headers['x-passkey-challenge']",
+        "req.headers.dpop",
+        "req.headers['x-original-filename']",
         "res.headers['set-cookie']",
         "res.headers['set-auth-token']",
         "res.headers['set-passkey-challenge']",

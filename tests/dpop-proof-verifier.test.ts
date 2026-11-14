@@ -8,7 +8,7 @@ import {
   DpopProofMissingError,
   buildHtu,
   verifyDpopProof,
-} from "../src/modules/auth/application/dpop-proof-verifier.js";
+} from "../src/modules/auth/application/shared/dpop-proof-verifier.js";
 
 const HTM = "POST";
 const HTU = "https://api.vistablox.io/v1/investor-profile/wallet";

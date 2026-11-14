@@ -39,7 +39,9 @@ describe.skipIf(databaseUrl === undefined)(
       const kycRepository = new PrismaKycRepository(database, boss);
       intakeRepository = new PrismaIntakeRepository(database, boss, kycRepository);
       offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
-      openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository);
+      openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository, {
+        openEscrowCampaign: true,
+      });
       await boss.start();
       await boss.createQueue("case_timers.pre_offering_open_handoff");
       await boss.createQueue("settlement.open_ipo_escrow_campaign");

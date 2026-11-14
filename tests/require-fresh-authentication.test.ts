@@ -2,8 +2,8 @@ import express from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createRequireFreshAuthentication } from "../src/modules/auth/api/require-fresh-authentication.js";
-import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer-session.repository.js";
+import { createRequireFreshAuthentication } from "../src/modules/auth/api/customer/require-fresh-authentication.js";
+import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer/customer-session.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 

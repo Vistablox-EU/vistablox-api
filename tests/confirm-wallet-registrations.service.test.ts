@@ -110,6 +110,20 @@ class FakeSettlementRepository implements SettlementRepository {
     return false;
   }
 
+  public async findEscrowMintIntent(): Promise<null> {
+    return null;
+  }
+
+  public async createEscrowMintIntent(): Promise<never> {
+    throw new Error("unused");
+  }
+
+  public async restartEscrowMintAttempt(): Promise<boolean> {
+    return false;
+  }
+
+  public async recordEscrowMintSent(): Promise<void> {}
+
   public async recordEscrowMintedPosition(): Promise<{ positionId: string }> {
     return { positionId: "unused" };
   }

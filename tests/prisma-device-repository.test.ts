@@ -4,8 +4,8 @@ import { Prisma } from "../src/generated/prisma/client.js";
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
-} from "../src/modules/auth/application/device-auth-errors.js";
-import { PrismaDeviceRepository } from "../src/modules/auth/repository/prisma-device.repository.js";
+} from "../src/modules/auth/application/customer/device-auth-errors.js";
+import { PrismaDeviceRepository } from "../src/modules/auth/repository/customer/prisma-device.repository.js";
 import type { DatabaseClient } from "../src/infrastructure/database/prisma.js";
 
 const CREATE_INPUT = {

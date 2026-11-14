@@ -3,10 +3,10 @@ import request from "supertest";
 import { APIError } from "better-auth/api";
 import { describe, expect, it, vi } from "vitest";
 
-import { createAppConfigRouter, createDeviceAuthRouter } from "../src/modules/auth/api/device-auth.router.js";
-import { IssueDeviceChallengeService } from "../src/modules/auth/application/device-challenge-issuance.service.js";
-import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
-import type { VistaBloxAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
+import { createAppConfigRouter, createDeviceAuthRouter } from "../src/modules/auth/api/customer/device-auth.router.js";
+import { IssueDeviceChallengeService } from "../src/modules/auth/application/customer/device-challenge-issuance.service.js";
+import type { DeviceChallengeRepository } from "../src/modules/auth/repository/customer/device-challenge.repository.js";
+import type { VistaBloxAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
