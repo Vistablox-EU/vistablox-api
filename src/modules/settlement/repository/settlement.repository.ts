@@ -70,6 +70,10 @@ export interface CreateEscrowMintIntentInput {
 export interface WalletRegistrationRecord {
   accountId: string;
   walletAddress: string;
+  // The stored commitment, exactly as persisted. confirmWalletRegistration
+  // compares against it (with the stored address) so a claim the account
+  // replaced after this row was read is not confirmed.
+  registrationCommitment: string;
   registeredAt: Date | null;
   transactionHash: string | null;
   blockNumber: bigint | null;
@@ -89,8 +93,6 @@ export interface WalletRegistrationEvidenceKey {
   logIndex: number | null;
 }
 
-export type WalletRegistrationConfirmation = "confirmed" | "already_registered" | "event_taken";
-
 export type WalletRegistrationEvidenceReplacement = "replaced" | "stale" | "event_taken";
 
 /** A registration whose recorded block still has to be compared with the chain. */
@@ -100,6 +102,37 @@ export interface WalletRegistrationRecheckCandidate {
   registrationCommitment: string;
   evidence: WalletRegistrationEvidence;
 }
+
+export interface ConfirmWalletRegistrationInput {
+  accountId: string;
+  // The address and commitment of the pending claim the on-chain event was
+  // matched to, exactly as stored.
+  walletAddress: string;
+  registrationCommitment: string;
+  registeredAt: Date;
+  // The identity of the event that confirms the claim, written with it.
+  evidence: WalletRegistrationEvidence;
+}
+
+// confirmed: the claim was still pending and is now registered, with the
+//   evidence recorded.
+// already_registered: the claim as matched (same account, address and
+//   commitment) is no longer pending, because another run or the manual
+//   reconcile confirmed it; nothing was written. The caller classifies the
+//   event against what the row holds now.
+// stale: no claim with that account, address and commitment exists any more
+//   (the account replaced it, or the row is gone); nothing was written.
+// event_taken: another row already holds this (transaction hash, log index);
+//   nothing was written.
+// address_conflict: another account already holds the address confirmed; the
+//   claim stays pending, nothing else was written, and the conflict is
+//   recorded in audit_log.
+export type WalletRegistrationConfirmation =
+  | "confirmed"
+  | "already_registered"
+  | "stale"
+  | "event_taken"
+  | "address_conflict";
 
 export interface WalletRegistrationAddressMismatchInput {
   accountId: string;
@@ -122,6 +155,8 @@ export interface WalletRegistrationAddressMismatchInput {
  */
 export interface SettlementRepository {
   findPivsWithPassedIpoDeadline(now: Date): Promise<PivPendingEscrowResolution[]>;
+  // Resolves CONFIRMED registrations only: a pending claim proves nothing, so
+  // it must never attribute an on-chain contribution to an account.
   resolveAccountIdForWallet(walletAddress: string): Promise<string | null>;
   hasPosition(pivId: string, accountId: string): Promise<boolean>;
   findEscrowMintIntent(pivId: string, accountId: string): Promise<EscrowMintIntent | null>;
@@ -153,16 +188,13 @@ export interface SettlementRepository {
   // too, not only the pending ones.
   findWalletRegistrationByCommitment(commitment: string): Promise<WalletRegistrationRecord | null>;
   countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number>;
-  // Confirms a pending row and records the event that confirmed it in ONE
-  // statement, so a row is never registered without its evidence or the other
-  // way round. "already_registered": the row was not pending any more, nothing
-  // was written. "event_taken": another row already holds this (transaction
-  // hash, log index); nothing was written.
-  confirmWalletRegistration(input: {
-    accountId: string;
-    registeredAt: Date;
-    evidence: WalletRegistrationEvidence;
-  }): Promise<WalletRegistrationConfirmation>;
+  // Confirms the exact pending claim the event was matched to and records the
+  // event that confirmed it, in ONE transaction (registered_at and the
+  // evidence in one UPDATE), so a row is never registered without its evidence
+  // or the other way round (see
+  // WalletRegistrationConfirmation for the outcomes). Nothing is written for
+  // any outcome but "confirmed".
+  confirmWalletRegistration(input: ConfirmWalletRegistrationInput): Promise<WalletRegistrationConfirmation>;
   // Replaces the recorded evidence of a registered row (compare-and-set on
   // `expected`), clears verification and flag, and writes the audit row in the
   // same transaction. registered_at is never changed.

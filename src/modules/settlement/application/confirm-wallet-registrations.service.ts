@@ -114,6 +114,12 @@ export interface ConfirmWalletRegistrationsSummary {
   // The part of unmatchedEvents that is news: events in a block past the cursor
   // an earlier completed run reached. Alerts key on this, not on the total.
   newUnmatchedEvents: number;
+  // The matched claim was replaced by its account between the match and the
+  // write; nothing was written.
+  staleConfirmations: number;
+  // Another account already holds the address confirmed; the claim stays
+  // pending and the conflict is in audit_log.
+  confirmationConflicts: number;
   // First-seen mismatches only (see recordWalletRegistrationAddressMismatch).
   addressMismatches: WalletRegistrationMismatchSignal[];
   // Mismatches this run read that were already recorded by an earlier read.
@@ -154,7 +160,12 @@ export interface ConfirmWalletRegistrationsSummary {
  * value RegisterWalletService handed the mobile app), sanity-checks the
  * on-chain sender against the stored address, and marks registered_at together
  * with the identity of the event (transaction hash, block hash and number, log
- * index) in one statement.
+ * index) in one statement. The write is a compare-and-set on the exact claim the
+ * event was matched to (its stored address and commitment, still pending): a
+ * claim the account replaced between the match and the write is reported as
+ * stale instead of being confirmed on the old address's evidence, and an
+ * address another account already holds confirmed is reported as a conflict
+ * (the claim stays pending, the run carries on) instead of failing the run.
  *
  * Idempotent by construction (AD-241's invariant): a row is confirmed only
  * while registered_at IS NULL, so replaying the same event (an overlapping
@@ -230,6 +241,8 @@ export class ConfirmWalletRegistrationsService {
       registrationsConfirmed: 0,
       unmatchedEvents: 0,
       newUnmatchedEvents: 0,
+      staleConfirmations: 0,
+      confirmationConflicts: 0,
       addressMismatches: [],
       addressMismatchesRepeated: 0,
       pendingRegistrationsOverdue,
@@ -365,8 +378,13 @@ export class ConfirmWalletRegistrationsService {
       return null;
     }
 
+    // Compare-and-set on the claim exactly as it was read (stored address and
+    // stored commitment), so a claim the account replaced since is not confirmed
+    // on this event.
     const outcome = await this.repository.confirmWalletRegistration({
       accountId: record.accountId,
+      walletAddress: record.walletAddress,
+      registrationCommitment: record.registrationCommitment,
       registeredAt: this.clock(),
       evidence,
     });
@@ -374,9 +392,17 @@ export class ConfirmWalletRegistrationsService {
       summary.registrationsConfirmed += 1;
     } else if (outcome === "event_taken") {
       summary.conflictingEvents += 1;
+    } else if (outcome === "address_conflict") {
+      // Another account already holds the address confirmed. The claim stays
+      // pending and the conflict is in audit_log.
+      summary.confirmationConflicts += 1;
+    } else if (outcome === "stale") {
+      // The account replaced the claim between the read and the write.
+      summary.staleConfirmations += 1;
     } else {
-      // Another run (or the manual reconcile) confirmed the row between the
-      // read and the write. Classify against what it holds now, once.
+      // "already_registered": another run (or the manual reconcile) confirmed
+      // the row between the read and the write. Classify against what it holds
+      // now, once.
       const reread = await this.repository.findWalletRegistrationByCommitment(commitment);
       if (reread !== null && reread.registeredAt !== null) {
         return this.processRegisteredEvent(reread, evidence, wallet, head, summary);

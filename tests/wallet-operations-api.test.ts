@@ -9,10 +9,12 @@ import {
   WalletRegistrationVerificationError,
   type WalletRegistrationChainVerifier,
 } from "../src/modules/wallet/application/reconcile-wallet-registration.service.js";
-import type {
-  ReconcileWalletRegistrationResult,
-  RegisteredWallet,
-  WalletRepository,
+import {
+  WalletAddressConflictError,
+  WalletRegistrationChangedError,
+  type ReconcileWalletRegistrationResult,
+  type RegisteredWallet,
+  type WalletRepository,
 } from "../src/modules/wallet/repository/wallet.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
@@ -265,12 +267,14 @@ describe("POST /internal/v1/wallet-accounts/:account_id/reconcile", () => {
   function buildReconcileApp(options: {
     verify?: WalletRegistrationChainVerifier["verify"];
     result?: ReconcileWalletRegistrationResult;
+    // What the repository throws instead of answering (the claim-lifecycle outcomes).
+    reconcileError?: Error;
     requireAdminOperations?: RequestHandler;
   }) {
-    const reconcileWalletRegistration = vi.fn(
-      async (): Promise<ReconcileWalletRegistrationResult> =>
-        options.result ?? { kind: "reconciled", outcome: "confirmed", wallet: confirmed },
-    );
+    const reconcileWalletRegistration = vi.fn(async (): Promise<ReconcileWalletRegistrationResult> => {
+      if (options.reconcileError !== undefined) throw options.reconcileError;
+      return options.result ?? { kind: "reconciled", outcome: "confirmed", wallet: confirmed };
+    });
     const repository: WalletRepository = {
       registerWallet: vi.fn(),
       findByAccountId: vi.fn(async (accountId: string) => (accountId === "acct_01" ? pending : null)),
@@ -390,5 +394,54 @@ describe("POST /internal/v1/wallet-accounts/:account_id/reconcile", () => {
     expect(response.status).toBe(403);
     expect(repository.findByAccountId).not.toHaveBeenCalled();
     expect(verify).not.toHaveBeenCalled();
+  });
+
+  it("answers 409 wallet.registration_changed in the error envelope when the account replaced its claim after the check", async () => {
+    const { app } = buildReconcileApp({ reconcileError: new WalletRegistrationChangedError() });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      type: expect.any(String),
+      code: "wallet.registration_changed",
+      title: "Wallet registration changed",
+      status: 409,
+      detail: expect.stringContaining("changed"),
+      trace_id: expect.any(String),
+    });
+  });
+
+  it("answers 409 wallet.address_already_claimed in the error envelope when another account holds the address", async () => {
+    const { app } = buildReconcileApp({ reconcileError: new WalletAddressConflictError("address_claimed") });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({
+      type: expect.any(String),
+      code: "wallet.address_already_claimed",
+      title: expect.any(String),
+      status: 409,
+      detail: expect.any(String),
+      trace_id: expect.any(String),
+    });
+  });
+
+  it("hands the verified address and commitment to the repository on success", async () => {
+    const { app, reconcileWalletRegistration } = buildReconcileApp({});
+
+    const response = await post(app);
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toMatchObject({ account_id: "acct_01", status: "registered" });
+    expect(reconcileWalletRegistration).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: "acct_01",
+        actorAccountId: "staff_01",
+        expectedWalletAddress: pending.walletAddress,
+        expectedRegistrationCommitment: pending.registrationCommitment,
+      }),
+    );
   });
 });
