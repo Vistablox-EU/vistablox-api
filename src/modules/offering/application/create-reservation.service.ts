@@ -18,7 +18,7 @@ const blockerMessages: Record<ReservationBlocker, string> = {
   kyc_not_eligible: "Identity verification is not currently eligible.",
   kyc_renewal_due: "Identity verification has expired and needs renewal.",
   login_methods_incomplete: "Sign in with Google or Apple and enrol this device before investing.",
-  payment_account_not_ready: "No wallet is registered for this account.",
+  payment_account_not_ready: "No confirmed wallet is registered for this account.",
   disclosure_pack_unavailable: "No current disclosure pack is available for this offering.",
   offering_not_open: "This offering is not currently open for reservations.",
   capacity_exhausted: "This offering has no remaining capacity.",
@@ -108,7 +108,9 @@ export class CreateReservationService {
       throw amountExceedsCapacityError();
     }
 
-    // computeReservationBlockers already required walletProvisioned; a null
+    // computeReservationBlockers already required walletProvisioned, which the
+    // read model only grants for a CONFIRMED registration, and walletAddress
+    // is read from that same row on every call, replays included; a null
     // address here would mean the read and write disagree about that.
     const walletAddress = detail.accountReadiness.walletAddress;
     if (walletAddress === null) {

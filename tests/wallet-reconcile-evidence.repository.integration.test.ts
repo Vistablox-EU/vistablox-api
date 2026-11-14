@@ -41,9 +41,17 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRepository.reconcileWall
     using: PrismaWalletRepository = repository,
   ) => {
     const reconcileWalletRegistration = using.reconcileWalletRegistration;
+    // The registration the evidence was verified against (compare-and-set): the
+    // fixture row's own claim, unless a test says otherwise.
+    const claim =
+      overrides.expectedWalletAddress !== undefined && overrides.expectedRegistrationCommitment !== undefined
+        ? { walletAddress: overrides.expectedWalletAddress, registrationCommitment: overrides.expectedRegistrationCommitment }
+        : fixtures.claimOf(accountId);
     return reconcileWalletRegistration.call(using, {
       accountId,
       actorAccountId: await defaultActor(),
+      expectedWalletAddress: claim.walletAddress,
+      expectedRegistrationCommitment: claim.registrationCommitment,
       evidence,
       registeredAt: CHAIN_TIME,
       changedAt: NOW,
@@ -356,7 +364,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRepository.reconcileWall
   });
 
   it("reports an account that has no registration", async () => {
-    expect(await reconcile("account_walletreg_missing", evidenceFor("r11"))).toEqual({ kind: "not_found" });
+    expect(
+      await reconcile("account_walletreg_missing", evidenceFor("r11"), {
+        expectedWalletAddress: "0xwalletreg_missing",
+        expectedRegistrationCommitment: "0xcommit_missing",
+      }),
+    ).toEqual({ kind: "not_found" });
   });
 
   it("reads the evidence back through findByAccountId", async () => {
