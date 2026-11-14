@@ -81,4 +81,25 @@ describe.skipIf(!configured)("MinIO disclosure document integration", () => {
   it("returns null for an object that is not present", async () => {
     await expect(store.get("offering_01/missing.pdf")).resolves.toBeNull();
   });
+
+  it("round-trips a staff upload: put, get with its metadata, delete", async () => {
+    const key = "offerings/offering_01M7AGKPB4F22YKF7Y3SJFB4W1/doc_roundtrip";
+    const uploaded = Buffer.from("uploaded disclosure document");
+    await store.put({
+      documentReference: key,
+      body: uploaded,
+      contentType: "application/pdf",
+      metadata: { "original-filename": "Final terms.pdf", sha256: "0".repeat(64) },
+    });
+
+    const result = await store.get(key);
+    expect(result).toMatchObject({ contentType: "application/pdf", contentLength: uploaded.length, fileName: "Final terms.pdf" });
+    const chunks: Buffer[] = [];
+    for await (const chunk of result!.body) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    expect(Buffer.concat(chunks)).toEqual(uploaded);
+
+    await store.delete(key);
+    await expect(store.get(key)).resolves.toBeNull();
+    await expect(store.delete(key)).resolves.toBeUndefined();
+  });
 });
