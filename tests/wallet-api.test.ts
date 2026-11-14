@@ -1,17 +1,29 @@
 import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
+import { isAddress } from "viem";
 
-import { createWalletRouter } from "../src/modules/wallet/api/wallet.router.js";
+import { createWalletRouter, type WalletFreshAuthenticationProbe } from "../src/modules/wallet/api/wallet.router.js";
+import { requestWalletTransferResponseSchema } from "../src/modules/wallet/api/wallet.schemas.js";
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
 import { GetWalletBalanceService } from "../src/modules/wallet/application/get-wallet-balance.service.js";
 import { GetWalletStatusService } from "../src/modules/wallet/application/get-wallet-status.service.js";
 import { RequestWalletTransferService } from "../src/modules/wallet/application/request-wallet-transfer.service.js";
-import type { WalletRepository } from "../src/modules/wallet/repository/wallet.repository.js";
+import {
+  WalletAddressConflictError,
+  WalletReplacementFreshAuthenticationRequiredError,
+  type WalletRepository,
+} from "../src/modules/wallet/repository/wallet.repository.js";
 import type { KycEligibilityReader } from "../src/modules/identity/repository/kyc-eligibility-reader.js";
 import type { PivTokenHoldingsReader } from "../src/modules/settlement/repository/settlement.repository.js";
+import { ChainStateUnavailableError } from "../src/shared/errors/chain-state-unavailable-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
+import {
+  SNAPSHOT_BLOCK_HASH,
+  buildPassingSnapshot,
+  buildTransferChainReader,
+} from "./support/wallet-transfer-fakes.js";
 
 const TEST_REGISTRY_ADDRESS = "0x1234567890123456789012345678901234567890";
 
@@ -28,9 +40,14 @@ const eligibleKyc = {
   renewalDueAt: new Date("2099-01-01T00:00:00.000Z"),
 };
 
+// A probe for the tests that do not care about freshness.
+const notFresh: WalletFreshAuthenticationProbe = async () => false;
+
 function buildApp(options?: {
   kyc?: typeof eligibleKyc | null;
   registerWallet?: WalletRepository["registerWallet"];
+  probe?: WalletFreshAuthenticationProbe;
+  population?: "customer" | "staff_partner";
 }) {
   const repository: WalletRepository = {
     registerWallet:
@@ -54,7 +71,7 @@ function buildApp(options?: {
     response.locals.authContext = {
       accountId: "acct_01",
       providerSessionId: "session_01",
-      population: "customer",
+      population: options?.population ?? "customer",
     };
     next();
   };
@@ -64,6 +81,7 @@ function buildApp(options?: {
     "/v1/investor-profile/wallet",
     createWalletRouter(
       authenticated,
+      options?.probe ?? notFresh,
       new RegisterWalletService(
         repository,
         kycEligibilityReader,
@@ -74,7 +92,7 @@ function buildApp(options?: {
     ),
   );
   app.use(errorHandler);
-  return { app, repository };
+  return { app, repository, kycEligibilityReader };
 }
 
 describe("POST /v1/investor-profile/wallet", () => {
@@ -100,8 +118,48 @@ describe("POST /v1/investor-profile/wallet", () => {
       },
     });
     expect(repository.registerWallet).toHaveBeenCalledWith(
-      expect.objectContaining({ accountId: "acct_01", walletAddress: validAddress }),
+      expect.objectContaining({ accountId: "acct_01", walletAddress: validAddress.toLowerCase() }),
     );
+  });
+
+  it.each([
+    ["EIP-55 spelling", validAddress],
+    ["all-uppercase hex", `0x${validAddress.slice(2).toUpperCase()}`],
+    ["all-lowercase hex", validAddress.toLowerCase()],
+    ["space-padded", `  ${validAddress}  `],
+    ["tab- and newline-padded", `\t${validAddress}\n`],
+  ])("hands the repository the canonical lowercase address for %s", async (_label, input) => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet")
+      .send({ wallet_address: input });
+
+    expect(response.status).toBe(201);
+    expect(repository.registerWallet).toHaveBeenCalledTimes(1);
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f" }),
+    );
+  });
+
+  it.each([
+    ["an 0X prefix", `0X${validAddress.slice(2)}`],
+    ["39 hex digits", validAddress.slice(0, -1)],
+    ["41 hex digits", `${validAddress}a`],
+    ["a non-hex digit", `${validAddress.slice(0, -1)}g`],
+  ])("rejects %s with one wallet_address field error and never reaches the repository", async (_label, input) => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet")
+      .send({ wallet_address: input });
+
+    expect(response.status).toBe(422);
+    expect(response.body.code).toBe("validation.invalid_field");
+    expect(response.body.field_errors).toEqual([
+      expect.objectContaining({ field: "wallet_address", code: "invalid_format" }),
+    ]);
+    expect(repository.registerWallet).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed wallet address before touching the repository", async () => {
@@ -128,9 +186,6 @@ describe("POST /v1/investor-profile/wallet", () => {
   });
 
   it("reports a conflict when the address is already claimed by another account", async () => {
-    const { WalletAddressConflictError } = await import(
-      "../src/modules/wallet/repository/wallet.repository.js"
-    );
     const { app } = buildApp({
       registerWallet: vi.fn().mockRejectedValue(new WalletAddressConflictError("address_claimed")),
     });
@@ -141,6 +196,162 @@ describe("POST /v1/investor-profile/wallet", () => {
 
     expect(response.status).toBe(409);
     expect(response.body.code).toBe("wallet.address_already_claimed");
+  });
+});
+
+describe("POST /v1/investor-profile/wallet freshness", () => {
+  const validAddress = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
+  const post = (app: express.Express) =>
+    request(app).post("/v1/investor-profile/wallet").send({ wallet_address: validAddress });
+
+  it("passes the probe's true to the service as freshAuthentication: true", async () => {
+    const { app, repository } = buildApp({ probe: vi.fn().mockResolvedValue(true) });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(201);
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "acct_01", freshAuthentication: true }),
+    );
+  });
+
+  it("passes the probe's false to the service as freshAuthentication: false", async () => {
+    const { app, repository } = buildApp({ probe: vi.fn().mockResolvedValue(false) });
+
+    await post(app);
+
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ freshAuthentication: false }),
+    );
+  });
+
+  it.each([undefined, null, "true", 1, {}])(
+    "treats a probe answer of %j as not fresh, so only the boolean true counts",
+    async (loose) => {
+      const { app, repository } = buildApp({
+        probe: vi.fn().mockResolvedValue(loose) as unknown as WalletFreshAuthenticationProbe,
+      });
+
+      await post(app);
+
+      expect(repository.registerWallet).toHaveBeenCalledWith(
+        expect.objectContaining({ freshAuthentication: false }),
+      );
+    },
+  );
+
+  it("asks the probe about the server-set auth context, exactly once", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app } = buildApp({ probe });
+
+    await post(app);
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(probe).toHaveBeenCalledWith({
+      accountId: "acct_01",
+      providerSessionId: "session_01",
+      population: "customer",
+    });
+  });
+
+  it("cannot be made fresh by anything the client sends: body field, query string or header", async () => {
+    const { app, repository } = buildApp({ probe: vi.fn().mockResolvedValue(false) });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet?fresh=1&fresh_authentication=true")
+      .set("X-Fresh-Authentication", "1")
+      .set("Fresh-Authentication", "true")
+      .send({ wallet_address: validAddress, fresh_authentication: true, freshAuthentication: true });
+
+    expect(response.status).toBe(201);
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ freshAuthentication: false }),
+    );
+  });
+
+  it("fails closed with a 500 and writes nothing when the probe itself fails", async () => {
+    const { app, repository, kycEligibilityReader } = buildApp({
+      probe: vi.fn().mockRejectedValue(new Error("session store down")),
+    });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe("internal.unexpected");
+    expect(kycEligibilityReader.getEligibilitySnapshot).not.toHaveBeenCalled();
+    expect(repository.registerWallet).not.toHaveBeenCalled();
+  });
+
+  it("does not call the probe for a body that fails validation", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app, repository } = buildApp({ probe });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet")
+      .send({ wallet_address: "not-an-address" });
+
+    expect(response.status).toBe(422);
+    expect(probe).not.toHaveBeenCalled();
+    expect(repository.registerWallet).not.toHaveBeenCalled();
+  });
+
+  it("does not call the probe for a staff session, which is refused first", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app, repository } = buildApp({ probe, population: "staff_partner" });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authorization.forbidden");
+    expect(probe).not.toHaveBeenCalled();
+    expect(repository.registerWallet).not.toHaveBeenCalled();
+  });
+
+  it("answers a refused replacement with the 403 fresh-authentication envelope and nothing else", async () => {
+    const { app } = buildApp({
+      registerWallet: vi.fn().mockRejectedValue(new WalletReplacementFreshAuthenticationRequiredError()),
+    });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(403);
+    expect(Object.keys(response.body).sort()).toEqual(["code", "detail", "status", "title", "trace_id", "type"]);
+    expect(response.body).toMatchObject({
+      type: "https://api.vistablox.io/errors/authentication.fresh_auth_required",
+      code: "authentication.fresh_auth_required",
+      title: "Fresh authentication required",
+      status: 403,
+      detail: "Sign in again on this device before continuing.",
+    });
+    expect(typeof response.body.trace_id).toBe("string");
+    expect(response.body.trace_id.length).toBeGreaterThan(0);
+  });
+
+  it("keeps a registration conflict a 409, whatever the probe said", async () => {
+    for (const fresh of [true, false]) {
+      const { app } = buildApp({
+        probe: vi.fn().mockResolvedValue(fresh),
+        registerWallet: vi.fn().mockRejectedValue(new WalletAddressConflictError("address_mismatch")),
+      });
+
+      const response = await post(app);
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("wallet.registration_address_mismatch");
+    }
+  });
+
+  // The balance and transfer routes have their own "never asks the
+  // fresh-authentication probe" tests below, where those routes are mounted.
+  it("never asks the probe on the status read", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app } = buildApp({ probe });
+
+    const response = await request(app).get("/v1/investor-profile/wallet");
+
+    // The read handler ran (this account has no wallet yet), not a 404 for a missing route.
+    expect(response.body.code).toBe("wallet.not_registered");
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 
@@ -170,6 +381,7 @@ describe("GET /v1/investor-profile/wallet", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
+        notFresh,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         new GetWalletStatusService(repository),
       ),
@@ -221,6 +433,7 @@ describe("GET /v1/investor-profile/wallet/balance", () => {
         getTokenBalances: vi.fn().mockResolvedValue([3n]),
       });
 
+    const probe = vi.fn().mockResolvedValue(true);
     const app = express();
     const authenticated: RequestHandler = (_request, response, next) => {
       response.locals.authContext = {
@@ -236,13 +449,14 @@ describe("GET /v1/investor-profile/wallet/balance", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
+        probe,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         new GetWalletStatusService(repository),
         balanceService,
       ),
     );
     app.use(errorHandler);
-    return { app };
+    return { app, probe };
   }
 
   it("reads the registered wallet's capital and token balances", async () => {
@@ -261,6 +475,14 @@ describe("GET /v1/investor-profile/wallet/balance", () => {
     });
   });
 
+  it("never asks the fresh-authentication probe", async () => {
+    const { app, probe } = buildBalanceApp();
+
+    await request(app).get("/v1/investor-profile/wallet/balance");
+
+    expect(probe).not.toHaveBeenCalled();
+  });
+
   it("is not mounted when no balance service is configured", async () => {
     const { app } = buildApp();
 
@@ -273,33 +495,34 @@ describe("GET /v1/investor-profile/wallet/balance", () => {
 describe("POST /v1/investor-profile/wallet/transfers", () => {
   const toWalletAddress = "0x00000000219ab540356cbb839cbe05303d7705fa";
 
-  function buildTransferApp(options?: { transferService?: RequestWalletTransferService }) {
+  function buildTransferApp(options?: {
+    transferService?: RequestWalletTransferService;
+    chainReader?: ReturnType<typeof buildTransferChainReader>;
+    // The wallet row's registered_at. Defaults to a confirmed registration;
+    // pass null for a pending claim.
+    registeredAt?: Date | null;
+  }) {
     const repository: WalletRepository = {
       registerWallet: vi.fn(),
       findByAccountId: vi.fn().mockResolvedValue({
         walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
         registrationCommitment: "commitment_01",
         requestedAt: new Date("2026-09-02T10:00:00.000Z"),
-        registeredAt: new Date("2026-09-02T10:05:00.000Z"),
+        registeredAt:
+          options !== undefined && "registeredAt" in options
+            ? options.registeredAt
+            : new Date("2026-09-02T10:05:00.000Z"),
       }),
     };
     const holdingsReader: PivTokenHoldingsReader = {
       listTokenHoldings: vi.fn().mockResolvedValue([{ pivId: "piv_01", tokenId: "7" }]),
     };
+    const chainReader = options?.chainReader ?? buildTransferChainReader();
     const transferService =
       options?.transferService ??
-      new RequestWalletTransferService(repository, holdingsReader, {
-        getTokenBalance: vi.fn().mockResolvedValue(10n),
-        isHolderAuthorized: vi.fn().mockResolvedValue(true),
-        isTokenPaused: vi.fn().mockResolvedValue(false),
-        buildTransferRequest: vi.fn().mockReturnValue({
-          chainId: 84532,
-          to: "0xproperty",
-          data: "0xdeadbeef",
-          value: "0",
-        }),
-      });
+      new RequestWalletTransferService(repository, holdingsReader, chainReader);
 
+    const probe = vi.fn().mockResolvedValue(true);
     const app = express();
     const authenticated: RequestHandler = (_request, response, next) => {
       response.locals.authContext = {
@@ -315,6 +538,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
+        probe,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         new GetWalletStatusService(repository),
         undefined,
@@ -322,7 +546,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       ),
     );
     app.use(errorHandler);
-    return { app };
+    return { app, probe, chainReader, holdingsReader };
   }
 
   it("builds an unsigned transfer transaction for the caller's wallet", async () => {
@@ -342,18 +566,240 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
         from_wallet_address: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
         to_wallet_address: toWalletAddress,
         unsigned_transaction: { chain_id: 84532, to: "0xproperty", data: "0xdeadbeef", value: "0" },
+        preflight: {
+          block_number: "123456",
+          block_hash: SNAPSHOT_BLOCK_HASH,
+          sender_balance: "10",
+          recipient_authorized: true,
+          token_paused: false,
+          simulation: "passed",
+        },
       },
     });
   });
 
-  it("rejects a malformed recipient address before touching the chain", async () => {
+  // The second row is the EIP-55 spelling above with its last hex digit
+  // mistyped, so its checksum is wrong. Lowercasing discards the casing that
+  // carries the checksum, so such a recipient is accepted and forwarded: the
+  // edge does not verify EIP-55. Before the canonical form this recipient
+  // reached viem as typed, and viem rejected it with InvalidAddressError (a
+  // 500 at chain-call time), which was the only typo guard a typed recipient
+  // had. Enforcing the checksum at the edge is a decision for the founder, not
+  // something this test changes: see "founder decisions" in the pull request.
+  it.each([
+    ["a valid EIP-55 recipient", "0x71C7656EC7ab88b098defB751B7401B5f6d8976F", true],
+    ["a recipient whose EIP-55 checksum is wrong", "0x71C7656EC7ab88b098defB751B7401B5f6d8976E", false],
+  ])("canonicalises %s before the chain reader and the response see it", async (_label, mixedCaseRecipient, checksumIsValid) => {
+    expect(isAddress(mixedCaseRecipient, { strict: true })).toBe(checksumIsValid);
+    const chainReader = buildTransferChainReader();
+    const { app } = buildTransferApp({ chainReader });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: `  ${mixedCaseRecipient} `, amount: "3" });
+
+    expect(response.status).toBe(200);
+    expect(chainReader.readTransferSnapshot).toHaveBeenCalledWith(
+      expect.objectContaining({ to: mixedCaseRecipient.toLowerCase() }),
+    );
+    expect(response.body.data.to_wallet_address).toBe(mixedCaseRecipient.toLowerCase());
+  });
+
+  it("rejects a recipient with an 0X prefix with one field error and never reaches the chain", async () => {
     const { app } = buildTransferApp();
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: `0X${toWalletAddress.slice(2)}`, amount: "3" });
+
+    expect(response.status).toBe(422);
+    expect(response.body.field_errors).toEqual([
+      expect.objectContaining({ field: "to_wallet_address", code: "invalid_format" }),
+    ]);
+  });
+
+  it("never asks the fresh-authentication probe", async () => {
+    const { app, probe } = buildTransferApp();
+
+    await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("returns the block the preview was read at, as strings, and the response schema does not strip it", async () => {
+    const { app } = buildTransferApp({
+      chainReader: buildTransferChainReader(
+        buildPassingSnapshot({
+          block: { number: 2n ** 60n, hash: `0x${"0f".repeat(32)}` },
+          senderBalance: 2n ** 70n,
+        }),
+      ),
+    });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data.preflight).toEqual({
+      block_number: (2n ** 60n).toString(),
+      block_hash: `0x${"0f".repeat(32)}`,
+      sender_balance: (2n ** 70n).toString(),
+      recipient_authorized: true,
+      token_paused: false,
+      simulation: "passed",
+    });
+  });
+
+  it("answers 422 wallet.transfer_lane_closed in the documented envelope while the contract's lane is closed", async () => {
+    const { app } = buildTransferApp({
+      chainReader: buildTransferChainReader(
+        buildPassingSnapshot({
+          simulation: { status: "reverted", revert: { errorName: "TransferLaneClosed" } },
+        }),
+      ),
+    });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(response.status).toBe(422);
+    expect(Object.keys(response.body).sort()).toEqual(["code", "detail", "status", "title", "trace_id", "type"]);
+    expect(response.body).toMatchObject({
+      code: "wallet.transfer_lane_closed",
+      title: "Transfers not open",
+      status: 422,
+    });
+    expect(response.body.unsigned_transaction).toBeUndefined();
+    expect(response.body.data).toBeUndefined();
+  });
+
+  it("answers 503 wallet.chain_unavailable, not 500, when the chain cannot be read", async () => {
+    const { app } = buildTransferApp({
+      chainReader: buildTransferChainReader(() =>
+        Promise.reject(new ChainStateUnavailableError("HttpRequestError: HTTP request failed.")),
+      ),
+    });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(response.status).toBe(503);
+    expect(response.body).toMatchObject({
+      code: "wallet.chain_unavailable",
+      title: "Chain state unavailable",
+      status: 503,
+    });
+    expect(Object.keys(response.body).sort()).toEqual(["code", "detail", "status", "title", "trace_id", "type"]);
+  });
+
+  it("answers 422, not 200, when the snapshot says the token is paused", async () => {
+    const { app } = buildTransferApp({
+      chainReader: buildTransferChainReader(buildPassingSnapshot({ tokenPaused: true })),
+    });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(response.status).toBe(422);
+    expect(response.body.code).toBe("wallet.token_paused");
+  });
+
+  it("answers 404 wallet.not_registered in the documented envelope for a pending wallet claim, and prepares nothing", async () => {
+    const { app, chainReader, holdingsReader } = buildTransferApp({ registeredAt: null });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(response.status).toBe(404);
+    expect(Object.keys(response.body).sort()).toEqual(["code", "detail", "status", "title", "trace_id", "type"]);
+    expect(response.body).toMatchObject({
+      type: "https://api.vistablox.io/errors/wallet.not_registered",
+      code: "wallet.not_registered",
+      title: "Wallet not registered",
+      status: 404,
+    });
+    expect(response.body.data).toBeUndefined();
+    expect(response.body.unsigned_transaction).toBeUndefined();
+    expect(holdingsReader.listTokenHoldings).not.toHaveBeenCalled();
+    expect(chainReader.readTransferSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("answers a malformed body 422 before it looks at the wallet, so a pending claim is not revealed by it", async () => {
+    const { app, chainReader } = buildTransferApp({ registeredAt: null });
 
     const response = await request(app)
       .post("/v1/investor-profile/wallet/transfers")
       .send({ piv_id: "piv_01", to_wallet_address: "not-an-address", amount: "3" });
 
     expect(response.status).toBe(422);
+    expect(response.body.code).toBe("validation.invalid_field");
+    expect(chainReader.readTransferSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("keeps GET /v1/investor-profile/wallet reporting the pending claim, so a client can tell it from no wallet", async () => {
+    const { app } = buildTransferApp({ registeredAt: null });
+
+    const response = await request(app).get("/v1/investor-profile/wallet");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: {
+        wallet_address: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
+        status: "pending",
+        requested_at: "2026-09-02T10:00:00.000Z",
+        registered_at: null,
+      },
+    });
+  });
+
+  it("has a response schema that cannot carry a preview saying no", () => {
+    const body = {
+      data: {
+        piv_id: "piv_01",
+        token_id: "7",
+        amount: "3",
+        from_wallet_address: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
+        to_wallet_address: toWalletAddress,
+        unsigned_transaction: { chain_id: 84532, to: "0xproperty", data: "0xdeadbeef", value: "0" },
+        preflight: {
+          block_number: "1",
+          block_hash: SNAPSHOT_BLOCK_HASH,
+          sender_balance: "10",
+          recipient_authorized: true,
+          token_paused: false,
+          simulation: "passed",
+        },
+      },
+    };
+    expect(requestWalletTransferResponseSchema.safeParse(body).success).toBe(true);
+    for (const override of [
+      { recipient_authorized: false },
+      { token_paused: true },
+      { simulation: "reverted" },
+      { block_hash: "0xABC" },
+      { block_number: "-1" },
+    ]) {
+      const broken = { data: { ...body.data, preflight: { ...body.data.preflight, ...override } } };
+      expect(requestWalletTransferResponseSchema.safeParse(broken).success).toBe(false);
+    }
+  });
+
+  it("rejects a malformed recipient address before touching the chain", async () => {
+    const { app, chainReader } = buildTransferApp();
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: "not-an-address", amount: "3" });
+
+    expect(response.status).toBe(422);
+    expect(chainReader.readTransferSnapshot).not.toHaveBeenCalled();
   });
 
   it("is not mounted when no transfer service is configured", async () => {

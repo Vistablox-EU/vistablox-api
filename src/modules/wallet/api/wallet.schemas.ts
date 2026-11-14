@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { canonicalWalletAddress } from "../../../shared/domain/wallet-address.js";
+
 const dateTime = z.iso.datetime();
 // The zero address cannot send a transaction, so a wallet registered under it
 // can never complete VistaBloxWalletRegistry.register() (the registry records
@@ -7,11 +9,15 @@ const dateTime = z.iso.datetime();
 // letters, so compare against the lowercase literal and leave the "0X"
 // spelling to the shape check.
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+// Any hex case is accepted, but only the canonical lowercase spelling leaves
+// this schema: the services, the repository and the database never see another
+// one. The regex runs first and a failed regex skips the transform.
 const ethAddress = z
   .string()
   .trim()
   .regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 20-byte, 0x-prefixed hex address")
-  .refine((value) => value !== ZERO_ADDRESS, { message: "Must not be the zero address" });
+  .refine((value) => value !== ZERO_ADDRESS, { message: "Must not be the zero address" })
+  .transform(canonicalWalletAddress);
 
 export const registerWalletBodySchema = z.object({
   wallet_address: ethAddress,
@@ -69,6 +75,19 @@ export const requestWalletTransferResponseSchema = z.object({
       to: z.string().min(1),
       data: z.string().min(1),
       value: z.string().min(1),
+    }),
+    // Advisory snapshot the response was prepared from: every read and the
+    // simulation come from this one block. The literals are deliberate: a
+    // 200 whose preview says "no" must never be emitted, so such a value
+    // fails here (500) instead of reaching the client. The contract stays the
+    // final authority; state can change after this block.
+    preflight: z.object({
+      block_number: z.string().regex(/^[0-9]+$/),
+      block_hash: z.string().regex(/^0x[0-9a-f]{64}$/),
+      sender_balance: z.string().regex(/^[0-9]+$/),
+      recipient_authorized: z.literal(true),
+      token_paused: z.literal(false),
+      simulation: z.literal("passed"),
     }),
   }),
 });

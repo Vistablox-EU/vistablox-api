@@ -20,7 +20,10 @@ import {
   type DpopEnforcementOptions,
 } from "./modules/auth/api/shared/require-authentication.js";
 import { rejectDisabledAuthRoutes } from "./modules/auth/api/shared/reject-disabled-auth.js";
-import { createRequireFreshAuthentication } from "./modules/auth/api/customer/require-fresh-authentication.js";
+import {
+  createFreshAuthenticationProbe,
+  createRequireFreshAuthentication,
+} from "./modules/auth/api/customer/require-fresh-authentication.js";
 import {
   createRequireAdminOperations,
   createRequireAppraisalPartner,
@@ -316,6 +319,9 @@ export interface AppDependencies {
     loginMethods?: {
       unlinker: LoginMethodUnlinker;
     };
+    // Requires customerSessions: replacing a pending claim needs the
+    // fresh-authentication probe built from its repository (createApp throws
+    // otherwise).
     wallet?: {
       repository: WalletRepository;
       kycEligibilityReader: KycEligibilityReader;
@@ -593,6 +599,13 @@ export function createApp(dependencies: AppDependencies): Express {
         : createRequireFreshAuthentication(
             dependencies.protectedApi.customerSessions.repository,
           );
+    // The same rule as requireFreshAuthentication, as a question rather than a
+    // gate, for the one route that needs freshness only on some of its paths
+    // (replacing a pending wallet claim).
+    const freshAuthenticationProbe =
+      dependencies.protectedApi.customerSessions === undefined
+        ? undefined
+        : createFreshAuthenticationProbe(dependencies.protectedApi.customerSessions.repository);
     app.use(
       "/v1/offerings",
       createInvestorOfferingRouter(
@@ -764,10 +777,19 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     if (dependencies.protectedApi.wallet !== undefined) {
       const wallet = dependencies.protectedApi.wallet;
+      // Fail at construction, not per request: without the probe every
+      // replacement of a pending claim would be refused for ever, with an
+      // error no amount of signing in again could clear.
+      if (freshAuthenticationProbe === undefined) {
+        throw new Error(
+          "protectedApi.wallet requires protectedApi.customerSessions: replacing a pending wallet claim needs the fresh-authentication probe",
+        );
+      }
       app.use(
         "/v1/investor-profile/wallet",
         createWalletRouter(
           requireAuthentication,
+          freshAuthenticationProbe,
           new RegisterWalletService(
             wallet.repository,
             wallet.kycEligibilityReader,

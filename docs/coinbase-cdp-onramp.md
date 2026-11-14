@@ -5,7 +5,7 @@ This is the buy-side (`EUR -> EURC`) REST surface that backs reservation funding
 ## Runtime flow
 
 1. `CreateReservationService` creates the reservation row and its first `money.money_events` row inside one transaction (`AD-146`; see [`investor-offering.md`](investor-offering.md#reservation-creation)).
-2. It then calls `POST /onramp/v1/token` with the investor's already-registered wallet address, synchronously in the request path, and records `eurc_purchase_pending`.
+2. It then calls `POST /onramp/v1/token` with the investor's already-registered wallet address (stored lowercase; the client sends Coinbase its EIP-55 checksum spelling, and passes anything that is not a valid address through unchanged), synchronously in the request path, and records `eurc_purchase_pending`.
 3. The response is turned into a hosted purchase URL (`https://pay.coinbase.com/buy/select-asset?sessionToken=...&partnerUserRef=...&redirectUrl=...`) and returned to the client. The investor picks their own payment method inside Coinbase's hosted UI — VistaBlox never collects or stores one, which is load-bearing for `AD-254`'s non-custody position (the purchase must be investor-initiated, not something VistaBlox performs on their behalf).
 4. `partnerUserRef` is the reservation ID, not the account ID, so a later `GET /onramp/v1/buy/user/{partnerUserRef}/transactions` call resolves unambiguously to one reservation even if an account has reserved more than once over time.
 
