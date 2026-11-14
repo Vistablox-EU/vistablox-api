@@ -90,9 +90,28 @@ export const walletAccountIdParamsSchema = z.object({
   account_id: z.string().min(1),
 });
 export const reconcileWalletRegistrationBodySchema = z.object({
-  transaction_hash: z.string().regex(/^0x[0-9a-fA-F]{64}$/),
+  // Stored and compared lower case, so the spelling staff typed does not matter.
+  transaction_hash: z
+    .string()
+    .regex(/^0x[0-9a-fA-F]{64}$/)
+    .transform((value) => value.toLowerCase()),
 });
-export const reconcileWalletRegistrationResponseSchema = z.object({ data: z.object({ account_id: z.string(), wallet_address: z.string(), status: z.literal("registered"), registration_tx_hash: z.string(), registration_block_number: z.string(), requested_at: dateTime, registered_at: dateTime }) });
+export const reconcileWalletRegistrationResponseSchema = z.object({
+  data: z.object({
+    account_id: z.string(),
+    wallet_address: z.string(),
+    status: z.literal("registered"),
+    registration_tx_hash: z.string(),
+    registration_block_number: z.string(),
+    registration_block_hash: z.string(),
+    registration_log_index: z.number().int(),
+    // What the call did: confirmed a pending registration, filled in or
+    // replaced the recorded evidence, or found the row already holding this event.
+    outcome: z.enum(["confirmed", "evidence_recorded", "evidence_replaced", "unchanged"]),
+    requested_at: dateTime,
+    registered_at: dateTime,
+  }),
+});
 
 // Staff-only view (admin_operations + staff WebAuthn, same gate as the
 // equivalent KYC operations read) of the same wallet_registrations row the
@@ -108,5 +127,17 @@ export const operationsWalletAccountResponseSchema = z.object({
     status: z.enum(["pending", "registered"]),
     requested_at: dateTime,
     registered_at: dateTime.nullable(),
+    // The on-chain event that confirmed the registration and what the job that
+    // re-checks it has found. Staff only: a customer is never shown it.
+    registration_evidence: z.object({
+      status: z.enum(["none", "partial", "recorded", "verified", "flagged"]),
+      transaction_hash: z.string().nullable(),
+      block_number: z.string().nullable(),
+      block_hash: z.string().nullable(),
+      log_index: z.number().int().nullable(),
+      verified_at: dateTime.nullable(),
+      flag: z.enum(["transaction_missing", "transaction_reverted", "event_missing"]).nullable(),
+      flagged_at: dateTime.nullable(),
+    }),
   }),
 });

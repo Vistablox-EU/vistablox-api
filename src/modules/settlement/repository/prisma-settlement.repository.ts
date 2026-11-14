@@ -1,17 +1,28 @@
 import { ulid } from "ulid";
 
+import type { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import { isUniqueViolation } from "../../../infrastructure/database/unique-violation.js";
+import {
+  normalizeChainHash,
+  type WalletRegistrationEvidence,
+  type WalletRegistrationEvidenceFlag,
+} from "../../../shared/domain/wallet-registration-evidence.js";
 import type {
   CreateEscrowMintIntentInput,
   EscrowMintIntent,
   EscrowMintIntentStatus,
-  PendingWalletRegistration,
   PivPendingEscrowResolution,
   PivTokenHolding,
   PivTokenHoldingsReader,
   RecordEscrowMintedPositionInput,
   SettlementRepository,
   WalletRegistrationAddressMismatchInput,
+  WalletRegistrationConfirmation,
+  WalletRegistrationEvidenceKey,
+  WalletRegistrationEvidenceReplacement,
+  WalletRegistrationRecheckCandidate,
+  WalletRegistrationRecord,
 } from "./settlement.repository.js";
 
 // Reuses the generic platform.settings key-value table (PlatformSetting)
@@ -19,6 +30,101 @@ import type {
 // value to persist and this table already exists for exactly this kind of
 // thing.
 const WALLET_REGISTRY_CURSOR_SETTING_KEY = "wallet_registry.last_processed_block";
+
+// The partial unique index on (registration_tx_hash, registration_log_index):
+// an on-chain event backs at most one registration. Named so a violation of it
+// is told apart from any other unique constraint the same UPDATE can meet.
+const CHAIN_EVENT_UNIQUE_INDEX = "uq_wallet_registrations_chain_event";
+
+const WALLET_REGISTRATION_RECORD_SELECT = {
+  accountId: true,
+  walletAddress: true,
+  registeredAt: true,
+  registrationTxHash: true,
+  registrationBlockNumber: true,
+  registrationBlockHash: true,
+  registrationLogIndex: true,
+  registrationEvidenceFlag: true,
+} as const;
+
+interface WalletRegistrationRecordRow {
+  accountId: string;
+  walletAddress: string;
+  registeredAt: Date | null;
+  registrationTxHash: string | null;
+  registrationBlockNumber: bigint | null;
+  registrationBlockHash: string | null;
+  registrationLogIndex: number | null;
+  registrationEvidenceFlag: string | null;
+}
+
+function toWalletRegistrationRecord(row: WalletRegistrationRecordRow): WalletRegistrationRecord {
+  return {
+    accountId: row.accountId,
+    walletAddress: row.walletAddress,
+    registeredAt: row.registeredAt,
+    transactionHash: row.registrationTxHash,
+    blockNumber: row.registrationBlockNumber,
+    blockHash: row.registrationBlockHash,
+    logIndex: row.registrationLogIndex,
+    // The evidence_state_check constraint is what guarantees this cast.
+    evidenceFlag: row.registrationEvidenceFlag as WalletRegistrationEvidenceFlag | null,
+  };
+}
+
+function holdsKey(row: WalletRegistrationRecordRow, key: WalletRegistrationEvidenceKey): boolean {
+  const same = (stored: string | null, expected: string | null) =>
+    stored === null || expected === null ? stored === expected : stored.toLowerCase() === expected.toLowerCase();
+  return (
+    same(row.registrationTxHash, key.transactionHash) &&
+    same(row.registrationBlockHash, key.blockHash) &&
+    row.registrationLogIndex === key.logIndex
+  );
+}
+
+function evidenceColumns(evidence: WalletRegistrationEvidence) {
+  // The repository is the persistence boundary: it stores the one spelling the
+  // CHECK constraint accepts whatever the caller passed.
+  return {
+    registrationTxHash: normalizeChainHash(evidence.transactionHash),
+    registrationBlockNumber: evidence.blockNumber,
+    registrationBlockHash: normalizeChainHash(evidence.blockHash),
+    registrationLogIndex: evidence.logIndex,
+  };
+}
+
+function evidenceForAudit(evidence: {
+  transactionHash: string | null;
+  blockHash: string | null;
+  blockNumber: bigint | null;
+  logIndex: number | null;
+}) {
+  return {
+    tx_hash: evidence.transactionHash,
+    block_hash: evidence.blockHash,
+    block_number: evidence.blockNumber?.toString() ?? null,
+    log_index: evidence.logIndex,
+  };
+}
+
+// Takes the row lock a compare-and-set that also writes an audit row needs, so
+// the values read for the audit are the values the write replaces.
+async function lockWalletRegistration(
+  transaction: Prisma.TransactionClient,
+  accountId: string,
+): Promise<WalletRegistrationRecordRow | null> {
+  const locked = await transaction.$queryRaw<Array<{ account_id: string }>>`
+    SELECT account_id
+    FROM settlement.wallet_registrations
+    WHERE account_id = ${accountId}
+    FOR UPDATE
+  `;
+  if (locked.length === 0) return null;
+  return transaction.walletRegistration.findUnique({
+    where: { accountId },
+    select: WALLET_REGISTRATION_RECORD_SELECT,
+  });
+}
 
 interface EscrowMintIntentRow {
   id: string;
@@ -231,16 +337,15 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     });
   }
 
-  public async findPendingWalletRegistrationByCommitment(
-    commitment: string,
-  ): Promise<PendingWalletRegistration | null> {
+  public async findWalletRegistrationByCommitment(commitment: string): Promise<WalletRegistrationRecord | null> {
     // Case-insensitive for the same reason resolveAccountIdForWallet is
     // above: nothing guarantees the on-chain event's hex casing matches what
     // was stored when the commitment was generated.
-    return this.database.walletRegistration.findFirst({
-      where: { registrationCommitment: { equals: commitment, mode: "insensitive" }, registeredAt: null },
-      select: { accountId: true, walletAddress: true },
+    const row = await this.database.walletRegistration.findFirst({
+      where: { registrationCommitment: { equals: commitment, mode: "insensitive" } },
+      select: WALLET_REGISTRATION_RECORD_SELECT,
     });
+    return row === null ? null : toWalletRegistrationRecord(row);
   }
 
   public async countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number> {
@@ -249,11 +354,203 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     });
   }
 
-  public async confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void> {
-    await this.database.walletRegistration.update({
-      where: { accountId },
-      data: { registeredAt },
+  public async confirmWalletRegistration(input: {
+    accountId: string;
+    registeredAt: Date;
+    evidence: WalletRegistrationEvidence;
+  }): Promise<WalletRegistrationConfirmation> {
+    // One statement: registered_at and the event's identity land together or
+    // not at all. The registered_at IS NULL predicate is the compare-and-set
+    // that makes a second confirmation of the same row a no-op, and it is
+    // evaluated under the row lock UPDATE takes, so of several concurrent
+    // confirmations exactly one writes (count 1) and the others see count 0.
+    try {
+      const result = await this.database.walletRegistration.updateMany({
+        where: { accountId: input.accountId, registeredAt: null },
+        data: { registeredAt: input.registeredAt, ...evidenceColumns(input.evidence) },
+      });
+      return result.count === 1 ? "confirmed" : "already_registered";
+    } catch (error) {
+      // Another row already holds this (transaction hash, log index). The
+      // statement did not apply, so registered_at and the evidence are still
+      // all NULL on this row.
+      if (isUniqueViolation(error, CHAIN_EVENT_UNIQUE_INDEX)) return "event_taken";
+      throw error;
+    }
+  }
+
+  public async replaceWalletRegistrationEvidence(input: {
+    accountId: string;
+    expected: WalletRegistrationEvidenceKey;
+    next: WalletRegistrationEvidence;
+    reason: "recorded" | "refreshed";
+    changedAt: Date;
+  }): Promise<WalletRegistrationEvidenceReplacement> {
+    try {
+      return await this.database.$transaction(async (transaction) => {
+        const current = await lockWalletRegistration(transaction, input.accountId);
+        if (current === null || current.registeredAt === null || !holdsKey(current, input.expected)) {
+          return "stale" as const;
+        }
+        await transaction.walletRegistration.update({
+          where: { accountId: input.accountId },
+          data: {
+            ...evidenceColumns(input.next),
+            registrationEvidenceVerifiedAt: null,
+            registrationEvidenceFlaggedAt: null,
+            registrationEvidenceFlag: null,
+          },
+        });
+        await transaction.auditLog.create({
+          data: {
+            id: `audit_${ulid()}`,
+            action: `settlement.wallet_registration_evidence_${input.reason}`,
+            resourceType: "wallet_registration",
+            resourceId: input.accountId,
+            changes: {
+              previous:
+                current.registrationTxHash === null
+                  ? null
+                  : evidenceForAudit({
+                      transactionHash: current.registrationTxHash,
+                      blockHash: current.registrationBlockHash,
+                      blockNumber: current.registrationBlockNumber,
+                      logIndex: current.registrationLogIndex,
+                    }),
+              next: evidenceForAudit({
+                transactionHash: normalizeChainHash(input.next.transactionHash),
+                blockHash: normalizeChainHash(input.next.blockHash),
+                blockNumber: input.next.blockNumber,
+                logIndex: input.next.logIndex,
+              }),
+              previous_flag: current.registrationEvidenceFlag,
+            },
+            createdAt: input.changedAt,
+          },
+        });
+        return "replaced" as const;
+      });
+    } catch (error) {
+      // Raised outside the transaction on purpose: a failed statement aborts
+      // the Postgres transaction, so there is nothing to continue inside it.
+      if (isUniqueViolation(error, CHAIN_EVENT_UNIQUE_INDEX)) return "event_taken";
+      throw error;
+    }
+  }
+
+  public async markWalletRegistrationEvidenceVerified(input: {
+    accountId: string;
+    expected: WalletRegistrationEvidenceKey;
+    verifiedAt: Date;
+  }): Promise<boolean> {
+    const result = await this.database.walletRegistration.updateMany({
+      where: {
+        accountId: input.accountId,
+        registeredAt: { not: null },
+        registrationTxHash: input.expected.transactionHash,
+        registrationBlockHash: input.expected.blockHash,
+        registrationLogIndex: input.expected.logIndex,
+        registrationEvidenceVerifiedAt: null,
+        registrationEvidenceFlaggedAt: null,
+      },
+      data: { registrationEvidenceVerifiedAt: input.verifiedAt },
     });
+    return result.count === 1;
+  }
+
+  public async flagWalletRegistrationEvidence(input: {
+    accountId: string;
+    expected: WalletRegistrationEvidenceKey;
+    flag: WalletRegistrationEvidenceFlag;
+    flaggedAt: Date;
+  }): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      const current = await lockWalletRegistration(transaction, input.accountId);
+      if (
+        current === null ||
+        current.registeredAt === null ||
+        current.registrationBlockHash === null ||
+        current.registrationEvidenceFlag !== null ||
+        !holdsKey(current, input.expected)
+      ) {
+        return false;
+      }
+      // registered_at is deliberately not touched: the registration was proven
+      // by the wallet's signature; a flag only says the recorded event is gone.
+      await transaction.walletRegistration.update({
+        where: { accountId: input.accountId },
+        data: { registrationEvidenceFlaggedAt: input.flaggedAt, registrationEvidenceFlag: input.flag },
+      });
+      await transaction.auditLog.create({
+        data: {
+          id: `audit_${ulid()}`,
+          action: "settlement.wallet_registration_evidence_flagged",
+          resourceType: "wallet_registration",
+          resourceId: input.accountId,
+          changes: {
+            flag: input.flag,
+            ...evidenceForAudit({
+              transactionHash: current.registrationTxHash,
+              blockHash: current.registrationBlockHash,
+              blockNumber: current.registrationBlockNumber,
+              logIndex: current.registrationLogIndex,
+            }),
+          },
+          createdAt: input.flaggedAt,
+        },
+      });
+      return true;
+    });
+  }
+
+  public async listWalletRegistrationsForEvidenceRecheck(
+    limit: number,
+  ): Promise<WalletRegistrationRecheckCandidate[]> {
+    // Matches idx_wallet_registrations_evidence_recheck (partial, ordered by
+    // block number) exactly.
+    const rows = await this.database.walletRegistration.findMany({
+      where: {
+        registrationBlockHash: { not: null },
+        registrationEvidenceVerifiedAt: null,
+        registrationEvidenceFlaggedAt: null,
+      },
+      orderBy: { registrationBlockNumber: "asc" },
+      take: limit,
+      select: {
+        accountId: true,
+        walletAddress: true,
+        registrationCommitment: true,
+        registrationTxHash: true,
+        registrationBlockNumber: true,
+        registrationBlockHash: true,
+        registrationLogIndex: true,
+      },
+    });
+    const candidates: WalletRegistrationRecheckCandidate[] = [];
+    for (const row of rows) {
+      // The shape check keeps these four together; the guard is for a row the
+      // constraint was never validated against.
+      if (
+        row.registrationTxHash === null ||
+        row.registrationBlockHash === null ||
+        row.registrationBlockNumber === null ||
+        row.registrationLogIndex === null
+      ) {
+        continue;
+      }
+      candidates.push({
+        accountId: row.accountId,
+        walletAddress: row.walletAddress,
+        registrationCommitment: row.registrationCommitment,
+        evidence: {
+          transactionHash: row.registrationTxHash,
+          blockHash: row.registrationBlockHash,
+          blockNumber: row.registrationBlockNumber,
+          logIndex: row.registrationLogIndex,
+        },
+      });
+    }
+    return candidates;
   }
 
   public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {
