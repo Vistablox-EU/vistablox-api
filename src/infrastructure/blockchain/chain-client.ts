@@ -15,6 +15,11 @@ import { base, baseSepolia } from "viem/chains";
 import vistaBloxPropertyAbi from "./abis/VistaBloxProperty.abi.json" with { type: "json" };
 import vistaBloxIpoEscrowAbi from "./abis/VistaBloxIpoEscrow.abi.json" with { type: "json" };
 import vistaBloxWalletRegistryAbi from "./abis/VistaBloxWalletRegistry.abi.json" with { type: "json" };
+import {
+  readTransferSnapshot,
+  type TransferSnapshot,
+  type TransferSnapshotInput,
+} from "./transfer-snapshot.js";
 
 type OperatorChain = typeof base | typeof baseSepolia;
 
@@ -172,6 +177,23 @@ export class ChainReader {
       functionName: "safeTransferFrom",
       args: [input.from, input.to, input.tokenId, input.amount, "0x"],
     });
+  }
+
+  // Everything the transfer preflight needs, read at one pinned block and
+  // simulated at that same block (see transfer-snapshot.ts). Lives here
+  // because publicClient is deliberately private: exposing it would expose
+  // sendRawTransaction and weaken the no-signing, no-broadcast guarantee
+  // documented above. A narrow read-only method keeps that guarantee.
+  public readTransferSnapshot(input: TransferSnapshotInput): Promise<TransferSnapshot> {
+    return readTransferSnapshot(
+      {
+        client: this.publicClient,
+        propertyAddress: this.config.propertyContractAddress,
+        chainId: this.chainId,
+        encodeTransferCalldata: (calldataInput) => this.encodeTransferCalldata(calldataInput),
+      },
+      input,
+    );
   }
 }
 
