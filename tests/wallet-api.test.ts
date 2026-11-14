@@ -283,6 +283,9 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
   function buildTransferApp(options?: {
     transferService?: RequestWalletTransferService;
     chainReader?: ReturnType<typeof buildTransferChainReader>;
+    // The wallet row's registered_at. Defaults to a confirmed registration;
+    // pass null for a pending claim.
+    registeredAt?: Date | null;
   }) {
     const repository: WalletRepository = {
       registerWallet: vi.fn(),
@@ -290,7 +293,10 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
         walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
         registrationCommitment: "commitment_01",
         requestedAt: new Date("2026-09-02T10:00:00.000Z"),
-        registeredAt: new Date("2026-09-02T10:05:00.000Z"),
+        registeredAt:
+          options !== undefined && "registeredAt" in options
+            ? options.registeredAt
+            : new Date("2026-09-02T10:05:00.000Z"),
       }),
     };
     const holdingsReader: PivTokenHoldingsReader = {
@@ -323,7 +329,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       ),
     );
     app.use(errorHandler);
-    return { app, chainReader };
+    return { app, chainReader, holdingsReader };
   }
 
   it("builds an unsigned transfer transaction for the caller's wallet", async () => {
@@ -435,6 +441,55 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
 
     expect(response.status).toBe(422);
     expect(response.body.code).toBe("wallet.token_paused");
+  });
+
+  it("answers 404 wallet.not_registered in the documented envelope for a pending wallet claim, and prepares nothing", async () => {
+    const { app, chainReader, holdingsReader } = buildTransferApp({ registeredAt: null });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(response.status).toBe(404);
+    expect(Object.keys(response.body).sort()).toEqual(["code", "detail", "status", "title", "trace_id", "type"]);
+    expect(response.body).toMatchObject({
+      type: "https://api.vistablox.io/errors/wallet.not_registered",
+      code: "wallet.not_registered",
+      title: "Wallet not registered",
+      status: 404,
+    });
+    expect(response.body.data).toBeUndefined();
+    expect(response.body.unsigned_transaction).toBeUndefined();
+    expect(holdingsReader.listTokenHoldings).not.toHaveBeenCalled();
+    expect(chainReader.readTransferSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("answers a malformed body 422 before it looks at the wallet, so a pending claim is not revealed by it", async () => {
+    const { app, chainReader } = buildTransferApp({ registeredAt: null });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: "not-an-address", amount: "3" });
+
+    expect(response.status).toBe(422);
+    expect(response.body.code).toBe("validation.invalid_field");
+    expect(chainReader.readTransferSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("keeps GET /v1/investor-profile/wallet reporting the pending claim, so a client can tell it from no wallet", async () => {
+    const { app } = buildTransferApp({ registeredAt: null });
+
+    const response = await request(app).get("/v1/investor-profile/wallet");
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: {
+        wallet_address: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
+        status: "pending",
+        requested_at: "2026-09-02T10:00:00.000Z",
+        registered_at: null,
+      },
+    });
   });
 
   it("has a response schema that cannot carry a preview saying no", () => {
