@@ -23,6 +23,13 @@ export interface RegisteredWallet {
 export interface ReconcileWalletRegistrationInput {
   accountId: string;
   actorAccountId: string;
+  // The registration the caller verified the evidence against, exactly as the
+  // row held it when it was read. The reconcile is a compare-and-set on both:
+  // if the account replaced its pending claim since, nothing is written and
+  // WalletRegistrationChangedError is thrown, so the new, unproven address is
+  // never confirmed on the old address's evidence.
+  expectedWalletAddress: string;
+  expectedRegistrationCommitment: string;
   // The event as the chain verifier read it, hashes lower case.
   evidence: WalletRegistrationEvidence;
   // The event's own timestamp; only written when the row is still pending.
@@ -54,9 +61,22 @@ export type ReconcileWalletRegistrationResult =
   | { kind: "conflict"; reason: "different_event" | "event_taken" }
   | { kind: "not_found" };
 
+// address_mismatch: the account's own registration is CONFIRMED on a different
+// address. address_claimed: the address is CONFIRMED for another account. A
+// pending claim never produces either: it is account-scoped, replaceable by
+// its own account, and does not block anyone else.
 export class WalletAddressConflictError extends Error {
   public constructor(public readonly reason: "address_mismatch" | "address_claimed") {
     super(`Wallet address conflict: ${reason}`);
+  }
+}
+
+// The registration a caller verified (its address and commitment) is no longer
+// the account's registration: the customer replaced the pending claim between
+// the read and the write, so the evidence no longer applies to it.
+export class WalletRegistrationChangedError extends Error {
+  public constructor() {
+    super("The wallet registration changed after it was read.");
   }
 }
 
@@ -68,6 +88,11 @@ export interface WalletRepository {
     requestedAt: Date;
   }): Promise<RegisteredWallet>;
   findByAccountId(accountId: string): Promise<RegisteredWallet | null>;
+  // Compare-and-set on the registration the caller verified (see
+  // ReconcileWalletRegistrationInput): WalletRegistrationChangedError when the
+  // row no longer holds expectedWalletAddress and expectedRegistrationCommitment,
+  // WalletAddressConflictError("address_claimed") when another account already
+  // holds the address confirmed. Both leave the row untouched.
   reconcileWalletRegistration?(input: ReconcileWalletRegistrationInput): Promise<ReconcileWalletRegistrationResult>;
 }
 
