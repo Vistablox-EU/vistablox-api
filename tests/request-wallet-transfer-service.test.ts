@@ -103,6 +103,82 @@ describe("RequestWalletTransferService", () => {
     expect(chainReader.readTransferSnapshot).not.toHaveBeenCalled();
   });
 
+  // A pending claim (registered_at null) is an address the customer typed, not
+  // a wallet anyone has shown control of, so transfers treat it as no wallet.
+  describe("a wallet claim that is still pending", () => {
+    const pendingWallet = {
+      walletAddress,
+      registrationCommitment: "commitment_01",
+      requestedAt: new Date("2026-09-02T10:00:00.000Z"),
+      registeredAt: null,
+    };
+
+    function buildPending(holdingsReader = buildHoldingsReader()) {
+      const chainReader = buildTransferChainReader();
+      const walletRepository = buildRepository({
+        findByAccountId: vi.fn().mockResolvedValue(pendingWallet),
+      });
+      return {
+        chainReader,
+        holdingsReader,
+        walletRepository,
+        service: new RequestWalletTransferService(walletRepository, holdingsReader, chainReader),
+      };
+    }
+
+    it("is rejected as not registered, before the holdings and the chain are read", async () => {
+      const { chainReader, holdingsReader, service } = buildPending();
+
+      await expect(execute(service)).rejects.toMatchObject({ code: "wallet.not_registered", status: 404 });
+      expect(holdingsReader.listTokenHoldings).not.toHaveBeenCalled();
+      // The snapshot reader is also what builds the calldata, so neither the
+      // preview nor the unsigned transaction is produced.
+      expect(chainReader.readTransferSnapshot).not.toHaveBeenCalled();
+    });
+
+    it("reads the wallet row exactly once, and does not use the repository to look again", async () => {
+      const { walletRepository, service } = buildPending();
+
+      await execute(service).catch(() => undefined);
+
+      expect(walletRepository.findByAccountId).toHaveBeenCalledTimes(1);
+      expect(walletRepository.findByAccountId).toHaveBeenCalledWith(accountId);
+    });
+
+    it("answers with the same code, title and status as no wallet at all, and only the detail tells them apart", async () => {
+      const { service: pendingService } = buildPending();
+      const missingService = new RequestWalletTransferService(
+        buildRepository({ findByAccountId: vi.fn().mockResolvedValue(null) }),
+        buildHoldingsReader(),
+        buildTransferChainReader(),
+      );
+
+      const pending = (await execute(pendingService).catch((caught: unknown) => caught)) as AppError;
+      const missing = (await execute(missingService).catch((caught: unknown) => caught)) as AppError;
+
+      expect(pending).toBeInstanceOf(AppError);
+      expect(missing).toBeInstanceOf(AppError);
+      expect({ code: pending.code, title: pending.title, status: pending.status, type: pending.type }).toEqual({
+        code: missing.code,
+        title: missing.title,
+        status: missing.status,
+        type: missing.type,
+      });
+      expect(pending.message).toMatch(/not confirmed/);
+      expect(pending.message).not.toBe(missing.message);
+      // Nothing about the address or about other accounts' claims on it.
+      expect(pending.message).not.toContain(walletAddress);
+    });
+
+    it("is refused as not registered even when the account holds no position either", async () => {
+      const { service } = buildPending(
+        buildHoldingsReader({ listTokenHoldings: vi.fn().mockResolvedValue([]) }),
+      );
+
+      await expect(execute(service)).rejects.toMatchObject({ code: "wallet.not_registered", status: 404 });
+    });
+  });
+
   it("rejects a PIV the account holds no minted position for without reading the chain", async () => {
     const chainReader = buildTransferChainReader();
     const service = new RequestWalletTransferService(

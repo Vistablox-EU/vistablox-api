@@ -77,6 +77,23 @@ function failureError(failure: TransferPreflightFailure): AppError {
   return new AppError({ ...FAILURE_ERRORS[failure], status: 422 });
 }
 
+// One code, title and status for "no wallet row" and "pending claim": the
+// client keys on the code, and only the detail (log and support text, not
+// contractual) says which of the two it was.
+function walletNotRegisteredError(detail: string): AppError {
+  return new AppError({
+    code: "wallet.not_registered",
+    title: "Wallet not registered",
+    status: 404,
+    detail,
+  });
+}
+
+// A transfer is prepared only for a confirmed wallet registration
+// (registered_at set). A pending claim is an address the customer typed and
+// proves nothing about who controls it, and several accounts may hold a
+// pending claim on one address, so it is treated as no wallet. The first check
+// made, before the holdings or the chain are read.
 export class RequestWalletTransferService {
   public constructor(
     private readonly walletRepository: WalletRepository,
@@ -90,14 +107,16 @@ export class RequestWalletTransferService {
     toWalletAddress: string;
     amount: string;
   }) {
+    // Read once, and this same row supplies the address below. A confirmed row
+    // cannot be given another address, so there is nothing to re-check later.
     const wallet = await this.walletRepository.findByAccountId(input.accountId);
     if (wallet === null) {
-      throw new AppError({
-        code: "wallet.not_registered",
-        title: "Wallet not registered",
-        status: 404,
-        detail: "This account has no registered wallet address.",
-      });
+      throw walletNotRegisteredError("This account has no registered wallet address.");
+    }
+    if (wallet.registeredAt === null) {
+      throw walletNotRegisteredError(
+        "This account's wallet registration is not confirmed yet. A transfer can be prepared once it is.",
+      );
     }
 
     const holdings = await this.pivTokenHoldingsReader.listTokenHoldings(input.accountId);

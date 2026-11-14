@@ -72,6 +72,28 @@ describe("GetWalletBalanceService", () => {
     expect(chainReader.getTokenBalances).not.toHaveBeenCalled();
   });
 
+  // Characterization, not policy. Transfer preparation requires a confirmed
+  // registration; the balance read does not (yet), and this test pins that so
+  // the transfer change cannot widen into it unnoticed. Whether the balance
+  // read should also be confirmed-only is an open product decision.
+  it("still reads the balances of a pending wallet claim", async () => {
+    const repository = buildRepository({
+      findByAccountId: vi.fn().mockResolvedValue({
+        walletAddress,
+        registrationCommitment: "commitment_01",
+        requestedAt: new Date("2026-09-02T10:00:00.000Z"),
+        registeredAt: null,
+      }),
+    });
+    const chainReader = buildChainReader();
+    const service = new GetWalletBalanceService(repository, buildHoldingsReader(), chainReader);
+
+    await expect(service.execute(accountId)).resolves.toMatchObject({
+      data: { wallet_address: walletAddress },
+    });
+    expect(chainReader.getCapitalBalance).toHaveBeenCalledWith(walletAddress);
+  });
+
   it("rejects an account with no registered wallet", async () => {
     const repository = buildRepository({ findByAccountId: vi.fn().mockResolvedValue(null) });
     const service = new GetWalletBalanceService(repository, buildHoldingsReader(), buildChainReader());
