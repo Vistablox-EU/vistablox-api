@@ -91,6 +91,7 @@ export function createRequireAuthentication(
         ...(identity.authenticationLevel === undefined
           ? {}
           : { authenticationLevel: identity.authenticationLevel }),
+        ...(typeof identity.dpopJkt === "string" ? { dpopJkt: identity.dpopJkt } : {}),
       };
 
       // Session time limits (contract 3.6/3.7): the request counts as

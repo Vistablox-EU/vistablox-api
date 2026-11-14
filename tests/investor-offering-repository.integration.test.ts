@@ -10,6 +10,7 @@ import { disclosureDocumentTypes } from "../src/modules/offering/domain/disclosu
 import { NotifyReconfirmationWindowOpenedService } from "../src/modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
 import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
+import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -976,6 +977,8 @@ describe.skipIf(databaseUrl === undefined)(
     const fundedAccountId = `account_finalize_funded_${suffix}`;
     const unfundedAccountId = `account_finalize_unfunded_${suffix}`;
     const founderAccountId = `account_finalize_founder_${suffix}`;
+    // An investor whose wallet claim is still pending (never confirmed).
+    const pendingWalletAccountId = `account_finalize_pending_${suffix}`;
     const authPool = new Pool({ connectionString: databaseUrl });
     const database = createPrismaClient(databaseUrl ?? "");
     // PgBoss's constructor eagerly validates its connection string, so it
@@ -1085,7 +1088,7 @@ describe.skipIf(databaseUrl === undefined)(
       // reached — same "queue must already exist" requirement.
       await boss.createQueue("case_timers.post_ipo_structuring_handoff");
       await authPool.query(
-        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10), ($11, $12, $13, $14, $15)',
+        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5), ($6, $7, $8, $9, $10), ($11, $12, $13, $14, $15), ($16, $17, $18, $19, $20)',
         [
           `auth_${fundedAccountId}`,
           "Funded Investor",
@@ -1102,6 +1105,11 @@ describe.skipIf(databaseUrl === undefined)(
           `finalize-founder-${suffix}@example.test`,
           true,
           "staff_partner",
+          `auth_${pendingWalletAccountId}`,
+          "Pending Wallet Investor",
+          `finalize-pending-${suffix}@example.test`,
+          true,
+          "customer",
         ],
       );
       await database.account.create({
@@ -1119,6 +1127,9 @@ describe.skipIf(databaseUrl === undefined)(
       });
       await database.account.create({
         data: { id: unfundedAccountId, betterAuthUserId: `auth_${unfundedAccountId}` },
+      });
+      await database.account.create({
+        data: { id: pendingWalletAccountId, betterAuthUserId: `auth_${pendingWalletAccountId}` },
       });
       // publishDisclosurePack/classifyMateriality/reconfirmReservation etc.
       // all record an audit log actor for whichever account performs them —
@@ -1145,7 +1156,12 @@ describe.skipIf(databaseUrl === undefined)(
       // log rows whose resourceType/resourceId isn't "offering" (disclosure
       // packs, materiality records, reconfirmations).
       await database.auditLog.deleteMany({ where: { actorAccountId: founderAccountId } });
-      await database.walletRegistration.deleteMany({ where: { accountId: fundedAccountId } });
+      await database.walletRegistration.deleteMany({
+        where: { accountId: { in: [fundedAccountId, pendingWalletAccountId] } },
+      });
+      // registerWallet writes its audit rows with the registering account as
+      // actor and resource.
+      await database.auditLog.deleteMany({ where: { actorAccountId: pendingWalletAccountId } });
       // Every reservation created here goes through createReservation, which
       // records a money event in the same transaction, and money_events is
       // append-only (its trigger rejects every UPDATE and DELETE) with an ON
@@ -1929,6 +1945,93 @@ describe.skipIf(databaseUrl === undefined)(
       expect(
         await database.auditLog.count({ where: { resourceId: offeringId, action: "offering.finalized" } }),
       ).toBe(1);
+    });
+
+    it("never copies an unconfirmed wallet address into a position, including one the account replaced after it reconfirmed", async () => {
+      // A pending claim proves nothing about who controls the address, and its
+      // own account may replace it in place until the row is confirmed. The
+      // address that position_ledger.holder_wallet_address records is the
+      // destination of operating distributions, so only a CONFIRMED row may
+      // feed it (the record: "null until address proof"). Otherwise a session
+      // that can replace a pending claim could re-route the payout of a
+      // position that already has a reservation.
+      const walletRepository = new PrismaWalletRepository(database);
+      const { offeringId, pivId } = await createOffering({ targetRaiseEur: "500.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      const claimedAddress = `0x${suffix.replaceAll("-", "")}a1`;
+      const replacementAddress = `0x${suffix.replaceAll("-", "")}b2`;
+      await walletRepository.registerWallet({
+        accountId: pendingWalletAccountId,
+        walletAddress: claimedAddress,
+        registrationCommitment: `commitment_claimed_${suffix}`,
+        requestedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId: pendingWalletAccountId,
+        amountEur: "500.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_pending_wallet_01",
+        capitalState: "eurc_reserved",
+        amountEur: "500.00",
+        amountEurc: "490.000000",
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: founderAccountId,
+        founderReviewNotes: "notes",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+      const reconfirmed = await repository.reconfirmReservation({
+        reservationId,
+        accountId: pendingWalletAccountId,
+        traceId: `trace_${suffix}`,
+        reconfirmedAt: new Date("2026-09-03T12:00:00.000Z"),
+      });
+      expect(reconfirmed.conflict).toBeNull();
+
+      // After reconfirming, before the window closes, the account moves its
+      // pending claim to another address.
+      const replaced = await walletRepository.registerWallet({
+        accountId: pendingWalletAccountId,
+        walletAddress: replacementAddress,
+        registrationCommitment: `commitment_replacement_${suffix}`,
+        requestedAt: new Date("2026-09-04T09:00:00.000Z"),
+      });
+      expect(replaced).toMatchObject({ walletAddress: replacementAddress, registeredAt: null });
+
+      const committed = await repository.commitOfferingFinalization({
+        offeringId,
+        traceId: `trace_${suffix}`,
+        finalizedAt: new Date("2026-09-09T12:00:00.000Z"),
+      });
+      expect(committed).toEqual({
+        conflict: null,
+        committed: { offeringId, positionsCreated: 1, reservationsLapsed: 0 },
+      });
+
+      const positions = await database.positionLedger.findMany({ where: { pivId } });
+      expect(positions).toHaveLength(1);
+      expect(positions[0]).toMatchObject({
+        reservationId,
+        accountId: pendingWalletAccountId,
+        holderWalletAddress: null,
+      });
+      // The claim itself is untouched: still pending, still the replacement.
+      expect(
+        await database.walletRegistration.findUniqueOrThrow({ where: { accountId: pendingWalletAccountId } }),
+      ).toMatchObject({ walletAddress: replacementAddress, registeredAt: null });
     });
 
     it("records a per_se_material classification, resets already-reconfirmed reservations, and restarts the full 168-hour window", async () => {

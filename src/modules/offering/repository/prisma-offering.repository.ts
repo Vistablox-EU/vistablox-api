@@ -403,6 +403,11 @@ export class PrismaOfferingRepository
       throw new Error("Offering progress query did not return an aggregate row");
     }
 
+    const confirmedWallet =
+      account.walletRegistration !== null && account.walletRegistration.registeredAt !== null
+        ? account.walletRegistration
+        : null;
+
     return {
       id: offering.id,
       status: asInvestorOfferingStatus(offering.status),
@@ -449,11 +454,18 @@ export class PrismaOfferingRepository
         ),
         kycEligibilityState: kycSnapshot?.eligibilityState ?? null,
         kycRenewalDueAt: kycSnapshot?.renewalDueAt ?? null,
-        walletProvisioned: account.walletRegistration !== null,
-        walletAddress: account.walletRegistration?.walletAddress ?? null,
-        payoutWalletRegistered:
-          account.walletRegistration !== null &&
-          account.walletRegistration.registeredAt !== null,
+        // Only a CONFIRMED registration (registered_at set) counts. A pending
+        // claim proves nothing about who controls the address, and its own
+        // account may still replace it in place, so it must neither make the
+        // payment account "ready" nor be handed to the Coinbase onramp as the
+        // delivery address: a replaced pending address would otherwise
+        // redirect the purchase, on a fresh request and on the replay of an
+        // idempotent one alike. A confirmed registration cannot be replaced
+        // through the API (address_mismatch), so the address read here is the
+        // same on every replay.
+        walletProvisioned: confirmedWallet !== null,
+        walletAddress: confirmedWallet?.walletAddress ?? null,
+        payoutWalletRegistered: confirmedWallet !== null,
         recoveryCooldownEndsAt: account.recoveryCases[0]?.cooldownEndsAt ?? null,
       },
     };
@@ -1112,8 +1124,17 @@ export class PrismaOfferingRepository
           reservation.reservation_stage,
           wallet.wallet_address
         FROM offering.reservations AS reservation
+        -- Only a CONFIRMED registration (registered_at set) feeds the copied
+        -- holder address. A pending claim proves nothing about who controls
+        -- the address and its own account may still replace it, and this
+        -- column is the destination of operating distributions. The record
+        -- keeps position_ledger.holder_wallet_address null until address
+        -- proof (CORE_TABLES.md). The condition sits in the ON clause so a
+        -- reservation without a confirmed wallet still commits, with a null
+        -- address, instead of dropping out of the loop below.
         LEFT JOIN settlement.wallet_registrations AS wallet
           ON wallet.account_id = reservation.account_id
+          AND wallet.registered_at IS NOT NULL
         WHERE reservation.offering_id = ${input.offeringId}
           AND reservation.reservation_stage IN ('awaiting_reconfirmation', 'reconfirmed')
         FOR UPDATE OF reservation

@@ -79,6 +79,10 @@ import {
 } from "./modules/auth/api/customer/device-auth.router.js";
 import { createRequireDpopOnly } from "./modules/auth/api/customer/require-dpop-only.js";
 import type { IssueDeviceChallengeService } from "./modules/auth/application/customer/device-challenge-issuance.service.js";
+import type { AuthorizeSigningRequestService } from "./modules/auth/application/customer/authorize-signing-request.service.js";
+import type { SigningRequestRepository } from "./modules/auth/repository/customer/signing-request.repository.js";
+import type { DeviceRepository } from "./modules/auth/repository/customer/device.repository.js";
+import { createSigningRequestsRouter } from "./modules/auth/api/customer/signing-requests.router.js";
 import type { VistaBloxAuth } from "./modules/auth/infrastructure/shared/better-auth.factory.js";
 import { createDeviceReplacementRouter } from "./modules/auth/api/customer/device-replacement.router.js";
 import {
@@ -396,6 +400,12 @@ export interface AppDependencies {
     customerSessions?: {
       repository: CustomerSessionRepository;
       revoker: SessionRevoker;
+      /**
+       * D3: when a device's DPoP key is revoked, cancels its pending/signed
+       * signing requests (plan section 3.10). Optional so the mount compiles
+       * even before the signing subsystem is wired.
+       */
+      cancelPendingSigningRequestsForDevice?: (dpopJkt: string) => Promise<number>;
     };
     // Device-key auth, step 1: single-device enrolment/login only (see
     // docs/plans/device-bound-auth-backend.md). `auth` is the same
@@ -407,6 +417,11 @@ export interface AppDependencies {
       issueChallenge: IssueDeviceChallengeService;
       baseUrl: string;
       appConfig: AppConfig;
+      signingRequests?: {
+        requests: SigningRequestRepository;
+        devices: Pick<DeviceRepository, "findByDpopJkt">;
+        authorizes: AuthorizeSigningRequestService;
+      };
     };
     deviceReplacement?: {
       repository: DeviceReplacementRepository;
@@ -711,6 +726,26 @@ export function createApp(dependencies: AppDependencies): Express {
           ],
         ),
       );
+      // T1-T3 (gated by the rollout flag: the endpoints exist behind it but
+      // only answer once signing_requests flips on -- mirror the phased
+      // roll-out of device_auth itself rather than shipping un-flagged
+      // routes).
+      if (
+        deviceAuth.appConfig.features.signing_requests === true &&
+        deviceAuth.signingRequests !== undefined
+      ) {
+        const signing = deviceAuth.signingRequests;
+        app.use(
+          "/v1/auth/signing-requests",
+          createSigningRequestsRouter({
+            requireAuthentication,
+            issues: deviceAuth.issueChallenge,
+            devices: signing.devices,
+            requests: signing.requests,
+            authorizes: signing.authorizes,
+          }),
+        );
+      }
     }
     if (dependencies.protectedApi.deviceReplacement !== undefined) {
       const replacement = dependencies.protectedApi.deviceReplacement;
@@ -792,7 +827,10 @@ export function createApp(dependencies: AppDependencies): Express {
           new ListOwnSessionsService(customerSessions.repository),
           new RevokeOwnSessionService(customerSessions.repository, customerSessions.revoker),
           new RevokeAllOwnSessionsService(customerSessions.revoker),
-          new RevokeDeviceSessionsService(customerSessions.revoker),
+          new RevokeDeviceSessionsService(
+          customerSessions.revoker,
+          customerSessions.cancelPendingSigningRequestsForDevice,
+        ),
         ),
       );
     }

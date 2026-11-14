@@ -4,6 +4,8 @@ import { Pool } from "pg";
 
 import type { DatabaseClient } from "../../src/infrastructure/database/prisma.js";
 
+const CONFIRMATION_AUDIT_ACTION = "settlement.wallet_registration_confirmed";
+
 /** A promise that is settled from outside, for pausing one writer while a test does something else. */
 export function deferred<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
   let resolve!: (value: T) => void;
@@ -55,6 +57,7 @@ export class WalletRegistrationFixtures {
   public readonly suffix = randomUUID().replace(/-/g, "").slice(0, 16);
   private readonly pool: Pool;
   private readonly accountIds: string[] = [];
+  private readonly claims = new Map<string, { walletAddress: string; registrationCommitment: string }>();
   private counter = 0;
 
   public constructor(
@@ -94,7 +97,19 @@ export class WalletRegistrationFixtures {
       },
     });
     this.accountIds.push(accountId);
+    this.claims.set(accountId, { walletAddress, registrationCommitment: commitment });
     return { accountId, walletAddress, commitment };
+  }
+
+  /**
+   * The address and commitment a fixture row was created with (a fixture row is
+   * never replaced): the claim a confirmation or a reconcile has matched, which
+   * both now compare-and-set on.
+   */
+  public claimOf(accountId: string): { walletAddress: string; registrationCommitment: string } {
+    const claim = this.claims.get(accountId);
+    if (claim === undefined) throw new Error(`no fixture registration for ${accountId}`);
+    return claim;
   }
 
   /** A valid transaction hash no other test run can have used: this run's suffix plus the tag. */
@@ -137,9 +152,19 @@ export class WalletRegistrationFixtures {
     return this.pool.query(sql, params);
   }
 
+  /**
+   * The audit actions written about an account's registration, apart from the
+   * confirmation's own row (settlement.wallet_registration_confirmed, covered by
+   * wallet-claim-lifecycle.integration.test.ts): the suites using this are about
+   * the evidence rows, and every fixture confirmation writes that one too.
+   */
   public async auditActions(accountId: string): Promise<string[]> {
     const rows = await this.database.auditLog.findMany({
-      where: { resourceType: "wallet_registration", resourceId: accountId },
+      where: {
+        resourceType: "wallet_registration",
+        resourceId: accountId,
+        NOT: { action: CONFIRMATION_AUDIT_ACTION },
+      },
       orderBy: { createdAt: "asc" },
       select: { action: true },
     });

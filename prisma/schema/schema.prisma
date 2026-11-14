@@ -58,6 +58,7 @@ model Account {
   resolvedClosureRequests        AccountClosureRequest[] @relation("ClosureRequestResolver")
   devices                        Device[]
   deviceReplacementCodes         DeviceReplacementCode[]
+  signingRequests                SigningRequest[]
   reviewedEvidence                DocumentaryScreeningEvidence[] @relation("EvidenceReviewer")
   intakeReversalRequests          IntakeCaseReversalOperation[] @relation("IntakeReversalRequester")
   intakeReversalApprovals         IntakeCaseReversalOperation[] @relation("IntakeReversalApprover")
@@ -735,9 +736,17 @@ model Payout {
   @@schema("money")
 }
 
+// A row with registered_at NULL is a pending claim: account-scoped, proves
+// nothing, never blocks another account. Exclusivity applies only once the
+// address is confirmed: the hand-written partial unique index
+// wallet_registrations_confirmed_address_key (UNIQUE (lower(wallet_address))
+// WHERE registered_at IS NOT NULL, migration
+// 20261113150200_wallet_claims_confirmed_address_uniqueness) enforces it. The
+// Prisma DSL cannot express it, so wallet_address carries no @unique here;
+// look addresses up with lower(wallet_address) = lower($1).
 model WalletRegistration {
   accountId              String    @id @map("account_id")
-  walletAddress          String    @unique @map("wallet_address")
+  walletAddress          String    @map("wallet_address")
   registrationCommitment String    @map("registration_commitment")
   requestedAt            DateTime  @default(now()) @map("requested_at") @db.Timestamptz(6)
   registeredAt           DateTime? @map("registered_at") @db.Timestamptz(6)

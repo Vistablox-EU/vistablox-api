@@ -3,10 +3,13 @@ import {
   normalizeChainHash,
   type WalletRegistrationEvidence,
 } from "../../../shared/domain/wallet-registration-evidence.js";
-import type {
-  ReconcileWalletRegistrationOutcome,
-  RegisteredWallet,
-  WalletRepository,
+import {
+  WalletAddressConflictError,
+  WalletRegistrationChangedError,
+  type ReconcileWalletRegistrationOutcome,
+  type ReconcileWalletRegistrationResult,
+  type RegisteredWallet,
+  type WalletRepository,
 } from "../repository/wallet.repository.js";
 
 /** Why the chain could not confirm a registration transaction. */
@@ -99,18 +102,35 @@ export class ReconcileWalletRegistrationService {
       throw error;
     }
 
-    const result = await reconcile.call(this.repository, {
-      accountId: input.accountId,
-      actorAccountId: input.actorAccountId,
-      evidence: {
-        transactionHash: normalizeChainHash(evidence.transactionHash),
-        blockHash: normalizeChainHash(evidence.blockHash),
-        blockNumber: evidence.blockNumber,
-        logIndex: evidence.logIndex,
-      },
-      registeredAt: evidence.registeredAt,
-      changedAt: this.clock(),
-    });
+    // The evidence was verified against this exact address and commitment. The
+    // repository confirms only if the account's row still holds both, so a
+    // claim the customer replaced in the meantime is never confirmed on the
+    // old claim's evidence.
+    let result: ReconcileWalletRegistrationResult;
+    try {
+      result = await reconcile.call(this.repository, {
+        accountId: input.accountId,
+        actorAccountId: input.actorAccountId,
+        expectedWalletAddress: wallet.walletAddress,
+        expectedRegistrationCommitment: wallet.registrationCommitment,
+        evidence: {
+          transactionHash: normalizeChainHash(evidence.transactionHash),
+          blockHash: normalizeChainHash(evidence.blockHash),
+          blockNumber: evidence.blockNumber,
+          logIndex: evidence.logIndex,
+        },
+        registeredAt: evidence.registeredAt,
+        changedAt: this.clock(),
+      });
+    } catch (error) {
+      if (error instanceof WalletRegistrationChangedError) {
+        throw new AppError({ code: "wallet.registration_changed", title: "Wallet registration changed", status: 409, detail: "The account's wallet registration changed after the transaction was checked. Read the registration again and retry." });
+      }
+      if (error instanceof WalletAddressConflictError) {
+        throw new AppError({ code: "wallet.address_already_claimed", title: "Wallet address unavailable", status: 409, detail: "That wallet address is already confirmed for a different account." });
+      }
+      throw error;
+    }
 
     if (result.kind === "not_found") throw accountNotFound();
     if (result.kind === "conflict") {
