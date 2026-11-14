@@ -10,7 +10,7 @@ import { RunWalletRegistryWatcherService } from "../src/modules/settlement/appli
 import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 import { PrismaWalletRegistryHealthRepository } from "../src/modules/settlement/repository/prisma-wallet-registry-health.repository.js";
-import { QUIET_EVIDENCE_COUNTERS } from "./support/wallet-registry-summary.js";
+import { QUIET_CLAIM_AND_EVIDENCE_COUNTERS } from "./support/wallet-registry-summary.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const HEARTBEAT_KEY = "wallet_registry.watcher_heartbeat";
@@ -365,7 +365,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
             addressMismatchesRepeated: 0,
             pendingRegistrationsOverdue: 0,
             pendingWarnAfterMinutes: 5,
-            ...QUIET_EVIDENCE_COUNTERS,
+            ...QUIET_CLAIM_AND_EVIDENCE_COUNTERS,
           }),
         },
         { getLastProcessedWalletRegistryBlock: async () => 4990n },

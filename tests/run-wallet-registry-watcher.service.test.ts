@@ -9,7 +9,7 @@ import { RunWalletRegistryWatcherService } from "../src/modules/settlement/appli
 import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import type { WalletRegistryHeartbeat } from "../src/modules/settlement/repository/wallet-registry-health.repository.js";
 import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
-import { QUIET_EVIDENCE_COUNTERS } from "./support/wallet-registry-summary.js";
+import { QUIET_CLAIM_AND_EVIDENCE_COUNTERS } from "./support/wallet-registry-summary.js";
 
 const RPC_SECRET = "SECRETPROVIDERKEY123";
 const RPC_URL = `https://base-sepolia.g.alchemy.com/v2/${RPC_SECRET}`;
@@ -28,7 +28,7 @@ function summary(overrides: Partial<ConfirmWalletRegistrationsSummary> = {}): Co
     addressMismatchesRepeated: 0,
     pendingRegistrationsOverdue: 0,
     pendingWarnAfterMinutes: 5,
-    ...QUIET_EVIDENCE_COUNTERS,
+    ...QUIET_CLAIM_AND_EVIDENCE_COUNTERS,
     ...overrides,
   };
 }
