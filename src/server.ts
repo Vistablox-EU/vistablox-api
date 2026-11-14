@@ -83,6 +83,7 @@ import {
 import { S3Client } from "@aws-sdk/client-s3";
 import { UploadCaseDocumentService } from "./modules/intake/application/upload-case-document.service.js";
 import { GetCaseDocumentService } from "./modules/intake/application/get-case-document.service.js";
+import { PrismaOfferingDocumentRepository } from "./modules/offering/repository/prisma-offering-document.repository.js";
 import { ClamAvScanner } from "./infrastructure/antivirus/clamav-scanner.js";
 import { PrismaPartnerOrganizationRepository } from "./modules/intake/repository/prisma-partner-organization.repository.js";
 
@@ -109,7 +110,9 @@ await ensureJobQueue(jobQueue, "provider_events.didit_webhook", "event");
 // profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
 const kycRepository = new PrismaKycRepository(database, jobQueue);
-const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
+const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository, {
+  disclosuresBucket: environment.MINIO_DISCLOSURES_BUCKET,
+});
 const intakeRepository = new PrismaIntakeRepository(database, jobQueue, kycRepository);
 const partnerOrganizationRepository = new PrismaPartnerOrganizationRepository(database);
 const accountRepository = new PrismaAccountRepository(database);
@@ -461,6 +464,7 @@ const displayProfiles = new IdentityDisplayProfileProvider(
     logger.warn({ err: error, operation }, "protected display profile refresh failed");
   },
 );
+const malwareScanner = new ClamAvScanner(environment.CLAMAV_HOST ?? "127.0.0.1", environment.CLAMAV_PORT);
 const disclosureDocumentStore =
   environment.MINIO_ENDPOINT !== undefined &&
   environment.MINIO_ACCESS_KEY !== undefined &&
@@ -475,6 +479,18 @@ const disclosureDocumentStore =
         bucket: environment.MINIO_DISCLOSURES_BUCKET,
       })
     : new UnavailableDisclosureDocumentStore();
+// Staff disclosure-document upload/list/download. Same gate as the store
+// above: absent, the /internal/v1/offerings/:offering_id/documents routes
+// are not mounted (as intake's upload routes are not), and
+// publishDisclosurePack accepts no document_ref at all.
+const offeringDocuments =
+  disclosureDocumentStore instanceof MinioDisclosureDocumentStore && environment.MINIO_DISCLOSURES_BUCKET !== undefined
+    ? {
+        repository: new PrismaOfferingDocumentRepository(database, environment.MINIO_DISCLOSURES_BUCKET),
+        store: disclosureDocumentStore,
+        scanner: malwareScanner,
+      }
+    : undefined;
 const documentUploadService =
   environment.MINIO_ENDPOINT !== undefined &&
   environment.MINIO_ACCESS_KEY !== undefined &&
@@ -489,7 +505,7 @@ const documentUploadService =
           credentials: { accessKeyId: environment.MINIO_ACCESS_KEY, secretAccessKey: environment.MINIO_SECRET_KEY },
         }),
         environment.MINIO_PRIVATE_BUCKET,
-        environment.CLAMAV_HOST === undefined ? new ClamAvScanner("127.0.0.1", environment.CLAMAV_PORT) : new ClamAvScanner(environment.CLAMAV_HOST, environment.CLAMAV_PORT),
+        malwareScanner,
       )
     : undefined;
 const documentDownloadService =
@@ -569,7 +585,10 @@ const app = createApp({
     ...(documentUploadService === undefined ? {} : { documentUpload: documentUploadService }),
     ...(documentDownloadService === undefined ? {} : { documentDownload: documentDownloadService }),
     emailSender,
-    offeringOperations: { repository: offeringRepository },
+    offeringOperations: {
+      repository: offeringRepository,
+      ...(offeringDocuments === undefined ? {} : { documents: offeringDocuments }),
+    },
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({
       rpName: environment.WEBAUTHN_RP_NAME,
