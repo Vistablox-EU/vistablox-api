@@ -301,6 +301,16 @@ describe("GetWalletAccountForOperationsService", () => {
         status: "pending",
         requested_at: now.toISOString(),
         registered_at: null,
+        registration_evidence: {
+          status: "none",
+          transaction_hash: null,
+          block_number: null,
+          block_hash: null,
+          log_index: null,
+          verified_at: null,
+          flag: null,
+          flagged_at: null,
+        },
       },
     });
     expect(repository.findByAccountId).toHaveBeenCalledWith(accountId);
