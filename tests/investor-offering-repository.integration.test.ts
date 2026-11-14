@@ -1033,9 +1033,33 @@ describe.skipIf(databaseUrl === undefined)(
       return { offeringId, pivId };
     }
 
+    // publishDisclosurePack only accepts a document_ref that is an accepted,
+    // non-deleted stored_documents row of the offering in the disclosures
+    // bucket — what POST /internal/v1/offerings/:offering_id/documents
+    // writes (offering-document-upload.integration.test.ts covers that path
+    // end to end). Tests here seed those rows directly.
+    const disclosuresBucket = `vistablox-disclosures-${suffix}`;
+    async function seedUploadedDocuments(offeringId: string, documentRefs: string[]): Promise<void> {
+      await database.storedDocument.createMany({
+        data: documentRefs.map((documentRef) => ({
+          id: `doc_${randomUUID().replaceAll("-", "")}`,
+          bucket: disclosuresBucket,
+          objectKey: documentRef,
+          documentType: "final_terms_sheet",
+          offeringId,
+          contentType: "application/pdf",
+          sizeBytes: BigInt(1024),
+          sha256Checksum: "0".repeat(64),
+          uploadStatus: "accepted",
+          classification: "disclosure",
+        })),
+      });
+    }
+
     // reconfirmReservation requires a complete current pack (AD-037) —
     // every mandatory document type, matching disclosureDocumentTypes.
     async function publishCompleteDisclosurePack(offeringId: string, publishedAt: Date): Promise<void> {
+      await seedUploadedDocuments(offeringId, disclosureDocumentTypes.map((documentType) => `documents/${documentType}.pdf`));
       const result = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -1053,7 +1077,7 @@ describe.skipIf(databaseUrl === undefined)(
 
     beforeAll(async () => {
       boss = new PgBoss(databaseUrl ?? "");
-      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
+      repository = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss), { disclosuresBucket });
       await boss.start();
       // publishFinalOfferingTerms enqueues the AD-214/AD-145 window-opened
       // notification handoff inside its own transaction — the queue must
@@ -1125,6 +1149,7 @@ describe.skipIf(databaseUrl === undefined)(
         where: { disclosurePack: { offeringId: { in: offeringIds } } },
       });
       await database.disclosurePack.deleteMany({ where: { offeringId: { in: offeringIds } } });
+      await database.storedDocument.deleteMany({ where: { offeringId: { in: offeringIds } } });
       await database.auditLog.deleteMany({ where: { resourceId: { in: offeringIds }, resourceType: "offering" } });
       // Separate from the resourceId-scoped delete above: this FK is on
       // actorAccountId, and the founder account acted on plenty of audit
@@ -1708,6 +1733,7 @@ describe.skipIf(databaseUrl === undefined)(
       });
       // Every mandatory type except full_prospectus — deliberately incomplete.
       const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
+      await seedUploadedDocuments(offeringId, partialTypes.map((documentType) => `documents/${documentType}.pdf`));
       const publishedPack = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -1766,6 +1792,7 @@ describe.skipIf(databaseUrl === undefined)(
       // publishFinalOfferingTerms itself already requires completeness: a
       // later republish (e.g. materiality-triggered) that lands incomplete.
       const partialTypes = disclosureDocumentTypes.filter((type) => type !== "full_prospectus");
+      await seedUploadedDocuments(offeringId, partialTypes.map((documentType) => `documents/${documentType}-v2.pdf`));
       const republishedPack = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -2229,6 +2256,7 @@ describe.skipIf(databaseUrl === undefined)(
     it("publishes an initial disclosure pack as version 1, with no prior pack to supersede", async () => {
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
       const publishedAt = new Date("2026-09-01T09:00:00.000Z");
+      await seedUploadedDocuments(offeringId, ["documents/kiis-v1.pdf", "documents/terms-v1.pdf"]);
 
       const result = await repository.publishDisclosurePack({
         offeringId,
@@ -2273,6 +2301,20 @@ describe.skipIf(databaseUrl === undefined)(
 
     it("supersedes the prior current pack and increments the version, reporting completeness once every mandatory document is present", async () => {
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      await seedUploadedDocuments(offeringId, [
+        "documents/kiis-v1.pdf",
+        "documents/kiis-v2.pdf",
+        "documents/kid-v2.pdf",
+        "documents/offer-summary-v2.pdf",
+        "documents/terms-v2.pdf",
+        "documents/structure-v2.pdf",
+        "documents/rights-v2.pdf",
+        "documents/risks-v2.pdf",
+        "documents/appraisal-v2.pdf",
+        "documents/fees-v2.pdf",
+        "documents/withdrawal-v2.pdf",
+        "documents/prospectus-v2.pdf",
+      ]);
       const first = await repository.publishDisclosurePack({
         offeringId,
         accountId: founderAccountId,
@@ -2341,6 +2383,93 @@ describe.skipIf(databaseUrl === undefined)(
       });
 
       expect(result).toEqual({ published: null, conflict: "offering_not_found" });
+    });
+
+    it("refuses a document_ref that is not an accepted upload of the offering, writing nothing", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const { offeringId: otherOfferingId } = await createOffering({ targetRaiseEur: "1000.00" });
+      await seedUploadedDocuments(offeringId, ["documents/kiis-uploaded.pdf"]);
+      // Right bucket and key, but another offering's upload.
+      await seedUploadedDocuments(otherOfferingId, ["documents/terms-other-offering.pdf"]);
+      // This offering's row, but not accepted / soft-deleted.
+      await database.storedDocument.createMany({
+        data: [
+          {
+            id: `doc_${randomUUID().replaceAll("-", "")}`,
+            bucket: disclosuresBucket,
+            objectKey: "documents/summary-quarantined.pdf",
+            documentType: "final_offer_summary",
+            offeringId,
+            contentType: "application/pdf",
+            sizeBytes: BigInt(1024),
+            sha256Checksum: "0".repeat(64),
+            uploadStatus: "quarantined",
+            classification: "disclosure",
+          },
+          {
+            id: `doc_${randomUUID().replaceAll("-", "")}`,
+            bucket: disclosuresBucket,
+            objectKey: "documents/prospectus-deleted.pdf",
+            documentType: "full_prospectus",
+            offeringId,
+            contentType: "application/pdf",
+            sizeBytes: BigInt(1024),
+            sha256Checksum: "0".repeat(64),
+            uploadStatus: "accepted",
+            classification: "disclosure",
+            deletedAt: new Date("2026-09-01T00:00:00.000Z"),
+          },
+        ],
+      });
+
+      const result = await repository.publishDisclosurePack({
+        offeringId,
+        accountId: founderAccountId,
+        documents: [
+          { documentType: "ecsp_kiis", documentRef: "documents/kiis-uploaded.pdf" },
+          { documentType: "final_terms_sheet", documentRef: "documents/terms-other-offering.pdf" },
+          { documentType: "final_offer_summary", documentRef: "documents/summary-quarantined.pdf" },
+          { documentType: "full_prospectus", documentRef: "documents/prospectus-deleted.pdf" },
+          { documentType: "priips_kid", documentRef: "documents/never-uploaded.pdf" },
+        ],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+
+      expect(result).toEqual({
+        published: null,
+        conflict: "unknown_document_refs",
+        unknownDocumentRefs: [
+          "documents/terms-other-offering.pdf",
+          "documents/summary-quarantined.pdf",
+          "documents/prospectus-deleted.pdf",
+          "documents/never-uploaded.pdf",
+        ],
+      });
+      expect(await database.disclosurePack.count({ where: { offeringId } })).toBe(0);
+      expect(
+        await database.auditLog.count({ where: { resourceId: offeringId, action: "offering.disclosure_pack_published" } }),
+      ).toBe(0);
+    });
+
+    it("accepts no document_ref at all when built without a disclosures bucket", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      await seedUploadedDocuments(offeringId, ["documents/kiis-uploaded.pdf"]);
+      const unconfigured = new PrismaOfferingRepository(database, boss, new PrismaKycRepository(database, boss));
+
+      const result = await unconfigured.publishDisclosurePack({
+        offeringId,
+        accountId: founderAccountId,
+        documents: [{ documentType: "ecsp_kiis", documentRef: "documents/kiis-uploaded.pdf" }],
+        traceId: `trace_${suffix}`,
+        publishedAt: new Date("2026-09-01T09:00:00.000Z"),
+      });
+
+      expect(result).toEqual({
+        published: null,
+        conflict: "unknown_document_refs",
+        unknownDocumentRefs: ["documents/kiis-uploaded.pdf"],
+      });
     });
 
     it("reports not_open once the offering has already committed to final_offering", async () => {
