@@ -88,6 +88,13 @@ export class PrismaOfferingRepository
     private readonly database: DatabaseClient,
     private readonly pgBoss: PgBoss,
     private readonly kycEligibilityReader: KycEligibilityReader,
+    /**
+     * `disclosuresBucket` is where staff uploads land (MINIO_DISCLOSURES_BUCKET);
+     * publishDisclosurePack only accepts document_refs that are accepted rows
+     * there. Left unset, no ref is accepted — a process without storage
+     * configured cannot have taken an upload either.
+     */
+    private readonly options: { disclosuresBucket?: string | undefined } = {},
   ) {}
 
   public async openOfferingForApprovedCase(
@@ -1316,6 +1323,29 @@ export class PrismaOfferingRepository
       // a separate amendment/consent path this codebase does not build.
       if (offering.status !== "pre_offering") {
         return { published: null, conflict: "not_open" as const };
+      }
+
+      // Every document_ref must be one of this offering's own accepted
+      // uploads (OfferingDocumentRepository), checked under the same lock so
+      // a pack can never be published against a reference nothing serves.
+      const requestedRefs = [...new Set(input.documents.map((document) => document.documentRef))];
+      const knownRows =
+        this.options.disclosuresBucket === undefined
+          ? []
+          : await transaction.storedDocument.findMany({
+              where: {
+                offeringId: input.offeringId,
+                bucket: this.options.disclosuresBucket,
+                objectKey: { in: requestedRefs },
+                uploadStatus: "accepted",
+                deletedAt: null,
+              },
+              select: { objectKey: true },
+            });
+      const knownRefs = new Set(knownRows.map((row) => row.objectKey));
+      const unknownDocumentRefs = requestedRefs.filter((ref) => !knownRefs.has(ref));
+      if (unknownDocumentRefs.length > 0) {
+        return { published: null, conflict: "unknown_document_refs" as const, unknownDocumentRefs };
       }
 
       const current = await transaction.disclosurePack.findFirst({

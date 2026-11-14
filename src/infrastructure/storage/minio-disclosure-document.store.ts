@@ -1,19 +1,22 @@
 import { Readable } from "node:stream";
 
 import {
+  DeleteObjectCommand,
   GetObjectCommand,
   NoSuchKey,
+  PutObjectCommand,
   S3Client,
   S3ServiceException,
 } from "@aws-sdk/client-s3";
 
 import type {
-  DisclosureDocumentStore,
+  DisclosureDocumentUpload,
   StoredDisclosureDocument,
+  WritableDisclosureDocumentStore,
 } from "../../modules/offering/application/disclosure-document-store.js";
 import { AppError } from "../../shared/errors/app-error.js";
 
-export class MinioDisclosureDocumentStore implements DisclosureDocumentStore {
+export class MinioDisclosureDocumentStore implements WritableDisclosureDocumentStore {
   private readonly client: S3Client;
 
   public constructor(
@@ -61,17 +64,59 @@ export class MinioDisclosureDocumentStore implements DisclosureDocumentStore {
       throw storageUnavailableError(error);
     }
   }
+
+  public async put(input: DisclosureDocumentUpload): Promise<void> {
+    const objectName = toObjectName(input.documentReference);
+    try {
+      await this.client.send(
+        new PutObjectCommand({
+          Bucket: this.options.bucket,
+          Key: objectName,
+          Body: input.body,
+          ContentLength: input.body.length,
+          ContentType: input.contentType,
+          Metadata: input.metadata,
+        }),
+      );
+    } catch (error) {
+      if (error instanceof AppError) throw error;
+      throw storageUnavailableError(error);
+    }
+  }
+
+  public async delete(documentReference: string): Promise<void> {
+    const objectName = toObjectName(documentReference);
+    try {
+      await this.client.send(new DeleteObjectCommand({ Bucket: this.options.bucket, Key: objectName }));
+    } catch (error) {
+      if (isMissingObject(error)) return;
+      if (error instanceof AppError) throw error;
+      throw storageUnavailableError(error);
+    }
+  }
 }
 
-export class UnavailableDisclosureDocumentStore implements DisclosureDocumentStore {
+export class UnavailableDisclosureDocumentStore implements WritableDisclosureDocumentStore {
   public async get(): Promise<never> {
-    throw new AppError({
-      code: "infrastructure.document_storage_unavailable",
-      title: "Document storage unavailable",
-      status: 503,
-      detail: "The document storage dependency is not configured.",
-    });
+    throw notConfiguredError();
   }
+
+  public async put(): Promise<never> {
+    throw notConfiguredError();
+  }
+
+  public async delete(): Promise<never> {
+    throw notConfiguredError();
+  }
+}
+
+function notConfiguredError(): AppError {
+  return new AppError({
+    code: "infrastructure.document_storage_unavailable",
+    title: "Document storage unavailable",
+    status: 503,
+    detail: "The document storage dependency is not configured.",
+  });
 }
 
 function toObjectName(documentReference: string): string {
