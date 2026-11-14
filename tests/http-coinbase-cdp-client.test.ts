@@ -66,6 +66,44 @@ describe("Coinbase CDP HTTP client", () => {
     expect(header).toMatchObject({ alg: "EdDSA", kid: apiKeyId, typ: "JWT" });
   });
 
+  describe("wallet address spelling on the outbound token request", () => {
+    // The API stores and passes around the canonical lowercase address;
+    // Coinbase is shown the EIP-55 spelling, as it was before the canonical
+    // form existed.
+    async function sentAddress(walletAddress: string): Promise<string> {
+      const fetch = vi.fn().mockResolvedValue(
+        Response.json({ token: "session-token-01", channel_id: "channel-01" }, { status: 201 }),
+      );
+      await buildClient(fetch).createOnrampSessionToken({ walletAddress, blockchain: "base" });
+      const [, init] = fetch.mock.calls[0] as [URL, RequestInit];
+      const body = JSON.parse(String(init.body)) as { addresses: Array<{ address: string }> };
+      expect(body.addresses).toHaveLength(1);
+      return body.addresses[0]!.address;
+    }
+
+    it("sends the EIP-55 spelling for the canonical lowercase address", async () => {
+      await expect(sentAddress("0x71c7656ec7ab88b098defb751b7401b5f6d8976f")).resolves.toBe(
+        "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+      );
+    });
+
+    it("checksums an all-uppercase address", async () => {
+      await expect(sentAddress("0x5AAEB6053F3E94C9B9A09F33669435E7EF1BEAED")).resolves.toBe(
+        "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed",
+      );
+    });
+
+    it("leaves an already checksummed address as it is", async () => {
+      await expect(sentAddress("0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359")).resolves.toBe(
+        "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359",
+      );
+    });
+
+    it("sends a value that is not an address unchanged and does not throw", async () => {
+      await expect(sentAddress("0xdifferent")).resolves.toBe("0xdifferent");
+    });
+  });
+
   it("builds the hosted onramp URL from a session token", () => {
     const client = buildClient(vi.fn());
 

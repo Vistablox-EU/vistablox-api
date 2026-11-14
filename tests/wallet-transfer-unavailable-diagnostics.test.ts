@@ -88,6 +88,7 @@ async function post(arrange: (world: TransferWorld) => void) {
     "/v1/investor-profile/wallet",
     createWalletRouter(
       authenticated,
+      async () => true,
       new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, PROPERTY_ADDRESS),
       new GetWalletStatusService(repository),
       undefined,
