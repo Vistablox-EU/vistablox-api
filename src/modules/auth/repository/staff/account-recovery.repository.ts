@@ -66,6 +66,7 @@ export interface AccountRecoveryRepository {
     corroborationCategory: RecoveryCorroborationCategory;
     traceId: string;
     reviewedAt: Date;
+    allowMissingDidit?: boolean;
   }): Promise<AccountRecoveryCaseRecord | null>;
   decideCase(input: {
     caseId: string;
@@ -74,6 +75,7 @@ export interface AccountRecoveryRepository {
     reason: string;
     traceId: string;
     decidedAt: Date;
+    allowSameReviewer?: boolean;
   }): Promise<AccountRecoveryCaseRecord | null>;
   completeCase(input: {
     caseId: string;

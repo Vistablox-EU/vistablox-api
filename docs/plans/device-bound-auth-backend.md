@@ -239,7 +239,7 @@ These are sent on `enrol/verify`, on `login/verify` when `attestation_required` 
 |---|---|---|---|---|
 | T1 | `GET /v1/signing-requests?status=pending` / `GET /v1/signing-requests/:request_id` | session | — | `{ request_id, request_type, amount_minor, currency, destination: { kind, value, display_name }, created_by: { kind, label }, created_at, expires_at, status, user_op?: { chain_id, safe_address, entry_point, module, op, sponsored, fee? } }` |
 | T2 | `POST /v1/signing-requests/:request_id/challenge` | session | `{}` | `{ challenge, expires_at }` (the client requests it after the deliberate action, right before the biometric prompt) |
-| T3 | `POST /v1/signing-requests/:request_id/sign` | session | `{ challenge, assertion, attestation }` for on-chain types (purpose `tx`); `{ challenge, jws, attestation }` for off-chain types | `{ status: "submitted"\|"executed", user_op_hash? }` |
+| T3 | `POST /v1/signing-requests/:request_id/sign` | session | `{ challenge, assertion, attestation }` for on-chain types (purpose `tx`); `{ challenge, jws, attestation }` for off-chain types | `{ status: "signed"\|"submitted"\|"executed", user_op_hash? }` |
 
 **Path note:** one signing-requests resource covers every request type, so the app has a single inbox for pending actions. The backend dispatches by `request_type`.
 
