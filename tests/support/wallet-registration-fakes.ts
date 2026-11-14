@@ -2,6 +2,7 @@ import { vi } from "vitest";
 
 import type { RegistrationEventLookup } from "../../src/infrastructure/blockchain/wallet-registry-chain-reader.js";
 import type { WalletRegistrationEvidenceReader } from "../../src/modules/settlement/application/confirm-wallet-registrations.service.js";
+import { walletRegistrationAddressMismatchEventKey } from "../../src/modules/settlement/repository/prisma-settlement.repository.js";
 import type {
   PivPendingEscrowResolution,
   SettlementRepository,
@@ -23,6 +24,9 @@ export interface FakeEvent {
   blockNumber: bigint;
   wallet: string;
   commitment: string;
+  // Leaves blockNumber out of the log the chain returns (it is still used to
+  // decide whether the log falls in the queried range).
+  omitBlockNumber?: boolean;
   // Defaults derive a distinct, valid identity from the block number, so tests
   // that do not care about it still give the job a complete one.
   transactionHash?: string | null;
@@ -74,7 +78,7 @@ export function makeFakeChain(options: { latestBlock: bigint; events: FakeEvent[
                   transactionHash:
                     event.transactionHash === undefined ? defaultHash("11", event.blockNumber) : event.transactionHash,
                   blockHash: event.blockHash === undefined ? defaultHash("22", event.blockNumber) : event.blockHash,
-                  blockNumber: event.blockNumber,
+                  blockNumber: event.omitBlockNumber === true ? undefined : event.blockNumber,
                   logIndex: event.logIndex === undefined ? index : event.logIndex,
                   removed: event.removed ?? false,
                 }));
@@ -124,6 +128,9 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
   public readonly rows = new Map<string, FakeRegistrationRow>();
   public readonly writes: RecordedWrite[] = [];
   public readonly recordedMismatches: WalletRegistrationAddressMismatchInput[] = [];
+  /** Account ids whose confirm throws once, as a database blip would. */
+  public readonly failConfirmOnceFor = new Set<string>();
+  private readonly mismatchKeys = new Set<string>();
   public readonly cursorWrites: bigint[] = [];
   public overdueCutoff: Date | undefined;
   /** Runs once, right before the next confirm applies: a way to model a concurrent run. */
@@ -184,6 +191,7 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
     const hook = this.beforeNextConfirm;
     this.beforeNextConfirm = undefined;
     hook?.();
+    if (this.failConfirmOnceFor.delete(input.accountId)) throw new Error("database blip");
     const row = this.row(input.accountId);
     if (row.registeredAt !== null) return "already_registered";
     if (this.holderOf(input.evidence.transactionHash, input.evidence.logIndex, input.accountId) !== null) {
@@ -270,8 +278,18 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
     return this.overdueCount;
   }
 
-  public async recordWalletRegistrationAddressMismatch(input: WalletRegistrationAddressMismatchInput): Promise<void> {
+  // The real repository claims audit_log.event_key with a conflict-do-nothing
+  // insert, so the same (account, commitment, sender) is stored once and every
+  // later attempt reports created: false. The same key function is used here so
+  // this fake cannot drift from what the database sees.
+  public async recordWalletRegistrationAddressMismatch(
+    input: WalletRegistrationAddressMismatchInput,
+  ): Promise<{ created: boolean }> {
+    const key = walletRegistrationAddressMismatchEventKey(input);
+    if (this.mismatchKeys.has(key)) return { created: false };
+    this.mismatchKeys.add(key);
     this.recordedMismatches.push(input);
+    return { created: true };
   }
 
   public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {

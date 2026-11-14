@@ -8,6 +8,7 @@ import { ConfirmWalletRegistrationsService } from "../src/modules/settlement/app
 import { RunWalletRegistryWatcherService } from "../src/modules/settlement/application/run-wallet-registry-watcher.service.js";
 import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import { PrismaSettlementRepository } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
+import type { WalletRegistrationConfirmation } from "../src/modules/settlement/repository/settlement.repository.js";
 import type { WalletRegistryHeartbeat } from "../src/modules/settlement/repository/wallet-registry-health.repository.js";
 import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 
@@ -38,6 +39,13 @@ describe.skipIf(databaseUrl === undefined)("address mismatch announcement agains
   const walletB = address();
   const commitmentA = commitment();
   const commitmentB = commitment();
+  // The identity of the log the node reports: the watcher confirms a registration
+  // only with a complete one (transaction hash, block hash, log index).
+  const identity = (blockNumber: bigint, logIndex: number) => ({
+    transactionHash: `0x${randomBytes(32).toString("hex")}`,
+    blockHash: `0x${blockNumber.toString(16).padStart(64, "0")}`,
+    logIndex,
+  });
   const accountA = `account_wmis_a_${suffix}`;
   const accountB = `account_wmis_b_${suffix}`;
 
@@ -53,12 +61,14 @@ describe.skipIf(databaseUrl === undefined)("address mismatch announcement agains
       this.cursor = block;
     }
 
-    public override async confirmWalletRegistration(accountId: string, confirmedAt: Date): Promise<void> {
-      if (this.failConfirmOnce && accountId === accountB) {
+    public override async confirmWalletRegistration(
+      input: Parameters<PrismaSettlementRepository["confirmWalletRegistration"]>[0],
+    ): Promise<WalletRegistrationConfirmation> {
+      if (this.failConfirmOnce && input.accountId === accountB) {
         this.failConfirmOnce = false;
         throw new Error("database blip");
       }
-      await super.confirmWalletRegistration(accountId, confirmedAt);
+      return super.confirmWalletRegistration(input);
     }
   }
 
@@ -98,8 +108,8 @@ describe.skipIf(databaseUrl === undefined)("address mismatch announcement agains
       walletRegistry: {
         getEvents: {
           WalletRegistered: vi.fn(async () => [
-            { args: { wallet: attackerWallet, commitment: commitmentA }, blockNumber: 15n },
-            { args: { wallet: walletB, commitment: commitmentB }, blockNumber: 16n },
+            { args: { wallet: attackerWallet, commitment: commitmentA }, blockNumber: 15n, ...identity(15n, 0) },
+            { args: { wallet: walletB, commitment: commitmentB }, blockNumber: 16n, ...identity(16n, 1) },
           ]),
         },
       },

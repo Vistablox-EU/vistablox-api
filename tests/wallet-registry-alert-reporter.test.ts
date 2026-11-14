@@ -11,6 +11,7 @@ import {
 } from "../src/modules/settlement/domain/wallet-registry-alert-policy.js";
 import type { WalletRegistryHeartbeat } from "../src/modules/settlement/repository/wallet-registry-health.repository.js";
 import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
+import { QUIET_EVIDENCE_COUNTERS } from "./support/wallet-registry-summary.js";
 
 const THRESHOLDS: WalletRegistryAlertThresholds = {
   watcherStaleAfterMs: 10 * 60_000,
@@ -82,6 +83,7 @@ function summary(overrides: Partial<ConfirmWalletRegistrationsSummary> = {}): Co
     addressMismatchesRepeated: 0,
     pendingRegistrationsOverdue: 0,
     pendingWarnAfterMinutes: 5,
+    ...QUIET_EVIDENCE_COUNTERS,
     ...overrides,
   };
 }
