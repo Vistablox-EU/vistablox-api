@@ -743,6 +743,18 @@ model WalletRegistration {
   registeredAt           DateTime? @map("registered_at") @db.Timestamptz(6)
   registrationTxHash     String?   @map("registration_tx_hash")
   registrationBlockNumber BigInt?  @map("registration_block_number")
+  // Identity of the WalletRegistered event that confirmed the row, written in
+  // the same statement as registeredAt: (registrationTxHash,
+  // registrationLogIndex) is unique where both are set (partial index
+  // uq_wallet_registrations_chain_event, raw SQL). The two evidence timestamps
+  // and the flag belong to the job that re-checks the block against the chain;
+  // registeredAt is never reverted. See migration
+  // 20261113150300_wallet_registration_chain_evidence.
+  registrationBlockHash   String?   @map("registration_block_hash")
+  registrationLogIndex    Int?      @map("registration_log_index")
+  registrationEvidenceVerifiedAt DateTime? @map("registration_evidence_verified_at") @db.Timestamptz(6)
+  registrationEvidenceFlaggedAt  DateTime? @map("registration_evidence_flagged_at") @db.Timestamptz(6)
+  registrationEvidenceFlag       String?   @map("registration_evidence_flag")
 
   account Account @relation(fields: [accountId], references: [id])
 
