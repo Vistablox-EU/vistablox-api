@@ -25,6 +25,9 @@ import { createBetterAuth } from "./modules/auth/infrastructure/shared/better-au
 import { PrismaDeviceRepository } from "./modules/auth/repository/customer/prisma-device.repository.js";
 import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/customer/prisma-device-challenge.repository.js";
 import { PrismaDeviceReplacementRepository } from "./modules/auth/repository/customer/prisma-device-replacement.repository.js";
+import { PrismaSigningRequestRepository } from "./modules/auth/repository/customer/prisma-signing-request.repository.js";
+import { CancelPendingSigningRequestsForDeviceService } from "./modules/auth/application/customer/cancel-signing-requests.service.js";
+import { AuthorizeSigningRequestService } from "./modules/auth/application/customer/authorize-signing-request.service.js";
 import { EnrolDeviceService } from "./modules/auth/application/customer/device-enrolment.service.js";
 import { LoginDeviceService } from "./modules/auth/application/customer/device-login.service.js";
 import { IssueDeviceChallengeService } from "./modules/auth/application/customer/device-challenge-issuance.service.js";
@@ -386,6 +389,8 @@ const accountRecovery = {
   callbackUrl: environment.DIDIT_CALLBACK_URL,
   recoveryRedirectUrl:
     environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "com.vistablox.app://recover-account",
+  singleReviewerMode: environment.ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE,
+  skipDiditInStaging: environment.ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING,
   emailSender,
 };
 // Reversal (undoing the KYC microservice split): identity's own
@@ -607,6 +612,17 @@ const app = createApp({
       auth,
       issueChallenge: issueDeviceChallengeService,
       baseUrl: environment.BETTER_AUTH_URL,
+      // T1-T3 (gated by the signing_requests flag below; wiring stays lean
+      // until the flag flips and Phase 2 registers request-type executors).
+      signingRequests: {
+        requests: new PrismaSigningRequestRepository(database),
+        devices: deviceRepository,
+        authorizes: new AuthorizeSigningRequestService(
+          deviceChallengeRepository,
+          deviceRepository,
+          new PrismaSigningRequestRepository(database),
+        ),
+      },
       // Step 1 only: device_auth on (this PR), everything past it still
       // off -- Safe/pairing/signing/recovery-v2 land in later PRs. There's no
       // passkey_login flag: customer passkeys ended at the Phase 4 cutover.
@@ -668,6 +684,14 @@ const app = createApp({
     customerSessions: {
       repository: new PrismaCustomerSessionRepository(database),
       revoker: new BetterAuthSessionRevoker(auth),
+      // D3: removing a device also cancels its pending/signed signing
+      // requests (plan section 3.10). (jkt, device, requests) all live in
+      // this process, so the cancel is a direct service call.
+      cancelPendingSigningRequestsForDevice: (dpopJkt) =>
+        new CancelPendingSigningRequestsForDeviceService(
+          deviceRepository,
+          new PrismaSigningRequestRepository(database),
+        ).execute(dpopJkt),
     },
     kyc: {
       getStatus: getKycStatus,
