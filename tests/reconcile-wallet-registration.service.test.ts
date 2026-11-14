@@ -90,6 +90,8 @@ describe("ReconcileWalletRegistrationService", () => {
     expect(reconcile).toHaveBeenCalledWith({
       accountId: "acct_1",
       actorAccountId: "staff_1",
+      expectedWalletAddress: pending.walletAddress,
+      expectedRegistrationCommitment: pending.registrationCommitment,
       evidence: { transactionHash: TX, blockHash: BLOCK, blockNumber: 12n, logIndex: 2 },
       registeredAt: REGISTERED_AT,
       changedAt: NOW,

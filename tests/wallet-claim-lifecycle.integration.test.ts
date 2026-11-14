@@ -52,12 +52,22 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
   const register = (accountId: string, walletAddress: string, registrationCommitment = nextCommitment()) =>
     walletRepository.registerWallet({ accountId, walletAddress, registrationCommitment, requestedAt: new Date() });
 
+  // The identity of the confirming event: a distinct transaction per call, so
+  // confirmations in one test never meet the one-event-one-registration index.
+  const nextEvidence = () => ({
+    transactionHash: nextTxHash(),
+    blockHash: nextTxHash(),
+    blockNumber: 12n,
+    logIndex: 0,
+  });
+
   const confirm = (accountId: string, walletAddress: string, registrationCommitment: string) =>
     settlementRepository.confirmWalletRegistration({
       accountId,
       walletAddress,
       registrationCommitment,
       registeredAt: new Date(),
+      evidence: nextEvidence(),
     });
 
   // True when the database refuses a wallet_address that is not already
@@ -177,7 +187,7 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
 
       const outcome = await confirm(accountB, address, owner.registrationCommitment);
 
-      expect(outcome).toEqual({ outcome: "confirmed" });
+      expect(outcome).toBe("confirmed");
       expect(squatter.registeredAt).toBeNull();
       await expect(register(accountA, address)).rejects.toMatchObject({ reason: "address_claimed" });
     });
@@ -219,7 +229,7 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
         requestedAt: pending.requestedAt,
         registeredAt: null,
       });
-      expect(await settlementRepository.findPendingWalletRegistrationByCommitment(pending.registrationCommitment)).toMatchObject({
+      expect(await settlementRepository.findWalletRegistrationByCommitment(pending.registrationCommitment)).toMatchObject({
         accountId: accountB,
         walletAddress: own,
       });
@@ -256,8 +266,8 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
 
       expect(replaced).toMatchObject({ walletAddress: y, registrationCommitment: c2, requestedAt: t2, registeredAt: null });
       expect(await database.walletRegistration.count({ where: { accountId: accountA } })).toBe(1);
-      expect(await settlementRepository.findPendingWalletRegistrationByCommitment(c1)).toBeNull();
-      expect(await settlementRepository.findPendingWalletRegistrationByCommitment(c2)).toMatchObject({
+      expect(await settlementRepository.findWalletRegistrationByCommitment(c1)).toBeNull();
+      expect(await settlementRepository.findWalletRegistrationByCommitment(c2)).toMatchObject({
         accountId: accountA,
         walletAddress: y,
         registrationCommitment: c2,
@@ -345,12 +355,12 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
   });
 
   describe("confirmWalletRegistration", () => {
-    it("confirms the matched claim once, writes one confirmed audit row, and reports a repeat as stale", async () => {
+    it("confirms the matched claim once, writes one confirmed audit row, and reports a repeat as already registered", async () => {
       const address = nextAddress();
       const claim = await register(accountA, address);
 
-      await expect(confirm(accountA, address, claim.registrationCommitment)).resolves.toEqual({ outcome: "confirmed" });
-      await expect(confirm(accountA, address, claim.registrationCommitment)).resolves.toEqual({ outcome: "stale" });
+      await expect(confirm(accountA, address, claim.registrationCommitment)).resolves.toBe("confirmed");
+      await expect(confirm(accountA, address, claim.registrationCommitment)).resolves.toBe("already_registered");
 
       const row = await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } });
       expect(row.registeredAt).not.toBeNull();
@@ -369,7 +379,7 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       const first = await register(accountA, x);
       const second = await register(accountA, y);
 
-      await expect(confirm(accountA, x, first.registrationCommitment)).resolves.toEqual({ outcome: "stale" });
+      await expect(confirm(accountA, x, first.registrationCommitment)).resolves.toBe("stale");
 
       const row = await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } });
       expect(row).toMatchObject({ walletAddress: y, registrationCommitment: second.registrationCommitment, registeredAt: null });
@@ -380,10 +390,10 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       const address = nextAddress();
       const claim = await register(accountA, address);
 
-      await expect(confirm(accountA, address, claim.registrationCommitment.toUpperCase().replace("0X", "0x"))).resolves.toEqual({
-        outcome: "stale",
-      });
-      await expect(confirm(accountB, address, claim.registrationCommitment)).resolves.toEqual({ outcome: "stale" });
+      await expect(confirm(accountA, address, claim.registrationCommitment.toUpperCase().replace("0X", "0x"))).resolves.toBe(
+        "stale",
+      );
+      await expect(confirm(accountB, address, claim.registrationCommitment)).resolves.toBe("stale");
       expect((await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } })).registeredAt).toBeNull();
     });
 
@@ -397,18 +407,18 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
         confirm(accountB, address, b.registrationCommitment),
       ]);
 
-      expect(outcomes.map((entry) => entry.outcome).sort()).toEqual(["address_conflict", "confirmed"]);
+      expect([...outcomes].sort()).toEqual(["address_conflict", "confirmed"]);
       expect(
         await database.walletRegistration.count({ where: { walletAddress: address, registeredAt: { not: null } } }),
       ).toBe(1);
 
       const [loserId, loserCommitment, winnerId] =
-        outcomes[0]!.outcome === "address_conflict"
+        outcomes[0] === "address_conflict"
           ? [accountA, a.registrationCommitment, accountB]
           : [accountB, b.registrationCommitment, accountA];
       // The watcher rescans an overlapping range: the same event comes round again.
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        await expect(confirm(loserId, address, loserCommitment)).resolves.toEqual({ outcome: "address_conflict" });
+        await expect(confirm(loserId, address, loserCommitment)).resolves.toBe("address_conflict");
       }
 
       const conflicts = await auditRows(loserId, "confirmation_conflict");
@@ -437,14 +447,14 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
         ]);
 
         const row = await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } });
-        if (confirmation.status === "fulfilled" && confirmation.value.outcome === "confirmed") {
+        if (confirmation.status === "fulfilled" && confirmation.value === "confirmed") {
           // The confirmation won: the registration is bound to X and the replacement was refused.
           expect(replacement).toMatchObject({ status: "rejected", reason: { reason: "address_mismatch" } });
           expect(row).toMatchObject({ walletAddress: x, registrationCommitment: old.registrationCommitment });
           expect(row.registeredAt).not.toBeNull();
         } else {
           // The replacement won: the confirmation was stale and nothing about Y was confirmed.
-          expect(confirmation).toMatchObject({ status: "fulfilled", value: { outcome: "stale" } });
+          expect(confirmation).toMatchObject({ status: "fulfilled", value: "stale" });
           expect(replacement.status).toBe("fulfilled");
           expect(row).toMatchObject({ walletAddress: y, registrationCommitment: newCommitment, registeredAt: null });
         }
@@ -464,7 +474,7 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
         data: { accountId: accountB, walletAddress: address, registrationCommitment: lateCommitment },
       });
 
-      await expect(confirm(accountB, address, lateCommitment)).resolves.toEqual({ outcome: "address_conflict" });
+      await expect(confirm(accountB, address, lateCommitment)).resolves.toBe("address_conflict");
       expect(await auditRows(accountB, "confirmation_conflict")).toHaveLength(1);
       expect((await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountB } })).registeredAt).toBeNull();
     });
@@ -505,9 +515,9 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       accountId: accountA,
       expectedWalletAddress: claim.walletAddress,
       expectedRegistrationCommitment: claim.registrationCommitment,
-      txHash: nextTxHash(),
-      blockNumber: 12n,
+      evidence: nextEvidence(),
       registeredAt: new Date("2026-11-01T10:05:00.000Z"),
+      changedAt: new Date("2026-11-01T10:06:00.000Z"),
       actorAccountId: staffAccount,
       ...overrides,
     });
@@ -519,10 +529,14 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       const reconciled = await walletRepository.reconcileWalletRegistration(input);
 
       expect(reconciled).toMatchObject({
-        walletAddress: claim.walletAddress,
-        registeredAt: input.registeredAt,
-        registrationTxHash: input.txHash,
-        registrationBlockNumber: 12n,
+        kind: "reconciled",
+        outcome: "confirmed",
+        wallet: {
+          walletAddress: claim.walletAddress,
+          registeredAt: input.registeredAt,
+          registrationTxHash: input.evidence.transactionHash,
+          registrationBlockNumber: 12n,
+        },
       });
       const audit = await auditRows(accountA, "reconciled");
       expect(audit).toHaveLength(1);
@@ -554,15 +568,20 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect(await auditRows(accountA, "reconciled")).toHaveLength(0);
     });
 
-    it("still lets staff attach evidence to a registration the watcher already confirmed", async () => {
+    it("still lets staff attach evidence to a registration that was confirmed without any", async () => {
       const address = nextAddress();
       const claim = await register(accountA, address);
-      await confirm(accountA, address, claim.registrationCommitment);
+      // Confirmed before evidence was kept: registered_at and nothing else.
+      await database.walletRegistration.update({ where: { accountId: accountA }, data: { registeredAt: new Date() } });
       const input = reconcileInput(claim);
 
       const reconciled = await walletRepository.reconcileWalletRegistration(input);
 
-      expect(reconciled).toMatchObject({ registrationTxHash: input.txHash, registrationBlockNumber: 12n });
+      expect(reconciled).toMatchObject({
+        kind: "reconciled",
+        outcome: "evidence_recorded",
+        wallet: { registrationTxHash: input.evidence.transactionHash, registrationBlockNumber: 12n },
+      });
     });
 
     it("answers address_claimed, and audits the conflict with the staff actor, when another account holds the address confirmed", async () => {
