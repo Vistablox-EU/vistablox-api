@@ -18,6 +18,7 @@ import type { KycEligibilityReader } from "../src/modules/identity/repository/ky
 import type { PivTokenHoldingsReader } from "../src/modules/settlement/repository/settlement.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
+import { SNAPSHOT_BLOCK_HASH } from "./support/wallet-transfer-fakes.js";
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const REGISTRY_ADDRESS = "0x1234567890123456789012345678901234567890";
@@ -297,6 +298,16 @@ function buildStubbedApp() {
       from_wallet_address: LOWERCASE,
       to_wallet_address: LOWERCASE,
       unsigned_transaction: { chain_id: 84532, to: "0xproperty", data: "0xdeadbeef", value: "0" },
+      // The response schema carries the pinned-block preview and refuses a
+      // body without it, or one whose preview says no.
+      preflight: {
+        block_number: "123456",
+        block_hash: SNAPSHOT_BLOCK_HASH,
+        sender_balance: "10",
+        recipient_authorized: true,
+        token_paused: false,
+        simulation: "passed",
+      },
     },
   });
   const app = mount(

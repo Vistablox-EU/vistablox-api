@@ -86,3 +86,45 @@ Not covered: a reorganization that touches no confirmed registration can hide th
 `GET /internal/v1/wallet-accounts/:account_id` (staff) shows the evidence as `registration_evidence`: `status` (`none`, `partial` for a transaction hash and block number only, `recorded`, `verified`, `flagged`), the identity, `verified_at`, and the `flag` with `flagged_at`. Customer endpoints never expose it.
 
 `POST /internal/v1/wallet-accounts/:account_id/reconcile` (staff, WebAuthn) records the same evidence for a registration whose event the job missed or got wrong. It verifies the transaction on the chain (at least 3 confirmations; the first `WalletRegistered` log in it for this wallet and commitment), then, under a row lock and only if the row still holds the address and commitment the transaction was verified against: confirms a pending registration (`outcome: confirmed`), fills in missing evidence (`evidence_recorded`), replaces the evidence of a flagged registration or of one whose transaction was mined again (`evidence_replaced`), or reports `unchanged`. `registered_at` is only written for a pending row. Failures: `422 wallet.registration_transaction_not_found`, `wallet.registration_transaction_reverted`, `wallet.registration_event_not_found`; `409 wallet.registration_transaction_unconfirmed` (retry), `wallet.registration_changed` (the customer replaced the pending claim after the transaction was checked; nothing written, read the registration again and retry), `wallet.address_already_claimed` (another account already holds the address confirmed; the conflict is recorded in `audit_log` with the staff actor), `wallet.registration_evidence_conflict` (the registration is confirmed by a different event and not flagged; nothing changed), `wallet.registration_event_already_used` (the event backs another account); `503 wallet.chain_unavailable`, `wallet.reconciliation_unavailable`. Its audit row (`settlement.wallet_registration_reconciled`, `..._evidence_recorded`, `..._evidence_replaced`) is stamped with the time of the call; the chain time stays in `changes.registered_at`.
+
+## Wallet transfers
+
+`POST /v1/investor-profile/wallet/transfers` (body `piv_id`, `to_wallet_address`, `amount`) prepares a transfer of a held PIV token and returns the unsigned `safeTransferFrom` call for the investor's own device to sign and submit (AD-267, AD-240). The backend never holds a key, signs, or broadcasts. This is the only transfer surface: there is no separate preview call, so the response is both the preview and the prepared transfer, and the two cannot disagree.
+
+The endpoint reads the chain head once (uncached) and pins everything else to that block's hash (EIP-1898, `requireCanonical`). One Multicall3 `eth_call` reads the sender's token balance, the recipient's `isHolderAuthorized` flag and `isTokenPaused`; a second `eth_call` simulates the exact calldata that is returned, from the investor's wallet, at the same block. A success carries that snapshot next to the unsigned transaction:
+
+| `data.preflight` field | Meaning |
+| --- | --- |
+| `block_number`, `block_hash` | The block every read and the simulation came from (decimal string, lowercase `0x` hash) |
+| `sender_balance` | The sender's token balance at that block (decimal string) |
+| `recipient_authorized` | Always `true` on a 200 |
+| `token_paused` | Always `false` on a 200 |
+| `simulation` | Always `"passed"` on a 200: the calldata ran without reverting from the wallet at that block |
+
+RPC provider requirement: `CHAIN_RPC_URL` must point to a provider that accepts an EIP-1898 block hash with `requireCanonical` in `eth_call`, and that answers a block it has just reported as head from every backend behind its load balancer. Support is not verified for the provider planned for production (CDP Node, `docs/plans/device-bound-auth-backend.md`, `docs/plans/devops-device-bound-auth.md`; neither plan records a check): make one `POST` against the staging deployment before relying on this route. A provider that rejects block hashes fails every request with `503 wallet.chain_unavailable`, and the server log then shows `ChainStateUnavailableError` with the node's JSON-RPC code (for example `-32602`, invalid params), which is how it is told apart from a timeout or a rate limit. Contingency, until the provider is switched: pin by `{ blockNumber: head.number }` in `readTransferSnapshot` instead of the block hash. Every node accepts that, but it cannot detect a reorg between the head read and the pinned calls.
+
+The preflight is advisory. State can change after the block it describes, the contract remains the final authority, and the simulation covers only the inner `safeTransferFrom` call. It does not simulate an ERC-4337 UserOperation (bundler, paymaster, owner signature, gas). `Cache-Control: no-store` stays on the response.
+
+When the preflight fails, nothing is prepared and the response is a documented error envelope:
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 404 | `wallet.not_registered` | The account has no registered wallet |
+| 404 | `wallet.piv_not_held` | The account holds no minted position for the PIV |
+| 422 | `wallet.transfer_lane_closed` | The contract's transfer lane is closed |
+| 422 | `wallet.token_paused` | The token (or the whole contract) is paused |
+| 422 | `wallet.recipient_not_authorized` | The recipient is not authorized to hold the token |
+| 422 | `wallet.insufficient_balance` | The amount exceeds the sender's balance at the block |
+| 422 | `wallet.recipient_cannot_receive` | The recipient address cannot receive the token |
+| 422 | `wallet.transfer_would_revert` | The simulation reverted for a reason not listed above |
+| 503 | `wallet.chain_unavailable` | The chain could not be read within the 10 second budget; retry |
+
+When several reasons apply the first in this order wins: closed lane, paused, recipient not authorized, insufficient balance, recipient cannot receive, any other revert. The chain being unreachable was previously a 500; it is now a 503, and the response carries no RPC URL.
+
+Reading the 503 in the server log: the logged error has the reason as its cause, for example `ChainStateUnavailableError: CallExecutionError: Invalid parameters were provided to the RPC method. (code -32602)`. That is viem's error class and fixed sentence plus the numeric JSON-RPC code or HTTP status, so a provider that rejects block-hash pinning (`-32602`), a header the node does not have (`-32000`), a rate limit (`-32005`, status `429`) and a timeout (`chain state read timed out`) can be told apart. It never holds the RPC URL, a key or the node's own message text, and it is never part of the response body.
+
+A node that has not yet seen the head another backend just reported (or whose head was reorged away) answers "header not found", `-32001` or "not currently canonical" to the pinned calls. viem's transport does not retry those, so the whole snapshot is taken once more from a fresh head, inside the same 10 second budget. No other failure is retried. Which wordings count is a short list in `transfer-snapshot.ts` (`isPinnedBlockUnavailable`); a wording it misses is not retried and answers 503.
+
+**Current behaviour: every request answers `422 wallet.transfer_lane_closed`.** The Phase 1 `VistaBloxProperty.safeTransferFrom` always reverts with `TransferLaneClosed` (`contracts/contracts/VistaBloxProperty.sol`), so any calldata this endpoint prepared before the simulation existed would have failed on chain. The endpoint now says so up front instead of handing out a doomed transaction. It starts returning 200 once a transfer lane is opened in the contract; whether and when that happens is a product and legal decision recorded outside this repository.
+
+`GET /balance` is separate and unchanged: it still reads the capital and token balances with independent, unpinned calls, so its numbers can differ from the snapshot a later transfer response reports.
