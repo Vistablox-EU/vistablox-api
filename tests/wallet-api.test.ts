@@ -1,6 +1,7 @@
 import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
+import { isAddress } from "viem";
 
 import { createWalletRouter } from "../src/modules/wallet/api/wallet.router.js";
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
@@ -100,8 +101,48 @@ describe("POST /v1/investor-profile/wallet", () => {
       },
     });
     expect(repository.registerWallet).toHaveBeenCalledWith(
-      expect.objectContaining({ accountId: "acct_01", walletAddress: validAddress }),
+      expect.objectContaining({ accountId: "acct_01", walletAddress: validAddress.toLowerCase() }),
     );
+  });
+
+  it.each([
+    ["EIP-55 spelling", validAddress],
+    ["all-uppercase hex", `0x${validAddress.slice(2).toUpperCase()}`],
+    ["all-lowercase hex", validAddress.toLowerCase()],
+    ["space-padded", `  ${validAddress}  `],
+    ["tab- and newline-padded", `\t${validAddress}\n`],
+  ])("hands the repository the canonical lowercase address for %s", async (_label, input) => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet")
+      .send({ wallet_address: input });
+
+    expect(response.status).toBe(201);
+    expect(repository.registerWallet).toHaveBeenCalledTimes(1);
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f" }),
+    );
+  });
+
+  it.each([
+    ["an 0X prefix", `0X${validAddress.slice(2)}`],
+    ["39 hex digits", validAddress.slice(0, -1)],
+    ["41 hex digits", `${validAddress}a`],
+    ["a non-hex digit", `${validAddress.slice(0, -1)}g`],
+  ])("rejects %s with one wallet_address field error and never reaches the repository", async (_label, input) => {
+    const { app, repository } = buildApp();
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet")
+      .send({ wallet_address: input });
+
+    expect(response.status).toBe(422);
+    expect(response.body.code).toBe("validation.invalid_field");
+    expect(response.body.field_errors).toEqual([
+      expect.objectContaining({ field: "wallet_address", code: "invalid_format" }),
+    ]);
+    expect(repository.registerWallet).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed wallet address before touching the repository", async () => {
@@ -344,6 +385,72 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
         unsigned_transaction: { chain_id: 84532, to: "0xproperty", data: "0xdeadbeef", value: "0" },
       },
     });
+  });
+
+  // The second row is the EIP-55 spelling above with its last hex digit
+  // mistyped, so its checksum is wrong. Lowercasing discards the casing that
+  // carries the checksum, so such a recipient is accepted and forwarded: the
+  // edge does not verify EIP-55. Before the canonical form this recipient
+  // reached viem as typed, and viem rejected it with InvalidAddressError (a
+  // 500 at chain-call time), which was the only typo guard a typed recipient
+  // had. Enforcing the checksum at the edge is a decision for the founder, not
+  // something this test changes: see "founder decisions" in the pull request.
+  it.each([
+    ["a valid EIP-55 recipient", "0x71C7656EC7ab88b098defB751B7401B5f6d8976F", true],
+    ["a recipient whose EIP-55 checksum is wrong", "0x71C7656EC7ab88b098defB751B7401B5f6d8976E", false],
+  ])("canonicalises %s before the chain reader and the response see it", async (_label, mixedCaseRecipient, checksumIsValid) => {
+    expect(isAddress(mixedCaseRecipient, { strict: true })).toBe(checksumIsValid);
+    const isHolderAuthorized = vi.fn().mockResolvedValue(true);
+    const buildTransferRequest = vi.fn().mockReturnValue({
+      chainId: 84532,
+      to: "0xproperty",
+      data: "0xdeadbeef",
+      value: "0",
+    });
+    const repository: WalletRepository = {
+      registerWallet: vi.fn(),
+      findByAccountId: vi.fn().mockResolvedValue({
+        walletAddress: "0x00000000219ab540356cbb839cbe05303d7705fa",
+        registrationCommitment: "commitment_01",
+        requestedAt: new Date("2026-09-02T10:00:00.000Z"),
+        registeredAt: new Date("2026-09-02T10:05:00.000Z"),
+      }),
+    };
+    const transferService = new RequestWalletTransferService(
+      repository,
+      { listTokenHoldings: vi.fn().mockResolvedValue([{ pivId: "piv_01", tokenId: "7" }]) },
+      {
+        getTokenBalance: vi.fn().mockResolvedValue(10n),
+        isHolderAuthorized,
+        isTokenPaused: vi.fn().mockResolvedValue(false),
+        buildTransferRequest,
+      },
+    );
+    const { app } = buildTransferApp({ transferService });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: `  ${mixedCaseRecipient} `, amount: "3" });
+
+    expect(response.status).toBe(200);
+    expect(isHolderAuthorized).toHaveBeenCalledWith(mixedCaseRecipient.toLowerCase(), "7");
+    expect(buildTransferRequest).toHaveBeenCalledWith(
+      expect.objectContaining({ to: mixedCaseRecipient.toLowerCase() }),
+    );
+    expect(response.body.data.to_wallet_address).toBe(mixedCaseRecipient.toLowerCase());
+  });
+
+  it("rejects a recipient with an 0X prefix with one field error and never reaches the chain", async () => {
+    const { app } = buildTransferApp();
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: `0X${toWalletAddress.slice(2)}`, amount: "3" });
+
+    expect(response.status).toBe(422);
+    expect(response.body.field_errors).toEqual([
+      expect.objectContaining({ field: "to_wallet_address", code: "invalid_format" }),
+    ]);
   });
 
   it("rejects a malformed recipient address before touching the chain", async () => {

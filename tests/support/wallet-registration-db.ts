@@ -78,7 +78,10 @@ export class WalletRegistrationFixtures {
     const tag = `${this.suffix}_${this.counter}`;
     const accountId = `account_walletreg_${tag}`;
     const betterAuthUserId = `auth_walletreg_${tag}`;
-    const walletAddress = options.walletAddress ?? `0xWalletReg${tag}`;
+    // Lowercase: settlement.wallet_registrations refuses any other spelling
+    // (wallet_registrations_wallet_address_lowercase_check). The fixture writes
+    // through Prisma directly, so nothing canonicalises it on the way in.
+    const walletAddress = options.walletAddress ?? `0xwalletreg${tag}`;
     const commitment = options.commitment ?? `0xCommit${tag}`;
     await this.pool.query(
       'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',

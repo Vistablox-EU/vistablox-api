@@ -3,6 +3,7 @@ import { ulid } from "ulid";
 import type { Prisma } from "../../../generated/prisma/client.js";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { isUniqueViolation } from "../../../infrastructure/database/unique-violation.js";
+import { canonicalWalletAddress } from "../../../shared/domain/wallet-address.js";
 import {
   normalizeChainHash,
   type WalletRegistrationEvidence,
@@ -237,7 +238,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
           id: `escrow_mint_${ulid()}`,
           pivId: input.pivId,
           accountId: input.accountId,
-          holderWalletAddress: input.walletAddress,
+          holderWalletAddress: canonicalWalletAddress(input.walletAddress),
           tokenContractAddress: input.tokenContractAddress,
           tokenId: input.tokenId,
           mintAmount: input.mintAmount.toString(),
@@ -333,7 +334,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
           unitCount: input.unitCount,
           costBasisEur: input.costBasisEur,
           positionStatus: "active",
-          holderWalletAddress: input.walletAddress,
+          holderWalletAddress: canonicalWalletAddress(input.walletAddress),
           activatedAt: input.activatedAt,
         },
         select: { id: true },
