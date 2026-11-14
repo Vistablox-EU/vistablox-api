@@ -230,7 +230,15 @@ export interface SettlementRepository {
   // (on-chain sender != the address this account actually has on file) --
   // ConfirmWalletRegistrationsService's own log warning scrolls away; this
   // survives in audit_log for staff/ops to actually find later.
-  recordWalletRegistrationAddressMismatch(input: WalletRegistrationAddressMismatchInput): Promise<void>;
+  //
+  // The signal's identity is (account, commitment, sender): the first call for
+  // one identity stores the row and returns created: true, every later call
+  // (the watcher re-reads its last 32 blocks every minute, a restart, a second
+  // worker) stores nothing and returns created: false. Callers raise an alert
+  // only for created: true.
+  recordWalletRegistrationAddressMismatch(
+    input: WalletRegistrationAddressMismatchInput,
+  ): Promise<{ created: boolean }>;
 }
 
 export interface PivTokenHolding {

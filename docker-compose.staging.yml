@@ -210,6 +210,14 @@ services:
       # AD-241's wallet registry, independently configurable of the CHAIN_*
       # bundle above -- see environment.ts's own comment on this var for why.
       VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: ${VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS:-}
+      # Wallet-registry watcher alert thresholds (docs/wallet-registration-
+      # operations.md). Listed here because a variable reaches the containers
+      # only through this anchor; the defaults match environment.ts.
+      WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES: ${WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES:-5}
+      WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES: ${WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES:-10}
+      WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS: ${WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS:-900}
+      WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT: ${WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT:-1}
+      WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: ${WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT:-5}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # The staging object store is the Compose-local MinIO service. These
       # values intentionally override any external endpoint left in the

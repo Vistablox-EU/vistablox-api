@@ -158,6 +158,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
     await database.property.deleteMany({
       where: { id: { in: [pastPropertyId, untokenizedPropertyId, futurePropertyId, ...mintPropertyIds] } },
     });
+    await database.auditLog.deleteMany({ where: { resourceType: "wallet_registration", resourceId: accountId } });
     await database.walletRegistration.deleteMany({ where: { accountId } });
     await database.account.deleteMany({ where: { id: accountId } });
     await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [betterAuthUserId]);
@@ -531,6 +532,138 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
         status: "mint_sent",
         mintTxHash: "0xnew",
       });
+    });
+  });
+
+  describe("recordWalletRegistrationAddressMismatch", () => {
+    const mismatchAction = "settlement.wallet_registration_address_mismatch";
+    // 64-hex commitments and 40-hex senders, unique per run so another file
+    // sharing this database cannot collide with them.
+    const hex = suffix.replace(/-/g, "");
+    const commitmentFor = (tag: string) => `0x${(tag + hex).padEnd(64, "0").slice(0, 64)}`;
+    const senderFor = (tag: string) => `0x${(tag + hex).padEnd(40, "0").slice(0, 40)}`;
+    const detectedAt = new Date("2026-11-13T10:00:00.000Z");
+    const rowsFor = (commitment: string) =>
+      database.auditLog.findMany({
+        where: {
+          action: mismatchAction,
+          resourceType: "wallet_registration",
+          resourceId: accountId,
+          changes: { path: ["commitment"], string_contains: commitment.toLowerCase().slice(2, 30) },
+        },
+      });
+
+    it("stores exactly one row when eight attempts for one (account, commitment, sender) race", async () => {
+      const commitment = commitmentFor("a1");
+      const input = {
+        accountId,
+        commitment,
+        storedWalletAddress: walletAddress,
+        onChainSender: senderFor("b1"),
+        detectedAt,
+      };
+
+      const results = await Promise.all(
+        Array.from({ length: 8 }, () => repository.recordWalletRegistrationAddressMismatch(input)),
+      );
+
+      expect(results.filter((result) => result.created)).toHaveLength(1);
+      expect(results.filter((result) => !result.created)).toHaveLength(7);
+      expect(await rowsFor(commitment)).toHaveLength(1);
+    });
+
+    it("keeps the full stored address, sender and commitment in the audit row, with no actor", async () => {
+      const commitment = commitmentFor("a2");
+      const sender = senderFor("b2");
+
+      await repository.recordWalletRegistrationAddressMismatch({
+        accountId,
+        commitment,
+        storedWalletAddress: walletAddress,
+        onChainSender: sender,
+        detectedAt,
+      });
+
+      const [row] = await rowsFor(commitment);
+      expect(row).toMatchObject({
+        action: mismatchAction,
+        resourceType: "wallet_registration",
+        resourceId: accountId,
+        actorAccountId: null,
+        createdAt: detectedAt,
+        changes: { commitment, stored_wallet_address: walletAddress, onchain_sender: sender },
+      });
+      expect(row?.eventKey).toBe(
+        `wallet_registration_address_mismatch:${accountId}:${commitment}:${sender}`,
+      );
+    });
+
+    it("treats the same commitment and sender in another hex case as the same signal", async () => {
+      const commitment = commitmentFor("a3");
+      const sender = senderFor("b3");
+      const base = { accountId, storedWalletAddress: walletAddress, detectedAt };
+
+      const first = await repository.recordWalletRegistrationAddressMismatch({
+        ...base,
+        commitment,
+        onChainSender: sender,
+      });
+      const second = await repository.recordWalletRegistrationAddressMismatch({
+        ...base,
+        commitment: ` 0x${commitment.slice(2).toUpperCase()} `,
+        onChainSender: `0x${sender.slice(2).toUpperCase()}`,
+      });
+
+      expect(first).toEqual({ created: true });
+      expect(second).toEqual({ created: false });
+      expect(await rowsFor(commitment)).toHaveLength(1);
+    });
+
+    it("records a different sender for the same commitment as a new signal", async () => {
+      const commitment = commitmentFor("a4");
+      const base = { accountId, commitment, storedWalletAddress: walletAddress, detectedAt };
+
+      const first = await repository.recordWalletRegistrationAddressMismatch({
+        ...base,
+        onChainSender: senderFor("b4"),
+      });
+      const second = await repository.recordWalletRegistrationAddressMismatch({
+        ...base,
+        onChainSender: senderFor("c4"),
+      });
+
+      expect([first.created, second.created]).toEqual([true, true]);
+      expect(await rowsFor(commitment)).toHaveLength(2);
+    });
+
+    it("leaves a legacy row with no event key alone and is not blocked by it", async () => {
+      const commitment = commitmentFor("a5");
+      const sender = senderFor("b5");
+      // What main wrote before this change: no event_key.
+      const legacy = await database.auditLog.create({
+        data: {
+          id: `audit_legacy_${suffix}`,
+          action: mismatchAction,
+          resourceType: "wallet_registration",
+          resourceId: accountId,
+          changes: { commitment, stored_wallet_address: walletAddress, onchain_sender: sender },
+          createdAt: new Date("2026-11-01T00:00:00.000Z"),
+        },
+      });
+
+      const result = await repository.recordWalletRegistrationAddressMismatch({
+        accountId,
+        commitment,
+        storedWalletAddress: walletAddress,
+        onChainSender: sender,
+        detectedAt,
+      });
+
+      // One more first-seen signal at most (the legacy row has no key to claim).
+      expect(result).toEqual({ created: true });
+      const rows = await rowsFor(commitment);
+      expect(rows).toHaveLength(2);
+      expect(rows.find((row) => row.id === legacy.id)).toMatchObject({ eventKey: null });
     });
   });
 });
