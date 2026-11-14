@@ -484,6 +484,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
         walletAddress: address,
         registrationCommitment: `commitment_new_${suffix}`,
         requestedAt: new Date("2026-09-02T11:00:00.000Z"),
+        freshAuthentication: false, // a first registration needs only the ordinary session
       });
       expect(created).toMatchObject({
         walletAddress: address,
@@ -496,6 +497,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
         walletAddress: address,
         registrationCommitment: `commitment_replayed_${suffix}`,
         requestedAt: new Date("2026-09-02T11:05:00.000Z"),
+        freshAuthentication: false, // a replay of the same address needs only the ordinary session
       });
       expect(replayed).toEqual(created);
 
@@ -505,6 +507,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
         walletAddress: replacementAddress,
         registrationCommitment: `commitment_replacement_${suffix}`,
         requestedAt: new Date("2026-09-02T11:10:00.000Z"),
+        freshAuthentication: true, // replacing a pending claim needs fresh authentication
       });
       expect(replaced).toMatchObject({
         walletAddress: replacementAddress,
@@ -523,6 +526,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
           walletAddress: address,
           registrationCommitment: `commitment_mismatch_${suffix}`,
           requestedAt: new Date("2026-09-02T11:20:00.000Z"),
+          freshAuthentication: false, // a confirmed registration's outcome does not depend on it
         }),
       ).rejects.toMatchObject({ reason: "address_mismatch" });
 
@@ -581,6 +585,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
             walletAddress: claimedAddress,
             registrationCommitment: `commitment_claim_attempt_${suffix}`,
             requestedAt: new Date("2026-09-02T11:25:00.000Z"),
+            freshAuthentication: true,
           }),
         ).rejects.toMatchObject({ reason: "address_claimed" });
 
@@ -595,6 +600,7 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
             walletAddress: pendingOnlyAddress,
             registrationCommitment: `commitment_claim_pending_${suffix}`,
             requestedAt: new Date("2026-09-02T11:30:00.000Z"),
+            freshAuthentication: true,
           }),
         ).resolves.toMatchObject({ walletAddress: pendingOnlyAddress, registeredAt: null });
       } finally {

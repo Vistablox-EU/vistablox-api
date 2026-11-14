@@ -17,6 +17,18 @@ export class WalletAddressConflictError extends Error {
   }
 }
 
+// The account's own claim is still pending, the submitted address is a
+// different one, and the caller's session has not confirmed recently who is
+// holding it (founder decision of 2026-11-14 on conflict C-010, question 2:
+// replacing a pending claim needs fresh authentication). Nothing was written.
+// It carries no payload on purpose: not the address, not the account, not the
+// commitment, so nothing about the claim can leak through it.
+export class WalletReplacementFreshAuthenticationRequiredError extends Error {
+  public constructor() {
+    super("Replacing a pending wallet claim requires fresh authentication.");
+  }
+}
+
 // The registration a caller verified (its address and commitment) is no longer
 // the account's registration: the customer replaced the pending claim between
 // the read and the write, so the evidence no longer applies to it.
@@ -32,6 +44,16 @@ export interface WalletRepository {
     walletAddress: string;
     registrationCommitment: string;
     requestedAt: Date;
+    // Computed server-side by the caller from the authenticated session, never
+    // from anything the client sends, and required so that omitting it cannot
+    // default to "fresh". It is consulted only when this call would replace
+    // the account's own pending claim with a DIFFERENT address, and only
+    // there, under the row lock, because only there is the row known:
+    // WalletReplacementFreshAuthenticationRequiredError when it is false.
+    // First registration, a replay of the same address (in any hex case, with
+    // surrounding whitespace) and every confirmed-registration outcome never
+    // look at it.
+    freshAuthentication: boolean;
   }): Promise<RegisteredWallet>;
   findByAccountId(accountId: string): Promise<RegisteredWallet | null>;
   // Compare-and-set on the registration the caller verified: expectedWalletAddress

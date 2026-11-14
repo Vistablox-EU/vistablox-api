@@ -2,12 +2,16 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createWalletRouter } from "../src/modules/wallet/api/wallet.router.js";
+import { createWalletRouter, type WalletFreshAuthenticationProbe } from "../src/modules/wallet/api/wallet.router.js";
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
 import { GetWalletBalanceService } from "../src/modules/wallet/application/get-wallet-balance.service.js";
 import { GetWalletStatusService } from "../src/modules/wallet/application/get-wallet-status.service.js";
 import { RequestWalletTransferService } from "../src/modules/wallet/application/request-wallet-transfer.service.js";
-import type { WalletRepository } from "../src/modules/wallet/repository/wallet.repository.js";
+import {
+  WalletAddressConflictError,
+  WalletReplacementFreshAuthenticationRequiredError,
+  type WalletRepository,
+} from "../src/modules/wallet/repository/wallet.repository.js";
 import type { KycEligibilityReader } from "../src/modules/identity/repository/kyc-eligibility-reader.js";
 import type { PivTokenHoldingsReader } from "../src/modules/settlement/repository/settlement.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
@@ -28,9 +32,14 @@ const eligibleKyc = {
   renewalDueAt: new Date("2099-01-01T00:00:00.000Z"),
 };
 
+// A probe for the tests that do not care about freshness.
+const notFresh: WalletFreshAuthenticationProbe = async () => false;
+
 function buildApp(options?: {
   kyc?: typeof eligibleKyc | null;
   registerWallet?: WalletRepository["registerWallet"];
+  probe?: WalletFreshAuthenticationProbe;
+  population?: "customer" | "staff_partner";
 }) {
   const repository: WalletRepository = {
     registerWallet:
@@ -54,7 +63,7 @@ function buildApp(options?: {
     response.locals.authContext = {
       accountId: "acct_01",
       providerSessionId: "session_01",
-      population: "customer",
+      population: options?.population ?? "customer",
     };
     next();
   };
@@ -64,6 +73,7 @@ function buildApp(options?: {
     "/v1/investor-profile/wallet",
     createWalletRouter(
       authenticated,
+      options?.probe ?? notFresh,
       new RegisterWalletService(
         repository,
         kycEligibilityReader,
@@ -74,7 +84,7 @@ function buildApp(options?: {
     ),
   );
   app.use(errorHandler);
-  return { app, repository };
+  return { app, repository, kycEligibilityReader };
 }
 
 describe("POST /v1/investor-profile/wallet", () => {
@@ -128,9 +138,6 @@ describe("POST /v1/investor-profile/wallet", () => {
   });
 
   it("reports a conflict when the address is already claimed by another account", async () => {
-    const { WalletAddressConflictError } = await import(
-      "../src/modules/wallet/repository/wallet.repository.js"
-    );
     const { app } = buildApp({
       registerWallet: vi.fn().mockRejectedValue(new WalletAddressConflictError("address_claimed")),
     });
@@ -141,6 +148,159 @@ describe("POST /v1/investor-profile/wallet", () => {
 
     expect(response.status).toBe(409);
     expect(response.body.code).toBe("wallet.address_already_claimed");
+  });
+});
+
+describe("POST /v1/investor-profile/wallet freshness", () => {
+  const validAddress = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
+  const post = (app: express.Express) =>
+    request(app).post("/v1/investor-profile/wallet").send({ wallet_address: validAddress });
+
+  it("passes the probe's true to the service as freshAuthentication: true", async () => {
+    const { app, repository } = buildApp({ probe: vi.fn().mockResolvedValue(true) });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(201);
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ accountId: "acct_01", freshAuthentication: true }),
+    );
+  });
+
+  it("passes the probe's false to the service as freshAuthentication: false", async () => {
+    const { app, repository } = buildApp({ probe: vi.fn().mockResolvedValue(false) });
+
+    await post(app);
+
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ freshAuthentication: false }),
+    );
+  });
+
+  it.each([undefined, null, "true", 1, {}])(
+    "treats a probe answer of %j as not fresh, so only the boolean true counts",
+    async (loose) => {
+      const { app, repository } = buildApp({
+        probe: vi.fn().mockResolvedValue(loose) as unknown as WalletFreshAuthenticationProbe,
+      });
+
+      await post(app);
+
+      expect(repository.registerWallet).toHaveBeenCalledWith(
+        expect.objectContaining({ freshAuthentication: false }),
+      );
+    },
+  );
+
+  it("asks the probe about the server-set auth context, exactly once", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app } = buildApp({ probe });
+
+    await post(app);
+
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(probe).toHaveBeenCalledWith({
+      accountId: "acct_01",
+      providerSessionId: "session_01",
+      population: "customer",
+    });
+  });
+
+  it("cannot be made fresh by anything the client sends: body field, query string or header", async () => {
+    const { app, repository } = buildApp({ probe: vi.fn().mockResolvedValue(false) });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet?fresh=1&fresh_authentication=true")
+      .set("X-Fresh-Authentication", "1")
+      .set("Fresh-Authentication", "true")
+      .send({ wallet_address: validAddress, fresh_authentication: true, freshAuthentication: true });
+
+    expect(response.status).toBe(201);
+    expect(repository.registerWallet).toHaveBeenCalledWith(
+      expect.objectContaining({ freshAuthentication: false }),
+    );
+  });
+
+  it("fails closed with a 500 and writes nothing when the probe itself fails", async () => {
+    const { app, repository, kycEligibilityReader } = buildApp({
+      probe: vi.fn().mockRejectedValue(new Error("session store down")),
+    });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe("internal.unexpected");
+    expect(kycEligibilityReader.getEligibilitySnapshot).not.toHaveBeenCalled();
+    expect(repository.registerWallet).not.toHaveBeenCalled();
+  });
+
+  it("does not call the probe for a body that fails validation", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app, repository } = buildApp({ probe });
+
+    const response = await request(app)
+      .post("/v1/investor-profile/wallet")
+      .send({ wallet_address: "not-an-address" });
+
+    expect(response.status).toBe(422);
+    expect(probe).not.toHaveBeenCalled();
+    expect(repository.registerWallet).not.toHaveBeenCalled();
+  });
+
+  it("does not call the probe for a staff session, which is refused first", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app, repository } = buildApp({ probe, population: "staff_partner" });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe("authorization.forbidden");
+    expect(probe).not.toHaveBeenCalled();
+    expect(repository.registerWallet).not.toHaveBeenCalled();
+  });
+
+  it("answers a refused replacement with the 403 fresh-authentication envelope and nothing else", async () => {
+    const { app } = buildApp({
+      registerWallet: vi.fn().mockRejectedValue(new WalletReplacementFreshAuthenticationRequiredError()),
+    });
+
+    const response = await post(app);
+
+    expect(response.status).toBe(403);
+    expect(Object.keys(response.body).sort()).toEqual(["code", "detail", "status", "title", "trace_id", "type"]);
+    expect(response.body).toMatchObject({
+      type: "https://api.vistablox.io/errors/authentication.fresh_auth_required",
+      code: "authentication.fresh_auth_required",
+      title: "Fresh authentication required",
+      status: 403,
+      detail: "Sign in again on this device before continuing.",
+    });
+    expect(typeof response.body.trace_id).toBe("string");
+    expect(response.body.trace_id.length).toBeGreaterThan(0);
+    expect(response.headers["cache-control"]).not.toBe("public");
+  });
+
+  it("keeps a registration conflict a 409, whatever the probe said", async () => {
+    for (const fresh of [true, false]) {
+      const { app } = buildApp({
+        probe: vi.fn().mockResolvedValue(fresh),
+        registerWallet: vi.fn().mockRejectedValue(new WalletAddressConflictError("address_mismatch")),
+      });
+
+      const response = await post(app);
+
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe("wallet.registration_address_mismatch");
+    }
+  });
+
+  it("never asks the probe on the read and transfer routes", async () => {
+    const probe = vi.fn().mockResolvedValue(true);
+    const { app } = buildApp({ probe });
+
+    await request(app).get("/v1/investor-profile/wallet");
+
+    expect(probe).not.toHaveBeenCalled();
   });
 });
 
@@ -170,6 +330,7 @@ describe("GET /v1/investor-profile/wallet", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
+        notFresh,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         new GetWalletStatusService(repository),
       ),
@@ -221,6 +382,7 @@ describe("GET /v1/investor-profile/wallet/balance", () => {
         getTokenBalances: vi.fn().mockResolvedValue([3n]),
       });
 
+    const probe = vi.fn().mockResolvedValue(true);
     const app = express();
     const authenticated: RequestHandler = (_request, response, next) => {
       response.locals.authContext = {
@@ -236,13 +398,14 @@ describe("GET /v1/investor-profile/wallet/balance", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
+        probe,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         new GetWalletStatusService(repository),
         balanceService,
       ),
     );
     app.use(errorHandler);
-    return { app };
+    return { app, probe };
   }
 
   it("reads the registered wallet's capital and token balances", async () => {
@@ -259,6 +422,14 @@ describe("GET /v1/investor-profile/wallet/balance", () => {
         tokens: [{ piv_id: "piv_01", token_id: "7", balance: "3" }],
       },
     });
+  });
+
+  it("never asks the fresh-authentication probe", async () => {
+    const { app, probe } = buildBalanceApp();
+
+    await request(app).get("/v1/investor-profile/wallet/balance");
+
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("is not mounted when no balance service is configured", async () => {
@@ -300,6 +471,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
         }),
       });
 
+    const probe = vi.fn().mockResolvedValue(true);
     const app = express();
     const authenticated: RequestHandler = (_request, response, next) => {
       response.locals.authContext = {
@@ -315,6 +487,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       "/v1/investor-profile/wallet",
       createWalletRouter(
         authenticated,
+        probe,
         new RegisterWalletService(repository, { getEligibilitySnapshot: vi.fn() }, TEST_REGISTRY_ADDRESS),
         new GetWalletStatusService(repository),
         undefined,
@@ -322,7 +495,7 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
       ),
     );
     app.use(errorHandler);
-    return { app };
+    return { app, probe };
   }
 
   it("builds an unsigned transfer transaction for the caller's wallet", async () => {
@@ -344,6 +517,16 @@ describe("POST /v1/investor-profile/wallet/transfers", () => {
         unsigned_transaction: { chain_id: 84532, to: "0xproperty", data: "0xdeadbeef", value: "0" },
       },
     });
+  });
+
+  it("never asks the fresh-authentication probe", async () => {
+    const { app, probe } = buildTransferApp();
+
+    await request(app)
+      .post("/v1/investor-profile/wallet/transfers")
+      .send({ piv_id: "piv_01", to_wallet_address: toWalletAddress, amount: "3" });
+
+    expect(probe).not.toHaveBeenCalled();
   });
 
   it("rejects a malformed recipient address before touching the chain", async () => {

@@ -1938,6 +1938,7 @@ describe.skipIf(databaseUrl === undefined)(
         walletAddress: claimedAddress,
         registrationCommitment: `commitment_claimed_${suffix}`,
         requestedAt: new Date("2026-09-01T09:00:00.000Z"),
+        freshAuthentication: false, // a first registration needs only the ordinary session
       });
       await repository.createReservation({
         reservationId,
@@ -1981,6 +1982,7 @@ describe.skipIf(databaseUrl === undefined)(
         walletAddress: replacementAddress,
         registrationCommitment: `commitment_replacement_${suffix}`,
         requestedAt: new Date("2026-09-04T09:00:00.000Z"),
+        freshAuthentication: true, // replacing a pending claim needs fresh authentication
       });
       expect(replaced).toMatchObject({ walletAddress: replacementAddress, registeredAt: null });
 

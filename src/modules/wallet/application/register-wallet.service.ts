@@ -1,9 +1,11 @@
 import { randomBytes } from "node:crypto";
 
 import { AppError } from "../../../shared/errors/app-error.js";
+import { freshAuthenticationRequiredError } from "../../../shared/errors/fresh-authentication-required-error.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import {
   WalletAddressConflictError,
+  WalletReplacementFreshAuthenticationRequiredError,
   type RegisteredWallet,
   type WalletRepository,
 } from "../repository/wallet.repository.js";
@@ -25,7 +27,14 @@ export class RegisterWalletService {
       `0x${randomBytes(32).toString("hex")}`,
   ) {}
 
-  public async execute(input: { accountId: string; walletAddress: string }) {
+  // freshAuthentication is whether the caller's session confirmed who is
+  // holding the device recently enough. The router computes it server-side
+  // from the authenticated session and passes it through unchanged; it is
+  // required, with no default, so a forgotten argument cannot read as fresh.
+  // It only matters when this call would replace the account's own pending
+  // claim with a different address, which only the repository can know under
+  // its row lock.
+  public async execute(input: { accountId: string; walletAddress: string; freshAuthentication: boolean }) {
     if (this.registryContractAddress === undefined) {
       throw new AppError({
         code: "wallet.on_chain_registration_unavailable",
@@ -59,11 +68,17 @@ export class RegisterWalletService {
         walletAddress: input.walletAddress,
         registrationCommitment: this.generateCommitment(),
         requestedAt: now,
+        freshAuthentication: input.freshAuthentication,
       });
       return { data: toWalletPayload(wallet, this.registryContractAddress) };
     } catch (error) {
       if (error instanceof WalletAddressConflictError) {
         throw walletConflictError(error.reason);
+      }
+      // Same envelope as requireFreshAuthentication on the other /v1 routes:
+      // the client signs in again on the device and repeats the same request.
+      if (error instanceof WalletReplacementFreshAuthenticationRequiredError) {
+        throw freshAuthenticationRequiredError();
       }
       throw error;
     }
