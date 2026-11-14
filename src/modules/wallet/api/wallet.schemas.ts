@@ -1,10 +1,17 @@
 import { z } from "zod";
 
 const dateTime = z.iso.datetime();
+// The zero address cannot send a transaction, so a wallet registered under it
+// can never complete VistaBloxWalletRegistry.register() (the registry records
+// msg.sender), and as a transfer destination it names no holder. It has no
+// letters, so compare against the lowercase literal and leave the "0X"
+// spelling to the shape check.
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const ethAddress = z
   .string()
   .trim()
-  .regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 20-byte, 0x-prefixed hex address");
+  .regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 20-byte, 0x-prefixed hex address")
+  .refine((value) => value !== ZERO_ADDRESS, { message: "Must not be the zero address" });
 
 export const registerWalletBodySchema = z.object({
   wallet_address: ethAddress,

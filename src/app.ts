@@ -109,10 +109,14 @@ import { DownloadDisclosureDocumentService } from "./modules/offering/applicatio
 import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
 import { ClassifyMaterialityService } from "./modules/offering/application/classify-materiality.service.js";
 import { PublishDisclosurePackService } from "./modules/offering/application/publish-disclosure-pack.service.js";
+import { UploadOfferingDocumentService } from "./modules/offering/application/upload-offering-document.service.js";
+import { GetOfferingDocumentService } from "./modules/offering/application/get-offering-document.service.js";
 import { FinalizeOfferingService } from "./modules/offering/application/finalize-offering.service.js";
 import { ReconfirmReservationService } from "./modules/offering/application/reconfirm-reservation.service.js";
 import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
-import type { DisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
+import type { DisclosureDocumentStore, WritableDisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
+import type { OfferingDocumentRepository } from "./modules/offering/repository/offering-document.repository.js";
+import type { MalwareScanner } from "./infrastructure/antivirus/clamav-scanner.js";
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
 import type { ReservationRepository } from "./modules/offering/repository/reservation.repository.js";
 import type { FinalizeOfferingRepository } from "./modules/offering/repository/finalize-offering.repository.js";
@@ -348,6 +352,12 @@ export interface AppDependencies {
     };
     offeringOperations?: {
       repository: FinalizeOfferingRepository & MaterialityRepository & DisclosurePackRepository;
+      /** Staff disclosure-document upload/list/download; only when document storage is configured. */
+      documents?: {
+        repository: OfferingDocumentRepository;
+        store: WritableDisclosureDocumentStore;
+        scanner: MalwareScanner;
+      };
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -619,6 +629,7 @@ export function createApp(dependencies: AppDependencies): Express {
       ),
     );
     if (dependencies.protectedApi.offeringOperations !== undefined) {
+      const offeringDocuments = dependencies.protectedApi.offeringOperations.documents;
       app.use(
         "/internal/v1/offerings",
         createOfferingOperationsRouter(
@@ -629,6 +640,12 @@ export function createApp(dependencies: AppDependencies): Express {
           new ClassifyMaterialityService(dependencies.protectedApi.offeringOperations.repository),
           new PublishDisclosurePackService(dependencies.protectedApi.offeringOperations.repository),
           finalizeIdempotency,
+          offeringDocuments === undefined
+            ? undefined
+            : {
+                upload: new UploadOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store, offeringDocuments.scanner),
+                read: new GetOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store),
+              },
         ),
       );
     }
