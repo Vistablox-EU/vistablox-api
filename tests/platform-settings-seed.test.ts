@@ -21,10 +21,10 @@ import { describe, expect, it } from "vitest";
 //
 // Scope, deliberately narrow: only reads whose key is a string literal and
 // whose call has `where: { key: "..." }` first. Rows created at runtime (the
-// wallet-registry block cursor is upserted by the worker and read with a null
-// fallback) are not seed-dependent; their key is a named constant, and their
-// file is allowlisted below. The final test makes any other way of reading a
-// setting fail loudly instead of being skipped silently.
+// wallet-registry block cursor and watcher heartbeat are upserted by the worker
+// and read with a null fallback) are not seed-dependent; their key is a named
+// constant, and their file is allowlisted below. The final test makes any other
+// way of reading a setting fail loudly instead of being skipped silently.
 
 const sourceRoot = fileURLToPath(new URL("../src/", import.meta.url));
 const migrationsRoot = fileURLToPath(new URL("../prisma/migrations/", import.meta.url));
@@ -37,7 +37,13 @@ const DELETE_STATEMENT = /DELETE\s+FROM\s+"platform"\."settings"[^;]*;/gi;
 
 // Files whose platformSetting lookups are runtime-written rows with a null
 // fallback rather than seed-dependent reads (paths relative to src/, posix).
-const RUNTIME_WRITTEN_SETTING_FILES = new Set(["modules/settlement/repository/prisma-settlement.repository.ts"]);
+// The wallet-registry health repository reads the watcher heartbeat, which the
+// worker upserts after each run; before the first run it reads as "no
+// heartbeat", which the health check reports instead of throwing on.
+const RUNTIME_WRITTEN_SETTING_FILES = new Set([
+  "modules/settlement/repository/prisma-settlement.repository.ts",
+  "modules/settlement/repository/prisma-wallet-registry-health.repository.ts",
+]);
 
 function sourceFiles(directory: string): string[] {
   return readdirSync(directory, { recursive: true, encoding: "utf8" })

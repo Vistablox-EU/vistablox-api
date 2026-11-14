@@ -484,7 +484,9 @@ export class InMemorySettlementRepository implements SettlementRepository {
 
   public async setLastProcessedWalletRegistryBlock(): Promise<void> {}
 
-  public async recordWalletRegistrationAddressMismatch(): Promise<void> {}
+  public async recordWalletRegistrationAddressMismatch(): Promise<{ created: boolean }> {
+    return { created: true };
+  }
 
   private async run<T>(method: RepositoryMethod, body: () => T): Promise<T> {
     this.timeline.push(`repo:${method}`);

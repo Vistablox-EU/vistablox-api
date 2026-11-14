@@ -9,6 +9,7 @@ import {
   type WalletRegistrationEvidence,
   type WalletRegistrationEvidenceFlag,
 } from "../../../shared/domain/wallet-registration-evidence.js";
+import { maskHexIdentifier } from "../../../shared/logging/log-redaction.js";
 import {
   WALLET_REGISTRY_EVIDENCE_FINAL_DEPTH,
   WALLET_REGISTRY_EVIDENCE_RECHECK_BATCH,
@@ -69,20 +70,60 @@ export interface WalletRegistrationEvidenceReader {
   }): Promise<RegistrationEventLookup>;
 }
 
+/**
+ * A first-seen address mismatch, as it may appear in a log line or a metric:
+ * the account id plus masked forms of the three values. The full stored
+ * address, on-chain sender and commitment live only in the audit_log row.
+ */
+export interface WalletRegistrationMismatchSignal {
+  accountId: string;
+  commitmentMasked: string;
+  storedWalletMasked: string;
+  onChainSenderMasked: string;
+}
+
+/**
+ * What a caller can ask execute() to do while it runs, as opposed to what it
+ * reports when it is done.
+ */
+export interface ConfirmWalletRegistrationsHooks {
+  /**
+   * Called once for each first-seen address mismatch, synchronously, right after
+   * its claim is stored and before the next event is read.
+   *
+   * The claim is durable, so a signal handed over only in the returned summary is
+   * lost whenever the run fails after it: the retry re-reads the event, finds the
+   * claim and counts a repeat. Announcing from here makes the announcement
+   * at-least-once with respect to a failure later in the run. It must not throw
+   * (a throw would fail the run after the claim, which is the loss this prevents).
+   */
+  onAddressMismatch?: (signal: WalletRegistrationMismatchSignal) => void;
+}
+
 export interface ConfirmWalletRegistrationsSummary {
   fromBlock: string;
   toBlock: string;
+  // The newest block this run may trust (chain head minus the confirmation
+  // depth, never below 0), not this run's capped toBlock: the health check
+  // measures cursor lag against it.
+  safeHeadBlock: string;
   eventsFound: number;
   registrationsConfirmed: number;
   // An event whose commitment belongs to no registration row at all.
   unmatchedEvents: number;
+  // The part of unmatchedEvents that is news: events in a block past the cursor
+  // an earlier completed run reached. Alerts key on this, not on the total.
+  newUnmatchedEvents: number;
   // The matched claim was replaced by its account between the match and the
   // write; nothing was written.
   staleConfirmations: number;
   // Another account already holds the address confirmed; the claim stays
   // pending and the conflict is in audit_log.
   confirmationConflicts: number;
-  addressMismatches: string[];
+  // First-seen mismatches only (see recordWalletRegistrationAddressMismatch).
+  addressMismatches: WalletRegistrationMismatchSignal[];
+  // Mismatches this run read that were already recorded by an earlier read.
+  addressMismatchesRepeated: number;
   pendingRegistrationsOverdue: number;
   pendingWarnAfterMinutes: number;
   // The same event seen again for a row that already holds it (the rescan
@@ -174,7 +215,7 @@ export class ConfirmWalletRegistrationsService {
     return this.defaultEvidenceReader;
   }
 
-  public async execute(): Promise<ConfirmWalletRegistrationsSummary> {
+  public async execute(hooks: ConfirmWalletRegistrationsHooks = {}): Promise<ConfirmWalletRegistrationsSummary> {
     const latestBlock = await this.chain.publicClient.getBlockNumber();
     const cursor = await this.repository.getLastProcessedWalletRegistryBlock();
     const now = this.clock();
@@ -195,12 +236,15 @@ export class ConfirmWalletRegistrationsService {
     const summary: ConfirmWalletRegistrationsSummary = {
       fromBlock: fromBlock.toString(),
       toBlock: safeLatestBlock.toString(),
+      safeHeadBlock: (safeLatestBlock < 0n ? 0n : safeLatestBlock).toString(),
       eventsFound: 0,
       registrationsConfirmed: 0,
       unmatchedEvents: 0,
+      newUnmatchedEvents: 0,
       staleConfirmations: 0,
       confirmationConflicts: 0,
       addressMismatches: [],
+      addressMismatchesRepeated: 0,
       pendingRegistrationsOverdue,
       pendingWarnAfterMinutes: Math.round(this.pendingWarnAfterMs / 60_000),
       eventsReplayed: 0,
@@ -241,7 +285,7 @@ export class ConfirmWalletRegistrationsService {
       if (wallet === undefined || commitment === undefined) {
         continue; // Defensive only -- the ABI guarantees both are present.
       }
-      const rewind = await this.processEvent(event, wallet, commitment, latestBlock, summary);
+      const rewind = await this.processEvent(event, wallet, commitment, latestBlock, summary, { cursor, hooks });
       if (rewind !== null) rewinds.push(rewind);
     }
 
@@ -267,16 +311,23 @@ export class ConfirmWalletRegistrationsService {
     commitment: string,
     head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
+    run: EventRun,
   ): Promise<bigint | null> {
     const evidence = toEvidence(event);
     const record = await this.repository.findWalletRegistrationByCommitment(commitment);
     if (record === null) {
       summary.unmatchedEvents += 1;
+      // An event at or before the cursor was already read by a completed run,
+      // so here it is an overlap replay, not news. No block number or no cursor
+      // means it cannot be shown to be a replay, so it counts.
+      if (run.cursor === null || event.blockNumber === undefined || event.blockNumber === null || event.blockNumber > run.cursor) {
+        summary.newUnmatchedEvents += 1;
+      }
       return null;
     }
 
     if (record.registeredAt === null) {
-      return this.processPendingEvent(record, evidence, wallet, commitment, head, summary);
+      return this.processPendingEvent(record, evidence, wallet, commitment, head, summary, run);
     }
     return this.processRegisteredEvent(record, evidence, wallet, head, summary);
   }
@@ -289,21 +340,33 @@ export class ConfirmWalletRegistrationsService {
     commitment: string,
     head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
+    run: EventRun,
   ): Promise<bigint | null> {
     if (record.walletAddress.toLowerCase() !== wallet.toLowerCase()) {
-      summary.addressMismatches.push(
-        `account_id=${record.accountId} commitment=${commitment}: stored wallet ${record.walletAddress} != on-chain sender ${wallet}`,
-      );
-      // Durable record, not just the log line worker.ts emits from this
+      // Durable record, not just the log line the worker emits from this
       // summary -- a log scrolls away; this is what a support/security
-      // review actually queries later.
-      await this.repository.recordWalletRegistrationAddressMismatch({
+      // review actually queries later. It also decides whether this is news:
+      // the overlap rescan re-reads the same event every run, and only the
+      // first sight of an (account, commitment, sender) is a signal.
+      const { created } = await this.repository.recordWalletRegistrationAddressMismatch({
         accountId: record.accountId,
         commitment,
         storedWalletAddress: record.walletAddress,
         onChainSender: wallet,
         detectedAt: this.clock(),
       });
+      if (created) {
+        const signal: WalletRegistrationMismatchSignal = {
+          accountId: record.accountId,
+          commitmentMasked: maskHexIdentifier(commitment),
+          storedWalletMasked: maskHexIdentifier(record.walletAddress),
+          onChainSenderMasked: maskHexIdentifier(wallet),
+        };
+        summary.addressMismatches.push(signal);
+        run.hooks.onAddressMismatch?.(signal);
+      } else {
+        summary.addressMismatchesRepeated += 1;
+      }
       return null;
     }
 
@@ -521,6 +584,13 @@ export class ConfirmWalletRegistrationsService {
       },
     };
   }
+}
+
+// What one execute() call shares with the events it processes: the cursor it
+// started from (to tell news from an overlap replay) and the caller's hooks.
+interface EventRun {
+  cursor: bigint | null;
+  hooks: ConfirmWalletRegistrationsHooks;
 }
 
 // What judging one recorded confirmation decided: where the cursor has to go,
