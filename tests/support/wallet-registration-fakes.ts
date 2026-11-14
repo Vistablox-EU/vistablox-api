@@ -3,6 +3,7 @@ import { vi } from "vitest";
 import type { RegistrationEventLookup } from "../../src/infrastructure/blockchain/wallet-registry-chain-reader.js";
 import type { WalletRegistrationEvidenceReader } from "../../src/modules/settlement/application/confirm-wallet-registrations.service.js";
 import type {
+  ConfirmWalletRegistrationInput,
   PivPendingEscrowResolution,
   SettlementRepository,
   WalletRegistrationAddressMismatchInput,
@@ -115,9 +116,10 @@ export interface RecordedWrite {
 
 /**
  * An in-memory model of wallet_registrations and the cursor setting, with the
- * semantics the real repository guarantees: confirm only applies to a pending
- * row, a (transaction hash, log index) pair backs one row, every other write is
- * a compare-and-set on the identity it expects. Not canned return values, so a
+ * semantics the real repository guarantees: confirm only applies to the exact
+ * pending claim it names (address and commitment), a (transaction hash, log
+ * index) pair backs one row, every other write is a compare-and-set on the
+ * identity it expects. Not canned return values, so a
  * test fails when the service sequences its calls wrongly.
  */
 export class FakeWalletRegistrationRepository implements SettlementRepository {
@@ -125,6 +127,14 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
   public readonly writes: RecordedWrite[] = [];
   public readonly recordedMismatches: WalletRegistrationAddressMismatchInput[] = [];
   public readonly cursorWrites: bigint[] = [];
+  /** Every confirmWalletRegistration call, as made: the claim it names and the event it carries. */
+  public readonly confirmCalls: ConfirmWalletRegistrationInput[] = [];
+  /**
+   * Makes confirmWalletRegistration answer this without writing, for an outcome
+   * the model cannot reach on its own (address_conflict: the confirmed-address
+   * unique index lives in the database).
+   */
+  public forcedConfirmOutcome: WalletRegistrationConfirmation | undefined;
   public overdueCutoff: Date | undefined;
   /** Runs once, right before the next confirm applies: a way to model a concurrent run. */
   public beforeNextConfirm: (() => void) | undefined;
@@ -176,15 +186,19 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
     return null;
   }
 
-  public async confirmWalletRegistration(input: {
-    accountId: string;
-    registeredAt: Date;
-    evidence: WalletRegistrationEvidence;
-  }): Promise<WalletRegistrationConfirmation> {
+  public async confirmWalletRegistration(input: ConfirmWalletRegistrationInput): Promise<WalletRegistrationConfirmation> {
     const hook = this.beforeNextConfirm;
     this.beforeNextConfirm = undefined;
     hook?.();
-    const row = this.row(input.accountId);
+    this.confirmCalls.push(input);
+    if (this.forcedConfirmOutcome !== undefined) return this.forcedConfirmOutcome;
+    // Compare-and-set on the exact claim the event was matched to: a row the
+    // account replaced (another address or commitment) is not the claim, and is
+    // told apart from the same claim confirmed meanwhile.
+    const row = this.rows.get(input.accountId);
+    if (row === undefined || row.walletAddress !== input.walletAddress || row.commitment !== input.registrationCommitment) {
+      return "stale";
+    }
     if (row.registeredAt !== null) return "already_registered";
     if (this.holderOf(input.evidence.transactionHash, input.evidence.logIndex, input.accountId) !== null) {
       return "event_taken";
@@ -332,6 +346,7 @@ function toRecord(row: FakeRegistrationRow): WalletRegistrationRecord {
   return {
     accountId: row.accountId,
     walletAddress: row.walletAddress,
+    registrationCommitment: row.commitment,
     registeredAt: row.registeredAt,
     transactionHash: row.transactionHash,
     blockNumber: row.blockNumber,

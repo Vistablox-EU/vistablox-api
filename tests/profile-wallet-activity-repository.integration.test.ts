@@ -475,8 +475,9 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
   });
 
   describe("PrismaWalletRepository", () => {
-    it("registers a wallet, replays idempotently, and rejects address conflicts", async () => {
+    it("registers a wallet, replays idempotently, replaces a pending claim, and rejects a change after confirmation", async () => {
       const address = `0xnew${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0");
+      const replacementAddress = `0xdifferent${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0");
 
       const created = await walletRepository.registerWallet({
         accountId: otherAccountId,
@@ -498,12 +499,30 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
       });
       expect(replayed).toEqual(created);
 
+      // A pending claim proves nothing, so its own account may replace it.
+      const replaced = await walletRepository.registerWallet({
+        accountId: otherAccountId,
+        walletAddress: replacementAddress,
+        registrationCommitment: `commitment_replacement_${suffix}`,
+        requestedAt: new Date("2026-09-02T11:10:00.000Z"),
+      });
+      expect(replaced).toMatchObject({
+        walletAddress: replacementAddress,
+        registrationCommitment: `commitment_replacement_${suffix}`,
+        registeredAt: null,
+      });
+
+      // Once confirmed, the address is bound and cannot be changed here.
+      await database.walletRegistration.update({
+        where: { accountId: otherAccountId },
+        data: { registeredAt: new Date("2026-09-02T11:15:00.000Z") },
+      });
       await expect(
         walletRepository.registerWallet({
           accountId: otherAccountId,
-          walletAddress: `0xdifferent${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0"),
+          walletAddress: address,
           registrationCommitment: `commitment_mismatch_${suffix}`,
-          requestedAt: new Date("2026-09-02T11:10:00.000Z"),
+          requestedAt: new Date("2026-09-02T11:20:00.000Z"),
         }),
       ).rejects.toMatchObject({ reason: "address_mismatch" });
 
@@ -515,16 +534,25 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
           },
         }),
       ).toBe(1);
+      expect(
+        await database.auditLog.count({
+          where: {
+            resourceId: otherAccountId,
+            action: "settlement.wallet_registration_replaced",
+          },
+        }),
+      ).toBe(1);
 
       await expect(walletRepository.getStatus(otherAccountId)).resolves.toMatchObject({
-        registeredAt: null,
+        registeredAt: new Date("2026-09-02T11:15:00.000Z"),
       });
     });
 
-    it("rejects registering an address already claimed by a different account", async () => {
+    it("rejects registering an address confirmed for a different account, but not one that is only pending", async () => {
       const thirdAccountId = `acct_third_${suffix}`;
       const thirdBetterAuthUserId = `auth_third_${suffix}`;
       const claimedAddress = `0xclaim${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0");
+      const pendingOnlyAddress = `0xpend${suffix.replaceAll("-", "")}`.slice(0, 42).padEnd(42, "0");
       await authPool.query(
         'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
         [thirdBetterAuthUserId, "Third Investor", `profile-third-${suffix}@example.test`, true, "customer"],
@@ -532,28 +560,50 @@ describe.skipIf(databaseUrl === undefined)("profile/wallet/investor-activity Pos
       await database.account.create({
         data: { id: thirdAccountId, betterAuthUserId: thirdBetterAuthUserId },
       });
+      // other_account's own row from the previous test is confirmed on another
+      // address; free it so this test controls its state.
+      await database.walletRegistration.deleteMany({ where: { accountId: otherAccountId } });
 
-      await database.walletRegistration.create({
-        data: {
-          accountId: thirdAccountId,
-          walletAddress: claimedAddress,
-          registrationCommitment: `commitment_claim_owner_${suffix}`,
-          requestedAt: new Date("2026-09-02T11:20:00.000Z"),
-        },
-      });
+      try {
+        await database.walletRegistration.create({
+          data: {
+            accountId: thirdAccountId,
+            walletAddress: claimedAddress,
+            registrationCommitment: `commitment_claim_owner_${suffix}`,
+            requestedAt: new Date("2026-09-02T11:20:00.000Z"),
+            registeredAt: new Date("2026-09-02T11:21:00.000Z"),
+          },
+        });
 
-      await expect(
-        walletRepository.registerWallet({
-          accountId: otherAccountId,
-          walletAddress: claimedAddress,
-          registrationCommitment: `commitment_claim_attempt_${suffix}`,
-          requestedAt: new Date("2026-09-02T11:25:00.000Z"),
-        }),
-      ).rejects.toMatchObject({ reason: "address_claimed" });
+        await expect(
+          walletRepository.registerWallet({
+            accountId: otherAccountId,
+            walletAddress: claimedAddress,
+            registrationCommitment: `commitment_claim_attempt_${suffix}`,
+            requestedAt: new Date("2026-09-02T11:25:00.000Z"),
+          }),
+        ).rejects.toMatchObject({ reason: "address_claimed" });
 
-      await database.walletRegistration.deleteMany({ where: { accountId: thirdAccountId } });
-      await database.account.deleteMany({ where: { id: thirdAccountId } });
-      await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [thirdBetterAuthUserId]);
+        // The same address held only as a pending claim blocks nobody.
+        await database.walletRegistration.update({
+          where: { accountId: thirdAccountId },
+          data: { walletAddress: pendingOnlyAddress, registeredAt: null },
+        });
+        await expect(
+          walletRepository.registerWallet({
+            accountId: otherAccountId,
+            walletAddress: pendingOnlyAddress,
+            registrationCommitment: `commitment_claim_pending_${suffix}`,
+            requestedAt: new Date("2026-09-02T11:30:00.000Z"),
+          }),
+        ).resolves.toMatchObject({ walletAddress: pendingOnlyAddress, registeredAt: null });
+      } finally {
+        await database.walletRegistration.deleteMany({
+          where: { accountId: { in: [thirdAccountId, otherAccountId] } },
+        });
+        await database.account.deleteMany({ where: { id: thirdAccountId } });
+        await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [thirdBetterAuthUserId]);
+      }
     });
   });
 });
