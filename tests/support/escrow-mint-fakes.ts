@@ -454,12 +454,28 @@ export class InMemorySettlementRepository implements SettlementRepository {
     return 0;
   }
 
-  public async findPendingWalletRegistrationByCommitment(): Promise<null> {
+  public async findWalletRegistrationByCommitment(): Promise<null> {
     return null;
   }
 
-  public async confirmWalletRegistration(): Promise<{ outcome: "confirmed" }> {
-    return { outcome: "confirmed" };
+  public async confirmWalletRegistration(): Promise<"already_registered"> {
+    return "already_registered";
+  }
+
+  public async replaceWalletRegistrationEvidence(): Promise<"stale"> {
+    return "stale";
+  }
+
+  public async markWalletRegistrationEvidenceVerified(): Promise<boolean> {
+    return false;
+  }
+
+  public async flagWalletRegistrationEvidence(): Promise<boolean> {
+    return false;
+  }
+
+  public async listWalletRegistrationsForEvidenceRecheck(): Promise<[]> {
+    return [];
   }
 
   public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {
