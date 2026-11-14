@@ -24,9 +24,10 @@ import { buildWalletFreshAuthApp } from "./support/wallet-fresh-auth-app.js";
 // and is lowercase: the database refuses any other spelling
 // (wallet_registrations_wallet_address_lowercase_check, the canonical-form
 // change, #147), so a mixed-case row cannot be created here, not even directly.
-// The two tests that are about letter case therefore pin what is left of it
+// The three tests that are about letter case therefore pin what is left of it
 // with the constraint in force: a case variant is refused at the database, and
-// a caller's mixed-case spelling is matched against the stored lowercase row.
+// a caller's mixed-case spelling is matched against the stored lowercase row,
+// confirmed or pending.
 // Neither skips: CI fails the job on any skipped test.
 const LOWERCASE_CHECK = "wallet_registrations_wallet_address_lowercase_check";
 const CONFIRMED_ADDRESS_INDEX = "wallet_registrations_confirmed_address_key";
@@ -535,18 +536,25 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect(await auditRows(accountA, "replaced")).toHaveLength(0);
     });
 
-    it("treats a legacy mixed-case pending row as the same address for a stale replay, not as a replacement", async (context) => {
-      skipWithoutMixedCaseRows(context);
+    it("treats a mixed-case spelling of the stored pending address as the same address for a stale replay, not as a replacement", async () => {
       const address = nextAddress();
-      const legacy = upper(address);
+      const spelling = upperCaseSpelling(address);
       const commitment = nextCommitment();
+      // The row is stored lowercase (the CHECK allows nothing else); the stale
+      // session spells the same address differently. registerWallet canonicalises
+      // the input, so this is a replay and needs no fresh authentication.
       await database.walletRegistration.create({
-        data: { accountId: accountA, walletAddress: legacy, registrationCommitment: commitment },
+        data: { accountId: accountA, walletAddress: address, registrationCommitment: commitment },
       });
 
-      await expect(registerStale(accountA, address)).resolves.toMatchObject({
-        walletAddress: legacy,
+      await expect(registerStale(accountA, spelling)).resolves.toMatchObject({
+        walletAddress: address,
         registrationCommitment: commitment,
+      });
+      expect(await snapshot(accountA)).toMatchObject({
+        walletAddress: address,
+        registrationCommitment: commitment,
+        registeredAt: null,
       });
       expect(await auditRows(accountA, "replaced")).toHaveLength(0);
     });
