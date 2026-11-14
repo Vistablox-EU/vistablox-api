@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { canonicalWalletAddress } from "../../../shared/domain/wallet-address.js";
+
 const dateTime = z.iso.datetime();
 // The zero address cannot send a transaction, so a wallet registered under it
 // can never complete VistaBloxWalletRegistry.register() (the registry records
@@ -7,11 +9,15 @@ const dateTime = z.iso.datetime();
 // letters, so compare against the lowercase literal and leave the "0X"
 // spelling to the shape check.
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+// Any hex case is accepted, but only the canonical lowercase spelling leaves
+// this schema: the services, the repository and the database never see another
+// one. The regex runs first and a failed regex skips the transform.
 const ethAddress = z
   .string()
   .trim()
   .regex(/^0x[0-9a-fA-F]{40}$/, "Must be a 20-byte, 0x-prefixed hex address")
-  .refine((value) => value !== ZERO_ADDRESS, { message: "Must not be the zero address" });
+  .refine((value) => value !== ZERO_ADDRESS, { message: "Must not be the zero address" })
+  .transform(canonicalWalletAddress);
 
 export const registerWalletBodySchema = z.object({
   wallet_address: ethAddress,

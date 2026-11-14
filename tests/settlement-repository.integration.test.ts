@@ -45,6 +45,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
     "rollback",
     "checks",
     "fkeys",
+    "spelling",
   ] as const;
   type MintTestName = (typeof mintTestNames)[number];
   const mintPivIds = Object.fromEntries(
@@ -56,7 +57,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
   const mintTokenId = (name: MintTestName) => (mintTokenBase + BigInt(mintTestNames.indexOf(name))).toString();
   const tokenContractAddress = "0x1111111111111111111111111111111111111";
 
-  const walletAddress = `0xAbC${suffix.replace(/-/g, "").slice(0, 37)}`;
+  // The repository is fed a mixed-case spelling on purpose (the chain returns
+  // checksummed addresses); wallet_registrations only stores the canonical
+  // lowercase form (wallet_registrations_wallet_address_lowercase_check), so
+  // the fixture row and every expectation use walletAddress.
+  const mixedCaseAddress = `0xAbC${suffix.replace(/-/g, "").slice(0, 37)}`;
+  const walletAddress = mixedCaseAddress.toLowerCase();
 
   const authPool = new Pool({ connectionString: databaseUrl });
   const database = createPrismaClient(databaseUrl ?? "");
@@ -177,8 +183,8 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
   });
 
   it("resolves a wallet to its account case-insensitively", async () => {
+    expect(await repository.resolveAccountIdForWallet(mixedCaseAddress)).toBe(accountId);
     expect(await repository.resolveAccountIdForWallet(walletAddress)).toBe(accountId);
-    expect(await repository.resolveAccountIdForWallet(walletAddress.toLowerCase())).toBe(accountId);
     expect(await repository.resolveAccountIdForWallet(walletAddress.toUpperCase())).toBe(accountId);
     expect(await repository.resolveAccountIdForWallet("0x000000000000000000000000000000000000dead")).toBeNull();
   });
@@ -189,7 +195,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
     const { intent } = await repository.createEscrowMintIntent({
       pivId: pastPivId,
       accountId,
-      walletAddress,
+      walletAddress: mixedCaseAddress,
       tokenContractAddress: "0x1111111111111111111111111111111111111",
       tokenId: pastTokenId,
       mintAmount: 50_000_000_000n,
@@ -201,7 +207,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       escrowMintIntentId: intent.id,
       pivId: pastPivId,
       accountId,
-      walletAddress,
+      walletAddress: mixedCaseAddress,
       unitCount: "50000.000000",
       costBasisEur: "50000.000000",
       activatedAt: new Date("2026-09-01T12:00:00.000Z"),
@@ -237,7 +243,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       repository.createEscrowMintIntent({
         pivId: mintPivIds[name],
         accountId,
-        walletAddress,
+        walletAddress: mixedCaseAddress,
         tokenContractAddress,
         tokenId: mintTokenId(name),
         mintAmount,
@@ -249,7 +255,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       escrowMintIntentId,
       pivId: mintPivIds[name],
       accountId,
-      walletAddress,
+      walletAddress: mixedCaseAddress,
       unitCount: "50000.000000",
       costBasisEur: "50000.000000",
       activatedAt,
@@ -280,6 +286,36 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
         searchFromBlock: 1234n,
       });
       expect(await repository.findEscrowMintIntent(mintPivIds.create, `account_nobody_${suffix}`)).toBeNull();
+    });
+
+    it("stores the holder address in canonical lowercase form whatever spelling the caller passes", async () => {
+      const first = await newIntent("spelling");
+      expect(first.created).toBe(true);
+      expect(first.intent.walletAddress).toBe(walletAddress);
+
+      // Another spelling of the same address is the same intent, not a new one.
+      const second = await repository.createEscrowMintIntent({
+        pivId: mintPivIds.spelling,
+        accountId,
+        walletAddress: `0x${walletAddress.slice(2).toUpperCase()}`,
+        tokenContractAddress,
+        tokenId: mintTokenId("spelling"),
+        mintAmount,
+        attemptedAt,
+        searchFromBlock: 1234n,
+      });
+      expect(second.created).toBe(false);
+      expect(second.intent.id).toBe(first.intent.id);
+      expect(second.intent.walletAddress).toBe(walletAddress);
+      const storedIntent = await database.escrowMintIntent.findUniqueOrThrow({ where: { id: first.intent.id } });
+      expect(storedIntent.holderWalletAddress).toBe(walletAddress);
+
+      await repository.recordEscrowMintSent({ intentId: first.intent.id, attempt: 1, txHash: "0xspelling" });
+      const { positionId } = await repository.recordEscrowMintedPosition(
+        recordInput("spelling", first.intent.id, "0xspelling"),
+      );
+      const position = await database.positionLedger.findUniqueOrThrow({ where: { id: positionId } });
+      expect(position.holderWalletAddress).toBe(walletAddress);
     });
 
     it("refuses, in the database itself, a second intent or a second position for the same mint", async () => {

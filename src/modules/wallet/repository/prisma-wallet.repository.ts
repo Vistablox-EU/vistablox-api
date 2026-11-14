@@ -2,6 +2,7 @@ import { ulid } from "ulid";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { isUniqueViolation } from "../../../infrastructure/database/unique-violation.js";
+import { canonicalWalletAddress } from "../../../shared/domain/wallet-address.js";
 import {
   normalizeChainHash,
   type WalletRegistrationEvidenceFlag,
@@ -9,6 +10,7 @@ import {
 import {
   WalletAddressConflictError,
   WalletRegistrationChangedError,
+  WalletReplacementFreshAuthenticationRequiredError,
   type ReconcileWalletRegistrationInput,
   type ReconcileWalletRegistrationResult,
   type RegisteredWallet,
@@ -77,7 +79,8 @@ function toRegisteredWallet(row: RegisteredWalletRow): RegisteredWallet {
  * A wallet_registrations row with registered_at NULL is a pending claim: the
  * customer typed an address and nothing has proved they control it. A pending
  * claim is account-scoped. It never blocks another account, and its own
- * account may replace it with a different address. Only a CONFIRMED row binds
+ * account may replace it with a different address, provided the caller's
+ * session is fresh (see registerWallet). Only a CONFIRMED row binds
  * an address to an account, and the database enforces that through the
  * partial unique index above. Every address comparison is lower(col) =
  * lower($x) so rows written before the canonical lowercase form still match.
@@ -90,8 +93,12 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
     walletAddress: string;
     registrationCommitment: string;
     requestedAt: Date;
+    freshAuthentication: boolean;
   }): Promise<RegisteredWallet> {
-    const address = input.walletAddress.trim().toLowerCase();
+    // The HTTP edge already canonicalises, but this is the persistence boundary
+    // and other callers can skip the edge: whatever spelling arrives, one
+    // address is stored, compared and audited in one form.
+    const address = canonicalWalletAddress(input.walletAddress);
     return this.database.$transaction(async (transaction) => {
       // Two passes: the first can lose the insert race to a concurrent
       // request of the same account (ON CONFLICT DO NOTHING reports 0 rows),
@@ -110,6 +117,27 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
           where: { accountId: input.accountId },
           select: WALLET_SELECT,
         });
+        // The input is canonical already; the stored value is compared in
+        // canonical form too, so a row that predates the lowercase check, or a
+        // case or whitespace variant of the account's own address, is a replay
+        // of it, never a replacement, so it never needs freshness.
+        const ownAddressMatches = own !== null && canonicalWalletAddress(own.walletAddress) === address;
+
+        // Replacing the account's own PENDING claim with a different address
+        // needs a fresh session. Decided here, under the row lock and on the
+        // row just read, so no concurrent request can change the answer
+        // between "is this a replacement?" and the write (a peek in the router
+        // followed by a write could not promise that). Placed BEFORE the
+        // owners query on purpose: the refusal then depends only on this
+        // account's own row and this session's freshness, never on another
+        // account's addresses, so a session that is not fresh cannot use the
+        // replace path to ask which addresses are confirmed elsewhere. Nothing
+        // has been written in this pass, and throwing rolls the transaction
+        // back: the row, its commitment, requested_at and the audit trail stay
+        // exactly as they were, and the refusal itself writes no audit row.
+        if (own !== null && own.registeredAt === null && !ownAddressMatches && !input.freshAuthentication) {
+          throw new WalletReplacementFreshAuthenticationRequiredError();
+        }
 
         // Only CONFIRMED rows bind an address. Raw SQL rather than Prisma's
         // `mode: insensitive`, which emits ILIKE: wildcard semantics for _
@@ -120,7 +148,6 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
             AND registered_at IS NOT NULL
         `;
         const claimedByOther = owners.some((owner) => owner.account_id !== input.accountId);
-        const ownAddressMatches = own !== null && own.walletAddress.toLowerCase() === address;
 
         // The more specific conflict wins: when the address is confirmed for a
         // different account, report that, even if this account's own

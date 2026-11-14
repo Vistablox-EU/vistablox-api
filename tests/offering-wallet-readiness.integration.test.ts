@@ -71,6 +71,8 @@ describe.skipIf(databaseUrl === undefined)("offering wallet readiness PostgreSQL
       walletAddress,
       registrationCommitment: nextCommitment(),
       requestedAt: new Date(),
+      // A test claims, confirms and may claim again: model a fresh session.
+      freshAuthentication: true,
     });
   const confirmCurrentClaim = () =>
     database.walletRegistration.update({ where: { accountId }, data: { registeredAt: new Date() } });
