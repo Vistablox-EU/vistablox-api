@@ -60,9 +60,11 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
       loginMethods: ["device_key", "google"],
       kycEligibilityState: "eligible",
       kycRenewalDueAt: new Date("2027-01-01T12:00:00.000Z"),
+      // The read model only reports a wallet as provisioned (and only hands
+      // out its address) for a CONFIRMED registration.
       walletProvisioned: true,
       walletAddress,
-      payoutWalletRegistered: false,
+      payoutWalletRegistered: true,
       recoveryCooldownEndsAt: null,
     },
     ...overrides,

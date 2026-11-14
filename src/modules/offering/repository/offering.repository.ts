@@ -76,7 +76,13 @@ export interface InvestorOfferingDetailRecord {
     loginMethods: Array<"passkey" | "google" | "apple" | "device_key">;
     kycEligibilityState: string | null;
     kycRenewalDueAt: Date | null;
+    /**
+     * True only for a CONFIRMED wallet registration. A pending claim is
+     * replaceable by its own account and proves nothing about who controls
+     * the address, so it never counts as a ready payment account.
+     */
     walletProvisioned: boolean;
+    /** The confirmed address (the Coinbase onramp destination), or null while the registration is missing or still pending. */
     walletAddress: string | null;
     payoutWalletRegistered: boolean;
     /** Still-active post-recovery restriction (ACCOUNT_RECOVERY_POLICY.md), if any — null once it has lapsed. */

@@ -35,12 +35,17 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
 
   const read = (accountId: string) => database.walletRegistration.findUniqueOrThrow({ where: { accountId } });
 
+  // The watcher confirms the claim it matched, so the call names the fixture
+  // row's stored address and commitment (the compare-and-set).
+  const confirmRegistration = (input: { accountId: string; registeredAt: Date; evidence: WalletRegistrationEvidence }) =>
+    repository.confirmWalletRegistration({ ...input, ...fixtures.claimOf(input.accountId) });
+
   describe("confirmWalletRegistration", () => {
     it("writes registered_at and the whole identity in one row, lower-cased", async () => {
       const { accountId } = await fixtures.createRegistration();
       const tx = uniqueTx("a1");
 
-      const outcome = await repository.confirmWalletRegistration({
+      const outcome = await confirmRegistration({
         accountId,
         registeredAt: T0,
         evidence: evidence({ transactionHash: tx.toUpperCase().replace("0X", "0x"), blockHash: `0x${"AB".repeat(32)}` }),
@@ -61,11 +66,11 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
     it("leaves the row exactly as it was when the same or another event confirms it again", async () => {
       const { accountId } = await fixtures.createRegistration();
       const first = evidence({ transactionHash: uniqueTx("a2") });
-      await repository.confirmWalletRegistration({ accountId, registeredAt: T0, evidence: first });
+      await confirmRegistration({ accountId, registeredAt: T0, evidence: first });
       const before = await read(accountId);
 
-      const replay = await repository.confirmWalletRegistration({ accountId, registeredAt: T1, evidence: first });
-      const other = await repository.confirmWalletRegistration({
+      const replay = await confirmRegistration({ accountId, registeredAt: T1, evidence: first });
+      const other = await confirmRegistration({
         accountId,
         registeredAt: T1,
         evidence: evidence({ transactionHash: uniqueTx("a2b"), logIndex: 9 }),
@@ -82,7 +87,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       );
 
       const outcomes = await Promise.all(
-        attempts.map((attempt) => repository.confirmWalletRegistration({ accountId, registeredAt: T0, evidence: attempt })),
+        attempts.map((attempt) => confirmRegistration({ accountId, registeredAt: T0, evidence: attempt })),
       );
 
       expect(outcomes.filter((outcome) => outcome === "confirmed")).toHaveLength(1);
@@ -103,8 +108,8 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       const shared = evidence({ transactionHash: uniqueTx("c1") });
 
       const outcomes = await Promise.all([
-        repository.confirmWalletRegistration({ accountId: a.accountId, registeredAt: T0, evidence: shared }),
-        repository.confirmWalletRegistration({ accountId: b.accountId, registeredAt: T0, evidence: shared }),
+        confirmRegistration({ accountId: a.accountId, registeredAt: T0, evidence: shared }),
+        confirmRegistration({ accountId: b.accountId, registeredAt: T0, evidence: shared }),
       ]);
 
       expect([...outcomes].sort()).toEqual(["confirmed", "event_taken"]);
@@ -123,12 +128,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       const b = await fixtures.createRegistration();
       const tx = uniqueTx("d1");
 
-      const first = await repository.confirmWalletRegistration({
+      const first = await confirmRegistration({
         accountId: a.accountId,
         registeredAt: T0,
         evidence: evidence({ transactionHash: tx, logIndex: 3 }),
       });
-      const second = await repository.confirmWalletRegistration({
+      const second = await confirmRegistration({
         accountId: b.accountId,
         registeredAt: T0,
         evidence: evidence({ transactionHash: tx, logIndex: 5 }),
@@ -141,7 +146,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       const { accountId } = await fixtures.createRegistration();
 
       await expect(
-        repository.confirmWalletRegistration({
+        confirmRegistration({
           accountId,
           registeredAt: T0,
           evidence: evidence({ transactionHash: "0xnothex", logIndex: 1 }),
@@ -155,7 +160,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
     async function confirmed(tag: string, overrides: Partial<WalletRegistrationEvidence> = {}) {
       const registration = await fixtures.createRegistration();
       const initial = evidence({ transactionHash: uniqueTx(tag), ...overrides });
-      await repository.confirmWalletRegistration({ accountId: registration.accountId, registeredAt: T0, evidence: initial });
+      await confirmRegistration({ accountId: registration.accountId, registeredAt: T0, evidence: initial });
       return { ...registration, initial };
     }
 
@@ -183,7 +188,9 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
         registrationEvidenceFlaggedAt: null,
         registrationEvidenceFlag: null,
       });
-      const audit = await database.auditLog.findMany({ where: { resourceType: "wallet_registration", resourceId: accountId } });
+      const audit = await database.auditLog.findMany({
+        where: { resourceType: "wallet_registration", resourceId: accountId, action: { startsWith: "settlement.wallet_registration_evidence_" } },
+      });
       expect(audit).toHaveLength(1);
       expect(audit[0]).toMatchObject({ action: "settlement.wallet_registration_evidence_refreshed", actorAccountId: null, createdAt: T1 });
       expect(audit[0]!.changes).toMatchObject({
@@ -274,7 +281,9 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       const stored = await read(registration.accountId);
       expect(stored).toMatchObject({ registeredAt: T0, registrationTxHash: next.transactionHash, registrationLogIndex: 3 });
       expect(await fixtures.auditActions(registration.accountId)).toEqual(["settlement.wallet_registration_evidence_recorded"]);
-      const audit = await database.auditLog.findFirstOrThrow({ where: { resourceId: registration.accountId } });
+      const audit = await database.auditLog.findFirstOrThrow({
+        where: { resourceId: registration.accountId, action: { startsWith: "settlement.wallet_registration_evidence_" } },
+      });
       expect((audit.changes as { previous: unknown }).previous).toBeNull();
     });
 
@@ -418,7 +427,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
     async function confirmed(tag: string) {
       const registration = await fixtures.createRegistration();
       const initial = evidence({ transactionHash: uniqueTx(tag) });
-      await repository.confirmWalletRegistration({ accountId: registration.accountId, registeredAt: T0, evidence: initial });
+      await confirmRegistration({ accountId: registration.accountId, registeredAt: T0, evidence: initial });
       return { ...registration, initial };
     }
 
@@ -470,7 +479,9 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
         registrationTxHash: initial.transactionHash,
       });
       expect(await fixtures.auditActions(accountId)).toEqual(["settlement.wallet_registration_evidence_flagged"]);
-      const audit = await database.auditLog.findFirstOrThrow({ where: { resourceType: "wallet_registration", resourceId: accountId } });
+      const audit = await database.auditLog.findFirstOrThrow({
+        where: { resourceType: "wallet_registration", resourceId: accountId, action: { startsWith: "settlement.wallet_registration_evidence_" } },
+      });
       expect(audit).toMatchObject({ actorAccountId: null, createdAt: T1 });
       expect(audit.changes).toEqual({
         flag: "transaction_missing",
@@ -582,7 +593,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       const make = async (tag: string, blockNumber: bigint) => {
         const registration = await fixtures.createRegistration();
         const initial = evidence({ transactionHash: uniqueTx(tag), blockNumber });
-        await repository.confirmWalletRegistration({ accountId: registration.accountId, registeredAt: T0, evidence: initial });
+        await confirmRegistration({ accountId: registration.accountId, registeredAt: T0, evidence: initial });
         return { ...registration, initial };
       };
       const third = await make("g3", lowBlock + 3n);
@@ -618,11 +629,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       const pending = await fixtures.createRegistration({ commitment: `0xAbCdEf${fixtures.suffix}p` });
       const registered = await fixtures.createRegistration({ commitment: `0xAbCdEf${fixtures.suffix}r` });
       const initial = evidence({ transactionHash: uniqueTx("h1") });
-      await repository.confirmWalletRegistration({ accountId: registered.accountId, registeredAt: T0, evidence: initial });
+      await confirmRegistration({ accountId: registered.accountId, registeredAt: T0, evidence: initial });
 
       expect(await repository.findWalletRegistrationByCommitment(`0xabcdef${fixtures.suffix}p`.toUpperCase().replace("0X", "0x"))).toEqual({
         accountId: pending.accountId,
         walletAddress: pending.walletAddress,
+        registrationCommitment: pending.commitment,
         registeredAt: null,
         transactionHash: null,
         blockNumber: null,
@@ -633,6 +645,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       expect(await repository.findWalletRegistrationByCommitment(`0xabcdef${fixtures.suffix}r`)).toEqual({
         accountId: registered.accountId,
         walletAddress: registered.walletAddress,
+        registrationCommitment: registered.commitment,
         registeredAt: T0,
         transactionHash: initial.transactionHash,
         blockNumber: 100n,
@@ -646,7 +659,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
     it("returns the flag of a flagged row, which is what makes the watcher refresh it instead of treating the event as a replay", async () => {
       const row = await fixtures.createRegistration({ commitment: `0xflagged${fixtures.suffix}` });
       const initial = evidence({ transactionHash: uniqueTx("h2") });
-      await repository.confirmWalletRegistration({ accountId: row.accountId, registeredAt: T0, evidence: initial });
+      await confirmRegistration({ accountId: row.accountId, registeredAt: T0, evidence: initial });
       await repository.flagWalletRegistrationEvidence({
         accountId: row.accountId,
         expected: keyOf(initial),
@@ -657,6 +670,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository wallet re
       expect(await repository.findWalletRegistrationByCommitment(`0xflagged${fixtures.suffix}`)).toEqual({
         accountId: row.accountId,
         walletAddress: row.walletAddress,
+        registrationCommitment: row.commitment,
         registeredAt: T0,
         transactionHash: initial.transactionHash,
         blockNumber: 100n,
