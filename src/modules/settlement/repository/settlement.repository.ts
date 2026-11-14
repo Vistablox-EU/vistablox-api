@@ -1,3 +1,8 @@
+import type {
+  WalletRegistrationEvidence,
+  WalletRegistrationEvidenceFlag,
+} from "../../../shared/domain/wallet-registration-evidence.js";
+
 export interface PivPendingEscrowResolution {
   pivId: string;
   tokenId: string;
@@ -56,9 +61,44 @@ export interface CreateEscrowMintIntentInput {
   searchFromBlock: bigint | null;
 }
 
-export interface PendingWalletRegistration {
+/**
+ * A wallet_registrations row as the registration watcher sees it, in any
+ * state: pending (registeredAt null), registered without evidence (confirmed
+ * before evidence was kept), or registered with the identity of the event that
+ * confirmed it.
+ */
+export interface WalletRegistrationRecord {
   accountId: string;
   walletAddress: string;
+  registeredAt: Date | null;
+  transactionHash: string | null;
+  blockNumber: bigint | null;
+  blockHash: string | null;
+  logIndex: number | null;
+  evidenceFlag: WalletRegistrationEvidenceFlag | null;
+}
+
+/**
+ * The identity a compare-and-set write expects the row to hold (null parts for
+ * a row with no or partial evidence). The write only applies while the row
+ * still holds exactly this, so two runs cannot overwrite each other's change.
+ */
+export interface WalletRegistrationEvidenceKey {
+  transactionHash: string | null;
+  blockHash: string | null;
+  logIndex: number | null;
+}
+
+export type WalletRegistrationConfirmation = "confirmed" | "already_registered" | "event_taken";
+
+export type WalletRegistrationEvidenceReplacement = "replaced" | "stale" | "event_taken";
+
+/** A registration whose recorded block still has to be compared with the chain. */
+export interface WalletRegistrationRecheckCandidate {
+  accountId: string;
+  walletAddress: string;
+  registrationCommitment: string;
+  evidence: WalletRegistrationEvidence;
 }
 
 export interface WalletRegistrationAddressMismatchInput {
@@ -108,9 +148,50 @@ export interface SettlementRepository {
   // position and its mint event in one transaction. Replaying it for an
   // intent that is already recorded returns the existing position.
   recordEscrowMintedPosition(input: RecordEscrowMintedPositionInput): Promise<{ positionId: string }>;
-  findPendingWalletRegistrationByCommitment(commitment: string): Promise<PendingWalletRegistration | null>;
+  // The row a WalletRegistered commitment belongs to, whatever its state:
+  // classifying a replayed or reorganized event needs the registered rows
+  // too, not only the pending ones.
+  findWalletRegistrationByCommitment(commitment: string): Promise<WalletRegistrationRecord | null>;
   countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number>;
-  confirmWalletRegistration(accountId: string, registeredAt: Date): Promise<void>;
+  // Confirms a pending row and records the event that confirmed it in ONE
+  // statement, so a row is never registered without its evidence or the other
+  // way round. "already_registered": the row was not pending any more, nothing
+  // was written. "event_taken": another row already holds this (transaction
+  // hash, log index); nothing was written.
+  confirmWalletRegistration(input: {
+    accountId: string;
+    registeredAt: Date;
+    evidence: WalletRegistrationEvidence;
+  }): Promise<WalletRegistrationConfirmation>;
+  // Replaces the recorded evidence of a registered row (compare-and-set on
+  // `expected`), clears verification and flag, and writes the audit row in the
+  // same transaction. registered_at is never changed.
+  replaceWalletRegistrationEvidence(input: {
+    accountId: string;
+    expected: WalletRegistrationEvidenceKey;
+    next: WalletRegistrationEvidence;
+    reason: "recorded" | "refreshed";
+    changedAt: Date;
+  }): Promise<WalletRegistrationEvidenceReplacement>;
+  // Marks the recorded block final (compare-and-set on `expected`, only while
+  // neither verified nor flagged). False when nothing matched.
+  markWalletRegistrationEvidenceVerified(input: {
+    accountId: string;
+    expected: WalletRegistrationEvidenceKey;
+    verifiedAt: Date;
+  }): Promise<boolean>;
+  // Flags the recorded event as no longer on the chain (compare-and-set on
+  // `expected`, only while not flagged) and writes the audit row in the same
+  // transaction. registered_at is never changed. False when nothing matched.
+  flagWalletRegistrationEvidence(input: {
+    accountId: string;
+    expected: WalletRegistrationEvidenceKey;
+    flag: WalletRegistrationEvidenceFlag;
+    flaggedAt: Date;
+  }): Promise<boolean>;
+  // Registered rows with a recorded block that is neither verified nor
+  // flagged, oldest block first.
+  listWalletRegistrationsForEvidenceRecheck(limit: number): Promise<WalletRegistrationRecheckCandidate[]>;
   getLastProcessedWalletRegistryBlock(): Promise<bigint | null>;
   setLastProcessedWalletRegistryBlock(block: bigint): Promise<void>;
   // A durable, queryable record of a possible spoofed-registration attempt
