@@ -25,6 +25,9 @@ import { createBetterAuth } from "./modules/auth/infrastructure/shared/better-au
 import { PrismaDeviceRepository } from "./modules/auth/repository/customer/prisma-device.repository.js";
 import { PrismaDeviceChallengeRepository } from "./modules/auth/repository/customer/prisma-device-challenge.repository.js";
 import { PrismaDeviceReplacementRepository } from "./modules/auth/repository/customer/prisma-device-replacement.repository.js";
+import { PrismaSigningRequestRepository } from "./modules/auth/repository/customer/prisma-signing-request.repository.js";
+import { CancelPendingSigningRequestsForDeviceService } from "./modules/auth/application/customer/cancel-signing-requests.service.js";
+import { AuthorizeSigningRequestService } from "./modules/auth/application/customer/authorize-signing-request.service.js";
 import { EnrolDeviceService } from "./modules/auth/application/customer/device-enrolment.service.js";
 import { LoginDeviceService } from "./modules/auth/application/customer/device-login.service.js";
 import { IssueDeviceChallengeService } from "./modules/auth/application/customer/device-challenge-issuance.service.js";
@@ -83,6 +86,7 @@ import {
 import { S3Client } from "@aws-sdk/client-s3";
 import { UploadCaseDocumentService } from "./modules/intake/application/upload-case-document.service.js";
 import { GetCaseDocumentService } from "./modules/intake/application/get-case-document.service.js";
+import { PrismaOfferingDocumentRepository } from "./modules/offering/repository/prisma-offering-document.repository.js";
 import { ClamAvScanner } from "./infrastructure/antivirus/clamav-scanner.js";
 import { PrismaPartnerOrganizationRepository } from "./modules/intake/repository/prisma-partner-organization.repository.js";
 
@@ -109,7 +113,9 @@ await ensureJobQueue(jobQueue, "provider_events.didit_webhook", "event");
 // profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
 const kycRepository = new PrismaKycRepository(database, jobQueue);
-const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository);
+const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository, {
+  disclosuresBucket: environment.MINIO_DISCLOSURES_BUCKET,
+});
 const intakeRepository = new PrismaIntakeRepository(database, jobQueue, kycRepository);
 const partnerOrganizationRepository = new PrismaPartnerOrganizationRepository(database);
 const accountRepository = new PrismaAccountRepository(database);
@@ -383,6 +389,8 @@ const accountRecovery = {
   callbackUrl: environment.DIDIT_CALLBACK_URL,
   recoveryRedirectUrl:
     environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "com.vistablox.app://recover-account",
+  singleReviewerMode: environment.ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE,
+  skipDiditInStaging: environment.ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING,
   emailSender,
 };
 // Reversal (undoing the KYC microservice split): identity's own
@@ -461,6 +469,7 @@ const displayProfiles = new IdentityDisplayProfileProvider(
     logger.warn({ err: error, operation }, "protected display profile refresh failed");
   },
 );
+const malwareScanner = new ClamAvScanner(environment.CLAMAV_HOST ?? "127.0.0.1", environment.CLAMAV_PORT);
 const disclosureDocumentStore =
   environment.MINIO_ENDPOINT !== undefined &&
   environment.MINIO_ACCESS_KEY !== undefined &&
@@ -475,6 +484,18 @@ const disclosureDocumentStore =
         bucket: environment.MINIO_DISCLOSURES_BUCKET,
       })
     : new UnavailableDisclosureDocumentStore();
+// Staff disclosure-document upload/list/download. Same gate as the store
+// above: absent, the /internal/v1/offerings/:offering_id/documents routes
+// are not mounted (as intake's upload routes are not), and
+// publishDisclosurePack accepts no document_ref at all.
+const offeringDocuments =
+  disclosureDocumentStore instanceof MinioDisclosureDocumentStore && environment.MINIO_DISCLOSURES_BUCKET !== undefined
+    ? {
+        repository: new PrismaOfferingDocumentRepository(database, environment.MINIO_DISCLOSURES_BUCKET),
+        store: disclosureDocumentStore,
+        scanner: malwareScanner,
+      }
+    : undefined;
 const documentUploadService =
   environment.MINIO_ENDPOINT !== undefined &&
   environment.MINIO_ACCESS_KEY !== undefined &&
@@ -489,7 +510,7 @@ const documentUploadService =
           credentials: { accessKeyId: environment.MINIO_ACCESS_KEY, secretAccessKey: environment.MINIO_SECRET_KEY },
         }),
         environment.MINIO_PRIVATE_BUCKET,
-        environment.CLAMAV_HOST === undefined ? new ClamAvScanner("127.0.0.1", environment.CLAMAV_PORT) : new ClamAvScanner(environment.CLAMAV_HOST, environment.CLAMAV_PORT),
+        malwareScanner,
       )
     : undefined;
 const documentDownloadService =
@@ -569,7 +590,10 @@ const app = createApp({
     ...(documentUploadService === undefined ? {} : { documentUpload: documentUploadService }),
     ...(documentDownloadService === undefined ? {} : { documentDownload: documentDownloadService }),
     emailSender,
-    offeringOperations: { repository: offeringRepository },
+    offeringOperations: {
+      repository: offeringRepository,
+      ...(offeringDocuments === undefined ? {} : { documents: offeringDocuments }),
+    },
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({
       rpName: environment.WEBAUTHN_RP_NAME,
@@ -588,6 +612,17 @@ const app = createApp({
       auth,
       issueChallenge: issueDeviceChallengeService,
       baseUrl: environment.BETTER_AUTH_URL,
+      // T1-T3 (gated by the signing_requests flag below; wiring stays lean
+      // until the flag flips and Phase 2 registers request-type executors).
+      signingRequests: {
+        requests: new PrismaSigningRequestRepository(database),
+        devices: deviceRepository,
+        authorizes: new AuthorizeSigningRequestService(
+          deviceChallengeRepository,
+          deviceRepository,
+          new PrismaSigningRequestRepository(database),
+        ),
+      },
       // Step 1 only: device_auth on (this PR), everything past it still
       // off -- Safe/pairing/signing/recovery-v2 land in later PRs. There's no
       // passkey_login flag: customer passkeys ended at the Phase 4 cutover.
@@ -649,6 +684,14 @@ const app = createApp({
     customerSessions: {
       repository: new PrismaCustomerSessionRepository(database),
       revoker: new BetterAuthSessionRevoker(auth),
+      // D3: removing a device also cancels its pending/signed signing
+      // requests (plan section 3.10). (jkt, device, requests) all live in
+      // this process, so the cancel is a direct service call.
+      cancelPendingSigningRequestsForDevice: (dpopJkt) =>
+        new CancelPendingSigningRequestsForDeviceService(
+          deviceRepository,
+          new PrismaSigningRequestRepository(database),
+        ).execute(dpopJkt),
     },
     kyc: {
       getStatus: getKycStatus,

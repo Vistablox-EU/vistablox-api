@@ -253,6 +253,8 @@ model Device {
 
   account Account @relation(fields: [accountId], references: [id])
 
+  signingRequests SigningRequest[]
+
   @@index([accountId], map: "idx_devices_account")
   @@map("devices")
   @@schema("auth")
@@ -301,5 +303,40 @@ model DeviceReplacementCode {
   @@index([accountId, consumedAt], map: "idx_device_replacement_codes_account")
   @@index([expiresAt], map: "idx_device_replacement_codes_expiry")
   @@map("device_replacement_codes")
+  @@schema("auth")
+}
+
+// One pending action awaiting the device's biometric signature (per-action
+// SCA, T1-T3). Created server-side at the sensitive action's initiation;
+// the client fetches it (T1), requests a purpose-bound challenge (T2), then
+// signs (T3). Off-chain request types ("reservation_create" etc.) verify a
+// compact ES256 device-auth JWS over the tx claims; the request_id is the
+// canonical reference the device signs over (AD-097), amounts are decimal
+// strings, and the tx claims are compared to this row field by field --
+// any difference is TX_FIELD_MISMATCH. Status transitions:
+// pending -> signed -> executed, with pending/signed -> expired by the
+// hourly prune and pending/signed -> cancelled when the device is revoked.
+model SigningRequest {
+  id          String   @id @map("signing_request_id")
+  accountId   String   @map("account_id")
+  deviceId    String   @map("device_id")
+  requestType String   @map("request_type")
+  amountMinor String?  @map("amount_minor")
+  currency    String?  @map("currency")
+  destination Json?    @map("destination")
+  createdBy   Json     @map("created_by")
+  status      String   @default("pending")
+  signedJws   Json?    @map("signed_jws")
+  signedAt    DateTime? @map("signed_at") @db.Timestamptz(6)
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+  device  Device  @relation(fields: [deviceId], references: [deviceId])
+
+  @@index([accountId, status, createdAt], map: "idx_signing_requests_account_status_created")
+  @@index([expiresAt], map: "idx_signing_requests_expires_at")
+  @@index([deviceId, status], map: "idx_signing_requests_device_status")
+  @@map("signing_requests")
   @@schema("auth")
 }
