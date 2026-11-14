@@ -143,7 +143,16 @@ export class ChainReader {
     this.config = config;
     const chain = config.network === "base" ? base : baseSepolia;
     this.chainId = chain.id;
-    this.publicClient = createPublicClient({ chain, transport: http(config.rpcUrl) });
+    // ccipRead: false -- never follow an EIP-3668 OffchainLookup revert. The
+    // transfer simulation can surface a recipient contract's revert data
+    // verbatim, and viem's default would then send an HTTP request to a URL
+    // that contract chose (a blind SSRF from this server). Nothing this
+    // reader reads or simulates needs an off-chain lookup.
+    this.publicClient = createPublicClient({
+      chain,
+      transport: http(config.rpcUrl),
+      ccipRead: false,
+    });
   }
 
   public get property() {
