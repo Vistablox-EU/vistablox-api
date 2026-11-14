@@ -6,10 +6,12 @@ import {
   type VerifiedWalletRegistration,
   type WalletRegistrationVerificationFailure,
 } from "../src/modules/wallet/application/reconcile-wallet-registration.service.js";
-import type {
-  ReconcileWalletRegistrationResult,
-  RegisteredWallet,
-  WalletRepository,
+import {
+  WalletAddressConflictError,
+  WalletRegistrationChangedError,
+  type ReconcileWalletRegistrationResult,
+  type RegisteredWallet,
+  type WalletRepository,
 } from "../src/modules/wallet/repository/wallet.repository.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 
@@ -227,5 +229,48 @@ describe("ReconcileWalletRegistrationService", () => {
     const error = await appErrorOf(run(service));
 
     expect(error).toMatchObject({ status: 409, code });
+  });
+
+  it("confirms only the registration it verified: passes the address and commitment exactly as it read them", async () => {
+    const { service, reconcile, verifier } = build({});
+
+    await run(service);
+
+    // The chain is asked about the lower-cased commitment; the compare-and-set
+    // is on the stored spelling (pending's commitment is upper case).
+    expect(verifier.verify).toHaveBeenCalledWith(
+      expect.objectContaining({ commitment: pending.registrationCommitment.toLowerCase() }),
+    );
+    expect(reconcile).toHaveBeenCalledWith(
+      expect.objectContaining({
+        expectedWalletAddress: pending.walletAddress,
+        expectedRegistrationCommitment: pending.registrationCommitment,
+      }),
+    );
+  });
+
+  it("answers 409 wallet.registration_changed when the account replaced its claim after it was verified", async () => {
+    const { service, reconcile } = build({});
+    reconcile.mockRejectedValue(new WalletRegistrationChangedError());
+
+    const failure = await appErrorOf(run(service));
+
+    expect(failure).toMatchObject({ code: "wallet.registration_changed", status: 409 });
+  });
+
+  it("answers 409 wallet.address_already_claimed when another account holds the address confirmed", async () => {
+    const { service, reconcile } = build({});
+    reconcile.mockRejectedValue(new WalletAddressConflictError("address_claimed"));
+
+    const failure = await appErrorOf(run(service));
+
+    expect(failure).toMatchObject({ code: "wallet.address_already_claimed", status: 409 });
+  });
+
+  it("lets an unrelated repository failure through unchanged", async () => {
+    const { service, reconcile } = build({});
+    reconcile.mockRejectedValue(new Error("connection reset"));
+
+    await expect(run(service)).rejects.toThrow("connection reset");
   });
 });
