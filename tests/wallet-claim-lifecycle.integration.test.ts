@@ -21,8 +21,8 @@ import { buildWalletFreshAuthApp } from "./support/wallet-fresh-auth-app.js";
 // index wallet_registrations_confirmed_address_key.
 //
 // Every address, commitment and account id is derived from a per-run suffix
-// and is lowercase, and every test but two writes only lowercase addresses
-// (the repository canonicalises what it is given). Those two tests insert a
+// and is lowercase, and every test but three writes only lowercase addresses
+// (the repository canonicalises what it is given). Those three tests insert a
 // mixed-case row directly, to stand in for a row written before the canonical
 // form; that is impossible once the wallet_registrations_wallet_address_
 // lowercase_check constraint exists (the canonical-form change, #147), and the
@@ -638,6 +638,61 @@ describe.skipIf(databaseUrl === undefined)("wallet claim lifecycle PostgreSQL in
       expect(results.map((result) => result.status)).toEqual(Array(8).fill("fulfilled"));
       expect(await auditRows(accountA, "requested")).toHaveLength(1);
       expect(await auditRows(accountA, "replaced")).toHaveLength(0);
+    });
+
+    it("never lets a stale replacement overtake the watcher's confirmation: over 12 races the row stays on the original address, whichever request takes the row lock first", async () => {
+      for (let round = 0; round < 12; round += 1) {
+        const x = nextAddress();
+        const y = nextAddress();
+        const old = await register(accountA, x);
+        const refusedCommitment = nextCommitment();
+
+        // Alternate which request is started first, so both orders of the row
+        // lock are exercised: the replacement first (it must be refused, and
+        // the confirmation then still matches the original claim) and the
+        // confirmation first (the claim is confirmed, and the replacement runs
+        // into a confirmed row).
+        let replacementCall: ReturnType<typeof registerStale>;
+        let confirmationCall: ReturnType<typeof confirm>;
+        if (round % 2 === 0) {
+          replacementCall = registerStale(accountA, y, refusedCommitment);
+          confirmationCall = confirm(accountA, x, old.registrationCommitment);
+        } else {
+          confirmationCall = confirm(accountA, x, old.registrationCommitment);
+          replacementCall = registerStale(accountA, y, refusedCommitment);
+        }
+        const [replacement, confirmed] = await Promise.allSettled([replacementCall, confirmationCall]);
+
+        // A stale replacement never succeeds, whoever wins the race.
+        expect(replacement.status).toBe("rejected");
+        const reason = (replacement as PromiseRejectedResult).reason as unknown;
+        expect(
+          reason instanceof WalletReplacementFreshAuthenticationRequiredError ||
+            (reason instanceof WalletAddressConflictError && reason.reason === "address_mismatch"),
+        ).toBe(true);
+
+        // The row never ends on the refused address, whatever the confirmation did.
+        const row = await snapshot(accountA);
+        expect(row.walletAddress).toBe(x);
+        expect(row.registrationCommitment).toBe(old.registrationCommitment);
+        expect(await settlementRepository.findPendingWalletRegistrationByCommitment(refusedCommitment)).toBeNull();
+        expect(await auditRows(accountA, "replaced")).toHaveLength(0);
+
+        // Original pending claim (the confirmation reported stale) or confirmed
+        // on the original address (it reported confirmed); never a mix.
+        expect(confirmed.status).toBe("fulfilled");
+        const outcome = (confirmed as PromiseFulfilledResult<{ outcome: string }>).value.outcome;
+        if (outcome === "confirmed") {
+          expect(row.registeredAt).not.toBeNull();
+          expect(await auditRows(accountA, "confirmed")).toHaveLength(1);
+        } else {
+          expect(outcome).toBe("stale");
+          expect(row.registeredAt).toBeNull();
+          expect(await auditRows(accountA, "confirmed")).toHaveLength(0);
+        }
+        await database.walletRegistration.deleteMany({ where: { accountId: accountA } });
+        await database.auditLog.deleteMany({ where: { resourceId: accountA } });
+      }
     });
 
     describe("through the real app, real wallet repository and real fresh-authentication wiring", () => {

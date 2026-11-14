@@ -1,7 +1,9 @@
+import type { Request, Response } from "express";
 import { describe, expect, it, vi } from "vitest";
 
+import { createRequireFreshAuthentication } from "../src/modules/auth/api/customer/require-fresh-authentication.js";
+import type { CustomerSessionRepository } from "../src/modules/auth/repository/customer/customer-session.repository.js";
 import { AppError } from "../src/shared/errors/app-error.js";
-import { freshAuthenticationRequiredError } from "../src/shared/errors/fresh-authentication-required-error.js";
 import { RegisterWalletService } from "../src/modules/wallet/application/register-wallet.service.js";
 import { GetWalletAccountForOperationsService } from "../src/modules/wallet/application/get-wallet-account-for-operations.service.js";
 import {
@@ -128,7 +130,7 @@ describe("RegisterWalletService", () => {
     expect((error as AppError).fieldErrors).toBeUndefined();
   });
 
-  it("answers with the same envelope the fresh-authentication middleware uses", async () => {
+  it("answers with the same envelope the real fresh-authentication middleware produces", async () => {
     const repository = buildRepository({
       registerWallet: vi.fn().mockRejectedValue(new WalletReplacementFreshAuthenticationRequiredError()),
     });
@@ -139,16 +141,29 @@ describe("RegisterWalletService", () => {
       () => now,
     );
 
-    const error = await service
+    const serviceError = await service
       .execute({ accountId, walletAddress, freshAuthentication: false })
       .catch((caught: unknown) => caught);
 
-    expect(error).toMatchObject({
-      code: freshAuthenticationRequiredError().code,
-      title: freshAuthenticationRequiredError().title,
-      status: freshAuthenticationRequiredError().status,
-      message: freshAuthenticationRequiredError().message,
+    // The middleware built by the real factory, refusing a request that has no
+    // authentication context (never fresh, and it asks no repository).
+    const sessions: CustomerSessionRepository = { listForAccount: vi.fn(), findOwnedProviderSessionId: vi.fn() };
+    const next = vi.fn();
+    await createRequireFreshAuthentication(sessions)({} as Request, { locals: {} } as unknown as Response, next);
+    expect(next).toHaveBeenCalledTimes(1);
+    const middlewareError = next.mock.calls[0]![0] as unknown;
+
+    expect(middlewareError).toBeInstanceOf(AppError);
+    expect(serviceError).toBeInstanceOf(AppError);
+    const expected = middlewareError as AppError;
+    expect(serviceError).toMatchObject({
+      code: expected.code,
+      title: expected.title,
+      status: expected.status,
+      message: expected.message,
+      type: expected.type,
     });
+    expect((serviceError as AppError).fieldErrors).toEqual(expected.fieldErrors);
   });
 
   it("passes an unrelated repository error through unchanged", async () => {

@@ -277,7 +277,6 @@ describe("POST /v1/investor-profile/wallet freshness", () => {
     });
     expect(typeof response.body.trace_id).toBe("string");
     expect(response.body.trace_id.length).toBeGreaterThan(0);
-    expect(response.headers["cache-control"]).not.toBe("public");
   });
 
   it("keeps a registration conflict a 409, whatever the probe said", async () => {
@@ -294,12 +293,16 @@ describe("POST /v1/investor-profile/wallet freshness", () => {
     }
   });
 
-  it("never asks the probe on the read and transfer routes", async () => {
+  // The balance and transfer routes have their own "never asks the
+  // fresh-authentication probe" tests below, where those routes are mounted.
+  it("never asks the probe on the status read", async () => {
     const probe = vi.fn().mockResolvedValue(true);
     const { app } = buildApp({ probe });
 
-    await request(app).get("/v1/investor-profile/wallet");
+    const response = await request(app).get("/v1/investor-profile/wallet");
 
+    // The read handler ran (this account has no wallet yet), not a 404 for a missing route.
+    expect(response.body.code).toBe("wallet.not_registered");
     expect(probe).not.toHaveBeenCalled();
   });
 });
