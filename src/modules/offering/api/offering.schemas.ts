@@ -2,6 +2,10 @@ import { z } from "zod";
 
 import { publicOfferingStatuses } from "../domain/public-offering.policy.js";
 
+const investorImageUrl = z.url().refine((value) => new URL(value).protocol === "https:", {
+  message: "Investor-facing media URLs must use HTTPS.",
+});
+
 export const listOfferingsQuerySchema = z.object({
   limit: z.coerce.number().int().min(1).max(100).default(20),
   after: z.string().min(1).optional(),
@@ -10,12 +14,17 @@ export const listOfferingsQuerySchema = z.object({
 export const publicOfferingSchema = z.object({
   id: z.string(),
   status: z.enum(publicOfferingStatuses),
+  featured: z.boolean(),
   target_raise_eur: z.string().regex(/^\d+\.\d{2}$/),
   ipo_end_at: z.iso.datetime().nullable(),
   property: z.object({
-    property_type: z.literal("residential"),
+    property_type: z.string().min(1),
     country_code: z.string().length(2),
     city: z.string().nullable(),
+    media: z.object({
+      hero_url: investorImageUrl.nullable(),
+      gallery_urls: z.array(investorImageUrl),
+    }).nullable(),
   }),
 });
 
@@ -65,9 +74,13 @@ export const investorOfferingDetailResponseSchema = z.object({
     }),
     property: z.object({
       property_id: z.string().min(1),
-      property_type: z.literal("residential"),
+      property_type: z.string().min(1),
       country_code: z.string().length(2),
       city: z.string().nullable(),
+      media: z.object({
+        hero_url: investorImageUrl.nullable(),
+        gallery_urls: z.array(investorImageUrl),
+      }).nullable(),
       address_line: z.string().nullable(),
       owner_declared_value_eur: currency,
       appraisal_value_opinion_eur: currency.nullable(),

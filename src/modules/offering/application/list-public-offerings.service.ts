@@ -5,6 +5,7 @@ import type { ListOfferingsQuery, ListOfferingsResponse } from "../api/offering.
 import type { OfferingCursor, OfferingRepository } from "../repository/offering.repository.js";
 
 const cursorPayloadSchema = z.object({
+  featured: z.boolean().optional(),
   created_at: z.iso.datetime(),
   id: z.string().min(1),
 });
@@ -26,17 +27,19 @@ export class ListPublicOfferingsService {
       data: pageRows.map((row) => ({
         id: row.id,
         status: row.status,
+        featured: row.featured,
         target_raise_eur: row.targetRaiseEur,
         ipo_end_at: row.ipoEndAt?.toISOString() ?? null,
-        property: {
-          property_type: row.property.propertyType,
-          country_code: row.property.countryCode,
-          city: row.property.city,
-        },
+          property: {
+            property_type: row.property.propertyType,
+            country_code: row.property.countryCode,
+            city: row.property.city,
+            media: null,
+          },
       })),
       page: {
         next_cursor: hasNextPage && last !== undefined
-          ? encodeCursor({ createdAt: last.createdAt, id: last.id })
+          ? encodeCursor({ featured: last.featured, createdAt: last.createdAt, id: last.id })
           : null,
       },
     };
@@ -45,7 +48,11 @@ export class ListPublicOfferingsService {
 
 function encodeCursor(cursor: OfferingCursor): string {
   return Buffer.from(
-    JSON.stringify({ created_at: cursor.createdAt.toISOString(), id: cursor.id }),
+    JSON.stringify({
+      ...(cursor.featured === undefined ? {} : { featured: cursor.featured }),
+      created_at: cursor.createdAt.toISOString(),
+      id: cursor.id,
+    }),
     "utf8",
   ).toString("base64url");
 }
@@ -55,7 +62,11 @@ function decodeCursor(value: string): OfferingCursor {
     const parsed = cursorPayloadSchema.parse(
       JSON.parse(Buffer.from(value, "base64url").toString("utf8")),
     );
-    return { createdAt: new Date(parsed.created_at), id: parsed.id };
+    return {
+      ...(parsed.featured === undefined ? {} : { featured: parsed.featured }),
+      createdAt: new Date(parsed.created_at),
+      id: parsed.id,
+    };
   } catch (cause) {
     throw new AppError({
       code: "pagination.invalid_cursor",
