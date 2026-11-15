@@ -152,6 +152,18 @@ services:
       # what marks this deployment as staging. Staging-only settings, such as
       # PLAY_INTEGRITY_POLICY=disabled, are accepted here and nowhere else.
       APP_ENV: staging
+      ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: ${ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE:-false}
+      ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING: ${ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING:-false}
+      # Which proxies' X-Forwarded-For the API trusts for IP rate limits (see
+      # .env.example). Traefik fronts the API here, so unset puts every caller
+      # in the proxy's bucket. No default: the right value depends on whether
+      # anything (a CDN) sits in front of Traefik, and a hop count is only safe
+      # while published port 3000 below is not reachable from outside, so the
+      # Docker subnet of the `proxy` network is the better value. Compose
+      # interpolates this from --env-file .env.staging (scripts/deploy/
+      # staging.sh passes it); an empty value here overrides one set only in the
+      # service's env_file.
+      TRUST_PROXY: ${TRUST_PROXY:-}
       # Device-key auth (Android). "disabled" until a Play Console / Cloud
       # project exists; Android key attestation is enforced regardless, and
       # enrolment needs both ANDROID_ATTESTATION_* values set.
@@ -198,6 +210,14 @@ services:
       # AD-241's wallet registry, independently configurable of the CHAIN_*
       # bundle above -- see environment.ts's own comment on this var for why.
       VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: ${VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS:-}
+      # Wallet-registry watcher alert thresholds (docs/wallet-registration-
+      # operations.md). Listed here because a variable reaches the containers
+      # only through this anchor; the defaults match environment.ts.
+      WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES: ${WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES:-5}
+      WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES: ${WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES:-10}
+      WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS: ${WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS:-900}
+      WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT: ${WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT:-1}
+      WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: ${WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT:-5}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # The staging object store is the Compose-local MinIO service. These
       # values intentionally override any external endpoint left in the

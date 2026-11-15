@@ -30,11 +30,13 @@ export interface PublishedDisclosurePack {
   supersededPackId: string | null;
 }
 
-export type PublishDisclosurePackConflict = "offering_not_found" | "not_open";
+export type PublishDisclosurePackConflict = "offering_not_found" | "not_open" | "unknown_document_refs";
 
 export interface PublishDisclosurePackResult {
   published: PublishedDisclosurePack | null;
   conflict: PublishDisclosurePackConflict | null;
+  /** Set with `unknown_document_refs`: every `documentRef` that is not an accepted upload of the offering. */
+  unknownDocumentRefs?: string[];
 }
 
 /**
@@ -54,11 +56,13 @@ export interface PublishDisclosurePackResult {
  * already operate in) — AD-046 puts post-finalization content changes
  * through a separate amendment/consent path this codebase does not build.
  *
- * document_ref is a trusted, already-uploaded storage reference, the same
- * shape intake's own document intake already uses
- * (submissionDocumentTypeSchema/document_ref) — this codebase has no file
- * upload path for any document kind, disclosure documents included; the
- * underlying file reaching storage is a process this API does not perform.
+ * document_ref is the object key an earlier staff upload returned
+ * (POST /internal/v1/offerings/:offering_id/documents — see
+ * OfferingDocumentRepository). Inside the same transaction, every ref must
+ * resolve to an accepted, non-deleted stored_documents row of this offering
+ * in the disclosures bucket; otherwise the publish is refused with
+ * `unknown_document_refs` and nothing is written. A repository built without
+ * a disclosures bucket (storage not configured) accepts no ref at all.
  */
 export interface DisclosurePackRepository {
   publishDisclosurePack(input: PublishDisclosurePackInput): Promise<PublishDisclosurePackResult>;

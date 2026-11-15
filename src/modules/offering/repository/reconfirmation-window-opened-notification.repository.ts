@@ -26,7 +26,9 @@ export interface RecordReconfirmationWindowOpenedNotificationSentInput {
  * whether an offering.reconfirmation_window_opened_notification_sent audit
  * row already exists for the reservation, the same audit-log-as-general-
  * event-history approach the reminder job already uses, so a pg-boss retry
- * or duplicate delivery of this job can never double-email an investor.
+ * or duplicate delivery of this job after that row exists sends nothing. The
+ * email and the audit row are two separate steps, so a retry after a failed
+ * audit write sends the email again: delivery is at-least-once.
  */
 export interface ReconfirmationWindowOpenedNotificationRepository {
   getReservationsForReconfirmationWindowOpenedNotification(

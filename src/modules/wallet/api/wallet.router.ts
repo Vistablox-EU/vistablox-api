@@ -14,8 +14,18 @@ import {
   requestWalletTransferResponseSchema,
 } from "./wallet.schemas.js";
 
+// Whether the caller's session confirmed who is holding the device recently
+// enough. Defined here so the wallet module imports nothing from auth: app.ts
+// injects the auth module's probe, and this router only passes the answer on
+// as a boolean. It is asked with the server-set auth context and never with a
+// request field.
+export type WalletFreshAuthenticationProbe = (
+  context: Express.Locals["authContext"],
+) => Promise<boolean>;
+
 export function createWalletRouter(
   requireAuthentication: RequestHandler,
+  isFreshlyAuthenticated: WalletFreshAuthenticationProbe,
   registerWallet: RegisterWalletService,
   getStatus: GetWalletStatusService,
   getBalance?: GetWalletBalanceService,
@@ -25,9 +35,16 @@ export function createWalletRouter(
   router.post("/", requireAuthentication, async (request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
     const body = registerWalletBodySchema.parse(request.body);
+    // Freshness only matters when this request would replace the account's own
+    // pending claim, which is decided later under the row lock; this route
+    // never refuses on it. Asked after validation so a bad body costs no
+    // lookup. `=== true` so a loose probe answer (undefined, "true") is not
+    // fresh. A probe that rejects becomes a 500 with nothing written.
+    const freshAuthentication = (await isFreshlyAuthenticated(response.locals.authContext)) === true;
     const result = await registerWallet.execute({
       accountId: context.accountId,
       walletAddress: body.wallet_address,
+      freshAuthentication,
     });
     response.setHeader("Cache-Control", "no-store");
     response.status(201).json(registerWalletResponseSchema.parse(result));

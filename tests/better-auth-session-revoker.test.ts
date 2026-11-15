@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { BetterAuthSessionRevoker } from "../src/modules/auth/infrastructure/better-auth-session-revoker.js";
+import { BetterAuthSessionRevoker } from "../src/modules/auth/infrastructure/customer/better-auth-session-revoker.js";
 
 describe("BetterAuthSessionRevoker", () => {
   it("resolves a revocation token only from the authenticated caller's session list", async () => {

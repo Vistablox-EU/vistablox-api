@@ -2,9 +2,9 @@ import express, { type RequestHandler } from "express";
 import request from "supertest";
 import { describe, expect, it, vi } from "vitest";
 
-import { createRequireAuthentication } from "../src/modules/auth/api/require-authentication.js";
+import { createRequireAuthentication } from "../src/modules/auth/api/shared/require-authentication.js";
 import type { AccountRepository } from "../src/modules/account/repository/account.repository.js";
-import type { SessionResolver } from "../src/modules/auth/application/session-resolver.js";
+import type { SessionResolver } from "../src/modules/auth/application/shared/session-resolver.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";

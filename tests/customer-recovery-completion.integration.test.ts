@@ -3,35 +3,36 @@ import { createHash, randomUUID, webcrypto } from "node:crypto";
 import express from "express";
 import { Pool } from "pg";
 import request from "supertest";
+import { serializeSignedCookie } from "better-call";
 import { SignJWT, calculateJwkThumbprint, exportJWK, type JWK } from "jose";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 // Only the Android key-attestation chain check is stubbed: this test has no
 // real Android keystore chain. Everything else in E2 runs for real.
-vi.mock("../src/modules/auth/application/android-attestation-verifier.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../src/modules/auth/application/android-attestation-verifier.js")>();
+vi.mock("../src/modules/auth/application/customer/android-attestation-verifier.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/modules/auth/application/customer/android-attestation-verifier.js")>();
   return { ...actual, verifyAndroidKeyAttestation: vi.fn(async () => undefined) };
 });
 
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaAccountRepository } from "../src/modules/account/repository/prisma-account.repository.js";
-import { createDeviceAuthRouter } from "../src/modules/auth/api/device-auth.router.js";
-import { createRequireDpopOnly } from "../src/modules/auth/api/require-dpop-only.js";
+import { createDeviceAuthRouter } from "../src/modules/auth/api/customer/device-auth.router.js";
+import { createRequireDpopOnly } from "../src/modules/auth/api/customer/require-dpop-only.js";
 import {
   CompleteAccountRecoveryService,
   OpenAccountRecoveryCaseService,
-} from "../src/modules/auth/application/account-recovery.service.js";
-import { IssueDeviceChallengeService } from "../src/modules/auth/application/device-challenge-issuance.service.js";
-import { EnrolDeviceService } from "../src/modules/auth/application/device-enrolment.service.js";
-import { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
-import { BetterAuthCustomerAccountAdministrator } from "../src/modules/auth/infrastructure/better-auth-customer-account-administrator.js";
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
-import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/prisma-session-mirror.js";
-import { PrismaAccountRecoveryRepository } from "../src/modules/auth/repository/prisma-account-recovery.repository.js";
-import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/prisma-device-challenge.repository.js";
-import { PrismaDeviceRepository } from "../src/modules/auth/repository/prisma-device.repository.js";
-import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/prisma-dpop-replay.repository.js";
+} from "../src/modules/auth/application/staff/account-recovery.service.js";
+import { IssueDeviceChallengeService } from "../src/modules/auth/application/customer/device-challenge-issuance.service.js";
+import { EnrolDeviceService } from "../src/modules/auth/application/customer/device-enrolment.service.js";
+import { LoginDeviceService } from "../src/modules/auth/application/customer/device-login.service.js";
+import { BetterAuthCustomerAccountAdministrator } from "../src/modules/auth/infrastructure/customer/better-auth-customer-account-administrator.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
+import { PrismaSessionMirror } from "../src/modules/auth/infrastructure/shared/prisma-session-mirror.js";
+import { PrismaAccountRecoveryRepository } from "../src/modules/auth/repository/staff/prisma-account-recovery.repository.js";
+import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/customer/prisma-device-challenge.repository.js";
+import { PrismaDeviceRepository } from "../src/modules/auth/repository/customer/prisma-device.repository.js";
+import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/shared/prisma-dpop-replay.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -343,6 +344,10 @@ describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, 
        VALUES ($1, $2, $3, now() + interval '10 minutes', now(), 'oauth_pending', $4)`,
       [`session_pending_${suffix}`, pending.token, customerUserId, dpopJkt],
     );
+    // What the app holds and sends for that session: the signed set-auth-token
+    // value ("value.signature"), not the bare token stored in auth_session. The
+    // bearer plugin only accepts the signed form.
+    const pendingBearer = decodeURIComponent((await serializeSignedCookie("", pending.token, SECRET)).replace("=", ""));
     const enrolChallengeResponse = await request(testApp)
       .post(`${MOBILE}/enrol/challenge`)
       .set("dpop", await dpopProof(`${MOBILE}/enrol/challenge`));
@@ -365,8 +370,8 @@ describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, 
       .sign(newBioKeys.privateKey);
     const enrolResponse = await request(testApp)
       .post(`${MOBILE}/enrol/verify`)
-      .set("authorization", `Bearer ${pending.token}`)
-      .set("dpop", await dpopProof(`${MOBILE}/enrol/verify`, pending.token))
+      .set("authorization", `Bearer ${pendingBearer}`)
+      .set("dpop", await dpopProof(`${MOBILE}/enrol/verify`, pendingBearer))
       .send({
         challenge: enrolChallenge,
         jws: enrolJws,

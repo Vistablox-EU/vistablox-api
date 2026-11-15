@@ -19,8 +19,10 @@ export const notifyReconfirmationWindowOpenedJobSchema = z.object({
  * Consumer side of the AD-214/AD-145 window-opened handoff. Re-resolves
  * contact email, effective_rights_end_at, and whether a notification was
  * already sent for each reservation_id in the payload — never trusts a
- * payload snapshot — so a pg-boss retry or duplicate delivery is a safe
- * no-op rather than a duplicate email.
+ * payload snapshot — so a pg-boss retry or duplicate delivery after the
+ * audit row exists is a no-op rather than a duplicate email. The email is sent
+ * before the audit row is written, so a failure of that write makes the retry
+ * send it again: delivery is at-least-once.
  */
 export class NotifyReconfirmationWindowOpenedService {
   public constructor(

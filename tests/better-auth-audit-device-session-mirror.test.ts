@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { AuthAuditSink } from "../src/modules/auth/application/auth-audit-sink.js";
-import type { SessionMirror } from "../src/modules/auth/application/session-mirror.js";
-import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/better-auth-audit.plugin.js";
+import type { AuthAuditSink } from "../src/modules/auth/application/shared/auth-audit-sink.js";
+import type { SessionMirror } from "../src/modules/auth/application/shared/session-mirror.js";
+import { createBetterAuthAuditPlugin } from "../src/modules/auth/infrastructure/shared/better-auth-audit.plugin.js";
 
 interface SessionCreateHook {
   session: { create: { after(session: Record<string, unknown>, context: unknown): Promise<void> } };

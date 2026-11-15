@@ -120,3 +120,50 @@ jobs:
             process.exit(1);
           }
           EOF
+
+  # The Hardhat package under contracts/ has its own dependency tree and is
+  # part of neither the job above nor `npm run check`. This job installs only
+  # that tree, compiles the contracts, runs their tests, and checks that the
+  # ABIs the API and worker compile against are what the compiled contracts
+  # produce. It needs no database, no secrets and no root `npm ci`.
+  contracts:
+    name: contracts (compile, tests, ABI drift)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: contracts/package-lock.json
+
+      - name: Install contracts dependencies
+        run: npm --prefix contracts ci
+
+      # Hardhat downloads the solc version pinned in contracts/hardhat.config.js
+      # on first use, so this step needs outbound network access.
+      - name: Compile
+        run: npm run contracts:compile
+
+      - name: Contract tests
+        run: npm run contracts:test
+
+      # src/infrastructure/blockchain/abis/*.abi.json are committed copies of
+      # the compiled ABIs (scripts/export-contract-abis.mjs). Re-export them
+      # from the artifacts compiled above: a modified or new file means a
+      # contract's public interface changed without the ABIs being regenerated.
+      - name: Fail if the committed ABIs are stale
+        run: |
+          npm run contracts:export-abi
+          abis=src/infrastructure/blockchain/abis
+          if [ -n "$(git status --porcelain -- "$abis")" ]; then
+            echo "::error::$abis does not match the compiled contracts. Run 'npm --prefix contracts ci && npm run contracts:compile && npm run contracts:export-abi' and commit the result."
+            # `git diff` skips a file the export recreated after it was deleted
+            # (untracked), so list the changed files first.
+            git status --short -- "$abis"
+            git diff -- "$abis"
+            exit 1
+          fi

@@ -39,6 +39,10 @@ export function createInvestorOfferingRouter(
   createReservation?: CreateReservationService,
   reconfirmReservation?: ReconfirmReservationService,
   requireFreshAuthentication?: RequestHandler,
+  requireIdempotency?: {
+    createReservation: RequestHandler;
+    reconfirmReservation: RequestHandler;
+  },
 ): Router {
   const router = Router();
 
@@ -56,14 +60,25 @@ export function createInvestorOfferingRouter(
   if (createReservation !== undefined) {
     router.post("/:offering_id/reservations", requireAuthentication,
       ...(requireFreshAuthentication === undefined ? [] : [requireFreshAuthentication]),
+      ...(requireIdempotency === undefined ? [] : [requireIdempotency.createReservation]),
       async (request, response) => {
       const context = requireCustomerContext(response.locals.authContext);
       const params = investorOfferingParamsSchema.parse(request.params);
       const body = createReservationBodySchema.parse(request.body);
+      const clientIdempotencyKey = String(request.header("idempotency-key") ?? "").trim();
+      if (clientIdempotencyKey.length === 0 || clientIdempotencyKey.length > 128) {
+        throw new AppError({
+          code: "idempotency.key_required",
+          title: "Idempotency-Key required",
+          status: 400,
+          detail: "A reservation requires an Idempotency-Key header of at most 128 characters.",
+        });
+      }
       const result = await createReservation.execute({
         offeringId: params.offering_id,
         accountId: context.accountId,
         amountEur: body.amount_eur,
+        clientIdempotencyKey,
         traceId: String(response.locals.traceId),
       });
       response.setHeader("Cache-Control", "no-store");
@@ -76,6 +91,7 @@ export function createInvestorOfferingRouter(
       "/:offering_id/reservations/:reservation_id/reconfirm",
       requireAuthentication,
       ...(requireFreshAuthentication === undefined ? [] : [requireFreshAuthentication]),
+      ...(requireIdempotency === undefined ? [] : [requireIdempotency.reconfirmReservation]),
       async (request, response) => {
         const context = requireCustomerContext(response.locals.authContext);
         const params = reservationParamsSchema.parse(request.params);

@@ -253,6 +253,8 @@ model Device {
 
   account Account @relation(fields: [accountId], references: [id])
 
+  signingRequests SigningRequest[]
+
   @@index([accountId], map: "idx_devices_account")
   @@map("devices")
   @@schema("auth")
@@ -273,5 +275,68 @@ model DeviceChallenge {
 
   @@index([expiresAt], map: "idx_device_challenges_expires_at")
   @@map("device_challenges")
+  @@schema("auth")
+}
+
+// Self-service device replacement (AD-271): a short-lived, single-use email
+// code that authorizes revoking the active device + device_key login method so
+// a customer can enrol a new device after a reinstall or new phone, without
+// staff. Only the code HASH is stored, never the plaintext; the plaintext is
+// emailed to account.accounts.protected_contact_email and verified against
+// this hash at spend time. No SMS anywhere in this flow.
+model DeviceReplacementCode {
+  id           String    @id @map("device_replacement_code_id")
+  accountId    String    @map("account_id")
+  // Better Auth session id of the authenticated session that requested the
+  // code, re-bound at verify time so a code issued to one session can't be
+  // spent from another. Nullable: the session id is the caller's concern; this
+  // table just records what it's told.
+  sessionId    String?   @map("session_id")
+  codeHash     String    @map("code_hash")
+  expiresAt    DateTime  @map("expires_at") @db.Timestamptz(6)
+  attemptsUsed Int       @default(0) @map("attempts_used")
+  consumedAt   DateTime? @map("consumed_at") @db.Timestamptz(6)
+  createdAt    DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+
+  @@index([accountId, consumedAt], map: "idx_device_replacement_codes_account")
+  @@index([expiresAt], map: "idx_device_replacement_codes_expiry")
+  @@map("device_replacement_codes")
+  @@schema("auth")
+}
+
+// One pending action awaiting the device's biometric signature (per-action
+// SCA, T1-T3). Created server-side at the sensitive action's initiation;
+// the client fetches it (T1), requests a purpose-bound challenge (T2), then
+// signs (T3). Off-chain request types ("reservation_create" etc.) verify a
+// compact ES256 device-auth JWS over the tx claims; the request_id is the
+// canonical reference the device signs over (AD-097), amounts are decimal
+// strings, and the tx claims are compared to this row field by field --
+// any difference is TX_FIELD_MISMATCH. Status transitions:
+// pending -> signed -> executed, with pending/signed -> expired by the
+// hourly prune and pending/signed -> cancelled when the device is revoked.
+model SigningRequest {
+  id          String   @id @map("signing_request_id")
+  accountId   String   @map("account_id")
+  deviceId    String   @map("device_id")
+  requestType String   @map("request_type")
+  amountMinor String?  @map("amount_minor")
+  currency    String?  @map("currency")
+  destination Json?    @map("destination")
+  createdBy   Json     @map("created_by")
+  status      String   @default("pending")
+  signedJws   Json?    @map("signed_jws")
+  signedAt    DateTime? @map("signed_at") @db.Timestamptz(6)
+  expiresAt   DateTime @map("expires_at") @db.Timestamptz(6)
+  createdAt   DateTime @default(now()) @map("created_at") @db.Timestamptz(6)
+
+  account Account @relation(fields: [accountId], references: [id])
+  device  Device  @relation(fields: [deviceId], references: [deviceId])
+
+  @@index([accountId, status, createdAt], map: "idx_signing_requests_account_status_created")
+  @@index([expiresAt], map: "idx_signing_requests_expires_at")
+  @@index([deviceId, status], map: "idx_signing_requests_device_status")
+  @@map("signing_requests")
   @@schema("auth")
 }

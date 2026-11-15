@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, describe, expect, it } from "vitest";
 
-import { createBetterAuth } from "../src/modules/auth/infrastructure/better-auth.factory.js";
+import { createBetterAuth } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 

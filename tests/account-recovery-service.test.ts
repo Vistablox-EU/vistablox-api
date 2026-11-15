@@ -7,13 +7,13 @@ import {
   GetAccountRecoveryCaseService,
   OpenAccountRecoveryCaseService,
   RecordPrimaryRecoveryReviewService,
-} from "../src/modules/auth/application/account-recovery.service.js";
-import type { CustomerAccountAdministrator } from "../src/modules/auth/application/customer-account-administrator.js";
+} from "../src/modules/auth/application/staff/account-recovery.service.js";
+import type { CustomerAccountAdministrator } from "../src/modules/auth/application/shared/customer-account-administrator.js";
 import type {
   AccountRecoveryCaseRecord,
   AccountRecoveryRepository,
   RecoveryCaseTarget,
-} from "../src/modules/auth/repository/account-recovery.repository.js";
+} from "../src/modules/auth/repository/staff/account-recovery.repository.js";
 import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
 
@@ -103,6 +103,7 @@ function administrator(overrides: Partial<CustomerAccountAdministrator> = {}): C
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
     sendPasskeyRecoveryEmail: vi.fn().mockResolvedValue(undefined),
+    sendDeviceReplacementCodeEmail: vi.fn().mockResolvedValue(undefined),
     sendStaffInvitationEmail: vi.fn().mockResolvedValue(undefined),
     sendApplicantResponseReminderEmail: vi.fn().mockResolvedValue(undefined),
     sendKycRenewalReminderEmail: vi.fn().mockResolvedValue(undefined),
@@ -357,6 +358,7 @@ describe("RecordPrimaryRecoveryReviewService", () => {
       corroborationCategory: "recent_deposit",
       traceId: "trace_01",
       reviewedAt: now,
+      allowMissingDidit: false,
     });
   });
 
@@ -373,6 +375,28 @@ describe("RecordPrimaryRecoveryReviewService", () => {
         corroborationCategory: "recent_deposit",
       }),
     ).rejects.toMatchObject({ code: "authentication.account_recovery_primary_review_unavailable" });
+  });
+
+  it("allows a staging review without a fresh Didit reference when explicitly enabled", async () => {
+    const recordPrimaryReview = vi.fn().mockResolvedValue(
+      caseRecord({ reviewedByPrimary: "acct_reviewer_01" }),
+    );
+    const service = new RecordPrimaryRecoveryReviewService(
+      repository({ recordPrimaryReview }),
+      () => now,
+      true,
+    );
+
+    await service.execute({
+      caseId,
+      actorAccountId: "acct_reviewer_01",
+      traceId: "trace_01",
+      corroborationCategory: "other_policy_approved",
+    });
+
+    expect(recordPrimaryReview).toHaveBeenCalledWith(
+      expect.objectContaining({ allowMissingDidit: true }),
+    );
   });
 });
 
@@ -423,6 +447,37 @@ describe("DecideAccountRecoveryCaseService", () => {
       expect.objectContaining({ decision: "rejected", reviewerAccountId: "acct_reviewer_02" }),
     );
     expect(sendAccountRecoveryRejectedEmail).toHaveBeenCalledWith({ to: "investor@example.com" });
+  });
+
+  it("allows the primary reviewer to decide in explicitly enabled single-reviewer mode", async () => {
+    const decideCase = vi.fn().mockResolvedValue(
+      caseRecord({ status: "approved", reviewedByPrimary: "acct_reviewer_01", reviewedBySecondary: "acct_reviewer_01" }),
+    );
+    const service = new DecideAccountRecoveryCaseService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ reviewedByPrimary: "acct_reviewer_01" })),
+        decideCase,
+      }),
+      emailSender(),
+      () => now,
+      true,
+    );
+
+    await expect(
+      service.execute({
+        caseId,
+        actorAccountId: "acct_reviewer_01",
+        traceId: "trace_01",
+        decision: "approved",
+        reason: "Staging verification completed.",
+      }),
+    ).resolves.toMatchObject({ status: "approved" });
+    expect(decideCase).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reviewerAccountId: "acct_reviewer_01",
+        allowSameReviewer: true,
+      }),
+    );
   });
 
   it("rejects when the deciding reviewer is the same as the primary reviewer", async () => {

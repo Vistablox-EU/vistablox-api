@@ -122,5 +122,5 @@ function stableStringify(value: unknown): string {
     );
     return `{${entries.join(",")}}`;
   }
-  return JSON.stringify(value);
+  return JSON.stringify(value) ?? "undefined";
 }

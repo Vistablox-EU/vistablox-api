@@ -41,6 +41,7 @@ const eventLabels: Record<string, string> = {
   case_stage_reverted: "Case stage corrected",
   correction_requested: "Correction requested",
   correction_approved: "Correction approved",
+  correction_cancelled: "Correction cancelled",
   correction_failed: "Correction failed",
   correction_completed: "Correction completed",
 };

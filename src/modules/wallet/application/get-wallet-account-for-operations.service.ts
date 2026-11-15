@@ -1,3 +1,4 @@
+import { describeEvidence } from "../../../shared/domain/wallet-registration-evidence.js";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { WalletRepository } from "../repository/wallet.repository.js";
 
@@ -27,6 +28,24 @@ export class GetWalletAccountForOperationsService {
         status: wallet.registeredAt === null ? ("pending" as const) : ("registered" as const),
         requested_at: wallet.requestedAt.toISOString(),
         registered_at: wallet.registeredAt?.toISOString() ?? null,
+        registration_evidence: {
+          status: describeEvidence({
+            transactionHash: wallet.registrationTxHash,
+            blockNumber: wallet.registrationBlockNumber,
+            blockHash: wallet.registrationBlockHash,
+            logIndex: wallet.registrationLogIndex,
+            verifiedAt: wallet.registrationEvidenceVerifiedAt,
+            flaggedAt: wallet.registrationEvidenceFlaggedAt,
+          }),
+          transaction_hash: wallet.registrationTxHash ?? null,
+          // A string, like the reconcile response: block numbers can exceed what a JSON number holds exactly.
+          block_number: wallet.registrationBlockNumber?.toString() ?? null,
+          block_hash: wallet.registrationBlockHash ?? null,
+          log_index: wallet.registrationLogIndex ?? null,
+          verified_at: wallet.registrationEvidenceVerifiedAt?.toISOString() ?? null,
+          flag: wallet.registrationEvidenceFlag ?? null,
+          flagged_at: wallet.registrationEvidenceFlaggedAt?.toISOString() ?? null,
+        },
       },
     };
   }

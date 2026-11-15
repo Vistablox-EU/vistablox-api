@@ -6,7 +6,7 @@ import {
   DeviceJwsDpopMismatchError,
   DeviceJwsInvalidError,
   verifyDeviceAuthJws,
-} from "../src/modules/auth/application/device-auth-jws-verifier.js";
+} from "../src/modules/auth/application/customer/device-auth-jws-verifier.js";
 
 const CHALLENGE = "the-exact-challenge-string";
 const JWS_TYP = "vistablox-device-auth+jwt";

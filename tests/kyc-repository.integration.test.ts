@@ -326,6 +326,148 @@ describe.skipIf(databaseUrl === undefined)("Didit KYC PostgreSQL integration", (
     }
   });
 
+  it.each([
+    {
+      substatusBeforeRenewal: "kyc_verified" as const,
+      proofOfAddressStatus: "current",
+      proofOfAddressCurrentUntil: new Date("2027-01-01T00:00:00.000Z"),
+    },
+    {
+      substatusBeforeRenewal: "kyc_verified_owner_poa_missing" as const,
+      proofOfAddressStatus: "not_started",
+      proofOfAddressCurrentUntil: null,
+    },
+  ])(
+    "lets a customer whose renewal came due from $substatusBeforeRenewal renew and come back to the same sub-status",
+    async ({ substatusBeforeRenewal, proofOfAddressStatus, proofOfAddressCurrentUntil }) => {
+      // KYC_WORKFLOW.md pairs "Requires renewal" with kyc_reverification_required
+      // and allows RequiresRenewal -> InProgress. The due-date job used to flip
+      // only eligibility_state, leaving the sub-status where an eligible row
+      // keeps it; canStartSession then refused every restart with a 409.
+      const renewalSuffix = randomUUID();
+      const renewalAccountId = `acct_renewal_${renewalSuffix}`;
+      const renewalBetterAuthUserId = `auth_renewal_${renewalSuffix}`;
+      const renewalDiditReference = randomUUID();
+      const dueAt = new Date("2026-09-01T09:00:00.000Z");
+      const proofOfAddress = { proofOfAddressStatus, proofOfAddressCurrentUntil };
+
+      await authPool.query(
+        'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
+        [renewalBetterAuthUserId, "Renewal Test User", `kyc-renewal-${renewalSuffix}@example.test`, true, "customer"],
+      );
+      await database.account.create({
+        data: { id: renewalAccountId, betterAuthUserId: renewalBetterAuthUserId },
+      });
+      await database.kycEligibility.create({
+        data: {
+          accountId: renewalAccountId,
+          eligibilityState: "eligible",
+          operationalSubstatus: substatusBeforeRenewal,
+          ...proofOfAddress,
+          residenceCountryCode: "DE",
+          taxResidenceCountryCode: "DE",
+          lastVerifiedAt: new Date("2024-09-01T09:00:00.000Z"),
+          renewalDueAt: dueAt,
+          updatedAt: new Date("2024-09-01T09:00:00.000Z"),
+        },
+      });
+
+      try {
+        expect(
+          await repository.transitionToRequiresRenewal({
+            accountId: renewalAccountId,
+            traceId: `trace_${renewalSuffix}`,
+            transitionedAt: dueAt,
+          }),
+        ).toBe(true);
+        expect(
+          await database.kycEligibility.findUniqueOrThrow({ where: { accountId: renewalAccountId } }),
+        ).toMatchObject({
+          eligibilityState: "requires_renewal",
+          operationalSubstatus: "kyc_reverification_required",
+          ...proofOfAddress,
+        });
+        const renewalAudit = await database.auditLog.findFirstOrThrow({
+          where: { resourceId: renewalAccountId, action: "identity.kyc_renewal_due" },
+        });
+        expect(renewalAudit.changes).toMatchObject({
+          previous_state: "eligible",
+          new_state: "requires_renewal",
+          new_operational_substatus: "kyc_reverification_required",
+        });
+
+        const sessionStartId = `kyc_start_renewal_${renewalSuffix}`;
+        expect(
+          await repository.reserveSessionStart({
+            accountId: renewalAccountId,
+            sessionStartId,
+            residenceCountryCode: "DE",
+            taxResidenceCountryCode: "DE",
+            traceId: `trace_${renewalSuffix}`,
+            startedAt: new Date("2026-09-02T09:00:00.000Z"),
+          }),
+        ).toBe(true);
+        // Starting the session does not itself lift the renewal requirement.
+        expect(
+          await database.kycEligibility.findUniqueOrThrow({ where: { accountId: renewalAccountId } }),
+        ).toMatchObject({
+          eligibilityState: "requires_renewal",
+          operationalSubstatus: "kyc_session_creating",
+          ...proofOfAddress,
+        });
+
+        // The rest of the journey: the session opens, Didit approves, and the
+        // sub-status is rebuilt from the untouched proof-of-address columns.
+        expect(
+          await repository.completeSessionStart({
+            accountId: renewalAccountId,
+            sessionStartId,
+            diditReference: renewalDiditReference,
+            providerStatus: "Not Started",
+            traceId: `trace_${renewalSuffix}`,
+            completedAt: new Date("2026-09-02T09:00:01.000Z"),
+          }),
+        ).toBe(true);
+        const approvedAgainAt = new Date("2026-09-02T10:00:00.000Z");
+        expect(
+          await repository.applyProviderOutcome({
+            eventKey: `didit:webhook:${randomUUID()}`,
+            eventId: randomUUID(),
+            diditReference: renewalDiditReference,
+            providerStatus: "Approved",
+            webhookType: "status.updated",
+            traceId: `trace_${renewalSuffix}`,
+            providerUpdatedAt: approvedAgainAt,
+            outcome: {
+              eligibilityState: "eligible",
+              operationalSubstatus: "kyc_verified_owner_poa_missing",
+              reasonCode: "KYC_BASELINE_APPROVED",
+              lastVerifiedAt: approvedAgainAt,
+              everRequiredManualReview: false,
+              renewalDueAt: new Date("2028-09-02T10:00:00.000Z"),
+            },
+          }),
+        ).toBe("applied");
+        expect(
+          await database.kycEligibility.findUniqueOrThrow({ where: { accountId: renewalAccountId } }),
+        ).toMatchObject({
+          eligibilityState: "eligible",
+          operationalSubstatus: substatusBeforeRenewal,
+          lastVerifiedAt: approvedAgainAt,
+          ...proofOfAddress,
+        });
+      } finally {
+        await database.auditLog.deleteMany({
+          where: { OR: [{ resourceId: renewalAccountId }, { resourceId: renewalDiditReference }] },
+        });
+        await database.kycEligibilityHistory.deleteMany({ where: { accountId: renewalAccountId } });
+        await database.kycEligibility.deleteMany({ where: { accountId: renewalAccountId } });
+        await database.account.deleteMany({ where: { id: renewalAccountId } });
+        await authPool.query('DELETE FROM "auth_user" WHERE "id" = $1', [renewalBetterAuthUserId]);
+      }
+    },
+  );
+
   it("rejects provider statuses outside the reviewed contract", async () => {
     await expect(
       database.kycEligibility.update({

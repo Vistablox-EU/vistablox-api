@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { deriveCrossSubDomainCookieDomain } from "../src/modules/auth/infrastructure/better-auth.factory.js";
+import { deriveCrossSubDomainCookieDomain } from "../src/modules/auth/infrastructure/shared/better-auth.factory.js";
 
 describe("deriveCrossSubDomainCookieDomain", () => {
   it("derives the shared parent domain for a three-label host", () => {

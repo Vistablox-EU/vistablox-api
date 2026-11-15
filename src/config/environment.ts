@@ -1,3 +1,6 @@
+import { isIP } from "node:net";
+
+import express from "express";
 import { z } from "zod";
 
 const environmentSchema = z
@@ -94,6 +97,16 @@ const environmentSchema = z
     // production. Unset means production: a real production deploy stays
     // protected without anyone having to remember to set it.
     APP_ENV: z.preprocess(emptyStringToUndefined, z.enum(["staging", "production"]).optional()),
+    // Staging-only test-account relaxation. This permits one staff account to
+    // record both recovery reviews while preserving the Didit gate and audit.
+    ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
+    ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING: z
+      .enum(["true", "false"])
+      .default("false")
+      .transform((value) => value === "true"),
     PLAY_INTEGRITY_POLICY: z.enum(["disabled", "relaxed", "strict"]).default("disabled"),
     PLAY_INTEGRITY_CLOUD_PROJECT_NUMBER: optionalNonEmptyString(),
     // Base64-encoded service account JSON, decode-only role, used to verify
@@ -160,6 +173,29 @@ const environmentSchema = z
           (value) => value.startsWith("redis://") || value.startsWith("rediss://"),
           { message: "RATE_LIMIT_CACHE_URL must be a Redis or TLS Redis URL" },
         )
+        .optional(),
+    ),
+    // Which reverse proxies Express trusts to say who the client is
+    // (X-Forwarded-For), so req.ip -- and with it the IP rate limits -- sees
+    // the caller rather than the proxy. Unset trusts none, which behind a
+    // proxy puts every caller in one bucket; see parseTrustProxy for the
+    // accepted forms and why "true" is refused.
+    TRUST_PROXY: z.preprocess(
+      emptyStringToUndefined,
+      z
+        .string()
+        .transform((value, context) => {
+          const parsed = parseTrustProxy(value);
+          if (parsed === undefined) {
+            context.addIssue({
+              code: "custom",
+              message:
+                "TRUST_PROXY must be a proxy hop count (0-10) or a comma-separated list of proxy addresses, CIDR ranges (IPv4 /8 or longer, IPv6 /16 or longer), or loopback/linklocal/uniquelocal",
+            });
+            return z.NEVER;
+          }
+          return parsed;
+        })
         .optional(),
     ),
     // Best-effort display-profile cache invalidation/refresh on KYC state
@@ -280,9 +316,33 @@ const environmentSchema = z
     // additionally requires the CHAIN_* bundle above to be configured.
     VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS: optionalEthAddress(),
     WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(5),
+    // Alert thresholds for the wallet-registry watcher and its health check
+    // (docs/wallet-registration-operations.md). Starting values for Base
+    // Sepolia, not calibrated against real traffic. Blank counts as unset, so a
+    // compose file that passes ${NAME:-} falls back to the default instead of
+    // stopping the worker.
+    // The watcher has not completed a run for this long: wallet_registry.watcher_stalled.
+    WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES: blankTolerantInteger(2, 1440, 10),
+    // The saved cursor is at least this many blocks behind the safe chain head
+    // (about 30 minutes at Base's 2 second blocks): wallet_registry.cursor_lag.
+    WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS: blankTolerantInteger(1, 1_000_000, 900),
+    // This many claims pending longer than WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES:
+    // wallet_registry.pending_overdue.
+    WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT: blankTolerantInteger(1, 10_000, 1),
+    // This many events that match no pending claim in one run:
+    // wallet_registry.unmatched_events.
+    WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: blankTolerantInteger(1, 10_000, 5),
     KYC_CREATING_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
     KYC_OPEN_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(10080).default(60),
     ACCOUNT_RECOVERY_ALERT_AFTER_HOURS: z.coerce.number().int().min(1).max(720).default(24),
+    // Self-service device replacement email code (AD-271). The code is emailed
+    // to the account's bound protected_contact_email (no SMS), verified against
+    // a stored hash, single-use, and bound to the requesting session. These
+    // defaults are the accepted values from the device-replacement design doc.
+    DEVICE_REPLACEMENT_CODE_TTL_MINUTES: z.coerce.number().int().min(1).max(60).default(10),
+    DEVICE_REPLACEMENT_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
+    DEVICE_REPLACEMENT_COOLDOWN_HOURS: z.coerce.number().int().min(1).max(720).default(72),
+    DEVICE_REPLACEMENT_RATE_LIMIT_PER_HOUR: z.coerce.number().int().min(1).max(60).default(3),
   })
   .refine(
     (environment) => {
@@ -438,6 +498,24 @@ const environmentSchema = z
   )
   .refine(
     (environment) =>
+      environment.ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE === false ||
+      environment.APP_ENV === "staging",
+    {
+      message: "ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE=true is permitted only when APP_ENV=staging",
+      path: ["ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE"],
+    },
+  )
+  .refine(
+    (environment) =>
+      environment.ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING === false ||
+      environment.APP_ENV === "staging",
+    {
+      message: "ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING=true is permitted only when APP_ENV=staging",
+      path: ["ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING"],
+    },
+  )
+  .refine(
+    (environment) =>
       // A production build is a production deployment unless APP_ENV says
       // staging (staging runs NODE_ENV=production too).
       environment.NODE_ENV !== "production" ||
@@ -588,8 +666,80 @@ function registrableLabels(origins: string[]): Set<string> {
   );
 }
 
+const MAX_TRUST_PROXY_HOPS = 10;
+const TRUST_PROXY_PRESETS = new Set(["loopback", "linklocal", "uniquelocal"]);
+const MIN_TRUST_PROXY_IPV4_PREFIX = 8;
+const MIN_TRUST_PROXY_IPV6_PREFIX = 16;
+
+// TRUST_PROXY feeds Express's `trust proxy` setting. Accepted forms:
+//   - a hop count (0-10): trust that many proxies in front of the API. Only
+//     right when nothing can reach the API except through them, and when the
+//     count equals the number of proxies that append an address: a caller that
+//     connects directly, or a count that is too high, lets the caller choose
+//     the entry it is counted under.
+//   - a comma-separated list of proxy addresses, CIDR ranges or the presets
+//     loopback/linklocal/uniquelocal: X-Forwarded-For is honoured only when
+//     the connection itself comes from one of them. Prefer this where the
+//     proxy's address or network is known.
+// Refused: Express's boolean `true` (the one form that trusts every hop and
+// that Express itself accepts), netmask notation, and ranges broad enough to
+// cover callers that are not proxies -- an IPv4 prefix below /8, an IPv6
+// prefix below /16, and any IPv6 range inside ::/16 other than a single host
+// (that space holds the IPv4-mapped addresses, so ::ffff:10.0.0.0/8 or ::/1
+// would trust every IPv4 peer; write an IPv4 range as IPv4). Whatever passes
+// is also compiled by Express itself, so a value that validates here cannot
+// make createApp throw at startup. Returns undefined for anything else.
+function parseTrustProxy(value: string): number | string[] | undefined {
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const hops = Number(trimmed);
+    return hops <= MAX_TRUST_PROXY_HOPS ? hops : undefined;
+  }
+  const entries = trimmed
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (entries.length === 0 || !entries.every(isTrustProxyEntry)) return undefined;
+  try {
+    express().set("trust proxy", entries);
+  } catch {
+    return undefined;
+  }
+  return entries;
+}
+
+function isTrustProxyEntry(entry: string): boolean {
+  if (TRUST_PROXY_PRESETS.has(entry)) return true;
+  const [address, prefix, ...rest] = entry.split("/");
+  if (address === undefined || rest.length > 0) return false;
+  const family = isIP(address);
+  if (family === 0) return false;
+  if (prefix === undefined) return true;
+  if (!/^\d+$/.test(prefix)) return false;
+  const length = Number(prefix);
+  if (family === 4) return length >= MIN_TRUST_PROXY_IPV4_PREFIX && length <= 32;
+  if (length < MIN_TRUST_PROXY_IPV6_PREFIX || length > 128) return false;
+  return length === 128 || !startsWithZeroHextet(address);
+}
+
+function startsWithZeroHextet(address: string): boolean {
+  try {
+    const first = new URL(`http://[${address}]`).hostname.slice(1).split(":")[0];
+    return first === "" || first === "0";
+  } catch {
+    return true;
+  }
+}
+
 function emptyStringToUndefined(value: unknown): unknown {
   return value === "" ? undefined : value;
+}
+
+// An integer variable with bounds and a default that treats a blank value as
+// unset. A function declaration, not a const, so the schema above can use it
+// while the module is still initialising.
+function blankTolerantInteger(min: number, max: number, fallback: number) {
+  return z.preprocess(emptyStringToUndefined, z.coerce.number().int().min(min).max(max).default(fallback));
 }
 
 // "a, b ,,c" -> ["a", "b", "c"]; empty or all-blank -> undefined, so an

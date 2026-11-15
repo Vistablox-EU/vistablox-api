@@ -51,15 +51,12 @@ describe.skipIf(databaseUrl === undefined)(
           data: { id, betterAuthUserId: authId, protectedContactEmail: email },
         });
       }
-      await database.platformSetting.upsert({
-        where: { key: "intake.minimum_property_value_eur" },
-        update: {},
-        create: {
-          key: "intake.minimum_property_value_eur",
-          value: { amount: "150000.00", currency: "EUR" },
-          description: "Test fixture floor",
-        },
-      });
+      // No platform.settings fixture on purpose. This suite used to upsert the
+      // property-value floor by hand (nothing read it), and no other
+      // real-database test read the intake.* settings at all, so it went
+      // unnoticed that the migrations seeded only the retired origination.*
+      // spelling. The first test below now reads them as the migrations
+      // actually create them.
     }, 30_000);
 
     afterAll(async () => {
@@ -82,6 +79,12 @@ describe.skipIf(databaseUrl === undefined)(
       // clean up only what's actually deletable (audit rows above), and
       // leave the rest.
       await Promise.all([database.$disconnect(), authPool.end(), boss.stop({ graceful: false })]);
+    });
+
+    it("finds every intake platform setting the repository reads on a database built only from migrations", async () => {
+      await expect(intakeRepository.getMinimumPropertyValueEur()).resolves.toBe("150000.00");
+      await expect(intakeRepository.getApplicantResponseWindowBusinessDays()).resolves.toBe(10);
+      await expect(intakeRepository.getInformationRequestReminderBusinessDays()).resolves.toEqual([3, 7]);
     });
 
     it("creates a submitted case with a real revision in one transaction, attributed to the staff caller", async () => {

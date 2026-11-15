@@ -36,6 +36,7 @@ function repository(
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
     sendPasskeyRecoveryEmail: vi.fn(),
+    sendDeviceReplacementCodeEmail: vi.fn(),
     sendStaffInvitationEmail: vi.fn(),
     sendApplicantResponseReminderEmail: vi.fn(),
     sendKycRenewalReminderEmail: vi.fn(),

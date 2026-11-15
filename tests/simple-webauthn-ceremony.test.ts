@@ -3,8 +3,8 @@ import { randomBytes } from "node:crypto";
 import { isoBase64URL } from "@simplewebauthn/server/helpers";
 import { describe, expect, it } from "vitest";
 
-import type { StaffWebAuthnCredentialRecord } from "../src/modules/auth/repository/staff-webauthn.repository.js";
-import { SimpleWebAuthnCeremony } from "../src/modules/auth/infrastructure/simple-webauthn.ceremony.js";
+import type { StaffWebAuthnCredentialRecord } from "../src/modules/auth/repository/staff/staff-webauthn.repository.js";
+import { SimpleWebAuthnCeremony } from "../src/modules/auth/infrastructure/staff/simple-webauthn.ceremony.js";
 import {
   createSoftwareAuthenticator,
   type SoftwareAuthenticator,

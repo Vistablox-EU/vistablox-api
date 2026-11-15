@@ -679,6 +679,14 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
         where: { accountId: input.accountId, eligibilityState: "eligible" },
         data: {
           eligibilityState: "requires_renewal",
+          // The same pairing Didit's "Kyc Expired" outcome writes
+          // (KYC_WORKFLOW.md has no separate row for the due-date job).
+          // canStartSession does not admit kyc_verified or
+          // kyc_verified_owner_poa_missing, so left as it was the customer
+          // could never renew: POST /v1/kyc/sessions answered 409.
+          // kyc_reverification_required is admitted. Proof-of-address state
+          // has its own columns, so nothing is lost.
+          operationalSubstatus: "kyc_reverification_required",
           updatedAt: input.transitionedAt,
         },
       });
@@ -705,6 +713,7 @@ export class PrismaKycRepository implements KycRepository, KycEligibilityReader 
             trace_id: input.traceId,
             previous_state: "eligible",
             new_state: "requires_renewal",
+            new_operational_substatus: "kyc_reverification_required",
           },
           createdAt: input.transitionedAt,
         },

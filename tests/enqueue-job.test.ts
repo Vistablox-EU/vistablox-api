@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
+import type { DatabaseClient } from "../src/infrastructure/database/prisma.js";
+import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
 import { enqueueTransactionalJob, JOB_RETRY_OPTIONS } from "../src/shared/jobs/enqueue-job.js";
 
 describe("enqueueTransactionalJob", () => {
@@ -46,5 +48,31 @@ describe("enqueueTransactionalJob", () => {
 
     expect(queryRawUnsafe).toHaveBeenCalledWith("SELECT 1 WHERE id = $1", "a");
     expect(result).toEqual({ rows: [{ id: "row_01" }] });
+  });
+});
+
+describe("PrismaKycRepository.enqueueDiditWebhookProcessing", () => {
+  it("sends the webhook job with the event retry profile, because the Didit outcome is lost if it exhausts its retries", async () => {
+    const send = vi.fn().mockResolvedValue("job_01");
+    const boss = { send } as unknown as ConstructorParameters<typeof PrismaKycRepository>[1];
+    const repository = new PrismaKycRepository({} as DatabaseClient, boss);
+    const input = {
+      eventId: "evt_01",
+      webhookType: "status.updated",
+      applicationId: "app_01",
+      environment: "sandbox",
+      sessionId: "session_01",
+      sessionKind: "user",
+      workflowId: "workflow_01",
+      vendorData: "account_01",
+      status: "Approved",
+      createdAt: 1_790_000_000,
+      traceId: "trace_01",
+    };
+
+    await repository.enqueueDiditWebhookProcessing(input);
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledWith("provider_events.didit_webhook", input, JOB_RETRY_OPTIONS);
   });
 });

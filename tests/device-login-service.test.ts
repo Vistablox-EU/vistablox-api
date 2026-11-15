@@ -3,11 +3,11 @@ import { webcrypto } from "node:crypto";
 import { SignJWT, calculateJwkThumbprint, exportJWK, type JWK } from "jose";
 import { describe, expect, it } from "vitest";
 
-import { DeviceChallengeExpiredError, DeviceLoginFailedError } from "../src/modules/auth/application/device-auth-errors.js";
-import { LoginDeviceService } from "../src/modules/auth/application/device-login.service.js";
+import { DeviceChallengeExpiredError, DeviceLoginFailedError } from "../src/modules/auth/application/customer/device-auth-errors.js";
+import { LoginDeviceService } from "../src/modules/auth/application/customer/device-login.service.js";
 import { CHALLENGE_REPLAY_WINDOW_MS } from "../src/modules/auth/domain/device-challenge-replay.js";
-import type { Device, DeviceRepository } from "../src/modules/auth/repository/device.repository.js";
-import type { DeviceChallengeRepository } from "../src/modules/auth/repository/device-challenge.repository.js";
+import type { Device, DeviceRepository } from "../src/modules/auth/repository/customer/device.repository.js";
+import type { DeviceChallengeRepository } from "../src/modules/auth/repository/customer/device-challenge.repository.js";
 
 const JWS_TYP = "vistablox-device-auth+jwt";
 

@@ -3,7 +3,7 @@ import { createAuthEndpoint, dispatchAuthEndpoint } from "better-auth/api";
 import { serializeSignedCookie } from "better-call";
 import { describe, expect, it } from "vitest";
 
-import { createBetterAuthPasskeyChallengeHeaderPlugin } from "../src/modules/auth/infrastructure/better-auth-passkey-challenge-header.plugin.js";
+import { createBetterAuthPasskeyChallengeHeaderPlugin } from "../src/modules/auth/infrastructure/shared/better-auth-passkey-challenge-header.plugin.js";
 
 const SECRET = "test-secret-at-least-32-characters-long";
 

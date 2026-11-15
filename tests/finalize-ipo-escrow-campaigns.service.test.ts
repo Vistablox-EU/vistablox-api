@@ -1,137 +1,65 @@
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it } from "vitest";
 
-import { FinalizeIpoEscrowCampaignsService } from "../src/modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
-import type {
-  PivPendingEscrowResolution,
-  RecordEscrowMintedPositionInput,
-  SettlementRepository,
-} from "../src/modules/settlement/repository/settlement.repository.js";
+import {
+  ESCROW_MINT_IN_FLIGHT_GRACE_MS,
+  FinalizeIpoEscrowCampaignsService,
+} from "../src/modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
+import {
+  CAMPAIGN_STATE_OPEN,
+  FakeEscrowChain,
+  InMemorySettlementRepository,
+  makeCapturingLogger,
+  PROPERTY_CONTRACT,
+  successfulCampaign,
+  type FakeCampaign,
+} from "./support/escrow-mint-fakes.js";
 
-const CAMPAIGN_STATE_OPEN = 1;
-const CAMPAIGN_STATE_SUCCESSFUL = 2;
-const CAMPAIGN_STATE_FAILED = 3;
+const T0 = new Date("2026-10-18T12:00:00.000Z");
+const TRACE_ID = "req_test";
 
-interface FakeCampaign {
-  targetAmount: bigint;
-  totalRaised: bigint;
-  deadline: bigint;
-  treasury: string;
-  state: number;
-  swept: boolean;
-}
-
-// A small in-memory model of VistaBloxIpoEscrow's own state machine, not
-// just a sequence of canned return values -- so the orchestration logic
-// under test is genuinely driving state transitions (Open -> Successful/
-// Failed -> swept), the same way it would against the real contract.
-function makeFakeChain(options: {
+interface HarnessOptions {
   campaigns: Map<string, FakeCampaign>;
   contributions: Map<string, Map<string, bigint>>;
   contributors: Map<string, string[]>;
-}) {
-  let txCounter = 0;
-  const nextHash = () => `0xtx${++txCounter}`;
+  candidates: Array<{ pivId: string; tokenId: string }>;
+  wallets: Record<string, string>;
+  legacyPositions?: Array<{ pivId: string; accountId: string }>;
+}
 
+// The whole system under test, with one clock the test can advance and one
+// timeline both fakes append to.
+function harness(options: HarnessOptions) {
+  const timeline: string[] = [];
+  const chain = new FakeEscrowChain(options.campaigns, options.contributions, options.contributors, timeline);
+  const repository = new InMemorySettlementRepository(
+    options.candidates,
+    options.wallets,
+    timeline,
+    options.legacyPositions,
+  );
+  const { logger, entries } = makeCapturingLogger();
+  let now = T0;
+  const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger, () => now);
   return {
-    config: { propertyContractAddress: "0xPROPERTY0000000000000000000000000000000" },
-    publicClient: {
-      waitForTransactionReceipt: vi.fn(async () => ({ status: "success" as const })),
-    },
-    ipoEscrow: {
-      read: {
-        campaignOf: vi.fn(async ([tokenId]: [bigint]) => {
-          const campaign = options.campaigns.get(tokenId.toString())!;
-          return [
-            campaign.targetAmount,
-            campaign.totalRaised,
-            campaign.deadline,
-            campaign.treasury,
-            campaign.state,
-            campaign.swept,
-          ] as const;
-        }),
-        contributorsOf: vi.fn(async ([tokenId]: [bigint]) => options.contributors.get(tokenId.toString()) ?? []),
-        contributionOf: vi.fn(
-          async ([tokenId, address]: [bigint, string]) =>
-            options.contributions.get(tokenId.toString())?.get(address) ?? 0n,
-        ),
-      },
-      write: {
-        finalize: vi.fn(async ([tokenId]: [bigint]) => {
-          const campaign = options.campaigns.get(tokenId.toString())!;
-          campaign.state =
-            campaign.totalRaised >= campaign.targetAmount ? CAMPAIGN_STATE_SUCCESSFUL : CAMPAIGN_STATE_FAILED;
-          return nextHash();
-        }),
-        withdrawRaised: vi.fn(async ([tokenId]: [bigint]) => {
-          options.campaigns.get(tokenId.toString())!.swept = true;
-          return nextHash();
-        }),
-      },
-    },
-    property: {
-      write: {
-        authorizeHolder: vi.fn(async () => nextHash()),
-        mint: vi.fn(async () => nextHash()),
-      },
+    chain,
+    repository,
+    entries,
+    timeline,
+    service,
+    run: () => service.execute(TRACE_ID),
+    advance: (ms: number) => {
+      now = new Date(now.getTime() + ms);
     },
   };
 }
 
-class FakeSettlementRepository implements SettlementRepository {
-  public readonly recordedPositions: RecordEscrowMintedPositionInput[] = [];
-  private readonly walletToAccount: Map<string, string>;
-  private readonly existingPositions: Set<string>;
-
-  public constructor(
-    private readonly candidates: PivPendingEscrowResolution[],
-    walletToAccount: Record<string, string>,
-    existingPositions: Array<{ pivId: string; accountId: string }> = [],
-  ) {
-    this.walletToAccount = new Map(Object.entries(walletToAccount));
-    this.existingPositions = new Set(existingPositions.map((p) => `${p.pivId}:${p.accountId}`));
-  }
-
-  public async findPivsWithPassedIpoDeadline(): Promise<PivPendingEscrowResolution[]> {
-    return this.candidates;
-  }
-
-  public async countPendingWalletRegistrationsBefore(): Promise<number> {
-    return 0;
-  }
-
-  public async resolveAccountIdForWallet(walletAddress: string): Promise<string | null> {
-    return this.walletToAccount.get(walletAddress) ?? null;
-  }
-
-  public async hasPosition(pivId: string, accountId: string): Promise<boolean> {
-    return this.existingPositions.has(`${pivId}:${accountId}`);
-  }
-
-  public async recordEscrowMintedPosition(
-    input: RecordEscrowMintedPositionInput,
-  ): Promise<{ positionId: string }> {
-    this.recordedPositions.push(input);
-    this.existingPositions.add(`${input.pivId}:${input.accountId}`);
-    return { positionId: `position_fake_${this.recordedPositions.length}` };
-  }
-
-  // Unused by this suite -- it exercises escrow finalize-and-mint only, not
-  // AD-241's wallet-registration confirmation (see
-  // confirm-wallet-registrations.service.test.ts for that).
-  public async findPendingWalletRegistrationByCommitment(): Promise<null> {
-    return null;
-  }
-
-  public async confirmWalletRegistration(): Promise<void> {}
-
-  public async getLastProcessedWalletRegistryBlock(): Promise<bigint | null> {
-    return null;
-  }
-
-  public async setLastProcessedWalletRegistryBlock(): Promise<void> {}
-
-  public async recordWalletRegistrationAddressMismatch(): Promise<void> {}
+// One PIV (token 1) with one contributor of 100 base units, Successful, not swept.
+function singleContributor() {
+  return harness({
+    ...successfulCampaign({ tokenId: "1", contributions: { "0xInvestorA": 100n } }),
+    candidates: [{ pivId: "piv_1", tokenId: "1" }],
+    wallets: { "0xInvestorA": "account_a" },
+  });
 }
 
 describe("FinalizeIpoEscrowCampaignsService", () => {
@@ -153,14 +81,15 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       ["1", new Map([["0xInvestorA", 200_000_000_000n], ["0xInvestorB", 100_000_000_000n]])],
     ]);
     const contributors = new Map([["1", ["0xInvestorA", "0xInvestorB"]]]);
-    const chain = makeFakeChain({ campaigns, contributions, contributors });
-    const repository = new FakeSettlementRepository([{ pivId: "piv_1", tokenId: "1" }], {
-      "0xInvestorA": "account_a",
-      "0xInvestorB": "account_b",
+    const h = harness({
+      campaigns,
+      contributions,
+      contributors,
+      candidates: [{ pivId: "piv_1", tokenId: "1" }],
+      wallets: { "0xInvestorA": "account_a", "0xInvestorB": "account_b" },
     });
 
-    const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, () => new Date());
-    const summary = await service.execute();
+    const summary = await h.run();
 
     expect(summary).toMatchObject({
       pivsChecked: 1,
@@ -168,18 +97,25 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       campaignsSuccessful: 1,
       campaignsFailed: 0,
       positionsMinted: 2,
+      mintsReconciled: 0,
       errors: [],
     });
-    expect(chain.ipoEscrow.write.finalize).toHaveBeenCalledTimes(1);
-    expect(chain.property.write.authorizeHolder).toHaveBeenCalledTimes(2);
-    expect(chain.property.write.mint).toHaveBeenCalledTimes(2);
-    expect(chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
+    expect(h.chain.ipoEscrow.write.finalize).toHaveBeenCalledTimes(1);
+    expect(h.chain.property.write.authorizeHolder).toHaveBeenCalledTimes(2);
+    expect(h.chain.property.write.mint).toHaveBeenCalledTimes(2);
+    expect(h.chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
     expect(campaigns.get("1")!.swept).toBe(true);
 
-    expect(repository.recordedPositions).toHaveLength(2);
-    const positionA = repository.recordedPositions.find((p) => p.accountId === "account_a")!;
+    expect(h.repository.recordedPositions).toHaveLength(2);
+    const positionA = h.repository.recordedPositions.find((p) => p.accountId === "account_a")!;
     expect(positionA.unitCount).toBe("200000.000000");
     expect(positionA.costBasisEur).toBe("200000.000000");
+    // Each position is linked to a distinct, recorded intent and carries its mint's real hash.
+    const intents = [...h.repository.intents.values()];
+    expect(intents.map((i) => i.status)).toEqual(["recorded", "recorded"]);
+    expect(h.repository.recordedPositions.map((p) => p.chainTxHash).sort()).toEqual(
+      h.chain.mints.map((m) => m.hash).sort(),
+    );
   });
 
   it("finalizes an underfunded campaign as Failed and does not mint or sweep", async () => {
@@ -196,15 +132,15 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
         },
       ],
     ]);
-    const chain = makeFakeChain({
+    const h = harness({
       campaigns,
       contributions: new Map(),
       contributors: new Map([["2", ["0xInvestorA"]]]),
+      candidates: [{ pivId: "piv_2", tokenId: "2" }],
+      wallets: {},
     });
-    const repository = new FakeSettlementRepository([{ pivId: "piv_2", tokenId: "2" }], {});
 
-    const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, () => new Date());
-    const summary = await service.execute();
+    const summary = await h.run();
 
     expect(summary).toMatchObject({
       campaignsFinalized: 1,
@@ -212,150 +148,842 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       campaignsFailed: 1,
       positionsMinted: 0,
     });
-    expect(chain.property.write.mint).not.toHaveBeenCalled();
-    expect(chain.ipoEscrow.write.withdrawRaised).not.toHaveBeenCalled();
+    expect(h.chain.property.write.mint).not.toHaveBeenCalled();
+    expect(h.chain.ipoEscrow.write.withdrawRaised).not.toHaveBeenCalled();
   });
 
-  it("skips an already-swept campaign entirely", async () => {
-    const campaigns = new Map([
-      [
-        "3",
-        {
-          targetAmount: 100n,
-          totalRaised: 100n,
-          deadline: 1n,
-          treasury: "0xTREASURY",
-          state: CAMPAIGN_STATE_SUCCESSFUL,
-          swept: true,
-        },
-      ],
-    ]);
-    const chain = makeFakeChain({ campaigns, contributions: new Map(), contributors: new Map() });
-    const repository = new FakeSettlementRepository([{ pivId: "piv_3", tokenId: "3" }], {});
+  // Pins the current behaviour, not a guarantee: a sweep is taken to mean the
+  // contributors were minted first, which only holds for sweeps this job did
+  // itself (withdrawRaised is permissionless). See the swept check in the service.
+  it("skips an already-swept campaign entirely, without telling a sweep by this job from one by anyone else", async () => {
+    const h = harness({
+      ...successfulCampaign({ tokenId: "3", contributions: {}, swept: true }),
+      candidates: [{ pivId: "piv_3", tokenId: "3" }],
+      wallets: {},
+    });
 
-    const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, () => new Date());
-    const summary = await service.execute();
+    const summary = await h.run();
 
     expect(summary).toMatchObject({ campaignsFinalized: 0, campaignsSuccessful: 0, campaignsFailed: 0 });
-    expect(chain.ipoEscrow.write.finalize).not.toHaveBeenCalled();
+    expect(h.chain.ipoEscrow.write.finalize).not.toHaveBeenCalled();
   });
 
   it("does not re-call finalize on a campaign that's already Successful but not yet swept (resumed after an interruption)", async () => {
-    const campaigns = new Map([
-      [
-        "4",
-        {
-          targetAmount: 100n,
-          totalRaised: 100n,
-          deadline: 1n,
-          treasury: "0xTREASURY",
-          state: CAMPAIGN_STATE_SUCCESSFUL,
-          swept: false,
-        },
-      ],
-    ]);
-    const contributions = new Map([["4", new Map([["0xInvestorA", 100n]])]]);
-    const contributors = new Map([["4", ["0xInvestorA"]]]);
-    const chain = makeFakeChain({ campaigns, contributions, contributors });
-    const repository = new FakeSettlementRepository([{ pivId: "piv_4", tokenId: "4" }], {
-      "0xInvestorA": "account_a",
+    const h = harness({
+      ...successfulCampaign({ tokenId: "4", contributions: { "0xInvestorA": 100n } }),
+      candidates: [{ pivId: "piv_4", tokenId: "4" }],
+      wallets: { "0xInvestorA": "account_a" },
     });
 
-    const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, () => new Date());
-    const summary = await service.execute();
+    const summary = await h.run();
 
-    expect(chain.ipoEscrow.write.finalize).not.toHaveBeenCalled();
+    expect(h.chain.ipoEscrow.write.finalize).not.toHaveBeenCalled();
     expect(summary.campaignsFinalized).toBe(0);
     expect(summary.campaignsSuccessful).toBe(1);
     expect(summary.positionsMinted).toBe(1);
-    expect(chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
+    expect(h.chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
   });
 
   it("skips a contributor who already has a position, without re-minting, while still minting the rest", async () => {
-    const campaigns = new Map([
-      [
-        "5",
-        {
-          targetAmount: 200n,
-          totalRaised: 200n,
-          deadline: 1n,
-          treasury: "0xTREASURY",
-          state: CAMPAIGN_STATE_SUCCESSFUL,
-          swept: false,
-        },
-      ],
-    ]);
-    const contributions = new Map([["5", new Map([["0xInvestorA", 100n], ["0xInvestorB", 100n]])]]);
-    const contributors = new Map([["5", ["0xInvestorA", "0xInvestorB"]]]);
-    const chain = makeFakeChain({ campaigns, contributions, contributors });
-    const repository = new FakeSettlementRepository(
-      [{ pivId: "piv_5", tokenId: "5" }],
-      { "0xInvestorA": "account_a", "0xInvestorB": "account_b" },
-      [{ pivId: "piv_5", accountId: "account_a" }], // already minted on a prior, interrupted run
-    );
+    const h = harness({
+      ...successfulCampaign({ tokenId: "5", contributions: { "0xInvestorA": 100n, "0xInvestorB": 100n } }),
+      candidates: [{ pivId: "piv_5", tokenId: "5" }],
+      wallets: { "0xInvestorA": "account_a", "0xInvestorB": "account_b" },
+      legacyPositions: [{ pivId: "piv_5", accountId: "account_a" }], // minted and recorded on a prior run
+    });
 
-    const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, () => new Date());
-    const summary = await service.execute();
+    const summary = await h.run();
 
     expect(summary.positionsMinted).toBe(1);
-    expect(chain.property.write.mint).toHaveBeenCalledTimes(1);
-    expect(repository.recordedPositions).toHaveLength(1);
-    expect(repository.recordedPositions[0]?.accountId).toBe("account_b");
+    expect(h.chain.property.write.mint).toHaveBeenCalledTimes(1);
+    expect(h.repository.recordedPositions).toHaveLength(1);
+    expect(h.repository.recordedPositions[0]?.accountId).toBe("account_b");
   });
 
   it("records a per-campaign error without aborting other candidates in the same run", async () => {
-    const campaigns = new Map([
-      [
-        "6",
-        {
-          targetAmount: 100n,
-          totalRaised: 100n,
-          deadline: 1n,
-          treasury: "0xTREASURY",
-          state: CAMPAIGN_STATE_SUCCESSFUL,
-          swept: false,
-        },
-      ],
-      [
-        "7",
-        {
-          targetAmount: 100n,
-          totalRaised: 100n,
-          deadline: 1n,
-          treasury: "0xTREASURY",
-          state: CAMPAIGN_STATE_SUCCESSFUL,
-          swept: false,
-        },
-      ],
-    ]);
-    const contributions = new Map([
-      ["6", new Map([["0xUnregistered", 100n]])],
-      ["7", new Map([["0xInvestorA", 100n]])],
-    ]);
-    const contributors = new Map([
-      ["6", ["0xUnregistered"]],
-      ["7", ["0xInvestorA"]],
-    ]);
-    const chain = makeFakeChain({ campaigns, contributions, contributors });
-    const repository = new FakeSettlementRepository(
-      [
+    const six = successfulCampaign({ tokenId: "6", contributions: { "0xUnregistered": 100n } });
+    const seven = successfulCampaign({ tokenId: "7", contributions: { "0xInvestorA": 100n } });
+    const h = harness({
+      campaigns: new Map([...six.campaigns, ...seven.campaigns]),
+      contributions: new Map([...six.contributions, ...seven.contributions]),
+      contributors: new Map([...six.contributors, ...seven.contributors]),
+      candidates: [
         { pivId: "piv_6", tokenId: "6" },
         { pivId: "piv_7", tokenId: "7" },
       ],
-      { "0xInvestorA": "account_a" }, // 0xUnregistered deliberately has no account
-    );
+      wallets: { "0xInvestorA": "account_a" }, // 0xUnregistered deliberately has no account
+    });
 
-    const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, () => new Date());
-    const summary = await service.execute();
+    const summary = await h.run();
 
     expect(summary.errors).toHaveLength(1);
     expect(summary.errors[0]).toContain("piv_id=piv_6");
     expect(summary.errors[0]).toContain("0xUnregistered");
     // Campaign 7 (unrelated) still fully processed despite campaign 6's failure.
     expect(summary.positionsMinted).toBe(1);
-    expect(campaigns.get("7")!.swept).toBe(true);
-    // Campaign 6 never got its treasury sweep -- a real, unresolved
-    // contributor is more important than releasing funds on schedule.
-    expect(campaigns.get("6")!.swept).toBe(false);
+    expect(six.campaigns.get("6")!.swept).toBe(false);
+    expect(seven.campaigns.get("7")!.swept).toBe(true);
+  });
+
+  it("logs each failed campaign at error level with its piv_id, token_id and trace_id", async () => {
+    const h = harness({
+      ...successfulCampaign({ tokenId: "6", contributions: { "0xUnregistered": 100n } }),
+      candidates: [{ pivId: "piv_6", tokenId: "6" }],
+      wallets: {},
+    });
+
+    await h.run();
+
+    const errors = h.entries.filter((entry) => entry.level === "error");
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.fields).toMatchObject({ trace_id: TRACE_ID, piv_id: "piv_6", token_id: "6" });
+    expect((errors[0]?.fields["err"] as Error).message).toContain("0xUnregistered");
+  });
+
+  describe("recording the intent and the transaction hash", () => {
+    it("writes the intent before the mint is sent and the hash before its receipt is awaited", async () => {
+      const h = singleContributor();
+      let intentWhenMintWasSent: Array<{ status: string; hash: string | null }> = [];
+      h.chain.onMint = () => {
+        intentWhenMintWasSent = [...h.repository.intents.values()].map((i) => ({
+          status: i.status,
+          hash: i.mintTxHash,
+        }));
+      };
+
+      await h.run();
+
+      // At the moment write.mint ran, the durable intent already existed and no hash was known yet.
+      expect(intentWhenMintWasSent).toEqual([{ status: "sending", hash: null }]);
+
+      const mintHash = h.chain.mints[0]!.hash;
+      const order = h.timeline.filter(
+        (entry) => entry.startsWith("repo:") || entry === "chain:mint" || entry === `chain:waitForReceipt(${mintHash})`,
+      );
+      expect(order).toEqual([
+        "repo:createEscrowMintIntent",
+        "chain:mint",
+        "repo:recordEscrowMintSent",
+        `chain:waitForReceipt(${mintHash})`,
+        "repo:recordEscrowMintedPosition",
+      ]);
+    });
+
+    it("records the position and the intent's final status together, with the mint's own hash", async () => {
+      const h = singleContributor();
+
+      await h.run();
+
+      const [intent] = [...h.repository.intents.values()];
+      const [position] = h.repository.positions;
+      expect(intent).toMatchObject({ status: "recorded", mintTxHash: h.chain.mints[0]!.hash, attempt: 1 });
+      expect(position?.input).toMatchObject({
+        escrowMintIntentId: intent!.id,
+        chainTxHash: h.chain.mints[0]!.hash,
+      });
+    });
+  });
+
+  describe("crash windows", () => {
+    it("before anything is written: nothing exists on either side, and the next run mints exactly once", async () => {
+      const h = singleContributor();
+      h.repository.failNext("createEscrowMintIntent", "before");
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect(h.chain.mints).toHaveLength(0);
+      expect(h.repository.intents.size).toBe(0);
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+    });
+
+    it("after the intent is written but before the mint is sent: waits out the in-flight window, then mints exactly once", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("reject"); // the call never reaches the node
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect(h.chain.mints).toHaveLength(0);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "sending", mintTxHash: null });
+
+      // Soon after: the attempt left no hash, so it may have reached the node. Nothing is sent.
+      h.advance(60_000);
+      const tooSoon = await h.run();
+      expect(tooSoon.errors).toHaveLength(1);
+      expect(tooSoon.errors[0]).toContain("may still be in flight");
+      expect(tooSoon.errors[0]).toContain("0xInvestorA");
+      expect(h.chain.mints).toHaveLength(0);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+
+      // Once the window has passed with nothing on-chain, one mint is sent and recorded.
+      h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS);
+      const later = await h.run();
+      expect(later.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", attempt: 2 });
+    });
+
+    it("waits exactly 30 minutes after an attempt that recorded no hash, and not a moment less", async () => {
+      expect(ESCROW_MINT_IN_FLIGHT_GRACE_MS).toBe(30 * 60 * 1000);
+      const h = singleContributor();
+      h.chain.mintModes.push("reject");
+      await h.run();
+
+      h.advance(30 * 60 * 1000 - 1);
+      const justBefore = await h.run();
+      expect(justBefore.errors).toHaveLength(1);
+      expect(justBefore.errors[0]).toContain("may still be in flight");
+      expect(h.chain.mints).toHaveLength(0);
+
+      h.advance(1); // exactly 30 minutes after the attempt began
+      const atWindow = await h.run();
+      expect(atWindow.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+    });
+
+    it("starts a fresh 30 minute wait when a restarted attempt also leaves no hash", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("reject", "reject");
+      await h.run(); // attempt 1 at T0
+
+      h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS);
+      const restarted = await h.run(); // attempt 2 begins now and is rejected as well
+      expect(restarted.errors).toHaveLength(1);
+      expect(h.chain.property.write.mint).toHaveBeenCalledTimes(2);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "sending", attempt: 2 });
+
+      // Attempt 2 is as young as attempt 1 was: the first attempt's age counts for nothing.
+      const immediately = await h.run();
+      expect(immediately.errors).toHaveLength(1);
+      expect(immediately.errors[0]).toContain("may still be in flight");
+      h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS - 1);
+      const justBefore = await h.run();
+      expect(justBefore.errors).toHaveLength(1);
+      expect(h.chain.property.write.mint).toHaveBeenCalledTimes(2);
+
+      h.advance(1);
+      const later = await h.run();
+      expect(later.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", attempt: 3 });
+    });
+
+    it("after the mint was sent but the call never returned its hash: records the mint that is on-chain instead of sending another", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("mine-then-reject"); // accepted and mined; the caller only sees an RPC timeout
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect(h.chain.mints).toHaveLength(1);
+      // The log search window opens a little before the head the attempt started from (1000 - 32).
+      expect([...h.repository.intents.values()][0]).toMatchObject({
+        status: "sending",
+        mintTxHash: null,
+        searchFromBlock: 968n,
+      });
+      expect(h.repository.recordedPositions).toHaveLength(0);
+
+      // No waiting needed: the chain shows the mint, so there is nothing to wait out.
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(second).toMatchObject({ positionsMinted: 1, mintsReconciled: 1 });
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.repository.recordedPositions[0]).toMatchObject({ chainTxHash: h.chain.mints[0]!.hash });
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded" });
+      expect(h.entries.some((e) => e.level === "warn" && e.fields["tx_hash"] === h.chain.mints[0]!.hash)).toBe(true);
+    });
+
+    it.each([
+      [10n, 0n],
+      [32n, 0n],
+      [33n, 1n],
+    ])("with the chain head at block %s, starts the log search at block %s and never below zero", async (head, expected) => {
+      const h = singleContributor();
+      h.chain.blockNumber = head;
+      h.chain.mintModes.push("mine-then-reject");
+
+      await h.run();
+
+      expect([...h.repository.intents.values()][0]).toMatchObject({ searchFromBlock: expected });
+    });
+
+    it("after the mint was sent but writing its hash failed: reports the hash and records the existing mint on the next run", async () => {
+      const h = singleContributor();
+      h.repository.failNext("recordEscrowMintSent", "before");
+
+      const first = await h.run();
+
+      const mintHash = h.chain.mints[0]!.hash;
+      expect(first.errors).toHaveLength(1);
+      expect(first.errors[0]).toContain(mintHash);
+      expect(first.errors[0]).toContain("could not be recorded");
+      const loggedFailure = h.entries.find((e) => e.level === "error");
+      expect((loggedFailure?.fields["err"] as Error).message).toContain(mintHash);
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect(h.repository.recordedPositions[0]?.chainTxHash).toBe(mintHash);
+    });
+
+    it("refuses to guess when the mint is on-chain but its transaction cannot be found in the logs", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("mine-then-reject");
+      await h.run();
+      h.chain.transferLogs.length = 0; // the log lookup comes back empty
+
+      const second = await h.run();
+
+      expect(second.errors).toHaveLength(1);
+      expect(second.errors[0]).toContain("could not be found in the chain logs");
+      expect(second.errors[0]).toContain("0xInvestorA");
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("after the hash was recorded but before the position was: records the position from the recorded hash without minting or authorizing again", async () => {
+      const h = singleContributor();
+      h.repository.failNext("recordEscrowMintedPosition", "before");
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect([...h.repository.intents.values()][0]).toMatchObject({
+        status: "mint_sent",
+        mintTxHash: h.chain.mints[0]!.hash,
+      });
+      expect(h.repository.recordedPositions).toHaveLength(0);
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(second).toMatchObject({ positionsMinted: 1, mintsReconciled: 1 });
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.property.write.authorizeHolder).toHaveBeenCalledTimes(1);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect(h.repository.recordedPositions[0]?.chainTxHash).toBe(h.chain.mints[0]!.hash);
+    });
+
+    it("after the position was committed but before the caller learned of it: the next run touches nothing on-chain for that contributor", async () => {
+      const h = singleContributor();
+      h.repository.failNext("recordEscrowMintedPosition", "after");
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+
+      const mintsBefore = h.chain.mints.length;
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(second.positionsMinted).toBe(0);
+      expect(h.chain.mints).toHaveLength(mintsBefore);
+      expect(h.chain.property.write.authorizeHolder).toHaveBeenCalledTimes(1);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      // The interrupted run never reached the sweep; this one completes it.
+      expect(h.chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
+    });
+
+    it("after every position was recorded but before the sweep: the next run sweeps without minting anything", async () => {
+      const h = harness({
+        ...successfulCampaign({ tokenId: "1", contributions: { "0xInvestorA": 100n, "0xInvestorB": 50n } }),
+        candidates: [{ pivId: "piv_1", tokenId: "1" }],
+        wallets: { "0xInvestorA": "account_a", "0xInvestorB": "account_b" },
+      });
+      h.chain.failWithdrawRaisedOnce = true;
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect(h.chain.mints).toHaveLength(2);
+      expect(h.repository.recordedPositions).toHaveLength(2);
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(second.positionsMinted).toBe(0);
+      expect(h.chain.mints).toHaveLength(2);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.chain.balanceOf("0xInvestorB", 1n)).toBe(50n);
+      expect(h.repository.recordedPositions).toHaveLength(2);
+      expect(h.chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(2);
+    });
+
+    it("resumes a partly-processed contributor list: finished contributors are untouched, the interrupted one is completed once", async () => {
+      const h = harness({
+        ...successfulCampaign({
+          tokenId: "1",
+          contributions: { "0xInvestorA": 100n, "0xInvestorB": 50n, "0xInvestorC": 25n },
+        }),
+        candidates: [{ pivId: "piv_1", tokenId: "1" }],
+        wallets: { "0xInvestorA": "account_a", "0xInvestorB": "account_b", "0xInvestorC": "account_c" },
+      });
+      // A completes; B's mint is accepted but the call dies; C is never reached.
+      h.chain.mintModes.push("mine", "mine-then-reject");
+
+      const first = await h.run();
+      expect(first.errors).toHaveLength(1);
+      expect(h.chain.mints.map((m) => m.to)).toEqual(["0xInvestorA", "0xInvestorB"]);
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.chain.mints.map((m) => m.to)).toEqual(["0xInvestorA", "0xInvestorB", "0xInvestorC"]);
+      expect(h.repository.recordedPositions.map((p) => p.accountId).sort()).toEqual([
+        "account_a",
+        "account_b",
+        "account_c",
+      ]);
+      expect(h.chain.balanceOf("0xInvestorB", 1n)).toBe(50n);
+    });
+  });
+
+  describe("reconciling against the chain on retry", () => {
+    it("does not send another mint while a recorded transaction has no receipt yet, and records it once it lands", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("pending");
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "mint_sent" });
+
+      h.advance(10 * ESCROW_MINT_IN_FLIGHT_GRACE_MS); // age alone must not make a recorded hash re-sendable
+      const stillPending = await h.run();
+
+      expect(stillPending.errors).toHaveLength(1);
+      expect(stillPending.errors[0]).toContain("has no receipt yet");
+      expect(stillPending.errors[0]).toContain(h.chain.mints[0]!.hash);
+      expect(h.chain.mints).toHaveLength(1);
+
+      h.chain.mineNextPending();
+      const landed = await h.run();
+
+      expect(landed.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+    });
+
+    it("does not record a position from the receipt of a different transaction that replaced the mint", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("replaced"); // waiting on the mint's hash resolves with the replacement's receipt
+
+      const first = await h.run();
+
+      const mintHash = h.chain.mints[0]!.hash;
+      expect(first.errors).toHaveLength(1);
+      expect(first.errors[0]).toContain(`mint transaction ${mintHash} was replaced`);
+      expect(first.errors[0]).toContain(`${mintHash}-replacement`);
+      expect(first.errors[0]).toContain("0xInvestorA");
+      // Nothing the replacement did is evidence that this mint executed: no position, and no sweep.
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(0n);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+      expect(h.chain.ipoEscrow.write.withdrawRaised).not.toHaveBeenCalled();
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "mint_sent", mintTxHash: mintHash });
+
+      // The next run does not send another mint over it either: the recorded hash still has no receipt.
+      const second = await h.run();
+
+      expect(second.errors).toHaveLength(1);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+      expect(h.chain.ipoEscrow.write.withdrawRaised).not.toHaveBeenCalled();
+    });
+
+    it("accepts the receipt of the mint's own transaction regardless of the hash's letter case", async () => {
+      const h = singleContributor();
+      const original = h.chain.publicClient.waitForTransactionReceipt.getMockImplementation()!;
+      h.chain.publicClient.waitForTransactionReceipt.mockImplementation(async (args: { hash: string }) => {
+        const receipt = await original(args);
+        return { ...receipt, transactionHash: receipt.transactionHash.toUpperCase().replace("0X", "0x") };
+      });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toEqual([]);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+    });
+
+    it("sends a replacement mint only after a recorded transaction is confirmed reverted and the wallet holds nothing", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("revert");
+
+      const first = await h.run();
+
+      expect(first.errors).toHaveLength(1);
+      expect(first.errors[0]).toContain("mint transaction reverted");
+      const revertedHash = h.chain.mints[0]!.hash;
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(0n);
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(2);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n); // minted once, not twice
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect(h.repository.recordedPositions[0]?.chainTxHash).toBe(h.chain.mints[1]!.hash);
+      expect(h.entries.some((e) => e.level === "warn" && e.fields["tx_hash"] === revertedHash)).toBe(true);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", attempt: 2 });
+    });
+
+    it("authorizes the holder again before a replacement mint when the authorization is gone by then", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("revert");
+      await h.run();
+      expect(h.chain.property.write.authorizeHolder).toHaveBeenCalledTimes(1);
+      h.chain.authorizedHolders.delete("0xinvestora:1"); // revoked between the attempts
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.chain.property.write.authorizeHolder).toHaveBeenCalledTimes(2);
+      const authorizeOrder = h.chain.property.write.authorizeHolder.mock.invocationCallOrder;
+      const mintOrder = h.chain.property.write.mint.mock.invocationCallOrder;
+      expect(authorizeOrder[1]!).toBeLessThan(mintOrder[1]!);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+    });
+
+    it("reports a receipt lookup that fails for any reason other than 'not found' instead of reading it as 'not mined'", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("pending");
+      await h.run();
+      h.chain.publicClient.getTransactionReceipt.mockRejectedValueOnce(new Error("RPC error: 503 service unavailable"));
+
+      const second = await h.run();
+
+      expect(second.errors).toHaveLength(1);
+      expect(second.errors[0]).toContain("503 service unavailable");
+      expect(second.errors[0]).not.toContain("has no receipt yet");
+      expect(h.chain.mints).toHaveLength(1);
+    });
+
+    it("records a mint that is on-chain with no database record at all instead of minting it again", async () => {
+      // What the job before intents existed leaves behind when it dies after the mint, before the position.
+      const h = singleContributor();
+      const orphanHash = h.chain.seedUnrecordedMint("0xInvestorA", 1n, 100n);
+
+      const summary = await h.run();
+
+      expect(summary.errors).toEqual([]);
+      expect(summary).toMatchObject({ positionsMinted: 1, mintsReconciled: 1 });
+      expect(h.chain.mints).toHaveLength(1); // only the orphan; nothing new was sent
+      expect(h.chain.property.write.mint).not.toHaveBeenCalled();
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect(h.repository.recordedPositions[0]?.chainTxHash).toBe(orphanHash);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", mintTxHash: orphanHash });
+    });
+
+    it("refuses to mint when the wallet holds a different amount than its contribution", async () => {
+      const h = singleContributor();
+      h.chain.balances.set("0xinvestora:1", 40n);
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("0xInvestorA");
+      expect(summary.errors[0]).toContain("holds 40");
+      expect(summary.errors[0]).toContain("no completed mint is recorded for it");
+      expect(summary.errors[0]).toContain("manual reconciliation");
+      expect(h.chain.mints).toHaveLength(0);
+      expect(h.chain.property.write.authorizeHolder).not.toHaveBeenCalled();
+      expect(h.repository.recordedPositions).toHaveLength(0);
+      expect(h.repository.intents.size).toBe(0);
+    });
+
+    it("refuses to mint a second time when the wallet already holds double its contribution", async () => {
+      const h = singleContributor();
+      h.chain.balances.set("0xinvestora:1", 200n);
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("holds 200");
+      expect(summary.errors[0]).toContain("no completed mint is recorded for it");
+      expect(h.chain.mints).toHaveLength(0);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("refuses to record a mint when the wallet holds more than its contribution, even though one mint log matches", async () => {
+      const h = singleContributor();
+      h.chain.seedUnrecordedMint("0xInvestorA", 1n, 100n);
+      h.chain.balances.set("0xinvestora:1", 140n); // 40 more arrived some other way
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("holds 140");
+      expect(summary.errors[0]).toContain("no completed mint is recorded for it");
+      expect(h.repository.recordedPositions).toHaveLength(0);
+      expect(h.repository.intents.size).toBe(0);
+    });
+
+    it("looks for the mint's transaction only from the block the attempt started at", async () => {
+      const h = singleContributor();
+      h.chain.seedUnrecordedMint("0xInvestorA", 1n, 100n); // lands in block 1001
+      h.repository.seedIntent({
+        pivId: "piv_1",
+        accountId: "account_a",
+        walletAddress: "0xInvestorA",
+        searchFromBlock: 1_500n, // the attempt began after that block, so that mint cannot be this attempt's
+      });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("could not be found in the chain logs");
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("does not take a mint log for a different amount as the mint of this contribution", async () => {
+      const h = singleContributor();
+      h.chain.seedUnrecordedMint("0xInvestorA", 1n, 70n);
+      h.chain.balances.set("0xinvestora:1", 100n); // the other 30 arrived some other way
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("could not be found in the chain logs");
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("does not take a mint log for a different token as the mint of this one", async () => {
+      const h = singleContributor();
+      h.chain.seedUnrecordedMint("0xInvestorA", 2n, 100n);
+      h.chain.balances.set("0xinvestora:1", 100n);
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("could not be found in the chain logs");
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("does not pick between two mint logs that both match the contribution", async () => {
+      const h = singleContributor();
+      h.chain.seedUnrecordedMint("0xInvestorA", 1n, 100n);
+      h.chain.transferLogs.push({ ...h.chain.transferLogs[0]!, transactionHash: "0xsecond" }); // same mint, seen twice
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("could not be found in the chain logs");
+      expect(h.repository.recordedPositions).toHaveLength(0);
+      expect(h.repository.intents.size).toBe(0);
+    });
+
+    it("leaves an on-chain mint to the other run when that run claimed the contributor first", async () => {
+      const h = singleContributor();
+      h.chain.seedUnrecordedMint("0xInvestorA", 1n, 100n);
+      h.repository.interleaveBefore("createEscrowMintIntent", () => {
+        h.repository.seedIntent({ pivId: "piv_1", accountId: "account_a", walletAddress: "0xInvestorA", attemptedAt: T0 });
+      });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("another run already claimed the mint");
+      expect(h.repository.recordedPositions).toHaveLength(0);
+      expect(h.chain.property.write.mint).not.toHaveBeenCalled();
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "sending", mintTxHash: null });
+    });
+
+    it("does not send a replacement for a reverted transaction when the wallet nevertheless holds tokens", async () => {
+      const h = singleContributor();
+      h.chain.transactions.set("0xreverted", { status: "reverted" });
+      h.repository.seedIntent({
+        pivId: "piv_1",
+        accountId: "account_a",
+        walletAddress: "0xInvestorA",
+        status: "mint_sent",
+        mintTxHash: "0xreverted",
+      });
+      h.chain.balances.set("0xinvestora:1", 100n);
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("its recorded mint transaction 0xreverted reverted");
+      expect(h.chain.property.write.mint).not.toHaveBeenCalled();
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it.each([
+      ["wallet", { walletAddress: "0xSomeoneElse" }],
+      ["token id", { tokenId: "2" }],
+      ["amount", { mintAmount: 101n }],
+      ["token contract", { tokenContractAddress: "0xOTHERCONTRACT000000000000000000000000000" }],
+    ])("does not send when the intent's %s contradicts the chain", async (_field, contradiction) => {
+      const h = singleContributor();
+      h.repository.seedIntent({ pivId: "piv_1", accountId: "account_a", ...contradiction });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("does not match the contribution now on-chain");
+      expect(h.chain.mints).toHaveLength(0);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("compares the intent's wallet and token contract regardless of address letter case", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("pending");
+      await h.run(); // intent in mint_sent, mint pending
+      h.chain.mineNextPending();
+      const [intent] = [...h.repository.intents.values()];
+      intent!.walletAddress = "0xinvestora"; // stored in another casing than the chain reports
+      intent!.tokenContractAddress = PROPERTY_CONTRACT.toLowerCase();
+
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect(h.chain.mints).toHaveLength(1);
+    });
+
+    it("does not mint when an intent is marked recorded but its position is missing", async () => {
+      const h = singleContributor();
+      h.repository.seedIntent({ pivId: "piv_1", accountId: "account_a", status: "recorded", mintTxHash: "0xold" });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("is recorded but no position exists");
+      expect(h.chain.mints).toHaveLength(0);
+    });
+
+    it("treats an intent that another run recorded between this run's position check and its intent read as done, not as an inconsistency", async () => {
+      const h = singleContributor();
+      h.repository.failNext("recordEscrowMintedPosition", "before"); // run 1 mints, saves the hash, dies before the position
+      await h.run();
+      expect(h.repository.recordedPositions).toHaveLength(0);
+
+      // Run 2 finds no position, and then the other run records it before run 2 reads the intent.
+      h.repository.interleaveBeforeIntentRead(async () => {
+        const intent = [...h.repository.intents.values()][0]!;
+        await h.repository.recordEscrowMintedPosition({
+          escrowMintIntentId: intent.id,
+          pivId: "piv_1",
+          accountId: "account_a",
+          walletAddress: "0xInvestorA",
+          unitCount: "0.000100",
+          costBasisEur: "0.000100",
+          activatedAt: T0,
+          tokenContractAddress: intent.tokenContractAddress,
+          tokenId: "1",
+          chainTxHash: intent.mintTxHash!,
+        });
+      });
+
+      const loggedBeforeSecondRun = h.entries.length;
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.entries.slice(loggedBeforeSecondRun).filter((e) => e.level === "error")).toEqual([]);
+      expect(second.positionsMinted).toBe(0);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      // The rest of the campaign is not abandoned: the sweep still happens.
+      expect(h.chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not mint a zero contribution", async () => {
+      const h = harness({
+        ...successfulCampaign({ tokenId: "1", contributions: { "0xInvestorA": 0n } }),
+        candidates: [{ pivId: "piv_1", tokenId: "1" }],
+        wallets: { "0xInvestorA": "account_a" },
+      });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("no contribution to mint");
+      expect(h.chain.mints).toHaveLength(0);
+      expect(h.repository.intents.size).toBe(0);
+    });
+  });
+
+  describe("overlapping runs", () => {
+    it("does not send when another run claimed the contributor between this run's read and its claim", async () => {
+      const h = singleContributor();
+      // The other run's claim lands after this run found no intent but before it writes its own.
+      h.repository.interleaveBefore("createEscrowMintIntent", () => {
+        h.repository.seedIntent({
+          pivId: "piv_1",
+          accountId: "account_a",
+          walletAddress: "0xInvestorA",
+          attemptedAt: T0,
+        });
+      });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("another run already claimed the mint");
+      expect(h.chain.mints).toHaveLength(0);
+    });
+
+    it("does not send when another run restarted the attempt first", async () => {
+      const h = singleContributor();
+      const seeded = h.repository.seedIntent({
+        pivId: "piv_1",
+        accountId: "account_a",
+        walletAddress: "0xInvestorA",
+        attemptedAt: new Date(T0.getTime() - 2 * ESCROW_MINT_IN_FLIGHT_GRACE_MS),
+      });
+      // Between this run reading attempt 1 and restarting it, another run moves to attempt 2.
+      h.repository.interleaveBefore("restartEscrowMintAttempt", () => {
+        seeded.attempt = 2;
+        seeded.attemptedAt = T0;
+      });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("another run already claimed the mint");
+      expect(h.chain.mints).toHaveLength(0);
+    });
+  });
+
+  describe("holder authorization", () => {
+    it("does not pay for an authorizeHolder transaction when the holder is already authorized", async () => {
+      const h = singleContributor();
+      h.chain.authorizedHolders.add("0xinvestora:1");
+
+      const summary = await h.run();
+
+      expect(summary.errors).toEqual([]);
+      expect(h.chain.property.write.authorizeHolder).not.toHaveBeenCalled();
+      expect(h.chain.mints).toHaveLength(1);
+    });
+
+    it("stops before minting, and before writing an intent, when the authorizeHolder transaction reverted", async () => {
+      const h = singleContributor();
+      h.chain.authorizeReverts = true;
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("authorizeHolder transaction reverted");
+      expect(h.chain.mints).toHaveLength(0);
+      expect(h.repository.intents.size).toBe(0);
+    });
   });
 });

@@ -45,12 +45,29 @@ export const deleteRoomPhotoBodySchema = z.object({
 export const reversalCommandParamsSchema = z.object({ case_id: z.string().trim().min(1) });
 export const reversalOperationParamsSchema = z.object({ case_id: z.string().trim().min(1), operation_id: z.string().trim().min(1) });
 export const reversalRequestBodySchema = z.object({ reason_code: reversalReasonCodeSchema, reason: z.string().trim().min(1).max(500) });
+// The note is optional, and so is the body itself: a cancel with nothing to say is a bare POST.
+export const reversalCancelBodySchema = z.object({ note: z.string().trim().min(1).max(500).optional() }).default({});
+// The correction currently pausing the case, with what the calling staff account may do about it. null when no correction is in progress.
+export const reversalPendingOperationSchema = z.object({
+  operation_id: z.string(),
+  command: reversalCommandSchema,
+  command_label: z.string(),
+  from_stage: intakeCaseStageSchema,
+  to_stage: intakeCaseStageSchema,
+  status: z.enum(["requested", "pending_approval", "approved", "executing"]),
+  reason_code: reversalReasonCodeSchema,
+  reason: z.string(),
+  requested_by_account_id: z.string(),
+  requested_at: z.iso.datetime(),
+  viewer_can_approve: z.boolean(),
+  viewer_can_cancel: z.boolean(),
+});
 export const reversalCommandSchemaForApi = reversalCommandSchema;
 export const reversalPreviewResponseSchema = z.object({
   data: z.object({
     case_id: z.string(), stage: intakeCaseStageSchema, workflow_event_sequence: z.number().int().nonnegative(),
     latest_transition: z.object({ event_id: z.string(), from_stage: intakeCaseStageSchema, to_stage: intakeCaseStageSchema }).nullable(),
-    correction_in_progress: z.boolean(), available: z.boolean(),
+    correction_in_progress: z.boolean(), pending_operation: reversalPendingOperationSchema.nullable(), available: z.boolean(),
     actions: z.array(z.object({ action: reversalCommandSchema, label: z.string(), target_stage: intakeCaseStageSchema, requires_reason: z.boolean(), requires_second_approval: z.boolean(), execution_mode: z.enum(["synchronous", "asynchronous"]), impact_summary: z.string(), blockers: z.array(z.string()) })),
   }),
 });
