@@ -44,7 +44,13 @@ import {
   isReconfirmationWindowOpen,
 } from "../domain/finalization.policy.js";
 import { materialityResetTriggered } from "../domain/materiality.policy.js";
-import { isCompleteDisclosurePack, isCoreReadingDocumentType, type DisclosureDocumentType } from "../domain/disclosure-pack.policy.js";
+import {
+  isCompleteDisclosurePack,
+  isCoreReadingDocumentType,
+  requiredDisclosurePackVersionAfterReset,
+  satisfiesRequiredDisclosurePackVersion,
+  type DisclosureDocumentType,
+} from "../domain/disclosure-pack.policy.js";
 import type {
   CommitOfferingFinalizationInput,
   CommitOfferingFinalizationResult,
@@ -1042,6 +1048,29 @@ export class PrismaOfferingRepository
 
   public async reconfirmReservation(input: ReconfirmReservationInput): Promise<ReconfirmReservationResult> {
     return this.database.$transaction(async (transaction) => {
+      const target = await transaction.reservation.findUnique({
+        where: { id: input.reservationId },
+        select: { offeringId: true },
+      });
+      // Not found and not-yours both report the same conflict, deliberately
+      // — a reservation ID belonging to someone else must not be
+      // distinguishable from one that doesn't exist.
+      if (target === null) {
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "not_found" as const };
+      }
+      // Share-lock the offering before the reservation (the same
+      // offering-then-reservations order classifyMateriality,
+      // publishDisclosurePack and commitOfferingFinalization use). It
+      // serializes this reconfirmation against a concurrent materiality reset
+      // or pack republish: without it, a reset committing between the pack
+      // check below and this commit would find no "reconfirmed" row to
+      // invalidate, leaving a reconfirmation against a superseded pack.
+      await transaction.$queryRaw`
+        SELECT offering_id
+        FROM offering.offerings
+        WHERE offering_id = ${target.offeringId}
+        FOR SHARE
+      `;
       const locked = await transaction.$queryRaw<
         Array<{ reservation_id: string; account_id: string; offering_id: string; reservation_stage: string }>
       >`
@@ -1051,14 +1080,11 @@ export class PrismaOfferingRepository
         FOR UPDATE
       `;
       const reservation = locked[0];
-      // Not found and not-yours both report the same conflict, deliberately
-      // — a reservation ID belonging to someone else must not be
-      // distinguishable from one that doesn't exist.
       if (reservation === undefined || reservation.account_id !== input.accountId) {
-        return { reconfirmedAt: null, conflict: "not_found" as const };
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "not_found" as const };
       }
       if (reservation.reservation_stage !== "awaiting_reconfirmation") {
-        return { reconfirmedAt: null, conflict: "not_awaiting_reconfirmation" as const };
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "not_awaiting_reconfirmation" as const };
       }
 
       const offering = await transaction.offering.findUniqueOrThrow({
@@ -1067,7 +1093,7 @@ export class PrismaOfferingRepository
           effectiveRightsEndAt: true,
           disclosurePacks: {
             where: { isCurrent: true, supersededAt: null },
-            select: { version: true, documents: { select: { documentType: true } } },
+            select: { id: true, version: true, documents: { select: { documentType: true } } },
             take: 1,
           },
         },
@@ -1076,7 +1102,7 @@ export class PrismaOfferingRepository
         offering.effectiveRightsEndAt === null ||
         !isReconfirmationWindowOpen({ effectiveRightsEndAt: offering.effectiveRightsEndAt, now: input.reconfirmedAt })
       ) {
-        return { reconfirmedAt: null, conflict: "window_closed" as const };
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "window_closed" as const };
       }
 
       // AD-037: "An investor must not be able to reconfirm against an
@@ -1087,13 +1113,33 @@ export class PrismaOfferingRepository
       const currentDocumentTypes = (currentPack?.documents ?? []).map(
         (document) => document.documentType as DisclosureDocumentType,
       );
-      if (!isCompleteDisclosurePack(currentDocumentTypes)) {
-        return { reconfirmedAt: null, conflict: "disclosure_pack_incomplete" as const };
+      if (currentPack === undefined || !isCompleteDisclosurePack(currentDocumentTypes)) {
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "disclosure_pack_incomplete" as const };
+      }
+
+      // AD-038: a material change resets the disclosure pack, so a pack
+      // published before the latest reset is superseded in substance even
+      // while it is still the current row.
+      const requirement = await transaction.materialityRecord.aggregate({
+        where: { offeringId: reservation.offering_id, resetTriggered: true },
+        _max: { requiredDisclosurePackVersion: true },
+      });
+      if (
+        !satisfiesRequiredDisclosurePackVersion({
+          currentPackVersion: currentPack.version,
+          requiredVersion: requirement._max.requiredDisclosurePackVersion,
+        })
+      ) {
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "disclosure_pack_outdated" as const };
       }
 
       await transaction.reservation.update({
         where: { id: input.reservationId },
-        data: { reservationStage: "reconfirmed", reconfirmedAt: input.reconfirmedAt },
+        data: {
+          reservationStage: "reconfirmed",
+          reconfirmedAt: input.reconfirmedAt,
+          reconfirmedDisclosurePackId: currentPack.id,
+        },
       });
       await transaction.auditLog.create({
         data: {
@@ -1107,13 +1153,14 @@ export class PrismaOfferingRepository
             // PAYMENT_FLOWS.md: "Reconfirmation must reference a specific
             // disclosure-pack version and that version must remain
             // downloadable for audit purposes."
-            disclosure_pack_version: offering.disclosurePacks[0]?.version ?? null,
+            disclosure_pack_id: currentPack.id,
+            disclosure_pack_version: currentPack.version,
           },
           createdAt: input.reconfirmedAt,
         },
       });
 
-      return { reconfirmedAt: input.reconfirmedAt, conflict: null };
+      return { reconfirmedAt: input.reconfirmedAt, disclosurePackVersion: currentPack.version, conflict: null };
     });
   }
 
@@ -1294,8 +1341,19 @@ export class PrismaOfferingRepository
       const resetTriggered = materialityResetTriggered(input.classification);
       let effectiveRightsEndAt = offering.effective_rights_end_at;
       let reservationsReset = 0;
+      let requiredDisclosurePackVersion: number | null = null;
 
       if (resetTriggered) {
+        // AD-038: the reset invalidates every pack published so far, so
+        // reconfirmation waits for a newer one (see reconfirmReservation).
+        // Pack publishing takes the same offering row lock, so this max is
+        // stable for the rest of the transaction.
+        const latestPack = await transaction.disclosurePack.aggregate({
+          where: { offeringId: input.offeringId },
+          _max: { version: true },
+        });
+        requiredDisclosurePackVersion = requiredDisclosurePackVersionAfterReset(latestPack._max.version);
+
         // Only already-reconfirmed reservations have anything to invalidate;
         // ones still awaiting_reconfirmation are untouched by a reset — they
         // simply reconfirm (or not) against the now-later window like normal.
@@ -1309,7 +1367,7 @@ export class PrismaOfferingRepository
         for (const reservation of reconfirmed) {
           await transaction.reservation.update({
             where: { id: reservation.reservation_id },
-            data: { reservationStage: "awaiting_reconfirmation", reconfirmedAt: null },
+            data: { reservationStage: "awaiting_reconfirmation", reconfirmedAt: null, reconfirmedDisclosurePackId: null },
           });
         }
         reservationsReset = reconfirmed.length;
@@ -1338,6 +1396,7 @@ export class PrismaOfferingRepository
           classification: input.classification,
           thresholdType: input.thresholdType,
           resetTriggered,
+          requiredDisclosurePackVersion,
           classifiedByAccountId: input.accountId,
           classifiedAt: input.classifiedAt,
         },
@@ -1355,6 +1414,7 @@ export class PrismaOfferingRepository
             classification: input.classification,
             threshold_type: input.thresholdType,
             reset_triggered: resetTriggered,
+            required_disclosure_pack_version: requiredDisclosurePackVersion,
             reservations_reset: reservationsReset,
           },
           createdAt: input.classifiedAt,
@@ -1368,6 +1428,7 @@ export class PrismaOfferingRepository
           classification: input.classification,
           thresholdType: input.thresholdType,
           resetTriggered,
+          requiredDisclosurePackVersion,
           classifiedAt: input.classifiedAt,
           effectiveRightsEndAt,
           reservationsReset,

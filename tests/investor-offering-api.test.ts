@@ -329,6 +329,7 @@ function buildReconfirmApp(options?: {
     publishFinalOfferingTerms: vi.fn(),
     reconfirmReservation: vi.fn().mockResolvedValue({
       reconfirmedAt: new Date("2026-09-05T12:00:00.000Z"),
+      disclosurePackVersion: 2,
       conflict: null,
     }),
     listOfferingsPendingFinalizationCommit: vi.fn().mockResolvedValue([]),
@@ -383,6 +384,7 @@ describe("POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm
         reservation_id: "reservation_01",
         status: "reconfirmed",
         reconfirmed_at: "2026-09-05T12:00:00.000Z",
+        disclosure_pack_version: 2,
       },
     });
     expect(finalization.reconfirmReservation).toHaveBeenCalledWith(
@@ -452,6 +454,23 @@ describe("POST /v1/offerings/:offering_id/reservations/:reservation_id/reconfirm
 
     expect(response.status).toBe(409);
     expect(response.body.code).toBe("offering.reconfirmation_disclosure_pack_incomplete");
+  });
+
+  it("409s when a materiality reset postdates the current disclosure pack", async () => {
+    const { app } = buildReconfirmApp({
+      repository: {
+        reconfirmReservation: vi
+          .fn()
+          .mockResolvedValue({ reconfirmedAt: null, disclosurePackVersion: null, conflict: "disclosure_pack_outdated" }),
+      },
+    });
+
+    const response = await request(app).post(
+      "/v1/offerings/offering_01/reservations/reservation_01/reconfirm",
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe("offering.reconfirmation_disclosure_pack_outdated");
   });
 
   it("does not expose the reconfirm action to staff identities", async () => {
