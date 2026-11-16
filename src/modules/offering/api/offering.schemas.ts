@@ -167,6 +167,7 @@ export const reconfirmReservationResponseSchema = z.object({
     reservation_id: z.string().min(1),
     status: z.literal("reconfirmed"),
     reconfirmed_at: z.iso.datetime(),
+    disclosure_pack_version: z.number().int().positive(),
   }),
 });
 

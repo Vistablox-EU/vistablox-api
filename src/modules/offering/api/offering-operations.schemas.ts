@@ -46,6 +46,7 @@ export const classifyMaterialityResponseSchema = z.object({
     classification: z.enum(materialityClassifications),
     threshold_type: z.enum(materialityThresholdTypes).nullable(),
     reset_triggered: z.boolean(),
+    required_disclosure_pack_version: z.number().int().positive().nullable(),
     classified_at: z.iso.datetime(),
     effective_rights_end_at: z.iso.datetime().nullable(),
     reservations_reset: z.number().int().min(0),
