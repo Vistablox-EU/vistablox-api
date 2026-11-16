@@ -1266,6 +1266,59 @@ describe.skipIf(databaseUrl === undefined)(
       ).toBe(1);
     });
 
+    it("rejects a reservation that reaches the offering lock after final terms are published, even with capacity free", async () => {
+      const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
+      const fundedReservationId = `reservation_${randomUUID()}`;
+      await repository.createReservation({
+        reservationId: fundedReservationId,
+        offeringId,
+        accountId: fundedAccountId,
+        amountEur: "1000.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+      await repository.recordMoneyEvent({
+        reservationId: fundedReservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_post_publish",
+        capitalState: "eurc_reserved",
+        amountEur: "1000.00",
+        amountEurc: "990.000000",
+        recordedAt: new Date(),
+      });
+      const publishedAt = new Date("2026-09-02T12:00:00.000Z");
+      await publishCompleteDisclosurePack(offeringId, publishedAt);
+      const published = await repository.publishFinalOfferingTerms({
+        offeringId,
+        accountId: founderAccountId,
+        founderReviewNotes: "Target reached, proceeding to tokenization.",
+        traceId: `trace_${suffix}`,
+        publishedAt,
+      });
+      expect(published.conflict).toBeNull();
+      // Free capacity so only the final-terms check can refuse the request;
+      // status is still pre_offering throughout the reconfirmation window.
+      await database.reservation.update({
+        where: { id: fundedReservationId },
+        data: { reservationStage: "cancelled" },
+      });
+
+      const lateReservationId = `reservation_${randomUUID()}`;
+      const result = await repository.createReservation({
+        reservationId: lateReservationId,
+        offeringId,
+        accountId: unfundedAccountId,
+        amountEur: "100.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(),
+      });
+
+      expect(result).toEqual({ conflict: "offering_not_open", reservation: null, reused: false });
+      expect(await database.reservation.findUnique({ where: { id: lateReservationId } })).toBeNull();
+    });
+
     it("durably enqueues the reconfirmation-window-opened notification job, and processing it is replay-safe", async () => {
       const { offeringId } = await createOffering({ targetRaiseEur: "1000.00" });
       const reservationId = `reservation_${randomUUID()}`;
