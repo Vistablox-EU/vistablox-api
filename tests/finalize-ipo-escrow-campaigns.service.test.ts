@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   ESCROW_MINT_IN_FLIGHT_GRACE_MS,
   FinalizeIpoEscrowCampaignsService,
+  type EscrowMintNonceBlockTag,
 } from "../src/modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
 import {
   CAMPAIGN_STATE_OPEN,
@@ -24,6 +25,7 @@ interface HarnessOptions {
   candidates: Array<{ pivId: string; tokenId: string }>;
   wallets: Record<string, string>;
   legacyPositions?: Array<{ pivId: string; accountId: string }>;
+  nonceBlockTag?: EscrowMintNonceBlockTag;
 }
 
 // The whole system under test, with one clock the test can advance and one
@@ -39,7 +41,9 @@ function harness(options: HarnessOptions) {
   );
   const { logger, entries } = makeCapturingLogger();
   let now = T0;
-  const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger, () => now);
+  const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger, () => now, {
+    ...(options.nonceBlockTag === undefined ? {} : { nonceBlockTag: options.nonceBlockTag }),
+  });
   return {
     chain,
     repository,
@@ -54,12 +58,20 @@ function harness(options: HarnessOptions) {
 }
 
 // One PIV (token 1) with one contributor of 100 base units, Successful, not swept.
-function singleContributor() {
+function singleContributor(options: { nonceBlockTag?: EscrowMintNonceBlockTag } = {}) {
   return harness({
     ...successfulCampaign({ tokenId: "1", contributions: { "0xInvestorA": 100n } }),
     candidates: [{ pivId: "piv_1", tokenId: "1" }],
     wallets: { "0xInvestorA": "account_a" },
+    ...options,
   });
+}
+
+// An intent written before mint nonces were pinned: an attempt began at T0 and recorded no hash.
+function legacyInterruptedAttempt() {
+  const h = singleContributor();
+  h.repository.seedIntent({ pivId: "piv_1", accountId: "account_a", walletAddress: "0xInvestorA", attemptedAt: T0 });
+  return h;
 }
 
 describe("FinalizeIpoEscrowCampaignsService", () => {
@@ -303,7 +315,7 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       expect(h.repository.recordedPositions).toHaveLength(1);
     });
 
-    it("after the intent is written but before the mint is sent: waits out the in-flight window, then mints exactly once", async () => {
+    it("after the intent is written but before the mint is sent: resends under the same nonce on the next run, and mints exactly once", async () => {
       const h = singleContributor();
       h.chain.mintModes.push("reject"); // the call never reaches the node
 
@@ -311,69 +323,189 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
 
       expect(first.errors).toHaveLength(1);
       expect(h.chain.mints).toHaveLength(0);
+      const pinned = [...h.repository.intents.values()][0]!;
+      expect(pinned).toMatchObject({ status: "sending", mintTxHash: null });
+      expect(pinned.mintNonce).not.toBeNull();
+
+      // No waiting: the attempt's nonce is unused and no mint log exists, so the mint is
+      // resent under that nonce -- the chain cannot mine both if the first one did go out.
+      h.advance(60_000);
+      const next = await h.run();
+      expect(next.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.mints[0]!.nonce).toBe(pinned.mintNonce);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect([...h.repository.intents.values()][0]).toMatchObject({
+        status: "recorded",
+        attempt: 2,
+        mintNonce: pinned.mintNonce,
+      });
+    });
+
+    it("writes the nonce to the intent before sending the mint, and sends the mint under it", async () => {
+      const h = singleContributor();
+      h.chain.consumeNonce(); // the operator has sent transactions before
+      h.chain.consumeNonce();
+      h.chain.authorizedHolders.add("0xinvestora:1");
+
+      const summary = await h.run();
+
+      expect(summary.errors).toEqual([]);
+      expect(h.timeline.indexOf("repo:createEscrowMintIntent")).toBeLessThan(h.timeline.indexOf("chain:mint"));
+      expect([...h.repository.intents.values()][0]!.mintNonce).toBe(2n);
+      expect(h.chain.property.write.mint).toHaveBeenCalledWith(expect.anything(), { nonce: 2 });
+    });
+
+    it("does not mint twice when a mint whose hash was never seen is still pending, however long it takes", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("pending-then-reject"); // accepted by the node; the caller only sees a timeout
+
+      const first = await h.run();
+      expect(first.errors).toHaveLength(1);
       expect([...h.repository.intents.values()][0]).toMatchObject({ status: "sending", mintTxHash: null });
 
-      // Soon after: the attempt left no hash, so it may have reached the node. Nothing is sent.
-      h.advance(60_000);
-      const tooSoon = await h.run();
-      expect(tooSoon.errors).toHaveLength(1);
-      expect(tooSoon.errors[0]).toContain("may still be in flight");
-      expect(tooSoon.errors[0]).toContain("0xInvestorA");
-      expect(h.chain.mints).toHaveLength(0);
+      // Long past any time-based window, the original is still in the mempool. The resend
+      // under the same nonce is refused by the node, so nothing new is pending.
+      h.advance(10 * ESCROW_MINT_IN_FLIGHT_GRACE_MS);
+      const stillPending = await h.run();
+      expect(stillPending.errors).toHaveLength(1);
+      expect(stillPending.errors[0]).toContain("replacement transaction underpriced");
+      expect(h.chain.mints).toHaveLength(1);
       expect(h.repository.recordedPositions).toHaveLength(0);
 
-      // Once the window has passed with nothing on-chain, one mint is sent and recorded.
-      h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS);
-      const later = await h.run();
-      expect(later.errors).toEqual([]);
+      // The original lands: the next run records it from its mint log.
+      h.chain.mineNextPending();
+      const landed = await h.run();
+      expect(landed.errors).toEqual([]);
       expect(h.chain.mints).toHaveLength(1);
       expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
       expect(h.repository.recordedPositions).toHaveLength(1);
-      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", attempt: 2 });
+      expect(h.repository.recordedPositions[0]!.chainTxHash).toBe(h.chain.mints[0]!.hash);
     });
 
-    it("waits exactly 30 minutes after an attempt that recorded no hash, and not a moment less", async () => {
-      expect(ESCROW_MINT_IN_FLIGHT_GRACE_MS).toBe(30 * 60 * 1000);
+    it("starts a new attempt under a fresh nonce at once when the pinned nonce was used without a mint", async () => {
       const h = singleContributor();
       h.chain.mintModes.push("reject");
       await h.run();
+      const pinned = [...h.repository.intents.values()][0]!.mintNonce!;
+      h.chain.consumeNonce(); // another operator transaction took that nonce
+
+      const next = await h.run();
+
+      expect(next.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.mints[0]!.nonce).toBe(pinned + 1n);
+      expect([...h.repository.intents.values()][0]).toMatchObject({
+        status: "recorded",
+        attempt: 2,
+        mintNonce: pinned + 1n,
+      });
+      expect(h.entries.some((e) => e.message.includes("nonce was used without a mint"))).toBe(true);
+    });
+
+    it("does not take a nonce as used until the block that used it is final", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("reject");
+      await h.run();
+      const pinned = [...h.repository.intents.values()][0]!.mintNonce!;
+      h.chain.finalizedNonceCount = pinned; // finality has not caught up with the block below
+      h.chain.consumeNonce();
+
+      const notFinal = await h.run();
+
+      // The attempt is not replaced with a fresh nonce on the strength of a block a reorg could
+      // drop; the resend under the pinned one is refused as too low, and nothing is minted.
+      expect(notFinal.errors).toHaveLength(1);
+      expect(notFinal.errors[0]).toContain("nonce too low");
+      expect(h.chain.mints).toHaveLength(0);
+
+      h.chain.finalizedNonceCount = undefined; // final now
+      const final = await h.run();
+      expect(final.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.mints[0]!.nonce).toBe(pinned + 1n);
+    });
+
+    it("reads the confirmed nonce at the configured block tag", async () => {
+      const h = singleContributor({ nonceBlockTag: "latest" });
+      h.chain.mintModes.push("reject");
+      await h.run();
+      h.chain.finalizedNonceCount = [...h.repository.intents.values()][0]!.mintNonce!;
+      h.chain.consumeNonce();
+
+      const next = await h.run();
+
+      expect(next.errors).toEqual([]);
+      expect(h.chain.publicClient.getTransactionCount).toHaveBeenCalledWith(
+        expect.objectContaining({ address: h.chain.operatorAddress, blockTag: "latest" }),
+      );
+      expect(h.chain.mints).toHaveLength(1);
+    });
+
+    it("does not mint again when the attempt's mint is on-chain but the wallet no longer holds it", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("mine-then-reject");
+      await h.run();
+      const mintHash = h.chain.mints[0]!.hash;
+      h.chain.balances.set("0xinvestora:1", 0n); // burned, or force-transferred away, before this run
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain(`its mint transaction ${mintHash} is on-chain`);
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("does not pick between two mint logs for an attempt with a pinned nonce", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("mine-then-reject");
+      await h.run();
+      h.chain.transferLogs.push({ ...h.chain.transferLogs[0]!, transactionHash: "0xsecond" });
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("found 2 mint logs");
+      expect(h.chain.mints).toHaveLength(1);
+      expect(h.repository.recordedPositions).toHaveLength(0);
+    });
+
+    it("for an attempt written before nonces were pinned: waits exactly 30 minutes, and not a moment less", async () => {
+      expect(ESCROW_MINT_IN_FLIGHT_GRACE_MS).toBe(30 * 60 * 1000);
+      const h = legacyInterruptedAttempt();
 
       h.advance(30 * 60 * 1000 - 1);
       const justBefore = await h.run();
       expect(justBefore.errors).toHaveLength(1);
       expect(justBefore.errors[0]).toContain("may still be in flight");
+      expect(justBefore.errors[0]).toContain("0xInvestorA");
       expect(h.chain.mints).toHaveLength(0);
 
       h.advance(1); // exactly 30 minutes after the attempt began
       const atWindow = await h.run();
       expect(atWindow.errors).toEqual([]);
       expect(h.chain.mints).toHaveLength(1);
+      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", attempt: 2 });
     });
 
-    it("starts a fresh 30 minute wait when a restarted attempt also leaves no hash", async () => {
-      const h = singleContributor();
-      h.chain.mintModes.push("reject", "reject");
-      await h.run(); // attempt 1 at T0
+    it("pins a nonce when it restarts an attempt written before nonces were, and follows the nonce rules after", async () => {
+      const h = legacyInterruptedAttempt();
+      h.chain.mintModes.push("reject");
 
       h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS);
-      const restarted = await h.run(); // attempt 2 begins now and is rejected as well
+      const restarted = await h.run(); // attempt 2 begins now and is rejected
       expect(restarted.errors).toHaveLength(1);
-      expect(h.chain.property.write.mint).toHaveBeenCalledTimes(2);
-      expect([...h.repository.intents.values()][0]).toMatchObject({ status: "sending", attempt: 2 });
+      const intent = [...h.repository.intents.values()][0]!;
+      expect(intent).toMatchObject({ status: "sending", attempt: 2 });
+      expect(intent.mintNonce).not.toBeNull();
 
-      // Attempt 2 is as young as attempt 1 was: the first attempt's age counts for nothing.
+      // Attempt 2 has a pinned nonce, so no 30 minute wait applies to it.
       const immediately = await h.run();
-      expect(immediately.errors).toHaveLength(1);
-      expect(immediately.errors[0]).toContain("may still be in flight");
-      h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS - 1);
-      const justBefore = await h.run();
-      expect(justBefore.errors).toHaveLength(1);
-      expect(h.chain.property.write.mint).toHaveBeenCalledTimes(2);
-
-      h.advance(1);
-      const later = await h.run();
-      expect(later.errors).toEqual([]);
+      expect(immediately.errors).toEqual([]);
       expect(h.chain.mints).toHaveLength(1);
+      expect(h.chain.mints[0]!.nonce).toBe(intent.mintNonce);
       expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", attempt: 3 });
     });
 

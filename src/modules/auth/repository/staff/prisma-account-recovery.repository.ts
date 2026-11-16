@@ -388,6 +388,18 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
     });
   }
 
+  public async hasRecoveryAuditEvent(input: { caseId: string; action: string }): Promise<boolean> {
+    const event = await this.database.auditLog.findFirst({
+      where: {
+        resourceType: "account_recovery_case",
+        resourceId: input.caseId,
+        action: input.action,
+      },
+      select: { id: true },
+    });
+    return event !== null;
+  }
+
   public async getActiveCooldown(accountId: string, now: Date): Promise<Date | null> {
     const active = await this.database.accountRecoveryCase.findFirst({
       where: { accountId, status: "completed", cooldownEndsAt: { gt: now } },

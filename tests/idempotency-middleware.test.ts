@@ -34,7 +34,8 @@ function memoryStore(): IdempotencyStore & {
   };
 }
 
-function appFor(store: IdempotencyStore, handler: (body: unknown) => void) {
+// The handler may return a status to answer with instead of the default 201.
+function appFor(store: IdempotencyStore, handler: (body: unknown) => number | void) {
   const app = express();
   app.use(requestContext);
   app.use(express.json());
@@ -42,8 +43,12 @@ function appFor(store: IdempotencyStore, handler: (body: unknown) => void) {
     "/orders",
     createIdempotencyMiddleware(store, "test.create_order"),
     async (request, response) => {
-      handler(request.body);
-      response.status(201).json({ order_id: "order_01" });
+      const status = handler(request.body) ?? 201;
+      if (status >= 400) {
+        response.status(status).json({ code: `test.failed_${status}` });
+        return;
+      }
+      response.status(status).json({ order_id: "order_01" });
     },
   );
   app.use(errorHandler);
@@ -144,6 +149,46 @@ describe("idempotency middleware", () => {
 
     expect(response.status).toBe(201);
     expect(response.body).toEqual({ order_id: "order_01" });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not store a 5xx, so a same-key retry re-runs the handler (#122)", async () => {
+    const handler = vi.fn().mockReturnValueOnce(502).mockReturnValueOnce(undefined);
+    const store = memoryStore();
+    const app = appFor(store, handler);
+
+    const failed = await request(app)
+      .post("/orders")
+      .set("Idempotency-Key", "key-5xx")
+      .send({ amount: 100 });
+    const retry = await request(app)
+      .post("/orders")
+      .set("Idempotency-Key", "key-5xx")
+      .send({ amount: 100 });
+    const replay = await request(app)
+      .post("/orders")
+      .set("Idempotency-Key", "key-5xx")
+      .send({ amount: 100 });
+
+    expect(failed.status).toBe(502);
+    expect(retry.status).toBe(201);
+    expect(retry.body).toEqual({ order_id: "order_01" });
+    expect(replay.status).toBe(201);
+    expect(handler).toHaveBeenCalledTimes(2);
+  });
+
+  it("still stores and replays a 4xx for the same key", async () => {
+    const handler = vi.fn().mockReturnValue(422);
+    const app = appFor(memoryStore(), handler);
+
+    await request(app).post("/orders").set("Idempotency-Key", "key-4xx").send({ amount: 100 });
+    const replay = await request(app)
+      .post("/orders")
+      .set("Idempotency-Key", "key-4xx")
+      .send({ amount: 100 });
+
+    expect(replay.status).toBe(422);
+    expect(replay.body).toEqual({ code: "test.failed_422" });
     expect(handler).toHaveBeenCalledTimes(1);
   });
 });

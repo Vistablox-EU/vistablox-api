@@ -257,7 +257,9 @@ const settlementRepository = chainClients === undefined ? undefined : new Prisma
 const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
-    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger);
+    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger, undefined, {
+        nonceBlockTag: environment.ESCROW_MINT_NONCE_BLOCK_TAG,
+      });
 const confirmWalletRegistrations =
   chainClients === undefined ||
   settlementRepository === undefined ||

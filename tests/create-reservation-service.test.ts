@@ -40,6 +40,7 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
       propertyType: "residential",
       countryCode: "DE",
       city: "Berlin",
+      media: null,
       addressLine: "Example Strasse 1",
       ownerDeclaredValueEur: "600000.00",
       appraisalValueOpinionEur: "625000.00",
@@ -89,7 +90,7 @@ function reservationRepository(
   );
   return {
     createReservation,
-    recordMoneyEvent: vi.fn().mockResolvedValue(undefined),
+    recordMoneyEvent: vi.fn().mockResolvedValue(true),
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn().mockResolvedValue(false),
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
@@ -439,6 +440,20 @@ describe("CreateReservationService", () => {
       await expect(replayService(reservations).execute(replayRequest)).resolves.toMatchObject({
         data: { reservation_id: "reservation_existing" },
       });
+    });
+
+    it("refuses a retry, handing out no onramp URL, when the reservation lapsed or was funded during the Coinbase call (#122)", async () => {
+      // assertReplayable passed on the state read before the Coinbase call;
+      // the repository's locked re-check is what refuses the write.
+      const reservations = replayedReservation({}, {});
+      reservations.recordMoneyEvent = vi.fn().mockResolvedValue(false);
+      const cdp = coinbase();
+
+      await expect(replayService(reservations, cdp).execute(replayRequest)).rejects.toMatchObject({
+        code: "offering.reservation_replay_unavailable",
+        status: 409,
+      });
+      expect(cdp.buildOnrampUrl).not.toHaveBeenCalled();
     });
 
     it("refuses a reused key carrying a different amount, and never records the retry's amount", async () => {
