@@ -11,20 +11,39 @@ const CAMPAIGN_STATE_SUCCESSFUL = 2;
 const CAMPAIGN_STATE_FAILED = 3;
 
 // A mint attempt that never recorded a transaction hash may have reached the
-// node anyway (an RPC timeout, a crash right after the node accepted it), and
-// nothing here can tell "never sent" from "sent and still pending". Another
-// mint is therefore not sent until the attempt is this old and the contributor
-// still holds nothing. This is a time-based assumption about how long a
-// transaction can stay pending; it cannot be checked without a chain.
+// node anyway (an RPC timeout, a crash right after the node accepted it). Every
+// attempt therefore pins the operator nonce its mint is sent with, and writes
+// it to the intent before sending. A later run reconciles against the chain
+// instead of a clock (resolveInterruptedAttempt):
+//   - a TransferSingle mint log for the contribution means the mint landed;
+//   - no log, and the operator's confirmed nonce has passed the pinned one:
+//     that nonce was used by a transaction that did not mint (a revert, a
+//     replacement), so the mint can never land and a new attempt is sent;
+//   - no log, and the nonce not yet passed: the mint is resent with the SAME
+//     nonce. At most one transaction per nonce is ever mined, so if the
+//     original is still pending the node rejects the resend (or one replaces
+//     the other) and never are both minted.
 //
-// "Holds nothing" is likewise the only chain evidence used, and it is not proof
-// that nothing was minted: VistaBloxProperty.burn (BURNER_ROLE) and
-// forceTransfer (TRANSFER_AGENT_ROLE) can empty a wallet that holds a mint, and
-// a mint that is then neither recorded nor found by balance would be sent again.
-// That needs a privileged role acting between a crash and a later run. (The
-// same property means burning a mint that has no recorded transaction hash is
-// what makes a later run mint that contributor afresh.)
+// This is the time-based rule that applied before nonces were pinned. It is
+// kept only for intents written then (mint_nonce NULL): another mint is not
+// sent until such an attempt is this old and the contributor still holds
+// nothing, an assumption about how long a transaction can stay pending.
+//
+// Neither rule is proof against VistaBloxProperty.burn (BURNER_ROLE) or
+// forceTransfer (TRANSFER_AGENT_ROLE) emptying the wallet: with a pinned nonce
+// a mint log with nothing left in the wallet is refused for manual
+// reconciliation; under the legacy rule an emptied, unrecorded mint whose log
+// is not found is sent again.
 export const ESCROW_MINT_IN_FLIGHT_GRACE_MS = 30 * 60 * 1000;
+
+// Which block the operator's "confirmed" nonce is read at when deciding that a
+// pinned nonce was used by a transaction that did not mint. "finalized" is the
+// conservative default: a block that a reorg could still drop is never taken as
+// evidence, at the cost of waiting for L1 finality before such an attempt is
+// replaced. ESCROW_MINT_NONCE_BLOCK_TAG overrides it.
+export const ESCROW_MINT_NONCE_BLOCK_TAGS = ["finalized", "safe", "latest"] as const;
+export type EscrowMintNonceBlockTag = (typeof ESCROW_MINT_NONCE_BLOCK_TAGS)[number];
+export const DEFAULT_ESCROW_MINT_NONCE_BLOCK_TAG: EscrowMintNonceBlockTag = "finalized";
 
 // A mint cannot land before the chain head seen just before the attempt began;
 // the margin only covers that head being re-organized. Bounds the log search
@@ -72,6 +91,12 @@ interface ConfirmedMint {
   sentThisRun: boolean;
 }
 
+export interface FinalizeIpoEscrowCampaignsOptions {
+  // Applies only to intents written before mint nonces were pinned.
+  inFlightGraceMs?: number;
+  nonceBlockTag?: EscrowMintNonceBlockTag;
+}
+
 /**
  * AD-256's finalize-and-mint half: for every PIV whose IPO deadline has
  * passed and whose escrow campaign isn't fully resolved yet (not swept),
@@ -90,9 +115,13 @@ interface ConfirmedMint {
  *   - the position, its mint event and the intent's `recorded` status are
  *     written in one database transaction, and the position carries a unique
  *     link to its intent, so recording cannot happen twice;
- *   - a rerun reads the chain first (the contributor's token balance, and
- *     the receipt of any recorded hash) and only sends a mint when the chain
- *     shows none exists and no earlier attempt can still be in flight. What it
+ *   - every attempt pins the operator nonce its mint is sent with and writes
+ *     it to the intent first, so at most one transaction of that attempt can
+ *     ever be mined;
+ *   - a rerun reads the chain first (the contributor's token balance, the
+ *     receipt of any recorded hash, the mint logs and the operator's confirmed
+ *     nonce) and only sends a mint when the chain shows none exists and no
+ *     earlier attempt can still land. What it
  *     cannot prove safe, it refuses with an error naming the PIV, token and
  *     wallet, rather than guess.
  * A contributor who already has a position is never touched, so a crash
@@ -106,8 +135,14 @@ export class FinalizeIpoEscrowCampaignsService {
     private readonly chain: ChainClients,
     private readonly logger: Logger,
     private readonly clock: () => Date = () => new Date(),
-    private readonly inFlightGraceMs: number = ESCROW_MINT_IN_FLIGHT_GRACE_MS,
-  ) {}
+    options: FinalizeIpoEscrowCampaignsOptions = {},
+  ) {
+    this.inFlightGraceMs = options.inFlightGraceMs ?? ESCROW_MINT_IN_FLIGHT_GRACE_MS;
+    this.nonceBlockTag = options.nonceBlockTag ?? DEFAULT_ESCROW_MINT_NONCE_BLOCK_TAG;
+  }
+
+  private readonly inFlightGraceMs: number;
+  private readonly nonceBlockTag: EscrowMintNonceBlockTag;
 
   public async execute(traceId: string): Promise<FinalizeIpoEscrowCampaignsSummary> {
     const candidates = await this.repository.findPivsWithPassedIpoDeadline(this.clock());
@@ -281,7 +316,7 @@ export class FinalizeIpoEscrowCampaignsService {
 
     if (intent === null) {
       // Nothing recorded. A zero balance is taken to mean nothing was minted
-      // (see ESCROW_MINT_IN_FLIGHT_GRACE_MS for what that does not rule out); a
+      // (a burn or forceTransfer of an unrecorded mint is not ruled out); a
       // balance equal to the contribution means a mint landed that this
       // database has no record of (an earlier run died between sending it and
       // recording it, including runs of the version before intents existed).
@@ -351,8 +386,70 @@ export class FinalizeIpoEscrowCampaignsService {
   }
 
   // The intent says an attempt started but no hash was recorded: the mint may
-  // or may not have been sent.
+  // or may not have been sent. See ESCROW_MINT_IN_FLIGHT_GRACE_MS.
   private async resolveInterruptedAttempt(
+    target: MintTarget,
+    intent: EscrowMintIntent,
+    balance: bigint,
+  ): Promise<ConfirmedMint> {
+    if (intent.mintNonce === null) {
+      return this.resolveLegacyInterruptedAttempt(target, intent, balance);
+    }
+    const pinnedNonce = intent.mintNonce;
+
+    // The nonce before the logs: a mint mined at or below the nonce read here
+    // is then in the logs read next, so "nonce passed, no log" cannot be a
+    // mint that landed in between.
+    const confirmedNonce = BigInt(
+      await this.chain.publicClient.getTransactionCount({
+        address: this.chain.operatorAddress,
+        blockTag: this.nonceBlockTag,
+      }),
+    );
+    const mintLogs = await this.findMintLogs(target, intent.searchFromBlock);
+    // Read again after the logs, so it is at least as fresh as they are.
+    const currentBalance = (await this.chain.property.read.balanceOf!([
+      target.walletAddress,
+      target.tokenId,
+    ])) as bigint;
+
+    if (mintLogs.length > 1) {
+      throw new Error(
+        `found ${mintLogs.length} mint logs of ${target.mintAmount} of token_id=${target.tokenId} to wallet ` +
+          `${target.walletAddress}; not minting -- manual reconciliation required`,
+      );
+    }
+    const [mintLog] = mintLogs;
+    if (mintLog !== undefined) {
+      if (currentBalance !== target.mintAmount) {
+        throw this.unexpectedBalance(target, currentBalance, `its mint transaction ${mintLog} is on-chain`);
+      }
+      return this.adoptMintLog(target, intent, mintLog);
+    }
+    if (currentBalance !== 0n) {
+      return this.adoptMintAlreadyOnChain(target, currentBalance, intent);
+    }
+
+    if (confirmedNonce > pinnedNonce) {
+      // The pinned nonce was used by a transaction that minted nothing.
+      this.logger.warn(
+        {
+          trace_id: target.traceId,
+          piv_id: target.pivId,
+          token_id: target.tokenId.toString(),
+          wallet: target.walletAddress,
+          mint_nonce: pinnedNonce.toString(),
+        },
+        "escrow mint attempt's nonce was used without a mint; starting a new attempt",
+      );
+      return this.restartMint(target, intent);
+    }
+    // The original may still be pending under this nonce: resend under the
+    // same one, so the chain can mine at most one of them.
+    return this.restartMint(target, intent, pinnedNonce);
+  }
+
+  private async resolveLegacyInterruptedAttempt(
     target: MintTarget,
     intent: EscrowMintIntent,
     balance: bigint,
@@ -392,26 +489,30 @@ export class FinalizeIpoEscrowCampaignsService {
       );
     }
 
-    let current = intent;
-    if (current === null) {
-      const created = await this.repository.createEscrowMintIntent({
-        pivId: target.pivId,
-        accountId: target.accountId,
-        walletAddress: target.walletAddress,
-        tokenContractAddress: target.tokenContractAddress,
-        tokenId: target.tokenId.toString(),
-        mintAmount: target.mintAmount,
-        attemptedAt: this.clock(),
-        // The mint predates this record, so there is no block to bound it by.
-        searchFromBlock: null,
-      });
-      if (!created.created) {
-        throw this.claimedByAnotherRun(target);
-      }
-      current = created.intent;
-    }
+    if (intent !== null) return this.adoptMintLog(target, intent, hash);
 
-    await this.repository.recordEscrowMintSent({ intentId: current.id, attempt: current.attempt, txHash: hash });
+    const created = await this.repository.createEscrowMintIntent({
+      pivId: target.pivId,
+      accountId: target.accountId,
+      walletAddress: target.walletAddress,
+      tokenContractAddress: target.tokenContractAddress,
+      tokenId: target.tokenId.toString(),
+      mintAmount: target.mintAmount,
+      attemptedAt: this.clock(),
+      // The mint predates this record, so there is no block to bound it by
+      // and no nonce this service chose.
+      searchFromBlock: null,
+      mintNonce: null,
+    });
+    if (!created.created) {
+      throw this.claimedByAnotherRun(target);
+    }
+    return this.adoptMintLog(target, created.intent, hash);
+  }
+
+  // Records `hash`, a mint found in the chain logs, as the intent's mint.
+  private async adoptMintLog(target: MintTarget, intent: EscrowMintIntent, hash: string): Promise<ConfirmedMint> {
+    await this.repository.recordEscrowMintSent({ intentId: intent.id, attempt: intent.attempt, txHash: hash });
     this.logger.warn(
       {
         trace_id: target.traceId,
@@ -422,13 +523,14 @@ export class FinalizeIpoEscrowCampaignsService {
       },
       "recording an escrow mint that was already on-chain without a database record",
     );
-    return { intentId: current.id, txHash: hash, sentThisRun: false };
+    return { intentId: intent.id, txHash: hash, sentThisRun: false };
   }
 
   private async sendFirstMint(target: MintTarget): Promise<ConfirmedMint> {
     await this.ensureHolderAuthorized(target);
 
     const head = await this.chain.publicClient.getBlockNumber();
+    const nonce = await this.nextOperatorNonce();
     const created = await this.repository.createEscrowMintIntent({
       pivId: target.pivId,
       accountId: target.accountId,
@@ -438,36 +540,60 @@ export class FinalizeIpoEscrowCampaignsService {
       mintAmount: target.mintAmount,
       attemptedAt: this.clock(),
       searchFromBlock: head > SEARCH_FROM_BLOCK_MARGIN ? head - SEARCH_FROM_BLOCK_MARGIN : 0n,
+      mintNonce: nonce,
     });
     if (!created.created) {
       throw this.claimedByAnotherRun(target);
     }
-    return this.sendMint(target, created.intent.id, created.intent.attempt);
+    return this.sendMint(target, created.intent.id, created.intent.attempt, nonce);
   }
 
-  private async restartMint(target: MintTarget, intent: EscrowMintIntent): Promise<ConfirmedMint> {
+  // Starts the next attempt under `reuseNonce` when the previous attempt's
+  // mint may still be pending under it, otherwise under a fresh nonce.
+  private async restartMint(
+    target: MintTarget,
+    intent: EscrowMintIntent,
+    reuseNonce?: bigint,
+  ): Promise<ConfirmedMint> {
     await this.ensureHolderAuthorized(target);
 
+    const nonce = reuseNonce ?? (await this.nextOperatorNonce());
     const restarted = await this.repository.restartEscrowMintAttempt({
       intentId: intent.id,
       expectedAttempt: intent.attempt,
       attemptedAt: this.clock(),
+      mintNonce: nonce,
     });
     if (!restarted) {
       throw this.claimedByAnotherRun(target);
     }
-    return this.sendMint(target, intent.id, intent.attempt + 1);
+    return this.sendMint(target, intent.id, intent.attempt + 1, nonce);
   }
 
-  // The intent is already durable and on `attempt` when this is called. The
-  // hash is recorded the moment the node returns it, before the receipt wait.
-  private async sendMint(target: MintTarget, intentId: string, attempt: number): Promise<ConfirmedMint> {
-    const hash = await this.chain.property.write.mint!([
-      target.walletAddress,
-      target.tokenId,
-      target.mintAmount,
-      "0x",
-    ]);
+  // The operator's next nonce, counting transactions still in the mempool. Read
+  // after any authorizeHolder transaction has been mined.
+  private async nextOperatorNonce(): Promise<bigint> {
+    return BigInt(
+      await this.chain.publicClient.getTransactionCount({
+        address: this.chain.operatorAddress,
+        blockTag: "pending",
+      }),
+    );
+  }
+
+  // The intent is already durable on `attempt`, with `nonce`, when this is
+  // called. The hash is recorded the moment the node returns it, before the
+  // receipt wait.
+  private async sendMint(
+    target: MintTarget,
+    intentId: string,
+    attempt: number,
+    nonce: bigint,
+  ): Promise<ConfirmedMint> {
+    const hash = await this.chain.property.write.mint!(
+      [target.walletAddress, target.tokenId, target.mintAmount, "0x"],
+      { nonce: Number(nonce) },
+    );
 
     try {
       await this.repository.recordEscrowMintSent({ intentId, attempt, txHash: hash });
@@ -530,6 +656,12 @@ export class FinalizeIpoEscrowCampaignsService {
   // The hash of the mint of exactly this token amount to this wallet, from the
   // token's TransferSingle logs. Null when there is not exactly one.
   private async findMintTransactionHash(target: MintTarget, fromBlock: bigint | null): Promise<string | null> {
+    const matches = await this.findMintLogs(target, fromBlock);
+    return matches.length === 1 ? (matches[0] ?? null) : null;
+  }
+
+  // The hashes of every mint of exactly this token amount to this wallet.
+  private async findMintLogs(target: MintTarget, fromBlock: bigint | null): Promise<string[]> {
     const logs = (await this.chain.property.getEvents.TransferSingle!(
       { from: ZERO_ADDRESS, to: target.walletAddress },
       { fromBlock: fromBlock ?? 0n },
@@ -537,8 +669,9 @@ export class FinalizeIpoEscrowCampaignsService {
       args: { id?: bigint; value?: bigint };
       transactionHash: string;
     }>;
-    const matches = logs.filter((log) => log.args.id === target.tokenId && log.args.value === target.mintAmount);
-    return matches.length === 1 ? (matches[0]?.transactionHash ?? null) : null;
+    return logs
+      .filter((log) => log.args.id === target.tokenId && log.args.value === target.mintAmount)
+      .map((log) => log.transactionHash);
   }
 
   private assertIntentMatchesTarget(intent: EscrowMintIntent, target: MintTarget): void {

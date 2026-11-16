@@ -39,11 +39,36 @@ export function isCoreReadingDocumentType(documentType: DisclosureDocumentType):
  * types satisfies that mandatory list — informational on publish, since a
  * pack published before final terms (the "initial" pre-offering moment
  * `hasDisclosurePack` gates reservations on) is legitimately allowed to be
- * partial. Wiring this as a hard gate on reconfirmReservation itself — so an
- * incomplete pack actually blocks reconfirmation, not just reports its own
- * completeness — is a deliberate, well-specified follow-on not built here.
+ * partial. publishFinalOfferingTerms and reconfirmReservation use it as a
+ * hard gate.
  */
 export function isCompleteDisclosurePack(documentTypes: readonly DisclosureDocumentType[]): boolean {
   const present = new Set(documentTypes);
   return disclosureDocumentTypes.every((required) => present.has(required));
+}
+
+/**
+ * AD-038: a material change "always resets the disclosure pack", and the
+ * classifying staff member republishes it as a separate step. A reset
+ * therefore requires a pack strictly newer than every version published up
+ * to the classification instant (`null` when none has been published yet).
+ */
+export function requiredDisclosurePackVersionAfterReset(latestPublishedVersion: number | null): number {
+  return (latestPublishedVersion ?? 0) + 1;
+}
+
+/**
+ * AD-037's "superseded pack" rule applied to materiality resets: an investor
+ * must not reconfirm against a pack published before the latest reset.
+ * `requiredVersion` is the highest required_disclosure_pack_version over the
+ * offering's reset-triggering materiality records, `null` if there are none.
+ */
+export function satisfiesRequiredDisclosurePackVersion(input: {
+  currentPackVersion: number | null;
+  requiredVersion: number | null;
+}): boolean {
+  if (input.requiredVersion === null) {
+    return true;
+  }
+  return input.currentPackVersion !== null && input.currentPackVersion >= input.requiredVersion;
 }
