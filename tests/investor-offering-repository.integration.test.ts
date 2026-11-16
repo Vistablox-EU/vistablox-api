@@ -13,6 +13,7 @@ import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-k
 import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
+const farFutureIpoEndAt = new Date("2099-12-31T00:00:00.000Z");
 
 describe.skipIf(databaseUrl === undefined)(
   "investor offering PostgreSQL integration",
@@ -402,6 +403,9 @@ describe.skipIf(databaseUrl === undefined)(
           legalExecutionEventRefs: [],
           legalDocumentRefs: [],
           appraisalDocumentRefs: [],
+          // Far enough ahead that tests creating reservations at the real
+          // clock stay inside the IPO period.
+          ipoEndAt: farFutureIpoEndAt,
         },
       });
       await database.piv.create({
@@ -478,6 +482,67 @@ describe.skipIf(databaseUrl === undefined)(
           where: { resourceId: reservationId, action: "offering.reservation_created" },
         }),
       ).toBe(1);
+    });
+
+    it("rejects a reservation that reaches the offering lock at or after ipo_end_at, reading the deadline live", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const { piv } = await database.offering.findUniqueOrThrow({
+        where: { id: offeringId },
+        select: { piv: { select: { caseId: true } } },
+      });
+      const ipoEndAt = new Date("2026-09-30T12:00:00.000Z");
+      await database.intakeCase.update({ where: { id: piv.caseId }, data: { ipoEndAt } });
+
+      for (const createdAt of [ipoEndAt, new Date(ipoEndAt.getTime() + 60_000)]) {
+        const rejectedId = `reservation_${randomUUID()}`;
+        const rejected = await repository.createReservation({
+          reservationId: rejectedId,
+          offeringId,
+          accountId,
+          amountEur: "100.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt,
+        });
+        expect(rejected).toEqual({ reservation: null, conflict: "offering_not_open", reused: false });
+        expect(await database.reservation.findUnique({ where: { id: rejectedId } })).toBeNull();
+      }
+      expect(await database.moneyEvent.count({ where: { reservation: { offeringId } } })).toBe(0);
+
+      // Without a deadline the offering is not open for collection either.
+      await database.intakeCase.update({ where: { id: piv.caseId }, data: { ipoEndAt: null } });
+      const noDeadline = await repository.createReservation({
+        reservationId: `reservation_${randomUUID()}`,
+        offeringId,
+        accountId,
+        amountEur: "100.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date("2026-09-01T12:00:00.000Z"),
+      });
+      expect(noDeadline).toEqual({ reservation: null, conflict: "offering_not_open", reused: false });
+
+      // An extension updates ipo_end_at in place; the lock reads it live, so
+      // the same request now succeeds.
+      await database.intakeCase.update({
+        where: { id: piv.caseId },
+        data: { ipoEndAt: new Date(ipoEndAt.getTime() + 30 * 24 * 60 * 60 * 1000) },
+      });
+      const extendedId = `reservation_${randomUUID()}`;
+      const extendedCreatedAt = new Date(ipoEndAt.getTime() + 60_000);
+      const extended = await repository.createReservation({
+        reservationId: extendedId,
+        offeringId,
+        accountId,
+        amountEur: "100.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: extendedCreatedAt,
+      });
+      expect(extended).toMatchObject({
+        reservation: { reservationId: extendedId, createdAt: extendedCreatedAt },
+        conflict: null,
+      });
     });
 
     it("rejects an amount that would exceed remaining capacity without writing a row", async () => {
@@ -1016,6 +1081,9 @@ describe.skipIf(databaseUrl === undefined)(
           legalExecutionEventRefs: [],
           legalDocumentRefs: [],
           appraisalDocumentRefs: [],
+          // Far enough ahead that tests creating reservations at the real
+          // clock stay inside the IPO period.
+          ipoEndAt: farFutureIpoEndAt,
         },
       });
       await database.piv.create({ data: { id: pivId, propertyId, caseId } });

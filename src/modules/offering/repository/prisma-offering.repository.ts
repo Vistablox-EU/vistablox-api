@@ -7,6 +7,7 @@ import type { Prisma } from "../../../generated/prisma/client.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { toCents, toEurcMicros } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
+import { isWithinIpoPeriod } from "../domain/reservation-eligibility.policy.js";
 import type {
   InvestorOfferingDetailRecord,
   ListPublicOfferingsInput,
@@ -544,12 +545,16 @@ export class PrismaOfferingRepository
           status: string;
           target_raise_eur: string;
           final_offering_published_at: Date | null;
+          ipo_end_at: Date | null;
         }>
       >`
-        SELECT offering_id, status, target_raise_eur::text, final_offering_published_at
-        FROM offering.offerings
-        WHERE offering_id = ${input.offeringId}
-        FOR UPDATE
+        SELECT o.offering_id, o.status, o.target_raise_eur::text, o.final_offering_published_at,
+               c.ipo_end_at
+        FROM offering.offerings o
+        LEFT JOIN intake.pivs p ON p.piv_id = o.piv_id
+        LEFT JOIN intake.intake_cases c ON c.case_id = p.case_id
+        WHERE o.offering_id = ${input.offeringId}
+        FOR UPDATE OF o
       `;
       const offering = locked[0];
       // Status stays 'pre_offering' through the reconfirmation window, so
@@ -557,10 +562,14 @@ export class PrismaOfferingRepository
       // reservation-eligibility.policy.ts. Without this, a request that
       // passed the advisory check before publication could take the lock
       // afterwards and create a reservation outside the reconfirmation batch.
+      // The IPO deadline is read here, live, for the same reason: it is
+      // mutable (an extension updates it in place), and a request that passed
+      // the advisory check just before ipo_end_at must not slip in after it.
       if (
         offering === undefined ||
         offering.status !== "pre_offering" ||
-        offering.final_offering_published_at !== null
+        offering.final_offering_published_at !== null ||
+        !isWithinIpoPeriod({ ipoEndAt: offering.ipo_end_at, now: input.createdAt })
       ) {
         return { reservation: null, conflict: "offering_not_open" as const, reused: false };
       }

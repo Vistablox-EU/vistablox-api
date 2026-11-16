@@ -208,7 +208,9 @@ describe("CreateReservationService", () => {
   });
 
   it("keeps the funding rail closed by default, blocking every reservation attempt", async () => {
-    const service = new CreateReservationService(offeringRepository(detail()), reservationRepository(), coinbase());
+    const service = new CreateReservationService(offeringRepository(detail()), reservationRepository(), coinbase(), {
+      clock: () => now,
+    });
 
     await expect(
       service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
@@ -278,6 +280,25 @@ describe("CreateReservationService", () => {
     await expect(
       service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
     ).rejects.toMatchObject({ code: "offering.reservation_amount_exceeds_capacity", status: 422 });
+  });
+
+  it("refuses a reservation once ipo_end_at has passed, before writing anything", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(
+      offeringRepository(detail({ ipoEndAt: now })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(
+      service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
+    ).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      status: 409,
+      fieldErrors: [{ field: "reservation", code: "offering_not_open" }],
+    });
+    expect(reservations.createReservation).not.toHaveBeenCalled();
   });
 
   it("maps an atomic offering_not_open conflict from the repository to a 409", async () => {

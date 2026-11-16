@@ -54,6 +54,7 @@ export class GetInvestorOfferingService {
       fundingRailAvailable: this.fundingRailAvailable,
       offeringStatus: record.status,
       finalTermsPublished: record.finalOfferingPublishedAt !== null,
+      ipoEndAt: record.ipoEndAt,
       hasDisclosurePack:
         record.currentDisclosurePack !== null && record.currentDisclosurePack.documents.length > 0,
       remainingCapacityEur,
