@@ -6,6 +6,7 @@ import { createVitest } from "vitest/node";
 const testsDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = join(testsDirectory, "..");
 const bootstrapSuite = "tests/staff-bootstrap-repository.integration.test.ts";
+const walletExpirySuite = "tests/wallet-claim-expiry.integration.test.ts";
 
 // The bootstrap suite's "issued" cases only pass while no account in the shared
 // test database holds an active admin_operations role, and other suites
@@ -45,6 +46,18 @@ describe("first-admin bootstrap suite isolation", () => {
       // ...which only starts once every other project has finished.
       const lastOtherGroup = Math.max(...others.map((placement) => placement.groupOrder));
       expect(alone?.groupOrder).toBeGreaterThan(lastOtherGroup);
+
+      // The wallet claim expiry suite sweeps every stale pending claim in the
+      // database, so it too has a project of its own, in a group after the
+      // parallel files.
+      const expiry = placements.filter((placement) => placement.file === walletExpirySuite);
+      expect(expiry).toHaveLength(1);
+      const [expiryAlone] = expiry;
+      const parallel = placements.filter(
+        (placement) => placement.file !== walletExpirySuite && placement.file !== bootstrapSuite,
+      );
+      expect(placements.filter((placement) => placement.project === expiryAlone?.project)).toHaveLength(1);
+      expect(expiryAlone?.groupOrder).toBeGreaterThan(Math.max(...parallel.map((placement) => placement.groupOrder)));
     } finally {
       await vitest.close();
     }

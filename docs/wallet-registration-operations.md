@@ -58,8 +58,23 @@ Starting values for Base Sepolia, not calibrated against real traffic (`AD-234` 
 | `WALLET_REGISTRY_WATCHER_STALE_AFTER_MINUTES` | 10 | 2-1440 | `watcher_stalled`: minutes without a completed run |
 | `WALLET_REGISTRY_CURSOR_LAG_ALERT_BLOCKS` | 900 | 1-1000000 | `cursor_lag`: about 30 minutes at Base's 2 second blocks |
 | `WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT` | 5 | 1-10000 | `unmatched_events`: new unmatched events in one run |
+| `WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS` | 24 | 1-720 | How old a pending claim must be before `maintenance.wallet_registration_expiry` expires it (see below) |
 
 The cursor-ahead tolerance is not a setting: it is the watcher's own 32-block overlap.
+
+## Expiry of pending claims
+
+Every 15 minutes (UTC) the worker's `maintenance.wallet_registration_expiry` job marks every claim still pending after `WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS` as expired: it sets `expired_at` on the row, keeps the row and its address and commitment, and writes an audit row `settlement.wallet_registration_expired` (resource type `account`, no actor, with the wallet address, commitment and `requested_at`). A run expires at most 500 claims; the next run takes the rest. It logs the usual `maintenance job completed` line with `checked` (claims past the cutoff when the run started) and `acted` (claims it expired). A confirmed claim is never expired, and the database refuses `expired_at` on one.
+
+Once expired, a claim:
+
+- reads as no wallet to the customer: `GET /v1/investor-profile/wallet` answers `404 wallet.not_registered` and the investor profile shows `not_registered`;
+- reads as `status: "expired"` with `expired_at` in `GET /internal/v1/wallet-accounts/:account_id`;
+- leaves the pending counts, `pending_overdue` and the unresolved-mismatch reading;
+- is no longer matched by the watcher: a `WalletRegistered` event naming its commitment counts as unmatched and confirms nothing;
+- cannot be reconciled (`404 wallet.account_not_found`, or `409 wallet.registration_changed` if it expired during the call).
+
+The investor registers again from the app. That needs no fresh authentication, is audited as `settlement.wallet_registration_requested` with `previous_expired_wallet_address`, and always issues a new commitment, even for the same address. The registry contract accepts repeated `register()` calls, so an investor who signed late signs once more. Do not clear `expired_at` by hand to revive a claim.
 
 ## Reading the log
 
@@ -89,7 +104,7 @@ Identifiers only: `account_id`, masked values such as `0xabcd...ef01` (first six
 Use this when an investor has signed but the claim is still pending and the watcher is healthy, or after a watcher outage. Staff only (`admin_operations` plus a staff WebAuthn session).
 
 1. Take the `account_id` from the log line. Do not start from an address.
-2. `GET /internal/v1/wallet-accounts/:account_id` returns `status` (`pending` or `registered`), `requested_at` and, for staff, the stored `wallet_address` and `registration_commitment`. If `status` is already `registered`, the reconcile can only fill in or replace the recorded chain evidence (`registration_evidence` in the same response shows what is recorded and whether it is flagged); it never changes `registered_at`.
+2. `GET /internal/v1/wallet-accounts/:account_id` returns `status` (`pending`, `registered` or `expired`), `requested_at` and, for staff, the stored `wallet_address` and `registration_commitment`. If `status` is already `registered`, the reconcile can only fill in or replace the recorded chain evidence (`registration_evidence` in the same response shows what is recorded and whether it is flagged); it never changes `registered_at`.
 3. On the chain explorer, open the registry contract's events and filter `WalletRegistered` by the commitment (both `wallet` and `commitment` are indexed). Find the transaction whose `wallet` is the stored wallet address.
 4. `POST /internal/v1/wallet-accounts/:account_id/reconcile` with `{"transaction_hash": "<that transaction>"}`. The route exists only where `CHAIN_NETWORK`, `CHAIN_RPC_URL` and the registry address are all set.
 
@@ -110,3 +125,5 @@ Only an engineer, only as a break-glass step, and only ever **lower** it: to re-
 ## Rollback
 
 Reverting this change needs no database step. The heartbeat row and the de-duplicated audit rows it adds are inert to the older code, and the cursor row's format is unchanged.
+
+Reverting the expiry of pending claims (#177) is different: code that does not know `expired_at` would read an expired claim as pending again, and the watcher could confirm it on a late event. Before deploying code without it, run `DELETE FROM settlement.wallet_registrations WHERE expired_at IS NOT NULL` (each account then registers afresh; the audit rows keep the history), and only then drop the column. The pg-boss schedule for `maintenance.wallet_registration_expiry` must be removed too (`boss.unschedule`), or jobs pile up in a queue nothing works.

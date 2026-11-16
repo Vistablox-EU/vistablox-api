@@ -28,6 +28,8 @@ import {
 } from "./modules/identity/application/kyc-stuck-session.service.js";
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
+import { ExpirePendingWalletRegistrationsService } from "./modules/wallet/application/expire-pending-wallet-registrations.service.js";
+import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
@@ -167,6 +169,14 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(intakeRepository);
 const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(intakeRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
+// Not gated on the registry address or the CHAIN_* bundle: it only touches
+// database rows, and a deployment without a watcher has no other way to
+// retire a pending claim.
+const expirePendingWalletRegistrations = new ExpirePendingWalletRegistrationsService(
+  new PrismaWalletRepository(database),
+  () => new Date(),
+  environment.WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS,
+);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
 const sendReconfirmationReminders = new SendReconfirmationRemindersService(offeringRepository, emailSender);
 const notifyReconfirmationWindowOpened = new NotifyReconfirmationWindowOpenedService(offeringRepository, emailSender);
@@ -388,6 +398,7 @@ await ensureJobQueue(boss, "maintenance.kyc_renewal", "scheduled");
 await ensureJobQueue(boss, "maintenance.kyc_stuck_session_expiry", "scheduled");
 await ensureJobQueue(boss, "maintenance.kyc_stuck_session_reconciliation", "scheduled");
 await ensureJobQueue(boss, "maintenance.account_recovery_alert", "scheduled");
+await ensureJobQueue(boss, "maintenance.wallet_registration_expiry", "scheduled");
 // Reversal (undoing the KYC microservice split): the Didit webhook's own
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
 // The webhook itself is received and durably enqueued by server.ts/app.ts.
@@ -508,6 +519,12 @@ await boss.schedule("maintenance.kyc_stuck_session_reconciliation", "0 * * * *",
   ...RETRY_OPTIONS,
 });
 await boss.schedule("maintenance.account_recovery_alert", "*/15 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
+// Every 15 minutes: the TTL is measured in hours, so a claim outlives it by
+// at most a quarter of an hour.
+await boss.schedule("maintenance.wallet_registration_expiry", "*/15 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
@@ -739,6 +756,9 @@ await boss.work("maintenance.account_recovery_alert", async () => {
   metrics.set("vistablox_worker_account_recovery_overdue", overdue);
   if (overdue > 0) logger.warn({ job: "maintenance.account_recovery_alert", overdue_cases: overdue, threshold_hours: environment.ACCOUNT_RECOVERY_ALERT_AFTER_HOURS }, "account recovery cases open beyond review threshold");
   logger.info({ job: "maintenance.account_recovery_alert", checked: overdue, acted: 0 }, "maintenance job completed");
+});
+await boss.work("maintenance.wallet_registration_expiry", async () => {
+  await runJob("maintenance.wallet_registration_expiry", (traceId) => expirePendingWalletRegistrations.execute(traceId));
 });
 await boss.work("provider_events.didit_webhook", async (jobs) => {
   for (const job of jobs) {

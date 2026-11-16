@@ -18,6 +18,9 @@ export interface RegisteredWallet {
   registrationEvidenceVerifiedAt?: Date | null;
   registrationEvidenceFlaggedAt?: Date | null;
   registrationEvidenceFlag?: WalletRegistrationEvidenceFlag | null;
+  // Set when the expiry job retired the claim while it was still pending
+  // (#177). Only findByAccountId with includeExpired returns such a row.
+  expiredAt?: Date | null;
 }
 
 export interface ReconcileWalletRegistrationInput {
@@ -109,13 +112,33 @@ export interface WalletRepository {
     // look at it.
     freshAuthentication: boolean;
   }): Promise<RegisteredWallet>;
-  findByAccountId(accountId: string): Promise<RegisteredWallet | null>;
+  // An expired claim (expiredAt set) is no wallet at all, so it reads as null
+  // unless the caller asks for it with includeExpired (the staff view does).
+  findByAccountId(accountId: string, options?: { includeExpired?: boolean }): Promise<RegisteredWallet | null>;
   // Compare-and-set on the registration the caller verified (see
   // ReconcileWalletRegistrationInput): WalletRegistrationChangedError when the
   // row no longer holds expectedWalletAddress and expectedRegistrationCommitment,
   // WalletAddressConflictError("address_claimed") when another account already
   // holds the address confirmed. Both leave the row untouched.
   reconcileWalletRegistration?(input: ReconcileWalletRegistrationInput): Promise<ReconcileWalletRegistrationResult>;
+}
+
+export interface ExpirePendingWalletRegistrationsResult {
+  // Claims still pending past the cutoff when the run started.
+  checked: number;
+  // Claims this run marked expired. Lower than checked when another
+  // transaction (a confirmation, a replacement, a concurrent run) held the
+  // row, or when the backlog is larger than one run's batch; the next run
+  // picks up the rest.
+  expired: number;
+}
+
+// The expiry job's port (#177): marks every claim still pending whose
+// requested_at is before `cutoff` as expired at `now`, one audit row
+// settlement.wallet_registration_expired each. A confirmed row is never
+// touched.
+export interface WalletRegistrationExpiryRepository {
+  expirePendingWalletRegistrations(input: { cutoff: Date; now: Date }): Promise<ExpirePendingWalletRegistrationsResult>;
 }
 
 // Read-only boundary port for wallet registration status, for modules

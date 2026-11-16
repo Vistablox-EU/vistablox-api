@@ -332,6 +332,11 @@ const environmentSchema = z
     // This many events that match no pending claim in one run:
     // wallet_registry.unmatched_events.
     WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: blankTolerantInteger(1, 10_000, 5),
+    // A claim still pending this long after it was requested is expired by the
+    // maintenance.wallet_registration_expiry job (#177): its commitment stops
+    // matching on-chain events and the account registers afresh. Starting
+    // value, not calibrated against real traffic.
+    WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS: blankTolerantInteger(1, 720, 24),
     KYC_CREATING_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
     KYC_OPEN_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(10080).default(60),
     ACCOUNT_RECOVERY_ALERT_AFTER_HOURS: z.coerce.number().int().min(1).max(720).default(24),

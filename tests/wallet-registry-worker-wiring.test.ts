@@ -103,3 +103,27 @@ describe("wallet-registry worker wiring", () => {
     expect(flat).toMatch(new RegExp(`if \\(${service} !== undefined\\) \\{[^}]*?await boss\\.work\\("${escape(name)}"`));
   });
 });
+
+describe("wallet claim expiry worker wiring (#177)", () => {
+  it("creates the expiry queue as a scheduled queue, unconditionally", () => {
+    expect(flat).toContain('await ensureJobQueue(boss, "maintenance.wallet_registration_expiry", "scheduled");');
+    expect(flat).not.toMatch(/if \([^)]*\) \{ await ensureJobQueue\(boss, "maintenance\.wallet_registration_expiry"/);
+  });
+
+  it("schedules the expiry every 15 minutes in UTC on the scheduled retry profile", () => {
+    expect(flat).toMatch(
+      new RegExp(
+        `await boss\\.schedule\\("maintenance\\.wallet_registration_expiry", "${escape("*/15 * * * *")}", null, \\{ tz: "UTC", \\.\\.\\.RETRY_OPTIONS`,
+      ),
+    );
+  });
+
+  it("runs the expiry service with the configured lifetime through runJob", () => {
+    expect(flat).toContain(
+      'await boss.work("maintenance.wallet_registration_expiry", async () => { await runJob("maintenance.wallet_registration_expiry", (traceId) => expirePendingWalletRegistrations.execute(traceId)); });',
+    );
+    expect(flat).toMatch(
+      /new ExpirePendingWalletRegistrationsService\( new PrismaWalletRepository\(database\), \(\) => new Date\(\), environment\.WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS, \)/,
+    );
+  });
+});

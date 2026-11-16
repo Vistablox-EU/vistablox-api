@@ -81,11 +81,11 @@ export class PrismaWalletRegistryHealthRepository
                count(*) FILTER (WHERE requested_at < ${overdueCutoff}::timestamptz) AS overdue,
                min(requested_at) AS oldest
         FROM settlement.wallet_registrations
-        WHERE registered_at IS NULL
+        WHERE registered_at IS NULL AND expired_at IS NULL
       `,
       // "Unresolved" means the account's CURRENT claim is still unconfirmed and
       // still carries the commitment the mismatching event named. A claim that
-      // was confirmed, or replaced by a new commitment, is no longer open.
+      // was confirmed, replaced by a new commitment, or expired is no longer open.
       // Legacy rows with no event_key count too: they are real mismatches.
       this.database.$queryRaw<UnresolvedMismatchRow[]>`
         WITH unresolved AS (
@@ -95,6 +95,7 @@ export class PrismaWalletRegistryHealthRepository
           WHERE a.action = 'settlement.wallet_registration_address_mismatch'
             AND a.resource_type = 'wallet_registration'
             AND w.registered_at IS NULL
+            AND w.expired_at IS NULL
             AND lower(w.registration_commitment) = lower(a.changes ->> 'commitment')
           GROUP BY a.resource_id
         )

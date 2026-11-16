@@ -376,7 +376,10 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     // above: nothing guarantees the on-chain event's hex casing matches what
     // was stored when the commitment was generated.
     const row = await this.database.walletRegistration.findFirst({
-      where: { registrationCommitment: { equals: commitment, mode: "insensitive" } },
+      // An expired claim's commitment is dead (#177): an event naming it
+      // matches nothing, and the account registers again for a new one. A row
+      // is never both confirmed and expired, so no confirmed match is lost.
+      where: { registrationCommitment: { equals: commitment, mode: "insensitive" }, expiredAt: null },
       select: WALLET_REGISTRATION_RECORD_SELECT,
     });
     return row === null ? null : toWalletRegistrationRecord(row);
@@ -384,7 +387,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
 
   public async countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number> {
     return this.database.walletRegistration.count({
-      where: { registeredAt: null, requestedAt: { lt: cutoff } },
+      where: { registeredAt: null, expiredAt: null, requestedAt: { lt: cutoff } },
     });
   }
 
@@ -408,6 +411,8 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
             walletAddress: input.walletAddress,
             registrationCommitment: input.registrationCommitment,
             registeredAt: null,
+            // Expired between the match and this write: stale, not confirmed.
+            expiredAt: null,
           },
           data: { registeredAt: input.registeredAt, ...evidenceColumns(input.evidence) },
         });

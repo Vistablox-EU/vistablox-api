@@ -130,9 +130,12 @@ export const operationsWalletAccountResponseSchema = z.object({
     account_id: z.string().min(1),
     wallet_address: z.string().min(1),
     registration_commitment: z.string().min(1),
-    status: z.enum(["pending", "registered"]),
+    // expired: the claim stayed pending past WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS
+    // and the expiry job retired it (#177). The customer sees no wallet.
+    status: z.enum(["pending", "registered", "expired"]),
     requested_at: dateTime,
     registered_at: dateTime.nullable(),
+    expired_at: dateTime.nullable(),
     // The on-chain event that confirmed the registration and what the job that
     // re-checks it has found. Staff only: a customer is never shown it.
     registration_evidence: z.object({

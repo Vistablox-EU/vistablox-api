@@ -37,7 +37,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
 
   async function createAccount(
     name: string,
-    claim: { commitment: string; requestedAt: Date; registeredAt: Date | null },
+    claim: { commitment: string; requestedAt: Date; registeredAt: Date | null; expiredAt?: Date },
   ): Promise<string> {
     const accountId = `account_whealth_${name}_${suffix}`;
     const betterAuthUserId = `auth_whealth_${name}_${suffix}`;
@@ -53,6 +53,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
         registrationCommitment: claim.commitment,
         requestedAt: claim.requestedAt,
         registeredAt: claim.registeredAt,
+        expiredAt: claim.expiredAt ?? null,
       },
     });
     accounts.set(name, accountId);
@@ -83,6 +84,17 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     // Pending, requested in 1990: overdue for any realistic cutoff.
     await createAccount("old1", { commitment: commitment("c1"), requestedAt: longAgo, registeredAt: null });
     await createAccount("old2", { commitment: commitment("c2"), requestedAt: longAgo, registeredAt: null });
+    // Expired pending claims (#177) are out of every pending reading: one older
+    // than any live fixture, which would otherwise be the oldest, and one from
+    // 1990, which would otherwise make three overdue claims between the cutoffs.
+    const expiredAt = new Date("2026-01-01T00:00:00.000Z");
+    await createAccount("expiredOlder", {
+      commitment: commitment("e1"),
+      requestedAt: new Date("1985-01-01T00:00:00.000Z"),
+      registeredAt: null,
+      expiredAt,
+    });
+    await createAccount("expired1990", { commitment: commitment("e2"), requestedAt: longAgo, registeredAt: null, expiredAt });
     // Pending but requested in 2099: never overdue.
     await createAccount("fresh", { commitment: commitment("c3"), requestedAt: farFuture, registeredAt: null });
     // Already confirmed: neither pending nor an open mismatch.
@@ -96,6 +108,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     await createAccount("mismatchMixedCase", { commitment: commitment("d2"), requestedAt: farFuture, registeredAt: null });
     await createAccount("mismatchLegacy", { commitment: commitment("d3"), requestedAt: farFuture, registeredAt: null });
     await createAccount("mismatchReplaced", { commitment: commitment("d4-new"), requestedAt: farFuture, registeredAt: null });
+    await createAccount("mismatchExpired", {
+      commitment: commitment("d6"),
+      requestedAt: farFuture,
+      registeredAt: null,
+      expiredAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
     await createAccount("mismatchConfirmed", {
       commitment: commitment("d5"),
       requestedAt: longAgo,
@@ -109,6 +127,8 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     await recordMismatchRow("mismatchLegacy", commitment("d3"), null);
     // The claim has since been replaced with another commitment.
     await recordMismatchRow("mismatchReplaced", commitment("d4-old"), `${suffix}:replaced`);
+    // The claim expired afterwards.
+    await recordMismatchRow("mismatchExpired", commitment("d6"), `${suffix}:expired`);
     // The claim was confirmed afterwards.
     await recordMismatchRow("mismatchConfirmed", commitment("d5"), `${suffix}:confirmed`);
   });
@@ -175,6 +195,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
 
       expect(unresolvedMismatches.accountIds).not.toContain(accountIdOf("mismatchConfirmed"));
       expect(unresolvedMismatches.accountIds).not.toContain(accountIdOf("mismatchReplaced"));
+    });
+
+    it("drops an account whose claim with the mismatching commitment expired", async () => {
+      const { unresolvedMismatches } = await repository.readWalletRegistryHealth(new Date());
+
+      expect(unresolvedMismatches.accountIds).not.toContain(accountIdOf("mismatchExpired"));
     });
 
     it("reports an account once however many mismatch rows it has, with a total that covers the listing", async () => {
