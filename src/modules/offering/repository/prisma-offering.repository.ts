@@ -682,18 +682,29 @@ export class PrismaOfferingRepository
     });
   }
 
-  public async recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<void> {
-    await this.database.moneyEvent.create({
-      data: {
-        id: `money_event_${ulid()}`,
-        reservationId: input.reservationId,
-        provider: input.provider,
-        providerReference: input.providerReference,
-        capitalState: input.capitalState,
-        amountEur: input.amountEur,
-        amountEurc: input.amountEurc,
-        recordedAt: input.recordedAt,
-      },
+  public async recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      // Takes the same row lock as expireReservation, so a money event and a
+      // lapse serialise: neither can act on a state the other is changing.
+      const current = await lockReservationWithLatestMoney(transaction, input.reservationId);
+      if (current === undefined || current.reservation_stage !== "initiated") return false;
+      // An unfunded event must never become the latest over funded money: the
+      // expiry sweeper reads the latest event and would lapse a paid hold.
+      if (isReservationFunded(current.capital_state) && !isReservationFunded(input.capitalState)) return false;
+
+      await transaction.moneyEvent.create({
+        data: {
+          id: `money_event_${ulid()}`,
+          reservationId: input.reservationId,
+          provider: input.provider,
+          providerReference: input.providerReference,
+          capitalState: input.capitalState,
+          amountEur: input.amountEur,
+          amountEurc: input.amountEurc,
+          recordedAt: input.recordedAt,
+        },
+      });
+      return true;
     });
   }
 
@@ -757,30 +768,18 @@ export class PrismaOfferingRepository
 
   public async expireReservation(input: ExpireReservationInput): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
-      const locked = await transaction.$queryRaw<
-        Array<{ reservation_id: string; reservation_stage: string; capital_state: string | null }>
-      >`
-        SELECT reservation.reservation_id, reservation.reservation_stage, latest_money.capital_state
-        FROM offering.reservations AS reservation
-        LEFT JOIN LATERAL (
-          SELECT money_event.capital_state
-          FROM money.money_events AS money_event
-          WHERE money_event.reservation_id = reservation.reservation_id
-          ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
-          LIMIT 1
-        ) AS latest_money ON TRUE
-        WHERE reservation.reservation_id = ${input.reservationId}
-        FOR UPDATE OF reservation
-      `;
-      const current = locked[0];
+      const current = await lockReservationWithLatestMoney(transaction, input.reservationId);
       if (current === undefined) return false;
       if (current.reservation_stage !== "initiated") return false;
-      // The onramp poll inserts money_events without taking the reservation
-      // row lock, so the capital_state snapshot ExpireUnfundedReservationsService
-      // took at list time can be stale by the instant we hold the lock. Re-read
-      // the latest capital_state under the same lock as the stage flip so money
-      // that has already landed is never swept to 'lapsed' (AD-253 keeps the
-      // two state machines separate on purpose).
+      // The capital_state snapshot ExpireUnfundedReservationsService took at
+      // list time can be stale by the instant we hold the lock (an onramp
+      // poll or a new payment session may have recorded money since). Re-read
+      // the latest capital_state under the same lock as the stage flip so
+      // money that has already landed is never swept to 'lapsed' (AD-253
+      // keeps the two state machines separate on purpose). recordMoneyEvent
+      // takes this same row lock, so the two serialise;
+      // lockReservationWithLatestMoney reads the money state only after the
+      // lock is held, so a waiter sees what the holder committed.
       if (isReservationFunded(current.capital_state)) return false;
 
       await transaction.reservation.update({
@@ -1660,4 +1659,40 @@ function normalizeCurrency(value: string): string {
   const [euros, fraction = "00"] = value.split(".");
   const cents = BigInt(euros!) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
   return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
+}
+
+// Takes the reservation row lock first and reads the latest money event in a
+// separate statement. Under READ COMMITTED a FOR UPDATE that waited on a lock
+// re-checks only the locked row; a money_events subquery in the same statement
+// would keep its pre-wait snapshot and miss an event the lock holder just
+// committed. The second statement gets a fresh snapshot.
+async function lockReservationWithLatestMoney(
+  transaction: Prisma.TransactionClient,
+  reservationId: string,
+): Promise<
+  | { reservation_stage: string; capital_state: string | null; provider_reference: string | null }
+  | undefined
+> {
+  const locked = await transaction.$queryRaw<Array<{ reservation_stage: string }>>`
+    SELECT reservation.reservation_stage
+    FROM offering.reservations AS reservation
+    WHERE reservation.reservation_id = ${reservationId}
+    FOR UPDATE
+  `;
+  const reservation = locked[0];
+  if (reservation === undefined) return undefined;
+  const latest = await transaction.$queryRaw<
+    Array<{ capital_state: string; provider_reference: string | null }>
+  >`
+    SELECT money_event.capital_state, money_event.provider_reference
+    FROM money.money_events AS money_event
+    WHERE money_event.reservation_id = ${reservationId}
+    ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+    LIMIT 1
+  `;
+  return {
+    reservation_stage: reservation.reservation_stage,
+    capital_state: latest[0]?.capital_state ?? null,
+    provider_reference: latest[0]?.provider_reference ?? null,
+  };
 }

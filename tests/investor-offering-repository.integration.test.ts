@@ -1032,6 +1032,141 @@ describe.skipIf(databaseUrl === undefined)(
         }),
       ).toBe(0);
     });
+
+    // #122: a direct recordMoneyEvent and a concurrent expiry must agree on
+    // one outcome. A third connection holds the reservation lock so both are
+    // forced to overlap: expiry queues first, then the money event arrives.
+    it.each([
+      { capitalState: "eurc_reserved", amountEurc: "190.000000" },
+      { capitalState: "eurc_purchase_pending", amountEurc: null },
+    ])(
+      "serialises a direct $capitalState money event with a concurrent expiry, never leaving money on a lapsed reservation",
+      async ({ capitalState, amountEurc }) => {
+        const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+        const reservationId = `reservation_${randomUUID()}`;
+        const now = Date.now();
+        await repository.createReservation({
+          reservationId,
+          offeringId,
+          accountId,
+          amountEur: "200.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date(now),
+        });
+
+        const holder = await authPool.connect();
+        try {
+          await holder.query("BEGIN");
+          await holder.query(
+            "SELECT 1 FROM offering.reservations WHERE reservation_id = $1 FOR UPDATE",
+            [reservationId],
+          );
+          const holderPid = (await holder.query<{ pid: number }>("SELECT pg_backend_pid() AS pid")).rows[0]!.pid;
+          const blockedBy = async (pids: number[]) =>
+            (
+              await authPool.query<{ pid: number }>(
+                "SELECT pid FROM pg_stat_activity WHERE pg_blocking_pids(pid) && $1::int[]",
+                [pids],
+              )
+            ).rows.map((row) => row.pid);
+          const waitUntil = async (condition: () => Promise<boolean>) => {
+            for (let attempt = 0; attempt < 200; attempt += 1) {
+              if (await condition()) return;
+              await new Promise((resolve) => setTimeout(resolve, 10));
+            }
+            throw new Error("timed out waiting for the lock queue");
+          };
+
+          const expiry = repository.expireReservation({
+            reservationId,
+            traceId: `trace_${suffix}`,
+            expiredAt: new Date(now + 16 * 60_000),
+          });
+          let expiryPids: number[] = [];
+          await waitUntil(async () => {
+            expiryPids = await blockedBy([holderPid]);
+            return expiryPids.length === 1;
+          });
+
+          let recordSettled = false;
+          const record = repository
+            .recordMoneyEvent({
+              reservationId,
+              provider: "coinbase_cdp",
+              providerReference: `ref_${capitalState}`,
+              capitalState,
+              amountEur: "200.00",
+              amountEurc,
+              recordedAt: new Date(now + 60_000),
+            })
+            .finally(() => {
+              recordSettled = true;
+            });
+          await waitUntil(
+            async () => recordSettled || (await blockedBy([holderPid, ...expiryPids])).length >= 2,
+          );
+
+          await holder.query("COMMIT");
+          const [expired, recorded] = await Promise.all([expiry, record]);
+
+          // Expiry was queued first, so it lapses the hold and the money event
+          // is refused against the lapsed reservation.
+          expect((await database.reservation.findUnique({ where: { id: reservationId } }))?.reservationStage).toBe(
+            "lapsed",
+          );
+          expect(await database.moneyEvent.count({ where: { reservationId, capitalState } })).toBe(0);
+          expect(expired).toBe(true);
+          expect(recorded).toBe(false);
+        } finally {
+          holder.release();
+        }
+      },
+    );
+
+    it("refuses a money event on a reservation that is no longer initiated, and an unfunded one over funded money", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const fundedId = `reservation_${randomUUID()}`;
+      const lapsedId = `reservation_${randomUUID()}`;
+      const now = Date.now();
+      for (const reservationId of [fundedId, lapsedId]) {
+        await repository.createReservation({
+          reservationId,
+          offeringId,
+          accountId,
+          amountEur: "100.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date(now),
+        });
+      }
+      const moneyEvent = (reservationId: string, capitalState: string, offsetMs: number) =>
+        repository.recordMoneyEvent({
+          reservationId,
+          provider: "coinbase_cdp",
+          providerReference: `ref_${capitalState}`,
+          capitalState,
+          amountEur: "100.00",
+          amountEurc: null,
+          recordedAt: new Date(now + offsetMs),
+        });
+
+      expect(await moneyEvent(fundedId, "eurc_reserved", 60_000)).toBe(true);
+      expect(await moneyEvent(fundedId, "eurc_purchase_pending", 120_000)).toBe(false);
+      expect(await moneyEvent(fundedId, "purchase_failed", 120_000)).toBe(false);
+      const forTimers = await repository.listInitiatedReservationsForTimers();
+      expect(forTimers.find((r) => r.reservationId === fundedId)?.latestCapitalState).toBe("eurc_reserved");
+
+      expect(
+        await repository.expireReservation({
+          reservationId: lapsedId,
+          traceId: `trace_${suffix}`,
+          expiredAt: new Date(now + 16 * 60_000),
+        }),
+      ).toBe(true);
+      expect(await moneyEvent(lapsedId, "eurc_purchase_pending", 17 * 60_000)).toBe(false);
+      expect(await database.moneyEvent.count({ where: { reservationId: lapsedId, capitalState: "eurc_purchase_pending" } })).toBe(0);
+    });
   },
 );
 

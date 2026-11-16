@@ -192,7 +192,7 @@ function buildReservationApp(options?: {
       reservation: { reservationId: input.reservationId, createdAt: input.createdAt },
       conflict: null,
     })),
-    recordMoneyEvent: vi.fn().mockResolvedValue(undefined),
+    recordMoneyEvent: vi.fn().mockResolvedValue(true),
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn().mockResolvedValue(false),
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
