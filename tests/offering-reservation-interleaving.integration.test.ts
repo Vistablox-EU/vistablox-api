@@ -249,6 +249,11 @@ describe.skipIf(databaseUrl === undefined)("offering reservation interleaving Po
     // stay behind (every id is unique per run). Positions, disclosure rows and audit rows are removed.
     await database.positionLedger.deleteMany({ where: { pivId: { in: pivIds } } });
     await database.disclosureDocument.deleteMany({ where: { disclosurePack: { offeringId: { in: offeringIds } } } });
+    // The reservations stay behind, so drop their reference to the pack they were reconfirmed against first.
+    await database.reservation.updateMany({
+      where: { offeringId: { in: offeringIds } },
+      data: { reconfirmedDisclosurePackId: null },
+    });
     await database.disclosurePack.deleteMany({ where: { offeringId: { in: offeringIds } } });
     await database.storedDocument.deleteMany({ where: { offeringId: { in: offeringIds } } });
     await database.auditLog.deleteMany({ where: { resourceId: { in: [...caseIds, ...offeringIds] } } });
