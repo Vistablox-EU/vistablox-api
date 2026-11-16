@@ -539,15 +539,29 @@ export class PrismaOfferingRepository
       // against the same offering serialize, matching the FOR UPDATE
       // pattern PrismaIntakeRepository.submitInitialCase already uses.
       const locked = await transaction.$queryRaw<
-        Array<{ offering_id: string; status: string; target_raise_eur: string }>
+        Array<{
+          offering_id: string;
+          status: string;
+          target_raise_eur: string;
+          final_offering_published_at: Date | null;
+        }>
       >`
-        SELECT offering_id, status, target_raise_eur::text
+        SELECT offering_id, status, target_raise_eur::text, final_offering_published_at
         FROM offering.offerings
         WHERE offering_id = ${input.offeringId}
         FOR UPDATE
       `;
       const offering = locked[0];
-      if (offering === undefined || offering.status !== "pre_offering") {
+      // Status stays 'pre_offering' through the reconfirmation window, so
+      // published final terms must close reservations here too, matching
+      // reservation-eligibility.policy.ts. Without this, a request that
+      // passed the advisory check before publication could take the lock
+      // afterwards and create a reservation outside the reconfirmation batch.
+      if (
+        offering === undefined ||
+        offering.status !== "pre_offering" ||
+        offering.final_offering_published_at !== null
+      ) {
         return { reservation: null, conflict: "offering_not_open" as const, reused: false };
       }
 
