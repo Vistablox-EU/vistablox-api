@@ -15,6 +15,7 @@ function blockers(loginMethods: LoginMethod[]) {
     fundingRailAvailable: true,
     offeringStatus: "pre_offering",
     finalTermsPublished: false,
+    ipoEndAt: new Date("2026-10-01T12:00:00.000Z"),
     hasDisclosurePack: true,
     remainingCapacityEur: "1000.00",
     accountStatus: "active",

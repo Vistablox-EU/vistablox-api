@@ -25,7 +25,7 @@ const repository: OfferingRepository = {
     finalOfferingPublishedAt: null,
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
-    ipoEndAt: null,
+    ipoEndAt: new Date("2099-12-31T00:00:00.000Z"),
     issuer: {
       pivId: "piv_01",
       legalName: null,
@@ -133,7 +133,7 @@ const reservationEligibleDetail: InvestorOfferingDetailRecord = {
   finalOfferingPublishedAt: null,
   platformRightsEndAt: null,
   effectiveRightsEndAt: null,
-  ipoEndAt: null,
+  ipoEndAt: new Date("2099-12-31T00:00:00.000Z"),
   issuer: {
     pivId: "piv_01",
     legalName: null,
