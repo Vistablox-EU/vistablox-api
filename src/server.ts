@@ -87,6 +87,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { UploadCaseDocumentService } from "./modules/intake/application/upload-case-document.service.js";
 import { GetCaseDocumentService } from "./modules/intake/application/get-case-document.service.js";
 import { PrismaOfferingDocumentRepository } from "./modules/offering/repository/prisma-offering-document.repository.js";
+import { PrismaOfferingPresentationRepository } from "./modules/offering/repository/prisma-offering-presentation.repository.js";
 import { ClamAvScanner } from "./infrastructure/antivirus/clamav-scanner.js";
 import { PrismaPartnerOrganizationRepository } from "./modules/intake/repository/prisma-partner-organization.repository.js";
 
@@ -594,6 +595,7 @@ const app = createApp({
     offeringOperations: {
       repository: offeringRepository,
       ...(offeringDocuments === undefined ? {} : { documents: offeringDocuments }),
+      presentation: new PrismaOfferingPresentationRepository(database),
     },
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({

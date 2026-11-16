@@ -3,6 +3,7 @@ import { z } from "zod";
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { ListOfferingsQuery, ListOfferingsResponse } from "../api/offering.schemas.js";
 import type { OfferingCursor, OfferingRepository } from "../repository/offering.repository.js";
+import type { OfferingMedia } from "../domain/offering-media.policy.js";
 
 const cursorPayloadSchema = z.object({
   featured: z.boolean().optional(),
@@ -34,7 +35,7 @@ export class ListPublicOfferingsService {
             property_type: row.property.propertyType,
             country_code: row.property.countryCode,
             city: row.property.city,
-            media: null,
+            media: toMediaResponse(row.property.media),
           },
       })),
       page: {
@@ -77,4 +78,8 @@ function decodeCursor(value: string): OfferingCursor {
       cause,
     });
   }
+}
+
+function toMediaResponse(media: OfferingMedia | null) {
+  return media === null ? null : { hero_url: media.heroUrl, gallery_urls: media.galleryUrls };
 }

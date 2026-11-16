@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { disclosureDocumentTypes } from "../domain/disclosure-pack.policy.js";
 import { materialityClassifications, materialityThresholdTypes } from "../domain/materiality.policy.js";
+import { MAX_OFFERING_GALLERY_IMAGES, MAX_OFFERING_MEDIA_URL_LENGTH } from "../domain/offering-media.policy.js";
+import { investorImageUrl } from "./offering.schemas.js";
 
 export const finalizeOfferingBodySchema = z.object({
   founder_review_notes: z.string().trim().min(1).max(10000),
@@ -146,3 +148,52 @@ export const listOfferingDocumentsResponseSchema = z.object({
 
 export type OfferingDocumentsQuery = z.infer<typeof offeringDocumentsQuerySchema>;
 export type ListOfferingDocumentsResponse = z.infer<typeof listOfferingDocumentsResponseSchema>;
+
+const offeringMediaUrlSchema = z.string().max(MAX_OFFERING_MEDIA_URL_LENGTH).pipe(investorImageUrl);
+
+const offeringMediaSchema = z.object({
+  hero_url: offeringMediaUrlSchema.nullable(),
+  gallery_urls: z.array(offeringMediaUrlSchema).max(MAX_OFFERING_GALLERY_IMAGES),
+});
+
+/**
+ * Sets what the investor list and detail show about an offering: the
+ * featured flag (featured offerings sort first) and its media. Omitted keys
+ * are left as they are; `media: null` clears the media.
+ */
+export const updateOfferingPresentationBodySchema = z
+  .strictObject({
+    featured: z.boolean().optional(),
+    media: z
+      .strictObject({
+        hero_url: offeringMediaUrlSchema.nullable(),
+        gallery_urls: z
+          .array(offeringMediaUrlSchema)
+          .max(MAX_OFFERING_GALLERY_IMAGES)
+          .superRefine((urls, ctx) => {
+            const seen = new Set<string>();
+            urls.forEach((url, index) => {
+              if (seen.has(url)) {
+                ctx.addIssue({ code: "custom", path: [index], message: "gallery_urls must not repeat a URL." });
+              }
+              seen.add(url);
+            });
+          }),
+      })
+      .nullable()
+      .optional(),
+  })
+  .refine((value) => value.featured !== undefined || value.media !== undefined, {
+    message: "Provide featured, media, or both.",
+  });
+
+export const updateOfferingPresentationResponseSchema = z.object({
+  data: z.object({
+    offering_id: z.string().min(1),
+    featured: z.boolean(),
+    media: offeringMediaSchema.nullable(),
+  }),
+});
+
+export type UpdateOfferingPresentationBody = z.infer<typeof updateOfferingPresentationBodySchema>;
+export type UpdateOfferingPresentationResponse = z.infer<typeof updateOfferingPresentationResponseSchema>;

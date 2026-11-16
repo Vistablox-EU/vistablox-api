@@ -9,7 +9,7 @@ API-only backend for VistaBlox. This repository is being implemented from the ar
 - stable error envelope with a trace ID
 - structured, redacted JSON logging
 - liveness and database-readiness endpoints
-- first layered product slice: public offering teasers at `GET /v1/offerings`
+- first layered product slice: public offering teasers at `GET /v1/offerings`, featured offerings first, each with its stored media
 - authenticated full offering detail at `GET /v1/offerings/:offering_id`, including the current disclosure pack, material-change log, raise progress, and account-specific investment readiness
 - authenticated disclosure downloads streamed through the API from private MinIO storage; object references and presigned storage URLs are never exposed
 - self-hosted Better Auth core for email/password and optional Google login
@@ -204,6 +204,7 @@ docker compose down -v      # stop and remove containers + the Postgres volume
 | `POST` | `/internal/v1/offerings/:offering_id/documents` | Staff uploads one disclosure document (raw body; `X-Document-Type`, `X-Original-Filename`): allowlisted type, 100 MB cap, ClamAV scan, stored in the disclosures bucket; returns the `document_ref` a pack publish quotes; requires admin role and WebAuthn |
 | `GET` | `/internal/v1/offerings/:offering_id/documents?document_type=` | Staff lists the offering's accepted uploads, newest first, each with the pack it was last published in; requires admin role and WebAuthn |
 | `GET` | `/internal/v1/offerings/:offering_id/documents?document_ref=` | Staff streams one of the offering's uploads back from private storage; requires admin role and WebAuthn |
+| `PATCH` | `/internal/v1/offerings/:offering_id/presentation` | Staff sets or clears the featured flag and the offering media (external `https` hero and gallery URLs) shown in `GET /v1/offerings` and the investor detail; audited, any offering status; requires admin role and WebAuthn |
 | `GET` | `/v1/investor-profile` | Read the authenticated customer's cross-domain investor profile aggregate |
 | `GET` | `/v1/investor-profile/reservations?limit=20&after=...` | Read account-scoped reservation history with the latest capital state |
 | `GET` | `/v1/investor-profile/positions?limit=20&after=...` | Read active and internally-settling portfolio positions |
