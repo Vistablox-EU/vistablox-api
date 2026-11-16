@@ -336,6 +336,10 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
     return false;
   }
   public async recordEscrowMintSent(): Promise<void> {}
+  public async findOfferingsAwaitingIpoEscrowCampaign(): Promise<[]> {
+    return [];
+  }
+  public async recordIpoEscrowCampaignOpened(): Promise<void> {}
   public async recordEscrowMintedPosition(): Promise<{ positionId: string }> {
     return { positionId: "unused" };
   }

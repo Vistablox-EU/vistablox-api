@@ -14,10 +14,12 @@ import type {
   CreateEscrowMintIntentInput,
   EscrowMintIntent,
   EscrowMintIntentStatus,
+  OfferingAwaitingIpoEscrowCampaign,
   PivPendingEscrowResolution,
   PivTokenHolding,
   PivTokenHoldingsReader,
   RecordEscrowMintedPositionInput,
+  RecordIpoEscrowCampaignOpenedInput,
   SettlementRepository,
   WalletRegistrationAddressMismatchInput,
   WalletRegistrationConfirmation,
@@ -199,6 +201,55 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
       select: { id: true, tokenId: true },
     });
     return rows.map((row) => ({ pivId: row.id, tokenId: row.tokenId!.toFixed(0) }));
+  }
+
+  public async findOfferingsAwaitingIpoEscrowCampaign(now: Date): Promise<OfferingAwaitingIpoEscrowCampaign[]> {
+    // The same "open for reservations" test the reservation gate applies
+    // (status pre_offering, final terms not published), plus a deadline still
+    // ahead: openCampaign reverts with InvalidDeadline for a past one.
+    const rows = await this.database.$queryRaw<
+      Array<{ piv_id: string; token_id: string; target_raise_eur: string; ipo_end_at: Date }>
+    >`
+      SELECT DISTINCT ON (p.piv_id)
+        p.piv_id,
+        p.token_id::text AS token_id,
+        o.target_raise_eur::text AS target_raise_eur,
+        c.ipo_end_at
+      FROM offering.offerings o
+      JOIN intake.pivs p ON p.piv_id = o.piv_id
+      JOIN intake.intake_cases c ON c.case_id = p.case_id
+      WHERE o.status = 'pre_offering'
+        AND o.final_offering_published_at IS NULL
+        AND p.token_id IS NOT NULL
+        AND c.ipo_end_at > ${now}
+        AND NOT EXISTS (
+          SELECT 1 FROM settlement.ipo_escrow_campaigns e WHERE e.piv_id = p.piv_id
+        )
+      ORDER BY p.piv_id, o.offering_id
+    `;
+    return rows.map((row) => ({
+      pivId: row.piv_id,
+      tokenId: row.token_id,
+      targetRaiseEur: row.target_raise_eur,
+      ipoEndAt: row.ipo_end_at,
+    }));
+  }
+
+  public async recordIpoEscrowCampaignOpened(input: RecordIpoEscrowCampaignOpenedInput): Promise<void> {
+    await this.database.$executeRaw`
+      INSERT INTO settlement.ipo_escrow_campaigns (
+        piv_id, token_id, escrow_contract_address, target_amount, deadline_at, treasury_address, open_tx_hash
+      ) VALUES (
+        ${input.pivId},
+        ${input.tokenId}::numeric,
+        ${canonicalWalletAddress(input.escrowContractAddress)},
+        ${input.targetAmount.toString()}::numeric,
+        ${input.deadlineAt},
+        ${canonicalWalletAddress(input.treasuryAddress)},
+        ${input.openTxHash === null ? null : normalizeChainHash(input.openTxHash)}
+      )
+      ON CONFLICT (piv_id) DO NOTHING
+    `;
   }
 
   public async resolveAccountIdForWallet(walletAddress: string): Promise<string | null> {

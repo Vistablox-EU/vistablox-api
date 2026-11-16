@@ -36,6 +36,9 @@ export interface InvestorOfferingDetailRecord {
   platformRightsEndAt: Date | null;
   effectiveRightsEndAt: Date | null;
   ipoEndAt: Date | null;
+  // The Piv's IPO escrow campaign is recorded open on-chain
+  // (settlement.ipo_escrow_campaigns, #176).
+  settlementEscrowReady: boolean;
   issuer: {
     pivId: string;
     legalName: string | null;

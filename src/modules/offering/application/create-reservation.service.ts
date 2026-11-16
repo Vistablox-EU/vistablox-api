@@ -23,6 +23,7 @@ const blockerMessages: Record<ReservationBlocker, string> = {
   offering_not_open: "This offering is not currently open for reservations.",
   capacity_exhausted: "This offering has no remaining capacity.",
   funding_rail_unavailable: "Reservation funding is not currently available.",
+  settlement_escrow_not_ready: "Settlement for this offering is not yet available.",
   recovery_cooldown_active: "This account is in a post-recovery restriction window.",
 };
 
@@ -90,6 +91,7 @@ export class CreateReservationService {
     const blockers = computeReservationBlockers({
       now,
       fundingRailAvailable: this.fundingRailAvailable,
+      settlementEscrowReady: detail.settlementEscrowReady,
       offeringStatus: detail.status,
       finalTermsPublished: detail.finalOfferingPublishedAt !== null,
       hasDisclosurePack:
@@ -131,6 +133,9 @@ export class CreateReservationService {
     });
     if (created.conflict === "offering_not_open") {
       throw reservationNotAvailableError(["offering_not_open"]);
+    }
+    if (created.conflict === "settlement_escrow_not_ready") {
+      throw reservationNotAvailableError(["settlement_escrow_not_ready"]);
     }
     if (created.conflict === "capacity_exceeded") {
       throw amountExceedsCapacityError();

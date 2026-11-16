@@ -314,6 +314,7 @@ export class PrismaOfferingRepository
                   appraisalValueOpinionEur: true,
                 },
               },
+              ipoEscrowCampaign: { select: { pivId: true } },
               property: {
                 select: {
                   id: true,
@@ -432,6 +433,7 @@ export class PrismaOfferingRepository
       platformRightsEndAt: offering.platformRightsEndAt,
       effectiveRightsEndAt: offering.effectiveRightsEndAt,
       ipoEndAt: offering.piv.case.ipoEndAt,
+      settlementEscrowReady: offering.piv.ipoEscrowCampaign !== null,
       issuer: {
         pivId: offering.piv.id,
         legalName: offering.piv.legalName,
@@ -563,6 +565,23 @@ export class PrismaOfferingRepository
         offering.final_offering_published_at !== null
       ) {
         return { reservation: null, conflict: "offering_not_open" as const, reused: false };
+      }
+
+      // #176: no funds are collected for an offering whose IPO escrow
+      // campaign is not recorded open on-chain, since they could not settle.
+      // Re-checked here, not only in the advisory read, matching every other
+      // gate above. Rows are only ever inserted, so reading it after the
+      // offering lock cannot race a removal.
+      const escrowRows = await transaction.$queryRaw<Array<{ ready: boolean }>>`
+        SELECT EXISTS (
+          SELECT 1
+          FROM settlement.ipo_escrow_campaigns e
+          JOIN offering.offerings o ON o.piv_id = e.piv_id
+          WHERE o.offering_id = ${input.offeringId}
+        ) AS ready
+      `;
+      if (escrowRows[0]?.ready !== true) {
+        return { reservation: null, conflict: "settlement_escrow_not_ready" as const, reused: false };
       }
 
       // The lock above serializes every reservation for this offering. Check

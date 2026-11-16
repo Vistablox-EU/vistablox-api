@@ -8,6 +8,7 @@ export const reservationBlockers = [
   "offering_not_open",
   "capacity_exhausted",
   "funding_rail_unavailable",
+  "settlement_escrow_not_ready",
   "recovery_cooldown_active",
 ] as const;
 
@@ -72,6 +73,11 @@ export function isInvestmentEligible(input: {
 export function computeReservationBlockers(input: {
   now: Date;
   fundingRailAvailable: boolean;
+  /**
+   * The offering's IPO escrow campaign is recorded open on-chain (#176):
+   * without it the money collected for a reservation has nowhere to settle.
+   */
+  settlementEscrowReady: boolean;
   offeringStatus: string;
   finalTermsPublished: boolean;
   hasDisclosurePack: boolean;
@@ -111,6 +117,7 @@ export function computeReservationBlockers(input: {
   }
   if (input.remainingCapacityEur === "0.00") blockers.push("capacity_exhausted");
   if (!input.fundingRailAvailable) blockers.push("funding_rail_unavailable");
+  if (!input.settlementEscrowReady) blockers.push("settlement_escrow_not_ready");
   if (input.recoveryCooldownEndsAt !== null && input.recoveryCooldownEndsAt > input.now) {
     blockers.push("recovery_cooldown_active");
   }

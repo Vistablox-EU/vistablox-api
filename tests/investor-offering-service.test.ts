@@ -20,6 +20,7 @@ function detail(
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
     ipoEndAt: new Date("2026-10-01T12:00:00.000Z"),
+    settlementEscrowReady: true,
     issuer: {
       pivId: "piv_01",
       legalName: "VistaBlox Berlin 01 B.V.",
@@ -177,6 +178,24 @@ describe("authenticated investor offering detail", () => {
     });
 
     expect(result.data.reservation).toEqual({ available: true, blockers: [] });
+  });
+
+  it("keeps reservation closed while the offering's settlement escrow is not ready, even with the rail open", async () => {
+    const service = new GetInvestorOfferingService(
+      repository(detail({ settlementEscrowReady: false })),
+      () => currentTime,
+      true,
+    );
+
+    const result = await service.execute({
+      offeringId: "offering_01",
+      accountId: "account_01",
+    });
+
+    expect(result.data.reservation).toEqual({
+      available: false,
+      blockers: ["settlement_escrow_not_ready"],
+    });
   });
 
   it("returns the stable offering not-found error", async () => {

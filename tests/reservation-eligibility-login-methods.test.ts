@@ -13,6 +13,7 @@ function blockers(loginMethods: LoginMethod[]) {
   return computeReservationBlockers({
     now,
     fundingRailAvailable: true,
+    settlementEscrowReady: true,
     offeringStatus: "pre_offering",
     finalTermsPublished: false,
     hasDisclosurePack: true,

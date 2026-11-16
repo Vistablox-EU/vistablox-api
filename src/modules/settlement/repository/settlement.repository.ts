@@ -8,6 +8,34 @@ export interface PivPendingEscrowResolution {
   tokenId: string;
 }
 
+/**
+ * An offering whose Piv has a token id and an IPO deadline still in the
+ * future, that is open for reservations, and whose escrow campaign is not yet
+ * recorded as open (#176). The activation sweep opens one for each.
+ */
+export interface OfferingAwaitingIpoEscrowCampaign {
+  pivId: string;
+  tokenId: string;
+  // offerings.target_raise_eur, as a decimal string (two places).
+  targetRaiseEur: string;
+  ipoEndAt: Date;
+}
+
+/**
+ * The evidence that a Piv's IPO escrow campaign is open on-chain, with the
+ * values campaignOf reports (not the ones the job asked for).
+ */
+export interface RecordIpoEscrowCampaignOpenedInput {
+  pivId: string;
+  tokenId: string;
+  escrowContractAddress: string;
+  targetAmount: bigint;
+  deadlineAt: Date;
+  treasuryAddress: string;
+  // Null when the campaign was found already open.
+  openTxHash: string | null;
+}
+
 export interface RecordEscrowMintedPositionInput {
   // The intent this position records the outcome of (see EscrowMintIntent).
   // The position row carries it under a unique constraint, so recording the
@@ -155,6 +183,10 @@ export interface WalletRegistrationAddressMismatchInput {
  */
 export interface SettlementRepository {
   findPivsWithPassedIpoDeadline(now: Date): Promise<PivPendingEscrowResolution[]>;
+  findOfferingsAwaitingIpoEscrowCampaign(now: Date): Promise<OfferingAwaitingIpoEscrowCampaign[]>;
+  // Writes the readiness row the reservation gate checks. Idempotent: when a
+  // row already exists for the Piv it is kept unchanged.
+  recordIpoEscrowCampaignOpened(input: RecordIpoEscrowCampaignOpenedInput): Promise<void>;
   // Resolves CONFIRMED registrations only: a pending claim proves nothing, so
   // it must never attribute an on-chain contribution to an account.
   resolveAccountIdForWallet(walletAddress: string): Promise<string | null>;

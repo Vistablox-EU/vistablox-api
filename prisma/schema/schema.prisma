@@ -578,6 +578,7 @@ model Piv {
   offerings              Offering[]
   positions              PositionLedger[]
   escrowMintIntents      EscrowMintIntent[]
+  ipoEscrowCampaign      IpoEscrowCampaign?
   rentCollections        RentCollection[]
   operatingDistributions OperatingDistribution[]
 
@@ -849,6 +850,31 @@ model EscrowMintIntent {
 
   @@unique([pivId, accountId], map: "uq_escrow_mint_intents_piv_account")
   @@map("escrow_mint_intents")
+  @@schema("settlement")
+}
+
+// AD-256: evidence that this Piv's IPO escrow campaign is open on-chain,
+// written by settlement.open_ipo_escrow_campaign once openCampaign has a
+// successful receipt (or campaignOf already shows the campaign past
+// NotOpened). Reservations are refused for an offering whose Piv has no row
+// here (#176): funds must not be collected for an offering that cannot
+// settle. Values are what the chain holds, not what was requested.
+model IpoEscrowCampaign {
+  pivId                 String   @id @map("piv_id")
+  tokenId               Decimal  @unique @map("token_id") @db.Decimal(78, 0)
+  escrowContractAddress String   @map("escrow_contract_address")
+  // EURC base units (6 decimals), as campaignOf reports it.
+  targetAmount          Decimal  @map("target_amount") @db.Decimal(78, 0)
+  deadlineAt            DateTime @map("deadline_at") @db.Timestamptz(6)
+  treasuryAddress       String   @map("treasury_address")
+  // Null when the campaign was found already open (opened by an earlier,
+  // interrupted attempt whose hash was not kept).
+  openTxHash            String?  @map("open_tx_hash")
+  recordedAt            DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
+
+  piv Piv @relation(fields: [pivId], references: [id])
+
+  @@map("ipo_escrow_campaigns")
   @@schema("settlement")
 }
 

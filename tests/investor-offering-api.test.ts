@@ -26,6 +26,7 @@ const repository: OfferingRepository = {
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
     ipoEndAt: null,
+    settlementEscrowReady: false,
     issuer: {
       pivId: "piv_01",
       legalName: null,
@@ -102,6 +103,7 @@ describe("authenticated investor offering API", () => {
             "payment_account_not_ready",
             "disclosure_pack_unavailable",
             "funding_rail_unavailable",
+            "settlement_escrow_not_ready",
           ],
         },
       },
@@ -134,6 +136,7 @@ const reservationEligibleDetail: InvestorOfferingDetailRecord = {
   platformRightsEndAt: null,
   effectiveRightsEndAt: null,
   ipoEndAt: null,
+  settlementEscrowReady: true,
   issuer: {
     pivId: "piv_01",
     legalName: null,

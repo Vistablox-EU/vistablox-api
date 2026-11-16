@@ -11,6 +11,7 @@ import { NotifyReconfirmationWindowOpenedService } from "../src/modules/offering
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
 import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
 import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
+import { markSettlementEscrowReady } from "./support/settlement-escrow-db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -122,6 +123,7 @@ describe.skipIf(databaseUrl === undefined)(
           incorporatedAt: new Date("2026-08-01T12:00:00.000Z"),
         },
       });
+      await markSettlementEscrowReady(database, pivId);
       await database.offering.create({
         data: {
           id: offeringId,
@@ -378,6 +380,7 @@ describe.skipIf(databaseUrl === undefined)(
     async function createOffering(input: {
       targetRaiseEur: string;
       status?: string;
+      settlementEscrowReady?: boolean;
     }): Promise<string> {
       const id = randomUUID();
       const propertyId = `property_reserve_${id}`;
@@ -407,6 +410,7 @@ describe.skipIf(databaseUrl === undefined)(
       await database.piv.create({
         data: { id: pivId, propertyId, caseId },
       });
+      if (input.settlementEscrowReady ?? true) await markSettlementEscrowReady(database, pivId);
       await database.offering.create({
         data: {
           id: offeringId,
@@ -505,6 +509,31 @@ describe.skipIf(databaseUrl === undefined)(
 
       expect(result).toEqual({ conflict: "capacity_exceeded", reservation: null, reused: false });
       expect(await database.reservation.findUnique({ where: { id: rejectedId } })).toBeNull();
+    });
+
+    it("refuses a reservation, under the offering lock, until the offering's escrow campaign is recorded open (#176)", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00", settlementEscrowReady: false });
+      const { pivId } = await database.offering.findUniqueOrThrow({ where: { id: offeringId } });
+      const attempt = (reservationId: string) =>
+        repository.createReservation({
+          reservationId,
+          offeringId,
+          accountId,
+          amountEur: "100.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date(),
+        });
+
+      const refusedId = `reservation_${randomUUID()}`;
+      expect(await attempt(refusedId)).toEqual({ conflict: "settlement_escrow_not_ready", reservation: null, reused: false });
+      expect(await database.reservation.findUnique({ where: { id: refusedId } })).toBeNull();
+      expect(await repository.getInvestorDetail({ offeringId, accountId })).toMatchObject({ settlementEscrowReady: false });
+
+      await markSettlementEscrowReady(database, pivId);
+
+      expect(await repository.getInvestorDetail({ offeringId, accountId })).toMatchObject({ settlementEscrowReady: true });
+      expect((await attempt(`reservation_${randomUUID()}`)).conflict).toBeNull();
     });
 
     it("rejects a reservation on an offering that is not pre_offering", async () => {
@@ -1019,6 +1048,7 @@ describe.skipIf(databaseUrl === undefined)(
         },
       });
       await database.piv.create({ data: { id: pivId, propertyId, caseId } });
+      await markSettlementEscrowReady(database, pivId);
       await database.offering.create({
         data: {
           id: offeringId,

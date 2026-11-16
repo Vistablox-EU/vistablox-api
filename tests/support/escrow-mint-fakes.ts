@@ -484,6 +484,12 @@ export class InMemorySettlementRepository implements SettlementRepository {
 
   public async setLastProcessedWalletRegistryBlock(): Promise<void> {}
 
+  public async findOfferingsAwaitingIpoEscrowCampaign(): Promise<[]> {
+    return [];
+  }
+
+  public async recordIpoEscrowCampaignOpened(): Promise<void> {}
+
   public async recordWalletRegistrationAddressMismatch(): Promise<{ created: boolean }> {
     return { created: true };
   }

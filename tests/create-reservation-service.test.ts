@@ -27,6 +27,7 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
     ipoEndAt: new Date("2026-10-01T12:00:00.000Z"),
+    settlementEscrowReady: true,
     issuer: {
       pivId: "piv_01",
       legalName: "VistaBlox Berlin 01 B.V.",
@@ -296,6 +297,45 @@ describe("CreateReservationService", () => {
       status: 409,
       fieldErrors: [{ field: "reservation", code: "offering_not_open" }],
     });
+  });
+
+  it("blocks a reservation before writing anything while the offering's settlement escrow is not ready", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(
+      offeringRepository(detail({ settlementEscrowReady: false })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(
+      service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
+    ).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      status: 409,
+      fieldErrors: [{ field: "reservation", code: "settlement_escrow_not_ready" }],
+    });
+    expect(reservations.createReservation).not.toHaveBeenCalled();
+  });
+
+  it("maps an atomic settlement_escrow_not_ready conflict from the repository to a 409 without opening a session", async () => {
+    const reservations = reservationRepository({
+      createReservation: vi.fn().mockResolvedValue({ reservation: null, conflict: "settlement_escrow_not_ready" }),
+    });
+    const cdp = coinbase();
+    const service = new CreateReservationService(offeringRepository(detail()), reservations, cdp, {
+      clock: () => now,
+      fundingRailAvailable: true,
+    });
+
+    await expect(
+      service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
+    ).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      status: 409,
+      fieldErrors: [{ field: "reservation", code: "settlement_escrow_not_ready" }],
+    });
+    expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
   });
 
   it("records a purchase_failed money event and rethrows when Coinbase session creation fails", async () => {

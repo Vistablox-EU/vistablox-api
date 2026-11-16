@@ -12,6 +12,7 @@ import { PrismaOfferingRepository } from "../src/modules/offering/repository/pri
 import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
 import { PrismaWalletRepository } from "../src/modules/wallet/repository/prisma-wallet.repository.js";
 import { WalletAddressConflictError } from "../src/modules/wallet/repository/wallet.repository.js";
+import { markSettlementEscrowReady } from "./support/settlement-escrow-db.js";
 
 // A pending wallet claim proves nothing about who controls the address, and
 // its own account may replace it in place (#146). The address handed to the
@@ -146,6 +147,7 @@ describe.skipIf(databaseUrl === undefined)("offering wallet readiness PostgreSQL
         incorporatedAt: new Date("2026-08-01T12:00:00.000Z"),
       },
     });
+    await markSettlementEscrowReady(database, pivId);
     await database.offering.create({
       data: {
         id: offeringId,
