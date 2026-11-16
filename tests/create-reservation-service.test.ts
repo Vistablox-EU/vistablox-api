@@ -40,6 +40,7 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
       propertyType: "residential",
       countryCode: "DE",
       city: "Berlin",
+      media: null,
       addressLine: "Example Strasse 1",
       ownerDeclaredValueEur: "600000.00",
       appraisalValueOpinionEur: "625000.00",

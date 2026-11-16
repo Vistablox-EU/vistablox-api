@@ -595,6 +595,8 @@ model Offering {
   targetRaiseEur           Decimal   @map("target_raise_eur") @db.Decimal(15, 2)
   status                   String    @default("pre_offering")
   featured                 Boolean   @default(false)
+  heroImageUrl             String?   @map("hero_image_url")
+  galleryImageUrls         String[]  @default([]) @map("gallery_image_urls")
   finalOfferingPublishedAt DateTime? @map("final_offering_published_at") @db.Timestamptz(6)
   platformRightsEndAt      DateTime? @map("platform_rights_end_at") @db.Timestamptz(6)
   effectiveRightsEndAt     DateTime? @map("effective_rights_end_at") @db.Timestamptz(6)

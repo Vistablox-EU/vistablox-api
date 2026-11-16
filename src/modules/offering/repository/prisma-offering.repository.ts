@@ -6,6 +6,7 @@ import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import type { Prisma } from "../../../generated/prisma/client.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { toCents, toEurcMicros } from "../domain/currency.js";
+import { toOfferingMedia } from "../domain/offering-media.policy.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
 import { isWithinIpoPeriod } from "../domain/reservation-eligibility.policy.js";
 import type {
@@ -266,6 +267,8 @@ export class PrismaOfferingRepository
         featured: true,
         targetRaiseEur: true,
         createdAt: true,
+        heroImageUrl: true,
+        galleryImageUrls: true,
         piv: {
           select: {
             case: { select: { ipoEndAt: true } },
@@ -293,6 +296,7 @@ export class PrismaOfferingRepository
           propertyType: row.piv.property.propertyType,
           countryCode: row.piv.property.countryCode,
           city: row.piv.property.city,
+          media: toOfferingMedia(row.heroImageUrl, row.galleryImageUrls),
         },
       };
     });
@@ -313,6 +317,8 @@ export class PrismaOfferingRepository
           finalOfferingPublishedAt: true,
           platformRightsEndAt: true,
           effectiveRightsEndAt: true,
+          heroImageUrl: true,
+          galleryImageUrls: true,
           piv: {
             select: {
               id: true,
@@ -458,6 +464,7 @@ export class PrismaOfferingRepository
         propertyType: offering.piv.property.propertyType,
         countryCode: offering.piv.property.countryCode,
         city: offering.piv.property.city,
+        media: toOfferingMedia(offering.heroImageUrl, offering.galleryImageUrls),
         addressLine: offering.piv.property.addressLine,
         ownerDeclaredValueEur: offering.piv.property.ownerDeclaredValueEur.toFixed(2),
         appraisalValueOpinionEur:

@@ -117,9 +117,11 @@ import { UploadOfferingDocumentService } from "./modules/offering/application/up
 import { GetOfferingDocumentService } from "./modules/offering/application/get-offering-document.service.js";
 import { FinalizeOfferingService } from "./modules/offering/application/finalize-offering.service.js";
 import { ReconfirmReservationService } from "./modules/offering/application/reconfirm-reservation.service.js";
+import { UpdateOfferingPresentationService } from "./modules/offering/application/update-offering-presentation.service.js";
 import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
 import type { DisclosureDocumentStore, WritableDisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
 import type { OfferingDocumentRepository } from "./modules/offering/repository/offering-document.repository.js";
+import type { OfferingPresentationRepository } from "./modules/offering/repository/offering-presentation.repository.js";
 import type { MalwareScanner } from "./infrastructure/antivirus/clamav-scanner.js";
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
 import type { ReservationRepository } from "./modules/offering/repository/reservation.repository.js";
@@ -362,6 +364,8 @@ export interface AppDependencies {
         store: WritableDisclosureDocumentStore;
         scanner: MalwareScanner;
       };
+      /** Staff featured-flag and media management (PATCH /:offering_id/presentation). */
+      presentation?: OfferingPresentationRepository;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -647,6 +651,7 @@ export function createApp(dependencies: AppDependencies): Express {
     );
     if (dependencies.protectedApi.offeringOperations !== undefined) {
       const offeringDocuments = dependencies.protectedApi.offeringOperations.documents;
+      const offeringPresentation = dependencies.protectedApi.offeringOperations.presentation;
       app.use(
         "/internal/v1/offerings",
         createOfferingOperationsRouter(
@@ -663,6 +668,7 @@ export function createApp(dependencies: AppDependencies): Express {
                 upload: new UploadOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store, offeringDocuments.scanner),
                 read: new GetOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store),
               },
+          offeringPresentation === undefined ? undefined : new UpdateOfferingPresentationService(offeringPresentation),
         ),
       );
     }

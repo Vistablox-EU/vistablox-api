@@ -10,6 +10,8 @@ import { FinalizeOfferingService } from "../src/modules/offering/application/fin
 import type { GetOfferingDocumentService } from "../src/modules/offering/application/get-offering-document.service.js";
 import { PublishDisclosurePackService } from "../src/modules/offering/application/publish-disclosure-pack.service.js";
 import type { UploadOfferingDocumentService } from "../src/modules/offering/application/upload-offering-document.service.js";
+import { UpdateOfferingPresentationService } from "../src/modules/offering/application/update-offering-presentation.service.js";
+import type { OfferingPresentationRepository } from "../src/modules/offering/repository/offering-presentation.repository.js";
 import { AppError } from "../src/shared/errors/app-error.js";
 import { createIdempotencyMiddleware } from "../src/shared/http/idempotency.js";
 import type { IdempotencyStore, StoredIdempotentResponse } from "../src/infrastructure/idempotency/idempotency-store.js";
@@ -26,6 +28,7 @@ function buildApp(options?: {
   denyAdminOperations?: boolean;
   requireFinalizeIdempotency?: RequestHandler;
   documents?: { upload?: Partial<UploadOfferingDocumentService>; read?: Partial<GetOfferingDocumentService> };
+  presentation?: Partial<OfferingPresentationRepository>;
 }) {
   const authenticated: RequestHandler = (_request, response, next) => {
     response.locals.authContext = {
@@ -120,6 +123,12 @@ function buildApp(options?: {
             upload: { execute: vi.fn(), ...options.documents.upload } as unknown as UploadOfferingDocumentService,
             read: { list: vi.fn(), download: vi.fn(), ...options.documents.read } as unknown as GetOfferingDocumentService,
           },
+      options?.presentation === undefined
+        ? undefined
+        : new UpdateOfferingPresentationService(
+            { updatePresentation: vi.fn(), ...options.presentation } as OfferingPresentationRepository,
+            () => new Date("2026-09-07T12:00:00.000Z"),
+          ),
     ),
   );
   app.use(errorHandler);
@@ -781,5 +790,95 @@ describe("POST /internal/v1/offerings/:offering_id/finalize — idempotency", ()
 
     expect(conflict.status).toBe(409);
     expect(conflict.body.code).toBe("idempotency.body_mismatch");
+  });
+});
+
+describe("PATCH /internal/v1/offerings/:offering_id/presentation", () => {
+  const hero = "https://cdn.example.com/offering_01/hero.jpg";
+  const gallery = ["https://cdn.example.com/offering_01/1.jpg", "https://cdn.example.com/offering_01/2.jpg"];
+
+  it("is not mounted without a presentation repository", async () => {
+    const { app } = buildApp();
+    const response = await request(app).patch("/internal/v1/offerings/offering_01/presentation").send({ featured: true });
+    expect(response.status).toBe(404);
+  });
+
+  it("sets the featured flag and media and returns the stored presentation", async () => {
+    const updatePresentation = vi.fn().mockResolvedValue({
+      featured: true,
+      media: { heroUrl: hero, galleryUrls: gallery },
+    });
+    const { app } = buildApp({ presentation: { updatePresentation } });
+
+    const response = await request(app)
+      .patch("/internal/v1/offerings/offering_01/presentation")
+      .send({ featured: true, media: { hero_url: hero, gallery_urls: gallery } });
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({
+      data: { offering_id: "offering_01", featured: true, media: { hero_url: hero, gallery_urls: gallery } },
+    });
+    expect(updatePresentation).toHaveBeenCalledWith({
+      offeringId: "offering_01",
+      featured: true,
+      media: { heroUrl: hero, galleryUrls: gallery },
+      actorAccountId: "account_founder",
+      traceId: expect.stringMatching(/^req_/),
+      updatedAt: new Date("2026-09-07T12:00:00.000Z"),
+    });
+  });
+
+  it("leaves omitted keys alone and clears media with null", async () => {
+    const updatePresentation = vi.fn().mockResolvedValue({ featured: false, media: null });
+    const { app } = buildApp({ presentation: { updatePresentation } });
+
+    const response = await request(app).patch("/internal/v1/offerings/offering_01/presentation").send({ media: null });
+
+    expect(response.status).toBe(200);
+    expect(response.body.data).toEqual({ offering_id: "offering_01", featured: false, media: null });
+    const input = updatePresentation.mock.calls[0]?.[0];
+    expect(input).toMatchObject({ media: null });
+    expect(input).not.toHaveProperty("featured");
+  });
+
+  it.each([
+    ["an empty body", {}],
+    ["an unknown key", { featured: true, rank: 1 }],
+    ["a non-boolean featured", { featured: "yes" }],
+    ["an http hero URL", { media: { hero_url: "http://cdn.example.com/hero.jpg", gallery_urls: [] } }],
+    ["a non-URL gallery entry", { media: { hero_url: null, gallery_urls: ["not a url"] } }],
+    ["a repeated gallery URL", { media: { hero_url: null, gallery_urls: [hero, hero] } }],
+    [
+      "more than 20 gallery images",
+      { media: { hero_url: null, gallery_urls: Array.from({ length: 21 }, (_, index) => `https://cdn.example.com/${index}.jpg`) } },
+    ],
+    ["media without gallery_urls", { media: { hero_url: hero } }],
+  ])("rejects %s before touching the repository", async (_label, body) => {
+    const updatePresentation = vi.fn();
+    const { app } = buildApp({ presentation: { updatePresentation } });
+
+    const response = await request(app).patch("/internal/v1/offerings/offering_01/presentation").send(body);
+
+    expect(response.status).toBe(422);
+    expect(updatePresentation).not.toHaveBeenCalled();
+  });
+
+  it("reports a 404 for an unknown offering", async () => {
+    const { app } = buildApp({ presentation: { updatePresentation: vi.fn().mockResolvedValue(null) } });
+
+    const response = await request(app).patch("/internal/v1/offerings/offering_missing/presentation").send({ featured: true });
+
+    expect(response.status).toBe(404);
+    expect(response.body.code).toBe("offering.not_found");
+  });
+
+  it("never reaches the service without the admin_operations role", async () => {
+    const updatePresentation = vi.fn();
+    const { app } = buildApp({ denyAdminOperations: true, presentation: { updatePresentation } });
+
+    const response = await request(app).patch("/internal/v1/offerings/offering_01/presentation").send({ featured: true });
+
+    expect(response.status).toBe(403);
+    expect(updatePresentation).not.toHaveBeenCalled();
   });
 });
