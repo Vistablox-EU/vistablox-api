@@ -7,6 +7,7 @@ import type { Prisma } from "../../../generated/prisma/client.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { toCents, toEurcMicros } from "../domain/currency.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
+import { isWithinIpoPeriod } from "../domain/reservation-eligibility.policy.js";
 import type {
   InvestorOfferingDetailRecord,
   ListPublicOfferingsInput,
@@ -71,6 +72,8 @@ import type {
   ReservationForReconfirmationWindowOpenedNotification,
 } from "./reconfirmation-window-opened-notification.repository.js";
 
+// Terminal intake stages (REAL_ESTATE_INTAKE_LIFECYCLE.md): a case in one of these must not have an open offering.
+const closedCaseStages = new Set(["rejected", "withdrawn", "expired"]);
 const reconfirmationReminderIntervalHoursSettingSchema = z.object({ hours: z.number().int().min(1).max(168) });
 
 export class PrismaOfferingRepository
@@ -102,6 +105,13 @@ export class PrismaOfferingRepository
     input: OpenOfferingForApprovedCaseInput,
   ): Promise<OpenedOffering> {
     return this.database.$transaction(async (transaction) => {
+      // closeCase locks the case row before it closes the case's pre-offering. Take the same lock first, so a case closed after
+      // approval but before this job ran never gets a listed, reservable offering: it is created already closed.
+      const lockedCase = await transaction.$queryRaw<Array<{ stage: string }>>`
+        SELECT stage FROM intake.intake_cases WHERE case_id = ${input.caseId} FOR UPDATE
+      `;
+      const caseClosed = closedCaseStages.has(lockedCase[0]?.stage ?? "");
+      const offeringStatus = caseClosed ? "closed" : "pre_offering";
       const existingPiv = await transaction.piv.findUnique({
         where: { propertyId: input.propertyId },
         select: { id: true, offerings: { select: { id: true }, take: 1 } },
@@ -117,6 +127,7 @@ export class PrismaOfferingRepository
             pivId: existingPiv.id,
             minimumRaiseEur: input.ipoValueEur,
             targetRaiseEur: input.ipoValueEur,
+            status: offeringStatus,
           },
           select: { id: true },
         });
@@ -128,7 +139,7 @@ export class PrismaOfferingRepository
         select: { ipoEndAt: true },
       });
       const ipoEndAt = intakeCase.ipoEndAt;
-      if (input.openEscrowCampaign && ipoEndAt === null) {
+      if (input.openEscrowCampaign && !caseClosed && ipoEndAt === null) {
         throw new Error(
           `Intake case ${input.caseId} has no ipo_end_at set; cannot open an IPO escrow campaign without a deadline.`,
         );
@@ -159,6 +170,7 @@ export class PrismaOfferingRepository
           pivId: piv.id,
           minimumRaiseEur: input.ipoValueEur,
           targetRaiseEur: input.ipoValueEur,
+          status: offeringStatus,
         },
         select: { id: true },
       });
@@ -175,6 +187,7 @@ export class PrismaOfferingRepository
             piv_id: piv.id,
             target_raise_eur: input.ipoValueEur,
             token_id: tokenId.toString(),
+            status: offeringStatus,
           },
           createdAt: input.openedAt,
         },
@@ -201,7 +214,7 @@ export class PrismaOfferingRepository
       // settlement is activated is an explicit activation step, safe to
       // re-run because OpenIpoEscrowCampaignService skips a campaign that is
       // already open on-chain.
-      if (input.openEscrowCampaign && ipoEndAt !== null) {
+      if (input.openEscrowCampaign && ipoEndAt !== null && !caseClosed) {
         await enqueueTransactionalJob(
           this.pgBoss,
           transaction,
@@ -544,12 +557,16 @@ export class PrismaOfferingRepository
           status: string;
           target_raise_eur: string;
           final_offering_published_at: Date | null;
+          ipo_end_at: Date | null;
         }>
       >`
-        SELECT offering_id, status, target_raise_eur::text, final_offering_published_at
-        FROM offering.offerings
-        WHERE offering_id = ${input.offeringId}
-        FOR UPDATE
+        SELECT o.offering_id, o.status, o.target_raise_eur::text, o.final_offering_published_at,
+               c.ipo_end_at
+        FROM offering.offerings o
+        LEFT JOIN intake.pivs p ON p.piv_id = o.piv_id
+        LEFT JOIN intake.intake_cases c ON c.case_id = p.case_id
+        WHERE o.offering_id = ${input.offeringId}
+        FOR UPDATE OF o
       `;
       const offering = locked[0];
       // Status stays 'pre_offering' through the reconfirmation window, so
@@ -557,10 +574,14 @@ export class PrismaOfferingRepository
       // reservation-eligibility.policy.ts. Without this, a request that
       // passed the advisory check before publication could take the lock
       // afterwards and create a reservation outside the reconfirmation batch.
+      // The IPO deadline is read here, live, for the same reason: it is
+      // mutable (an extension updates it in place), and a request that passed
+      // the advisory check just before ipo_end_at must not slip in after it.
       if (
         offering === undefined ||
         offering.status !== "pre_offering" ||
-        offering.final_offering_published_at !== null
+        offering.final_offering_published_at !== null ||
+        !isWithinIpoPeriod({ ipoEndAt: offering.ipo_end_at, now: input.createdAt })
       ) {
         return { reservation: null, conflict: "offering_not_open" as const, reused: false };
       }

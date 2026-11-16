@@ -92,6 +92,7 @@ export class CreateReservationService {
       fundingRailAvailable: this.fundingRailAvailable,
       offeringStatus: detail.status,
       finalTermsPublished: detail.finalOfferingPublishedAt !== null,
+      ipoEndAt: detail.ipoEndAt,
       hasDisclosurePack:
         detail.currentDisclosurePack !== null && detail.currentDisclosurePack.documents.length > 0,
       remainingCapacityEur,

@@ -30,6 +30,24 @@ The design record does not say what a `Pre-offering open` offering does while se
 
 A `case_timers.pre_offering_open_handoff` job that already ran out of retries before this change stays failed (pg-boss deletes failed jobs seven days after they complete); re-queue any such job, and check for `pre_offering_open` cases that have no `Piv`, after deploying.
 
+## The IPO deadline (`ipo_end_at`)
+
+An offering's reservation window ends at its case's `intake.intake_cases.ipo_end_at` (`AD-244`; `PAYMENT_FLOWS.md`: the IPO stays open until the IPO period ends). Approval sets it to the decision time plus `ipo_period_days`. Once it passes, the offering accepts no new reservations. Nothing else happens at the deadline.
+
+- **Where it is enforced.** The rule is `isWithinIpoPeriod` in `domain/reservation-eligibility.policy.ts`. It runs in two places. The advisory `reservation.blockers` on `GET /v1/offerings/:offering_id` uses it, and so does `CreateReservationService`'s pre-check. `createReservation` also reads `ipo_end_at` again under the `offerings` row lock, through the offering's PIV and case. Both report the existing `offering_not_open` blocker and return `409 offering.reservation_not_available`. No new code was added to the wire contract.
+- **Boundary.** The period is open while `now < ipo_end_at`. A request at exactly `ipo_end_at` is refused. The write path compares the deadline with the service clock's request time, the same instant the policy uses.
+- **Missing deadline.** An offering whose case has no `ipo_end_at` fails closed. Approval always sets the deadline, and reverting approval clears it, so a `pre_offering` offering without one is not in a defined collecting state.
+- **Extensions.** The record treats an extension as an in-place update of `ipo_end_at`. Because the lock reads it live, raising `ipo_end_at` reopens reservations with no other step. No extension endpoint exists yet.
+- **Idempotent retries.** A retry that reaches the lock after the deadline is refused like a new request, the same as a retry after final terms are published.
+- **Public listing.** `GET /v1/offerings` still lists a `pre_offering` offering after its deadline. It already returns `ipo_end_at`, so a client can mark the offering as closed for reservations. The record keeps an offering in pre-offering after the period ends until the founder decides to proceed, extend, or close it, and hiding it would make the offering disappear while it still awaits that decision. The reservation block is enforced server-side either way.
+
+The deadline does not move funds or reservations. No worker job runs at `ipo_end_at`: existing reservations keep their stage and capital state, unfunded holds still lapse through the 15-minute sweep, and finalization (below) is not gated on the deadline. These are open founder decisions, not settled design:
+
+- **Extend or close.** The record says both that an underfunded IPO is extended automatically by 30 days and that the founder decides whether to extend or close it.
+- **Underfunded offering at the deadline.** What happens to it and to its funded reservations is not decided.
+- **Finalization timing.** Whether finalization must wait for `ipo_end_at` once the target is reached early is not decided (`C-007`).
+- **Error code.** Whether the deadline deserves its own blocker code instead of `offering_not_open` is not decided.
+
 ## Reservation creation
 
 `POST /v1/offerings/:offering_id/reservations` creates a capacity-holding reservation and an investor-initiated Coinbase CDP onramp session in one request (`AD-255`, `AD-146`). Requires an `Idempotency-Key` header (AD-057/AD-147 — reservation funding initiation is a high-risk write, deduplicated through the shared `audit.idempotency_keys` table under the `offering.reservation.create` endpoint). Request body: `{ "amount_eur": "1000.00" }`. On success (`201`):
@@ -47,7 +65,7 @@ A `case_timers.pre_offering_open_handoff` job that already ran out of retries be
 }
 ```
 
-The reservation row and its first `money.money_events` row (`capital_state: "initiated"`) are written inside one transaction that also re-verifies, under a row lock on the `offerings` row, that the offering is still `pre_offering` with no final terms published (`final_offering_published_at` unset — `status` stays `pre_offering` through the reconfirmation window, so the status alone does not close reservations) and that the requested amount still fits the offering's remaining capacity (`AD-146`: the same check `GetInvestorOfferingService`'s `reservation.blockers` reports is advisory only — this is the atomic, authoritative one, sharing its rule set via `domain/reservation-eligibility.policy.ts` so the two can never disagree). A losing concurrent request gets `409 offering.reservation_not_available` (offering closed between read and write) or `422 offering.reservation_amount_exceeds_capacity` (amount no longer fits), never a silent oversell.
+The reservation row and its first `money.money_events` row (`capital_state: "initiated"`) are written inside one transaction that also re-verifies, under a row lock on the `offerings` row, that the offering is still `pre_offering` with no final terms published (`final_offering_published_at` unset — `status` stays `pre_offering` through the reconfirmation window, so the status alone does not close reservations), that its IPO period has not ended (see ["The IPO deadline"](#the-ipo-deadline-ipo_end_at) below) and that the requested amount still fits the offering's remaining capacity (`AD-146`: the same check `GetInvestorOfferingService`'s `reservation.blockers` reports is advisory only — this is the atomic, authoritative one, sharing its rule set via `domain/reservation-eligibility.policy.ts` so the two can never disagree). A losing concurrent request gets `409 offering.reservation_not_available` (offering closed between read and write) or `422 offering.reservation_amount_exceeds_capacity` (amount no longer fits), never a silent oversell.
 
 The onramp delivers the purchased EURC to the investor's wallet address, so that address is the one place a redirect would move money. It is read from the account's `settlement.wallet_registrations` row **only when that registration is confirmed** (`registered_at` set): a pending claim is replaceable in place by its own account (see [`docs/investor-profile.md`](investor-profile.md)), so it neither makes the payment account ready (`readiness.payment_account_ready`, blocker `payment_account_not_ready`) nor is ever handed to Coinbase. The same read runs on the replay of an idempotent request, so a replay cannot be steered to an address the account swapped in meanwhile; a confirmed registration cannot be replaced through the API (`wallet.registration_address_mismatch`), so the address a replay uses is the one the first request used. Until the watcher (or staff reconcile) confirms the registration, the reservation request is refused with `409 offering.reservation_not_available` and that blocker. `readiness.payout_account_verified` is true under the same condition, so the two flags currently move together.
 
@@ -76,6 +94,18 @@ Coinbase's onramp/offramp API has no webhook (confirmed against CDP's own API re
 
 A purchase that succeeds only *after* the reservation's stage has already flipped to `lapsed` is a real, deliberately unresolved race — deciding what happens to that late `EURC` is a policy question in the same territory as `AD-251`'s no-refund stance, not an implementation detail to invent here. That is distinct from the sweep-race above (a purchase landing just before the expiry sweep's lock), which the repository-level re-check closes.
 
+## Closing an intake case closes its pre-offering
+
+`POST /internal/v1/intake-cases/:case_id/close` can withdraw or reject a case that is already `pre_offering_open`, so its offering is live: listed publicly and taking reservations. The close does three things in the one transaction that moves the case to `withdrawn` or `rejected`:
+
+- The case's `pre_offering` offering moves to `closed`. That drops it from `GET /v1/offerings`, which only lists `pre_offering`/`final_offering`, and makes `createReservation` answer `409 offering_not_open`. The offering row is locked `FOR UPDATE` exactly as `createReservation` locks it, so a reservation that was mid-flight either committed first and is cancelled by the next step, or waits and then sees `closed`.
+- Every open reservation on it (`initiated`, `awaiting_reconfirmation`, `reconfirmed`) moves to `cancelled`. None of them can reconfirm or finalize against a closed offering, and cancelling them releases the capacity hold. `finalized` and already `cancelled`/`lapsed` reservations are left alone; a `finalized` one cannot exist while the case is still `pre_offering_open`.
+- An `offering.closed_with_case` audit row is written per offering, listing the cancelled reservation ids. The case's own `case_withdrawn`/`case_rejected` intake event carries `closed_offering_ids` in its metadata.
+
+No `money.money_events` row is written and nothing is refunded by the backend. In phase 1 the platform holds no investor funds and has no refund rail (`AD-240`, `AD-243`): EURC bought through the onramp stays in the investor's own wallet, and an escrow contribution is reclaimed by the investor from the escrow contract once the campaign fails (`AD-256`, `AD-258`). Notifying affected investors is not built here.
+
+The approval handoff (`case_timers.pre_offering_open_handoff`) locks the case row before it creates the offering. If the case was closed after approval but before that job ran, the offering is created already `closed` and no escrow campaign is enqueued, so a closed case never gets a listed offering.
+
 ## The funding rail still stays closed by default
 
 Both `GetInvestorOfferingService` and `CreateReservationService` take a `fundingRailAvailable` flag, computed once in `server.ts` as `RESERVATION_FUNDING_RAIL_ENABLED && <a configured Coinbase client>` and passed to both, so the read side and the write side can never disagree about whether reservations are open. `RESERVATION_FUNDING_RAIL_ENABLED` defaults to `false`; setting it without also configuring `COINBASE_CDP_*`/`COINBASE_ONRAMP_REDIRECT_URL` has no effect, and vice versa — either alone leaves `POST .../reservations` returning `409 funding_rail_unavailable`, deliberately, rather than a confusing half-enabled state.
@@ -96,7 +126,7 @@ See [`AD-255`](https://github.com/Vistablox-EU/vistablox-design-docs/blob/main/B
 
 ### 1. Publishing final terms (founder-triggered)
 
-`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Requires an `Idempotency-Key` header (AD-057/AD-147 — a finalization-batch action; endpoint `offering.finalize`). Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
+`POST /internal/v1/offerings/:offering_id/finalize` is the founder's "proceed" decision from `AD-244`/`AD-245`: once an offering has fully collected `target_raise_eur` (`ipo_value_eur`), the founder chooses to proceed to tokenization, extend the `ipo_period`, or close the case — this endpoint implements only "proceed." Extend and close have no endpoint yet; see ["The IPO deadline"](#the-ipo-deadline-ipo_end_at). Gated identically to intake's founder-decision endpoints: `admin_operations` role plus verified staff WebAuthn. Requires an `Idempotency-Key` header (AD-057/AD-147 — a finalization-batch action; endpoint `offering.finalize`). Request body: `{ "founder_review_notes": "..." }` (required, matching `RecordFounderDecisionService`'s/`CloseCaseService`'s own convention). Response (`200`):
 
 ```json
 {
