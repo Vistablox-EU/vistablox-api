@@ -76,6 +76,18 @@ Coinbase's onramp/offramp API has no webhook (confirmed against CDP's own API re
 
 A purchase that succeeds only *after* the reservation's stage has already flipped to `lapsed` is a real, deliberately unresolved race — deciding what happens to that late `EURC` is a policy question in the same territory as `AD-251`'s no-refund stance, not an implementation detail to invent here. That is distinct from the sweep-race above (a purchase landing just before the expiry sweep's lock), which the repository-level re-check closes.
 
+## Closing an intake case closes its pre-offering
+
+`POST /internal/v1/intake-cases/:case_id/close` can withdraw or reject a case that is already `pre_offering_open`, so its offering is live: listed publicly and taking reservations. The close does three things in the one transaction that moves the case to `withdrawn` or `rejected`:
+
+- The case's `pre_offering` offering moves to `closed`. That drops it from `GET /v1/offerings`, which only lists `pre_offering`/`final_offering`, and makes `createReservation` answer `409 offering_not_open`. The offering row is locked `FOR UPDATE` exactly as `createReservation` locks it, so a reservation that was mid-flight either committed first and is cancelled by the next step, or waits and then sees `closed`.
+- Every open reservation on it (`initiated`, `awaiting_reconfirmation`, `reconfirmed`) moves to `cancelled`. None of them can reconfirm or finalize against a closed offering, and cancelling them releases the capacity hold. `finalized` and already `cancelled`/`lapsed` reservations are left alone; a `finalized` one cannot exist while the case is still `pre_offering_open`.
+- An `offering.closed_with_case` audit row is written per offering, listing the cancelled reservation ids. The case's own `case_withdrawn`/`case_rejected` intake event carries `closed_offering_ids` in its metadata.
+
+No `money.money_events` row is written and nothing is refunded by the backend. In phase 1 the platform holds no investor funds and has no refund rail (`AD-240`, `AD-243`): EURC bought through the onramp stays in the investor's own wallet, and an escrow contribution is reclaimed by the investor from the escrow contract once the campaign fails (`AD-256`, `AD-258`). Notifying affected investors is not built here.
+
+The approval handoff (`case_timers.pre_offering_open_handoff`) locks the case row before it creates the offering. If the case was closed after approval but before that job ran, the offering is created already `closed` and no escrow campaign is enqueued, so a closed case never gets a listed offering.
+
 ## The funding rail still stays closed by default
 
 Both `GetInvestorOfferingService` and `CreateReservationService` take a `fundingRailAvailable` flag, computed once in `server.ts` as `RESERVATION_FUNDING_RAIL_ENABLED && <a configured Coinbase client>` and passed to both, so the read side and the write side can never disagree about whether reservations are open. `RESERVATION_FUNDING_RAIL_ENABLED` defaults to `false`; setting it without also configuring `COINBASE_CDP_*`/`COINBASE_ONRAMP_REDIRECT_URL` has no effect, and vice versa — either alone leaves `POST .../reservations` returning `409 funding_rail_unavailable`, deliberately, rather than a confusing half-enabled state.
