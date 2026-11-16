@@ -179,6 +179,7 @@ const coinbaseCdpClient =
         apiKeyId: environment.COINBASE_CDP_API_KEY_ID,
         apiKeySecret: environment.COINBASE_CDP_API_KEY_SECRET,
         timeoutMs: 8_000,
+        logger,
       });
 const pollOnrampTransactions =
   coinbaseCdpClient === undefined
