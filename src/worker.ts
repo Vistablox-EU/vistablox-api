@@ -29,6 +29,7 @@ import {
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
+import { ReconcileOnrampWebhookService } from "./modules/offering/application/coinbase-onramp-webhook.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
 import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
@@ -185,6 +186,10 @@ const pollOnrampTransactions =
   coinbaseCdpClient === undefined
     ? undefined
     : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger);
+const reconcileOnrampWebhook =
+  pollOnrampTransactions === undefined
+    ? undefined
+    : new ReconcileOnrampWebhookService(offeringRepository, pollOnrampTransactions);
 
 const operatingDistributionRepository = new PrismaOperatingDistributionRepository(database);
 const calculateOperatingDistribution = new CalculateOperatingDistributionService(
@@ -392,6 +397,9 @@ await ensureJobQueue(boss, "maintenance.account_recovery_alert", "scheduled");
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
 // The webhook itself is received and durably enqueued by server.ts/app.ts.
 await ensureJobQueue(boss, "provider_events.didit_webhook", "event");
+// Registered unconditionally, like server.ts, so a send never hits a missing
+// queue; consumed only when a Coinbase client is configured (below).
+await ensureJobQueue(boss, "provider_events.coinbase_onramp_webhook", "event");
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
   tz: "UTC",
@@ -761,6 +769,30 @@ await boss.work("provider_events.didit_webhook", async (jobs) => {
     }
   }
 });
+
+if (reconcileOnrampWebhook !== undefined) {
+  await boss.work("provider_events.coinbase_onramp_webhook", async (jobs) => {
+    for (const job of jobs) {
+      const traceId =
+        typeof job.data === "object" && job.data !== null && "traceId" in job.data
+          ? String((job.data as { traceId: unknown }).traceId)
+          : "unknown";
+      try {
+        const result = await reconcileOnrampWebhook.execute(job.data);
+        logger.info(
+          { trace_id: traceId, job: "provider_events.coinbase_onramp_webhook", ...result },
+          "webhook job completed",
+        );
+      } catch (error) {
+        logger.error(
+          { err: error, trace_id: traceId, job: "provider_events.coinbase_onramp_webhook" },
+          "webhook job failed",
+        );
+        throw error;
+      }
+    }
+  });
+}
 
 // A job sent from this release on that fails after its last retry lands in the
 // dead-letter queue (ensureJobQueue, above); a job queued by an earlier release

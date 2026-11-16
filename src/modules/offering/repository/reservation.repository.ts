@@ -69,6 +69,18 @@ export interface PendingPurchaseReservationForTimer {
   amountEur: string;
 }
 
+export interface OnrampWebhookReconcileJob {
+  reservationId: string;
+  eventId: string | null;
+  eventType: string;
+  traceId: string;
+}
+
+/** Durable receipt for a verified Coinbase onramp webhook: a plain pg-boss send (provider_events.coinbase_onramp_webhook), like enqueueDiditWebhookProcessing. */
+export interface OnrampWebhookJobQueue {
+  enqueueOnrampWebhookReconcile(job: OnrampWebhookReconcileJob): Promise<void>;
+}
+
 /**
  * The one place that performs AD-146's atomic, transaction-scoped capacity
  * check: createReservation locks the offering row (matching the intake
@@ -88,4 +100,16 @@ export interface ReservationRepository {
   expireReservation(input: ExpireReservationInput): Promise<boolean>;
   /** Reservations whose latest money event is still eurc_purchase_pending — the ones a Coinbase transaction-status poll can still move forward. */
   listPendingPurchaseReservationsForTimers(): Promise<PendingPurchaseReservationForTimer[]>;
+  /** The same filter as listPendingPurchaseReservationsForTimers, for one reservation: null once it has left the pending set (funded, lapsed, or unknown). */
+  findPendingPurchaseReservationForTimers(reservationId: string): Promise<PendingPurchaseReservationForTimer | null>;
+  /**
+   * The single recording path for onramp outcomes, shared by the minute poll
+   * and the webhook-triggered reconcile. Under the reservation's FOR UPDATE
+   * row lock (the same lock expireReservation takes) it records only while
+   * the reservation is still 'initiated' with an eurc_purchase_pending /
+   * purchase_failed latest state, and skips when the latest event already
+   * carries this providerReference + capitalState. Returns whether a row was
+   * written, so concurrent or repeated deliveries record one money event.
+   */
+  recordOnrampMoneyEventOnce(input: AdvanceReservationCapitalStateInput): Promise<boolean>;
 }

@@ -46,6 +46,8 @@ function repository(overrides: Partial<ReservationRepository> = {}): Reservation
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn(),
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
+    findPendingPurchaseReservationForTimers: vi.fn().mockResolvedValue(null),
+    recordOnrampMoneyEventOnce: vi.fn().mockResolvedValue(true),
     ...overrides,
   };
 }
@@ -61,7 +63,7 @@ function coinbase(overrides: Partial<CoinbaseCdpClient> = {}): CoinbaseCdpClient
 
 describe("PollOnrampTransactionsService", () => {
   it("advances a successful purchase that covers the reservation to eurc_reserved", async () => {
-    const recordMoneyEvent = vi.fn().mockResolvedValue(undefined);
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
     const listBuyTransactions = vi.fn().mockResolvedValue({
       transactions: [transaction()],
       nextPageKey: null,
@@ -69,7 +71,7 @@ describe("PollOnrampTransactionsService", () => {
     const service = new PollOnrampTransactionsService(
       repository({
         listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordMoneyEvent,
+        recordOnrampMoneyEventOnce,
       }),
       coinbase({ listBuyTransactions }),
       logger,
@@ -79,7 +81,7 @@ describe("PollOnrampTransactionsService", () => {
     const summary = await service.execute("trace_01");
 
     expect(listBuyTransactions).toHaveBeenCalledWith({ partnerUserRef: "reservation_01" });
-    expect(recordMoneyEvent).toHaveBeenCalledWith({
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith({
       reservationId: "reservation_01",
       provider: "coinbase_cdp",
       providerReference: "txn_01",
@@ -92,7 +94,7 @@ describe("PollOnrampTransactionsService", () => {
   });
 
   it("records purchase_failed for a success that does not cover the reservation (wrong asset)", async () => {
-    const recordMoneyEvent = vi.fn().mockResolvedValue(undefined);
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
     const listBuyTransactions = vi.fn().mockResolvedValue({
       transactions: [transaction({ transactionId: "txn_wrong_asset", purchaseCurrency: "ETH" })],
       nextPageKey: null,
@@ -100,7 +102,7 @@ describe("PollOnrampTransactionsService", () => {
     const service = new PollOnrampTransactionsService(
       repository({
         listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordMoneyEvent,
+        recordOnrampMoneyEventOnce,
       }),
       coinbase({ listBuyTransactions }),
       logger,
@@ -109,7 +111,7 @@ describe("PollOnrampTransactionsService", () => {
 
     await service.execute("trace_01");
 
-    expect(recordMoneyEvent).toHaveBeenCalledWith(
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
       expect.objectContaining({
         reservationId: "reservation_01",
         capitalState: "purchase_failed",
@@ -120,7 +122,7 @@ describe("PollOnrampTransactionsService", () => {
   });
 
   it("records purchase_failed for a success that lands far below the reserved amount", async () => {
-    const recordMoneyEvent = vi.fn().mockResolvedValue(undefined);
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
     const listBuyTransactions = vi.fn().mockResolvedValue({
       transactions: [transaction({ transactionId: "txn_underfunded", purchaseAmountValue: "500.000000" })],
       nextPageKey: null,
@@ -128,7 +130,7 @@ describe("PollOnrampTransactionsService", () => {
     const service = new PollOnrampTransactionsService(
       repository({
         listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordMoneyEvent,
+        recordOnrampMoneyEventOnce,
       }),
       coinbase({ listBuyTransactions }),
       logger,
@@ -137,7 +139,7 @@ describe("PollOnrampTransactionsService", () => {
 
     await service.execute("trace_01");
 
-    expect(recordMoneyEvent).toHaveBeenCalledWith(
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
       expect.objectContaining({
         capitalState: "purchase_failed",
         providerReference: "txn_underfunded",
@@ -147,7 +149,7 @@ describe("PollOnrampTransactionsService", () => {
   });
 
   it("records purchase_failed for a zero-value success, not eurc_reserved", async () => {
-    const recordMoneyEvent = vi.fn().mockResolvedValue(undefined);
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
     const listBuyTransactions = vi.fn().mockResolvedValue({
       transactions: [transaction({ transactionId: "txn_zero", purchaseAmountValue: "0.000000" })],
       nextPageKey: null,
@@ -155,7 +157,7 @@ describe("PollOnrampTransactionsService", () => {
     const service = new PollOnrampTransactionsService(
       repository({
         listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordMoneyEvent,
+        recordOnrampMoneyEventOnce,
       }),
       coinbase({ listBuyTransactions }),
       logger,
@@ -164,16 +166,16 @@ describe("PollOnrampTransactionsService", () => {
 
     await service.execute("trace_01");
 
-    expect(recordMoneyEvent).toHaveBeenCalledWith(
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
       expect.objectContaining({ capitalState: "purchase_failed", providerReference: "txn_zero" }),
     );
-    expect(recordMoneyEvent).not.toHaveBeenCalledWith(
+    expect(recordOnrampMoneyEventOnce).not.toHaveBeenCalledWith(
       expect.objectContaining({ capitalState: "eurc_reserved" }),
     );
   });
 
   it("records purchase_failed only once nothing is still in flight", async () => {
-    const recordMoneyEvent = vi.fn().mockResolvedValue(undefined);
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
     const listBuyTransactions = vi.fn().mockResolvedValue({
       transactions: [transaction({ transactionId: "txn_failed", status: "failed" })],
       nextPageKey: null,
@@ -181,7 +183,7 @@ describe("PollOnrampTransactionsService", () => {
     const service = new PollOnrampTransactionsService(
       repository({
         listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordMoneyEvent,
+        recordOnrampMoneyEventOnce,
       }),
       coinbase({ listBuyTransactions }),
       logger,
@@ -190,7 +192,7 @@ describe("PollOnrampTransactionsService", () => {
 
     const summary = await service.execute("trace_01");
 
-    expect(recordMoneyEvent).toHaveBeenCalledWith(
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
       expect.objectContaining({
         reservationId: "reservation_01",
         capitalState: "purchase_failed",
@@ -202,7 +204,7 @@ describe("PollOnrampTransactionsService", () => {
   });
 
   it("leaves capital_state alone while a transaction is still in flight, even alongside a failed attempt", async () => {
-    const recordMoneyEvent = vi.fn();
+    const recordOnrampMoneyEventOnce = vi.fn();
     const listBuyTransactions = vi.fn().mockResolvedValue({
       transactions: [
         transaction({ transactionId: "txn_retry_failed", status: "failed" }),
@@ -213,7 +215,7 @@ describe("PollOnrampTransactionsService", () => {
     const service = new PollOnrampTransactionsService(
       repository({
         listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordMoneyEvent,
+        recordOnrampMoneyEventOnce,
       }),
       coinbase({ listBuyTransactions }),
       logger,
@@ -222,12 +224,12 @@ describe("PollOnrampTransactionsService", () => {
 
     const summary = await service.execute("trace_01");
 
-    expect(recordMoneyEvent).not.toHaveBeenCalled();
+    expect(recordOnrampMoneyEventOnce).not.toHaveBeenCalled();
     expect(summary).toEqual({ checked: 1, acted: 0 });
   });
 
   it("prefers a success over an earlier failed attempt on the same reservation", async () => {
-    const recordMoneyEvent = vi.fn().mockResolvedValue(undefined);
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
     const listBuyTransactions = vi.fn().mockResolvedValue({
       transactions: [
         transaction({ transactionId: "txn_first_failed", status: "failed" }),
@@ -238,7 +240,7 @@ describe("PollOnrampTransactionsService", () => {
     const service = new PollOnrampTransactionsService(
       repository({
         listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordMoneyEvent,
+        recordOnrampMoneyEventOnce,
       }),
       coinbase({ listBuyTransactions }),
       logger,
@@ -247,13 +249,13 @@ describe("PollOnrampTransactionsService", () => {
 
     await service.execute("trace_01");
 
-    expect(recordMoneyEvent).toHaveBeenCalledWith(
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
       expect.objectContaining({ capitalState: "eurc_reserved", providerReference: "txn_retry_success" }),
     );
   });
 
   it("does nothing when no transaction exists yet for the reservation", async () => {
-    const recordMoneyEvent = vi.fn();
+    const recordOnrampMoneyEventOnce = vi.fn();
     const service = new PollOnrampTransactionsService(
       repository({ listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]) }),
       coinbase(),
@@ -263,8 +265,55 @@ describe("PollOnrampTransactionsService", () => {
 
     const summary = await service.execute("trace_01");
 
-    expect(recordMoneyEvent).not.toHaveBeenCalled();
+    expect(recordOnrampMoneyEventOnce).not.toHaveBeenCalled();
     expect(summary).toEqual({ checked: 1, acted: 0 });
+  });
+});
+
+describe("PollOnrampTransactionsService recording idempotency", () => {
+  it("does not count an outcome the repository had already recorded", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(false);
+    const spiedLogger = pino({ level: "silent" });
+    const warn = vi.spyOn(spiedLogger, "warn");
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({
+        listBuyTransactions: vi.fn().mockResolvedValue({
+          transactions: [transaction({ purchaseCurrency: "ETH" })],
+          nextPageKey: null,
+        }),
+      }),
+      spiedLogger,
+      () => now,
+    );
+
+    const summary = await service.execute("trace_01");
+
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
+    expect(summary).toEqual({ checked: 1, acted: 0 });
+  });
+
+  it("reconciles a single reservation through the same recording path", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
+    const listPendingPurchaseReservationsForTimers = vi.fn();
+    const service = new PollOnrampTransactionsService(
+      repository({ listPendingPurchaseReservationsForTimers, recordOnrampMoneyEventOnce }),
+      coinbase({
+        listBuyTransactions: vi.fn().mockResolvedValue({ transactions: [transaction()], nextPageKey: null }),
+      }),
+      logger,
+      () => now,
+    );
+
+    await expect(service.reconcileReservation(pending(), "trace_01")).resolves.toBe(true);
+    expect(listPendingPurchaseReservationsForTimers).not.toHaveBeenCalled();
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
+      expect.objectContaining({ capitalState: "eurc_reserved", providerReference: "txn_01" }),
+    );
   });
 });
 

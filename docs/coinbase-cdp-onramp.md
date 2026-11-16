@@ -9,7 +9,12 @@ This is the buy-side (`EUR -> EURC`) REST surface that backs reservation funding
 3. The response is turned into a hosted purchase URL (`https://pay.coinbase.com/buy/select-asset?sessionToken=...&partnerUserRef=...&redirectUrl=...`) and returned to the client. The investor picks their own payment method inside Coinbase's hosted UI — VistaBlox never collects or stores one, which is load-bearing for `AD-254`'s non-custody position (the purchase must be investor-initiated, not something VistaBlox performs on their behalf).
 4. `partnerUserRef` is the reservation ID, not the account ID, so a later `GET /onramp/v1/buy/user/{partnerUserRef}/transactions` call resolves unambiguously to one reservation even if an account has reserved more than once over time.
 
-There is no onramp/offramp webhook (confirmed against CDP's own API reference, not assumed — the only "Webhooks" product CDP documents is an unrelated on-chain contract-event feature). Advancing `capital_state` past `eurc_purchase_pending` requires polling step 4's endpoint on a schedule: `case_timers.reservation_onramp_poll` (`PollOnrampTransactionsService`, run every minute by the worker process) does this, and is the only worker job so far that the worker skips registering entirely when its provider credentials aren't configured — every other scheduled job's dependencies are always present. See [`investor-offering.md`](investor-offering.md#advancing-capital_state-the-onramp-transaction-poll) for the exact success/failed/still-pending resolution rule and the one race this pass deliberately leaves unresolved.
+Advancing `capital_state` past `eurc_purchase_pending` has two triggers that share one code path:
+
+- **Webhook (fast path).** CDP sends signed onramp transaction events (`onramp.transaction.created`, `.updated`, `.success`, `.failed`) to `POST /webhooks/coinbase-onramp` (see [Webhook](#webhook) below). The API verifies the signature and enqueues a `provider_events.coinbase_onramp_webhook` job carrying only the reservation ID, the event ID and the event type; the worker then re-runs the poll's own reconciliation for that one reservation.
+- **Poll (backstop).** `case_timers.reservation_onramp_poll` (`PollOnrampTransactionsService`, run every minute by the worker process) still lists every reservation awaiting its purchase and calls step 4's endpoint for each. It catches anything the webhook missed: a delivery that never arrived, a subscription that isn't configured, or an event that reached us before CDP's Transaction Status API reflected it. It is the only worker job so far that the worker skips registering entirely when its provider credentials aren't configured; every other scheduled job's dependencies are always present.
+
+Both triggers call `PollOnrampTransactionsService.reconcileReservation`, so they resolve the outcome identically, and both record through `recordOnrampMoneyEventOnce`. That method locks the reservation row (`FOR UPDATE`), re-checks inside the lock that the stage is still `initiated` and the latest `capital_state` is still `eurc_purchase_pending` or `purchase_failed`, and skips the write when the latest event already has the same provider transaction and `capital_state`. A duplicate webhook delivery, a webhook racing the minute poll, and a late `failed` after a recorded success therefore write nothing. See [`investor-offering.md`](investor-offering.md#advancing-capital_state-the-onramp-transaction-poll) for the exact success/failed/still-pending resolution rule and the one race this pass deliberately leaves unresolved.
 
 ## Authentication
 
@@ -23,7 +28,26 @@ Configure all three of these together, or leave all three empty to disable reser
 - `COINBASE_CDP_API_KEY_SECRET`
 - `COINBASE_ONRAMP_REDIRECT_URL`
 
+`COINBASE_ONRAMP_WEBHOOK_SECRET` is optional and separate: it enables the webhook route (see below). Leave it empty and the route is not mounted at all (requests get `404`), while the minute poll keeps working on its own. It requires `COINBASE_CDP_API_KEY_ID`, since the webhook only triggers a CDP re-fetch.
+
 `COINBASE_CDP_API_BASE_URL` defaults to `https://api.developer.coinbase.com`. `COINBASE_CDP_PAY_HOSTED_URL` defaults to `https://pay.coinbase.com/buy/select-asset`. `COINBASE_ONRAMP_BLOCKCHAIN` defaults to `base`.
+
+## Webhook
+
+Source: CDP's onramp webhook and webhook signature-verification documentation on `docs.cdp.coinbase.com`, checked when this was built.
+
+**Subscribing.** Create one subscription per environment with the CDP CLI, pointing at `https://<api-host>/webhooks/coinbase-onramp` and listing the four `onramp.transaction.*` event types (`cdp data webhooks subscriptions create`). The response's `metadata.secret` is the value for `COINBASE_ONRAMP_WEBHOOK_SECRET`. The API must also have the CDP client configured; without it the route stays unmounted even when the secret is set. On staging, `docker-compose.staging.yml`'s `&app-environment` anchor must pass the variable through before it reaches the container.
+
+**Verification** (`CoinbaseOnrampWebhookVerifier`):
+
+- The route is mounted with `express.raw()` ahead of the app-wide JSON parser, so the HMAC is computed over the exact bytes CDP sent (capped at 256 KB).
+- The signature header is `X-Webhook-Signature: t=<unix seconds>,v0=<hex>,...` (`X-Hook0-Signature` is accepted as CDP's deprecated name for the same value). Only `v0` is checked: `HMAC-SHA256(secret, "<t>.<raw body>")`, compared in constant time. Any other scheme in the header is ignored.
+- `t` must be within 5 minutes of the server clock, in either direction, which is CDP's recommended maximum age and bounds replay of a captured delivery.
+- A missing, malformed, stale or mismatched signature gets `401` with code `offering.coinbase_webhook_invalid`. A signed body that is not JSON, or has no `eventType`, gets `400` with `offering.coinbase_webhook_payload_invalid`.
+
+**What the body is trusted for.** Only `eventType` and `partnerUserRef` are read. Status, amounts, wallet address and the user's country are never taken from the body: the worker re-fetches the reservation's transactions from CDP, exactly as the poll does. A verified event is acknowledged with `200 {"received": true}` but not enqueued when it is not an `onramp.transaction.*` event or its `partnerUserRef` is not shaped like a reservation ID. Neither the body nor any PII in it (`walletAddress`, `country`, `userId`) is logged or stored in the job payload.
+
+**Processing.** `ReceiveCoinbaseOnrampWebhookService` enqueues `provider_events.coinbase_onramp_webhook` (event-job retry profile, dead-lettered after its last retry). Every delivery is enqueued, duplicates included; idempotency is enforced where the money event is recorded, not by an event-ID inbox. The worker's `ReconcileOnrampWebhookService` loads the reservation only if it is still awaiting its purchase, then calls `reconcileReservation`. Its log line reports `ignored` (no longer awaiting a purchase), `recorded`, or `unchanged` (still in flight at CDP, or this outcome was already recorded). The consumer is registered only when the worker has a CDP client; the queue itself is always created, so a send never fails against a missing queue.
 
 ## Data boundary
 

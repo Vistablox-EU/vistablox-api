@@ -1032,6 +1032,171 @@ describe.skipIf(databaseUrl === undefined)(
         }),
       ).toBe(0);
     });
+
+    it("records an onramp outcome once per transaction and state, even under concurrent webhook and poll delivery", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      const now = Date.now();
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId,
+        amountEur: "100.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(now),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "channel_01",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "100.00",
+        amountEurc: null,
+        recordedAt: new Date(now + 1_000),
+      });
+      expect(await repository.findPendingPurchaseReservationForTimers(reservationId)).toMatchObject({
+        reservationId,
+      });
+
+      const failed = {
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_failed_01",
+        capitalState: "purchase_failed" as const,
+        amountEur: "100.00",
+        amountEurc: null,
+        recordedAt: new Date(now + 2_000),
+      };
+      expect(await repository.recordOnrampMoneyEventOnce(failed)).toBe(true);
+      expect(await repository.recordOnrampMoneyEventOnce({ ...failed, recordedAt: new Date(now + 3_000) })).toBe(
+        false,
+      );
+
+      const funded = {
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "txn_success_01",
+        capitalState: "eurc_reserved" as const,
+        amountEur: "100.00",
+        amountEurc: "99.000000",
+        recordedAt: new Date(now + 4_000),
+      };
+      const results = await Promise.all([
+        repository.recordOnrampMoneyEventOnce(funded),
+        repository.recordOnrampMoneyEventOnce(funded),
+        repository.recordOnrampMoneyEventOnce(funded),
+      ]);
+      expect(results.filter(Boolean)).toHaveLength(1);
+
+      const events = await database.moneyEvent.findMany({
+        where: { reservationId },
+        orderBy: { recordedAt: "asc" },
+      });
+      expect(events.map((event) => event.capitalState)).toEqual([
+        "initiated",
+        "eurc_purchase_pending",
+        "purchase_failed",
+        "eurc_reserved",
+      ]);
+      // Funded now: no longer a pending purchase, so a late failure is ignored.
+      expect(await repository.findPendingPurchaseReservationForTimers(reservationId)).toBeNull();
+      expect(
+        await repository.recordOnrampMoneyEventOnce({
+          ...failed,
+          providerReference: "txn_failed_02",
+          recordedAt: new Date(now + 5_000),
+        }),
+      ).toBe(false);
+    });
+
+    it("never records an onramp outcome on a reservation that already lapsed", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const reservationId = `reservation_${randomUUID()}`;
+      const now = Date.now();
+      await repository.createReservation({
+        reservationId,
+        offeringId,
+        accountId,
+        amountEur: "100.00",
+        disclosurePackVersionAtReservation: null,
+        traceId: `trace_${suffix}`,
+        createdAt: new Date(now),
+      });
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "channel_01",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "100.00",
+        amountEurc: null,
+        recordedAt: new Date(now + 1_000),
+      });
+      expect(
+        await repository.expireReservation({
+          reservationId,
+          traceId: `trace_${suffix}`,
+          expiredAt: new Date(now + 2_000),
+        }),
+      ).toBe(true);
+
+      expect(
+        await repository.recordOnrampMoneyEventOnce({
+          reservationId,
+          provider: "coinbase_cdp",
+          providerReference: "txn_late_01",
+          capitalState: "eurc_reserved",
+          amountEur: "100.00",
+          amountEurc: "99.000000",
+          recordedAt: new Date(now + 3_000),
+        }),
+      ).toBe(false);
+      expect(await database.moneyEvent.count({ where: { reservationId, providerReference: "txn_late_01" } })).toBe(0);
+    });
+
+    it("never both funds and lapses a reservation when expiry races onramp recording", async () => {
+      const offeringId = await createOffering({ targetRaiseEur: "1000.00" });
+      const now = Date.now();
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const reservationId = `reservation_${randomUUID()}`;
+        await repository.createReservation({
+          reservationId,
+          offeringId,
+          accountId,
+          amountEur: "10.00",
+          disclosurePackVersionAtReservation: null,
+          traceId: `trace_${suffix}`,
+          createdAt: new Date(now),
+        });
+        await repository.recordMoneyEvent({
+          reservationId,
+          provider: "coinbase_cdp",
+          providerReference: "channel_01",
+          capitalState: "eurc_purchase_pending",
+          amountEur: "10.00",
+          amountEurc: null,
+          recordedAt: new Date(now + 1_000),
+        });
+
+        const [recorded, expired] = await Promise.all([
+          repository.recordOnrampMoneyEventOnce({
+            reservationId,
+            provider: "coinbase_cdp",
+            providerReference: `txn_race_${attempt}`,
+            capitalState: "eurc_reserved",
+            amountEur: "10.00",
+            amountEurc: "9.900000",
+            recordedAt: new Date(now + 2_000),
+          }),
+          repository.expireReservation({
+            reservationId,
+            traceId: `trace_${suffix}`,
+            expiredAt: new Date(now + 2_000),
+          }),
+        ]);
+        expect(recorded !== expired).toBe(true);
+      }
+    });
   },
 );
 
