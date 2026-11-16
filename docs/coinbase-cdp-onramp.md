@@ -28,3 +28,16 @@ Configure all three of these together, or leave all three empty to disable reser
 ## Data boundary
 
 `listBuyTransactions` normalizes Coinbase's `OnrampTransaction` response down to what `capital_state` advancement actually needs (transaction ID, status, wallet address, purchase/payment amounts, tx hash, timestamps); fields like `user_id` and `end_partner_name` are read by nothing in this codebase and are dropped rather than persisted or logged.
+
+## Errors and operator alerts
+
+The client classifies every CDP failure by HTTP status and never reads or logs the response body.
+
+| Upstream result | API error | Retry? | Operator signal |
+| --- | --- | --- | --- |
+| 5xx, 429, 408, network failure, timeout | `offering.coinbase_provider_unavailable` (503) | Yes, with backoff | None (transient) |
+| 401, 403 | `offering.coinbase_provider_auth_rejected` (500) | No | `event: coinbase_cdp.auth_rejected`, `severity: error` |
+| Any other 4xx | `offering.coinbase_provider_request_rejected` (422) | No, not unchanged | `event: coinbase_cdp.request_rejected`, `severity: warn` |
+| Unusable `COINBASE_CDP_API_KEY_SECRET` (no request sent) | `offering.coinbase_provider_key_invalid` (500) | No | `event: coinbase_cdp.key_invalid`, `severity: error` |
+
+Alert lines follow the wallet-registry convention: a structured pino line with a stable dotted `event`, a `severity` (`error` pages, `warn` opens a ticket), and snake_case fields (`operation`, `http_status`). Alert rules key on `event` and `severity`, never on the message text. A 401/403 or invalid key means the API key is wrong, revoked, or lacks permissions; retrying will not help until the configuration is fixed.

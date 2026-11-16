@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 
 import { importJWK, importPKCS8, SignJWT } from "jose";
+import type { Logger } from "pino";
 import { z } from "zod";
 
 import { toChecksumWalletAddress } from "../../../shared/domain/wallet-address.js";
@@ -13,6 +14,36 @@ import type {
 } from "../application/coinbase-cdp-client.js";
 
 type Fetch = typeof globalThis.fetch;
+
+type CoinbaseCdpOperation = "create_onramp_session_token" | "list_buy_transactions";
+
+/**
+ * Stable event names an operator alert rule keys on (with `severity`), the
+ * same convention as the wallet-registry alerts. Renaming one breaks the rule.
+ */
+export const COINBASE_CDP_ALERT_EVENTS = {
+  authRejected: "coinbase_cdp.auth_rejected",
+  keyInvalid: "coinbase_cdp.key_invalid",
+  requestRejected: "coinbase_cdp.request_rejected",
+} as const;
+
+/**
+ * How a non-2xx CDP response is handled:
+ * - `retryable`: 5xx, 408, 429 (and anything else unexpected). A transient
+ *   outage; the same request may succeed later.
+ * - `auth`: 401/403. Our API key is wrong, revoked or lacks the scope. No
+ *   retry will fix it; an operator has to.
+ * - `rejected`: any other 4xx. CDP refused this particular request; sending
+ *   it again unchanged will not succeed.
+ */
+export type CoinbaseCdpFailureClass = "retryable" | "auth" | "rejected";
+
+export function classifyCoinbaseCdpStatus(status: number): CoinbaseCdpFailureClass {
+  if (status === 401 || status === 403) return "auth";
+  if (status === 408 || status === 429) return "retryable";
+  if (status >= 400 && status < 500) return "rejected";
+  return "retryable";
+}
 
 const amountSchema = z.object({ currency: z.string(), value: z.string() });
 
@@ -66,6 +97,7 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
       audience?: string[];
       fetch?: Fetch;
       timeoutMs?: number;
+      logger?: Pick<Logger, "error" | "warn">;
     },
   ) {}
 
@@ -73,7 +105,7 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
     walletAddress: string;
     blockchain: string;
   }): Promise<CreateOnrampSessionTokenResult> {
-    const response = await this.request("POST", "/onramp/v1/token", {
+    const response = await this.request("create_onramp_session_token", "POST", "/onramp/v1/token", {
       // The API's canonical form is lowercase; Coinbase is shown EIP-55.
       addresses: [{ address: toChecksumWalletAddress(input.walletAddress), blockchains: [input.blockchain] }],
     });
@@ -100,7 +132,7 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
   }): Promise<{ transactions: OnrampTransactionSummary[]; nextPageKey: string | null }> {
     const path = `/onramp/v1/buy/user/${encodeURIComponent(input.partnerUserRef)}/transactions`;
     const query = input.pageKey === undefined ? "" : `?page_key=${encodeURIComponent(input.pageKey)}`;
-    const response = await this.request("GET", `${path}${query}`);
+    const response = await this.request("list_buy_transactions", "GET", `${path}${query}`);
     const parsed = listBuyTransactionsResponseSchema.safeParse(await safeJson(response));
     if (!parsed.success) throw invalidProviderResponseError(parsed.error);
     return {
@@ -110,6 +142,7 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
   }
 
   private async request(
+    operation: CoinbaseCdpOperation,
     method: "GET" | "POST",
     pathWithQuery: string,
     body?: Record<string, unknown>,
@@ -118,6 +151,7 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
     const url = new URL(pathWithQuery, this.options.baseUrl);
     const [pathOnly] = pathWithQuery.split("?");
     const jwt = await this.signJwt({
+      operation,
       method,
       host: url.host,
       path: pathOnly ?? pathWithQuery,
@@ -138,14 +172,45 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
       throw providerUnavailableError(error);
     }
     if (!response.ok) {
-      throw providerUnavailableError(
-        new Error(`Coinbase CDP request failed with HTTP ${response.status}`),
-      );
+      // The response body is never read: it may echo request data or carry
+      // provider internals, and nothing here needs it.
+      const cause = new Error(`Coinbase CDP request failed with HTTP ${response.status}`);
+      switch (classifyCoinbaseCdpStatus(response.status)) {
+        case "auth":
+          this.options.logger?.error(
+            {
+              event: COINBASE_CDP_ALERT_EVENTS.authRejected,
+              severity: "error",
+              operation,
+              http_status: response.status,
+            },
+            "Coinbase CDP rejected the platform's API credentials; check COINBASE_CDP_API_KEY_ID/SECRET and the key's permissions",
+          );
+          throw providerAuthRejectedError(cause);
+        case "rejected":
+          this.options.logger?.warn(
+            {
+              event: COINBASE_CDP_ALERT_EVENTS.requestRejected,
+              severity: "warn",
+              operation,
+              http_status: response.status,
+            },
+            "Coinbase CDP rejected the request as invalid",
+          );
+          throw providerRequestRejectedError(cause);
+        case "retryable":
+          throw providerUnavailableError(cause);
+      }
     }
     return response;
   }
 
-  private async signJwt(input: { method: string; host: string; path: string }): Promise<string> {
+  private async signJwt(input: {
+    operation: CoinbaseCdpOperation;
+    method: string;
+    host: string;
+    path: string;
+  }): Promise<string> {
     const now = Math.floor(Date.now() / 1000);
     const nonce = randomBytes(16).toString("hex");
     const claims = {
@@ -175,6 +240,10 @@ export class HttpCoinbaseCdpClient implements CoinbaseCdpClient {
         .sign(edKey);
     }
 
+    this.options.logger?.error(
+      { event: COINBASE_CDP_ALERT_EVENTS.keyInvalid, severity: "error", operation: input.operation },
+      "COINBASE_CDP_API_KEY_SECRET is neither a PEM EC key nor a base64 Ed25519 key",
+    );
     throw new AppError({
       code: "offering.coinbase_provider_key_invalid",
       title: "Onramp unavailable",
@@ -249,6 +318,26 @@ function providerUnavailableError(cause: unknown): AppError {
     title: "Onramp unavailable",
     status: 503,
     detail: "The Coinbase CDP onramp provider is temporarily unavailable.",
+    cause,
+  });
+}
+
+function providerAuthRejectedError(cause: unknown): AppError {
+  return new AppError({
+    code: "offering.coinbase_provider_auth_rejected",
+    title: "Onramp unavailable",
+    status: 500,
+    detail: "The onramp provider is misconfigured on our side. Retrying will not help until it is fixed.",
+    cause,
+  });
+}
+
+function providerRequestRejectedError(cause: unknown): AppError {
+  return new AppError({
+    code: "offering.coinbase_provider_request_rejected",
+    title: "Onramp request rejected",
+    status: 422,
+    detail: "The Coinbase CDP onramp provider rejected this request. Retrying it unchanged will not succeed.",
     cause,
   });
 }

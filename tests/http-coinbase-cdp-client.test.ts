@@ -204,15 +204,118 @@ describe("Coinbase CDP HTTP client", () => {
     );
   });
 
-  it("returns a safe provider error without response content", async () => {
-    const fetch = vi.fn().mockResolvedValue(new Response("sensitive upstream error", { status: 401 }));
-    const client = buildClient(fetch);
+  describe("non-2xx classification", () => {
+    function buildLoggingClient(fetch: FetchLike, secret = apiKeySecret) {
+      const logger = { error: vi.fn(), warn: vi.fn() };
+      const client = new HttpCoinbaseCdpClient({
+        baseUrl: "https://api.developer.coinbase.com",
+        payHostedUrl: "https://pay.coinbase.com/buy/select-asset",
+        apiKeyId,
+        apiKeySecret: secret,
+        fetch,
+        logger,
+      });
+      return { client, logger };
+    }
 
-    await expect(
-      client.createOnrampSessionToken({ walletAddress: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F", blockchain: "base" }),
-    ).rejects.toMatchObject({
-      code: "offering.coinbase_provider_unavailable",
-      message: "The Coinbase CDP onramp provider is temporarily unavailable.",
+    const createToken = (client: HttpCoinbaseCdpClient) =>
+      client.createOnrampSessionToken({
+        walletAddress: "0x71C7656EC7ab88b098defB751B7401B5f6d8976F",
+        blockchain: "base",
+      });
+
+    it.each([500, 502, 503, 504, 429, 408])(
+      "maps HTTP %i to the retryable provider-unavailable 503 without alerting",
+      async (status) => {
+        const { client, logger } = buildLoggingClient(
+          vi.fn().mockResolvedValue(new Response("sensitive upstream error", { status })),
+        );
+
+        const error = await createToken(client).catch((caught: unknown) => caught);
+
+        expect(error).toMatchObject({
+          code: "offering.coinbase_provider_unavailable",
+          status: 503,
+          message: "The Coinbase CDP onramp provider is temporarily unavailable.",
+        });
+        expect(JSON.stringify(error)).not.toContain("sensitive upstream error");
+        expect(logger.error).not.toHaveBeenCalled();
+        expect(logger.warn).not.toHaveBeenCalled();
+      },
+    );
+
+    it("maps a network failure or timeout to the retryable provider-unavailable 503", async () => {
+      const { client, logger } = buildLoggingClient(
+        vi.fn().mockRejectedValue(new DOMException("The operation was aborted due to timeout", "TimeoutError")),
+      );
+
+      await expect(createToken(client)).rejects.toMatchObject({
+        code: "offering.coinbase_provider_unavailable",
+        status: 503,
+      });
+      expect(logger.error).not.toHaveBeenCalled();
+    });
+
+    it.each([401, 403])(
+      "maps HTTP %i to a non-retryable internal error and raises an operator alert",
+      async (status) => {
+        const { client, logger } = buildLoggingClient(
+          vi.fn().mockResolvedValue(new Response("sensitive upstream error", { status })),
+        );
+
+        await expect(client.listBuyTransactions({ partnerUserRef: "reservation_01" })).rejects.toMatchObject({
+          code: "offering.coinbase_provider_auth_rejected",
+          status: 500,
+        });
+        expect(logger.error).toHaveBeenCalledTimes(1);
+        const [fields, message] = logger.error.mock.calls[0] as [Record<string, unknown>, string];
+        expect(fields).toEqual({
+          event: "coinbase_cdp.auth_rejected",
+          severity: "error",
+          operation: "list_buy_transactions",
+          http_status: status,
+        });
+        expect(message).not.toContain("sensitive upstream error");
+      },
+    );
+
+    it.each([400, 404, 409, 422])(
+      "maps HTTP %i to a non-retryable client-facing 422 and logs a warning",
+      async (status) => {
+        const { client, logger } = buildLoggingClient(
+          vi.fn().mockResolvedValue(new Response("sensitive upstream error", { status })),
+        );
+
+        await expect(createToken(client)).rejects.toMatchObject({
+          code: "offering.coinbase_provider_request_rejected",
+          status: 422,
+        });
+        expect(logger.error).not.toHaveBeenCalled();
+        expect(logger.warn).toHaveBeenCalledWith(
+          {
+            event: "coinbase_cdp.request_rejected",
+            severity: "warn",
+            operation: "create_onramp_session_token",
+            http_status: status,
+          },
+          expect.any(String),
+        );
+      },
+    );
+
+    it("raises an operator alert for an unusable API key secret without calling CDP", async () => {
+      const fetch = vi.fn();
+      const { client, logger } = buildLoggingClient(fetch, "not-a-key");
+
+      await expect(createToken(client)).rejects.toMatchObject({
+        code: "offering.coinbase_provider_key_invalid",
+        status: 500,
+      });
+      expect(fetch).not.toHaveBeenCalled();
+      expect(logger.error).toHaveBeenCalledWith(
+        { event: "coinbase_cdp.key_invalid", severity: "error", operation: "create_onramp_session_token" },
+        expect.any(String),
+      );
     });
   });
 
