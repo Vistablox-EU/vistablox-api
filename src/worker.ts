@@ -33,6 +33,7 @@ import { CommitOfferingFinalizationService } from "./modules/offering/applicatio
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
 import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { PrismaOnrampPaymentRepository } from "./modules/offering/repository/prisma-onramp-payment.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { CalculateOperatingDistributionService } from "./modules/rental/application/calculate-operating-distribution.service.js";
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
@@ -159,6 +160,7 @@ const processDiditWebhook = new ProcessDiditWebhookService(
 );
 
 const offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
+const onrampPaymentRepository = new PrismaOnrampPaymentRepository(database);
 const intakeRepository = new PrismaIntakeRepository(database, boss, kycRepository);
 const sendApplicantReminders = new SendApplicantResponseRemindersService(
   intakeRepository,
@@ -184,7 +186,7 @@ const coinbaseCdpClient =
 const pollOnrampTransactions =
   coinbaseCdpClient === undefined
     ? undefined
-    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger);
+    : new PollOnrampTransactionsService(offeringRepository, onrampPaymentRepository, coinbaseCdpClient, logger);
 
 const operatingDistributionRepository = new PrismaOperatingDistributionRepository(database);
 const calculateOperatingDistribution = new CalculateOperatingDistributionService(

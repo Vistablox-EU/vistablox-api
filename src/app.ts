@@ -108,6 +108,9 @@ import {
   createOfferingRouter,
 } from "./modules/offering/api/offering.router.js";
 import { createOfferingOperationsRouter } from "./modules/offering/api/offering-operations.router.js";
+import { createLatePaymentOperationsRouter } from "./modules/offering/api/late-payment-operations.router.js";
+import { ListLatePaymentsService } from "./modules/offering/application/list-late-payments.service.js";
+import type { LatePaymentReviewRepository } from "./modules/offering/repository/onramp-payment.repository.js";
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
 import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
@@ -362,6 +365,10 @@ export interface AppDependencies {
         store: WritableDisclosureDocumentStore;
         scanner: MalwareScanner;
       };
+    };
+    /** Staff read of the late-payment manual-review queue (issue #168). */
+    latePayments?: {
+      repository: LatePaymentReviewRepository;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -645,6 +652,17 @@ export function createApp(dependencies: AppDependencies): Express {
             },
       ),
     );
+    if (dependencies.protectedApi.latePayments !== undefined) {
+      app.use(
+        "/internal/v1/offerings/late-payments",
+        createLatePaymentOperationsRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new ListLatePaymentsService(dependencies.protectedApi.latePayments.repository),
+        ),
+      );
+    }
     if (dependencies.protectedApi.offeringOperations !== undefined) {
       const offeringDocuments = dependencies.protectedApi.offeringOperations.documents;
       app.use(
