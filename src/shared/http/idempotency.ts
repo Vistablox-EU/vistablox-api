@@ -54,7 +54,14 @@ export function createIdempotencyMiddleware(
       })
       .then((existing) => {
         if (existing === null) {
-          interceptResponse(response, (status, body) => {
+          interceptResponse(response, async (status, body) => {
+            // A 5xx is a server-side failure (a dependency outage, a crash),
+            // not an outcome of the client's request. Persisting it would
+            // replay that failure for the whole retention window and block
+            // the client's same-key retry (#122), so no row is written and a
+            // retry with this key runs the handler again. 2xx and 4xx are
+            // final outcomes and stay cached.
+            if (status >= 500) return;
             const accountId = response.locals.authContext?.accountId ?? null;
             const now = clock();
             return store.save({
