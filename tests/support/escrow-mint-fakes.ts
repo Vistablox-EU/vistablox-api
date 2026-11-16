@@ -34,16 +34,31 @@ export interface FakeCampaign {
  *   mine-then-reject   accepted and mined, but the call rejects (an RPC timeout, or the
  *                      process dying right after the node accepted it): the caller never
  *                      sees the hash
+ *   pending-then-reject accepted but not mined yet, and the call rejects: the caller never
+ *                      sees the hash of a mint that can still be mined
  *   replaced           accepted, then replaced in the mempool by another transaction from the
  *                      same account and nonce: the mint never executes, and waiting for the
  *                      returned hash resolves with the REPLACEMENT's receipt (as viem's
  *                      waitForTransactionReceipt does), while looking the hash up directly
  *                      finds no receipt
+ *
+ * Every operator transaction takes a nonce, as on a real chain: the one write.mint is
+ * called with ({ nonce }), or the next free one. A nonce below the mined count is
+ * rejected ("nonce too low"), as is one a pending transaction holds; a mined, reverted
+ * or replaced transaction uses its nonce up.
  */
-export type MintMode = "mine" | "revert" | "pending" | "reject" | "mine-then-reject" | "replaced";
+export type MintMode =
+  | "mine"
+  | "revert"
+  | "pending"
+  | "reject"
+  | "mine-then-reject"
+  | "pending-then-reject"
+  | "replaced";
 
 interface FakeTransaction {
   status: "success" | "reverted" | "pending";
+  nonce?: bigint;
   apply?: () => void;
 }
 
@@ -72,7 +87,7 @@ export class FakeEscrowChain {
   public readonly transactions = new Map<string, FakeTransaction>();
   public readonly transferLogs: FakeTransferLog[] = [];
   // Every write.mint call that reached the node (a "reject" never does).
-  public readonly mints: Array<{ hash: string; to: string; tokenId: bigint; amount: bigint }> = [];
+  public readonly mints: Array<{ hash: string; to: string; tokenId: bigint; amount: bigint; nonce?: bigint }> = [];
   public readonly mintModes: MintMode[] = [];
   // hash -> the hash of the transaction that replaced it (see MintMode "replaced").
   public readonly replacements = new Map<string, string>();
@@ -80,6 +95,11 @@ export class FakeEscrowChain {
   public onMint: (() => void) | undefined;
   public failWithdrawRaisedOnce = false;
   public authorizeReverts = false;
+  public readonly operatorAddress = "0xOPERATOR";
+  // How many operator transactions have been mined: the next nonce a block can include.
+  public minedNonceCount = 0n;
+  // When set, the operator nonce at "finalized"/"safe", lagging the latest block's.
+  public finalizedNonceCount: bigint | undefined;
   private txCounter = 0;
 
   public readonly config = { propertyContractAddress: PROPERTY_CONTRACT };
@@ -102,24 +122,49 @@ export class FakeEscrowChain {
    */
   public seedUnrecordedMint(to: string, tokenId: bigint, amount: bigint): string {
     const hash = this.nextHash();
-    this.mints.push({ hash, to, tokenId, amount });
+    const nonce = this.nextFreeNonce();
+    this.mints.push({ hash, to, tokenId, amount, nonce });
     this.applyMint(hash, to, tokenId, amount);
-    this.transactions.set(hash, { status: "success" });
+    this.transactions.set(hash, { status: "success", nonce });
+    this.minedNonceCount = nonce + 1n;
     return hash;
   }
 
   /** Mines the oldest still-pending transaction, applying its effect. */
   public mineNextPending(): string {
-    const entry = [...this.transactions.entries()].find(([, tx]) => tx.status === "pending");
+    const entry = [...this.transactions.entries()].find(
+      ([hash, tx]) => tx.status === "pending" && !this.replacements.has(hash),
+    );
     if (entry === undefined) throw new Error("no pending transaction to mine");
     const [hash, tx] = entry;
     tx.status = "success";
+    if (tx.nonce !== undefined) this.minedNonceCount = tx.nonce + 1n;
     tx.apply?.();
     return hash;
   }
 
+  /** Mines an operator transaction that is not a mint (another job's, or a manual one). */
+  public consumeNonce(): void {
+    this.minedNonceCount += 1n;
+  }
+
+  private get pendingNonces(): bigint[] {
+    return [...this.transactions.entries()]
+      .filter(([hash, tx]) => tx.status === "pending" && tx.nonce !== undefined && !this.replacements.has(hash))
+      .map(([, tx]) => tx.nonce!);
+  }
+
+  private nextFreeNonce(): bigint {
+    return this.pendingNonces.reduce((next, nonce) => (nonce >= next ? nonce + 1n : next), this.minedNonceCount);
+  }
+
   public readonly publicClient = {
     getBlockNumber: vi.fn(async () => this.blockNumber),
+    getTransactionCount: vi.fn(async ({ blockTag }: { address: string; blockTag: string }) => {
+      if (blockTag === "pending") return Number(this.nextFreeNonce());
+      if (blockTag === "latest") return Number(this.minedNonceCount);
+      return Number(this.finalizedNonceCount ?? this.minedNonceCount);
+    }),
     waitForTransactionReceipt: vi.fn(async ({ hash }: { hash: string }) => {
       this.timeline.push(`chain:waitForReceipt(${hash})`);
       const tx = this.transactions.get(hash);
@@ -185,35 +230,46 @@ export class FakeEscrowChain {
       authorizeHolder: vi.fn(async ([wallet, tokenId]: [string, bigint]) => {
         if (this.authorizeReverts) {
           const hash = this.nextHash();
-          this.transactions.set(hash, { status: "reverted" });
+          this.transactions.set(hash, { status: "reverted", nonce: this.nextFreeNonce() });
+          this.minedNonceCount = this.nextFreeNonce() + 1n;
           return hash;
         }
         this.authorizedHolders.add(this.balanceKey(wallet, tokenId));
         return this.sendConfirmedTransaction();
       }),
-      mint: vi.fn(async ([to, tokenId, amount]: [string, bigint, bigint, string]) => {
-        this.timeline.push("chain:mint");
-        const mode = this.mintModes.shift() ?? "mine";
-        if (mode === "reject") throw new Error("RPC error: connection refused");
+      mint: vi.fn(
+        async ([to, tokenId, amount]: [string, bigint, bigint, string], options?: { nonce?: number }) => {
+          this.timeline.push("chain:mint");
+          const mode = this.mintModes.shift() ?? "mine";
+          if (mode === "reject") throw new Error("RPC error: connection refused");
 
-        const hash = this.nextHash();
-        this.mints.push({ hash, to, tokenId, amount });
-        const apply = () => this.applyMint(hash, to, tokenId, amount);
-        if (mode === "revert") {
-          this.transactions.set(hash, { status: "reverted" });
-        } else if (mode === "pending") {
-          this.transactions.set(hash, { status: "pending", apply });
-        } else if (mode === "replaced") {
-          this.transactions.set(hash, { status: "pending", apply });
-          this.replacements.set(hash, `${hash}-replacement`);
-        } else {
-          apply();
-          this.transactions.set(hash, { status: "success" });
-        }
-        this.onMint?.();
-        if (mode === "mine-then-reject") throw new Error("RPC error: request timed out");
-        return hash;
-      }),
+          const nonce = options?.nonce === undefined ? this.nextFreeNonce() : BigInt(options.nonce);
+          if (nonce < this.minedNonceCount) throw new Error(`nonce too low: ${nonce}`);
+          if (this.pendingNonces.includes(nonce)) throw new Error("replacement transaction underpriced");
+
+          const hash = this.nextHash();
+          this.mints.push({ hash, to, tokenId, amount, nonce });
+          const apply = () => this.applyMint(hash, to, tokenId, amount);
+          if (mode === "revert") {
+            this.transactions.set(hash, { status: "reverted", nonce });
+            this.minedNonceCount = nonce + 1n;
+          } else if (mode === "pending" || mode === "pending-then-reject") {
+            this.transactions.set(hash, { status: "pending", nonce, apply });
+          } else if (mode === "replaced") {
+            this.transactions.set(hash, { status: "pending", nonce, apply });
+            this.replacements.set(hash, `${hash}-replacement`);
+            this.minedNonceCount = nonce + 1n;
+          } else {
+            apply();
+            this.transactions.set(hash, { status: "success", nonce });
+            this.minedNonceCount = nonce + 1n;
+          }
+          this.onMint?.();
+          if (mode === "mine-then-reject") throw new Error("RPC error: request timed out");
+          if (mode === "pending-then-reject") throw new Error("RPC error: request timed out");
+          return hash;
+        },
+      ),
     },
     getEvents: {
       TransferSingle: vi.fn(
@@ -247,9 +303,13 @@ export class FakeEscrowChain {
     return `0xtx${++this.txCounter}`;
   }
 
+  // Mined at once under the next free nonce (a model shortcut: a real chain would
+  // first need any pending transaction below it mined).
   private sendConfirmedTransaction(): string {
     const hash = this.nextHash();
-    this.transactions.set(hash, { status: "success" });
+    const nonce = this.nextFreeNonce();
+    this.transactions.set(hash, { status: "success", nonce });
+    this.minedNonceCount = nonce + 1n;
     return hash;
   }
 }
@@ -348,6 +408,7 @@ export class InMemorySettlementRepository implements SettlementRepository {
       attempt: 1,
       attemptedAt: new Date(0),
       searchFromBlock: 0n,
+      mintNonce: null,
       ...intent,
     };
     this.intents.set(full.id, full);
@@ -393,6 +454,7 @@ export class InMemorySettlementRepository implements SettlementRepository {
         attempt: 1,
         attemptedAt: input.attemptedAt,
         searchFromBlock: input.searchFromBlock,
+        mintNonce: input.mintNonce,
       };
       this.intents.set(intent.id, intent);
       return { intent: { ...intent }, created: true };
@@ -403,6 +465,7 @@ export class InMemorySettlementRepository implements SettlementRepository {
     intentId: string;
     expectedAttempt: number;
     attemptedAt: Date;
+    mintNonce: bigint;
   }): Promise<boolean> {
     return this.run("restartEscrowMintAttempt", () => {
       const intent = this.intents.get(input.intentId);
@@ -413,6 +476,7 @@ export class InMemorySettlementRepository implements SettlementRepository {
       intent.mintTxHash = null;
       intent.attempt += 1;
       intent.attemptedAt = input.attemptedAt;
+      intent.mintNonce = input.mintNonce;
       return true;
     });
   }
