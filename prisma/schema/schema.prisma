@@ -840,6 +840,11 @@ model EscrowMintIntent {
   // search that recovers the transaction hash after a crash. Null when the mint
   // was already on-chain before the intent was written.
   searchFromBlock      BigInt?   @map("search_from_block")
+  // The operator account nonce the latest attempt's mint is sent with, written
+  // before the send. Once the chain's confirmed nonce has passed it, a mint
+  // that left no log can never land. Null for attempts started before nonces
+  // were pinned, and for a mint already on-chain before the intent was written.
+  mintNonce            BigInt?   @map("mint_nonce")
   createdAt            DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
   recordedAt           DateTime? @map("recorded_at") @db.Timestamptz(6)
 
