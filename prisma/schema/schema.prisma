@@ -619,13 +619,15 @@ model Reservation {
   reservationStage                   String    @default("initiated") @map("reservation_stage")
   disclosurePackVersionAtReservation String?   @map("disclosure_pack_version_at_reservation")
   reconfirmedAt                      DateTime? @map("reconfirmed_at") @db.Timestamptz(6)
+  reconfirmedDisclosurePackId        String?   @map("reconfirmed_disclosure_pack_id")
   reservationFinalizedAt             DateTime? @map("reservation_finalized_at") @db.Timestamptz(6)
   createdAt                          DateTime  @default(now()) @map("created_at") @db.Timestamptz(6)
 
-  offering    Offering         @relation(fields: [offeringId], references: [id])
-  account     Account          @relation(fields: [accountId], references: [id])
-  moneyEvents MoneyEvent[]
-  positions   PositionLedger[]
+  offering                  Offering         @relation(fields: [offeringId], references: [id])
+  account                   Account          @relation(fields: [accountId], references: [id])
+  reconfirmedDisclosurePack DisclosurePack?  @relation(fields: [reconfirmedDisclosurePackId], references: [id], onDelete: Restrict)
+  moneyEvents               MoneyEvent[]
+  positions                 PositionLedger[]
 
   @@index([offeringId, reservationStage], map: "idx_reservations_offering_stage")
   @@index([accountId], map: "idx_reservations_account")
@@ -642,8 +644,9 @@ model DisclosurePack {
   supersededAt DateTime? @map("superseded_at") @db.Timestamptz(6)
   isCurrent    Boolean   @default(true) @map("is_current")
 
-  offering  Offering             @relation(fields: [offeringId], references: [id])
-  documents DisclosureDocument[]
+  offering                Offering             @relation(fields: [offeringId], references: [id])
+  documents               DisclosureDocument[]
+  reconfirmedReservations Reservation[]
 
   @@unique([offeringId, version])
   @@map("disclosure_packs")
@@ -665,14 +668,17 @@ model DisclosureDocument {
 }
 
 model MaterialityRecord {
-  id                    String   @id @map("materiality_record_id")
-  offeringId            String   @map("offering_id")
-  changeDescription     String   @map("change_description")
-  classification        String
-  thresholdType         String?  @map("threshold_type")
-  resetTriggered        Boolean  @default(false) @map("reset_triggered")
-  classifiedByAccountId String?  @map("classified_by_account_id")
-  classifiedAt          DateTime @default(now()) @map("classified_at") @db.Timestamptz(6)
+  id                            String   @id @map("materiality_record_id")
+  offeringId                    String   @map("offering_id")
+  changeDescription             String   @map("change_description")
+  classification                String
+  thresholdType                 String?  @map("threshold_type")
+  resetTriggered                Boolean  @default(false) @map("reset_triggered")
+  /// Set iff reset_triggered (CHECK in migration): reconfirmation is blocked
+  /// until a complete disclosure pack of at least this version is current.
+  requiredDisclosurePackVersion Int?     @map("required_disclosure_pack_version")
+  classifiedByAccountId         String?  @map("classified_by_account_id")
+  classifiedAt                  DateTime @default(now()) @map("classified_at") @db.Timestamptz(6)
 
   offering     Offering @relation(fields: [offeringId], references: [id])
   classifiedBy Account? @relation(fields: [classifiedByAccountId], references: [id])
