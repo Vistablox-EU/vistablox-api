@@ -403,10 +403,6 @@ describe.skipIf(databaseUrl === undefined)("offering reservation interleaving Po
   });
 });
 
-// Issue #183 also lists two #122 gaps whose fixes have not landed. They are recorded here so the test lands with the fix.
-describe("offering money-safety races pending #122", () => {
-  // #122 W2: a transient 5xx must not be cached, so the client's retry with the same idempotency key re-executes.
-  it.todo("an idempotent retry after a transient 5xx re-executes the handler instead of replaying the error (#122)");
-  // #122 defect 3: recordMoneyEvent takes no lock shared with expireReservation. The onramp-poll path is handled in #195.
-  it.todo("a money event recorded directly via recordMoneyEvent and a concurrent reservation expiry agree on one outcome (#122)");
-});
+// Issue #183 also lists two #122 races. Their tests live with their fixes: the 5xx idempotent retry in
+// tests/idempotency-5xx-retry.integration.test.ts (#200), and recordMoneyEvent against a concurrent reservation expiry
+// in tests/investor-offering-repository.integration.test.ts (#201).
