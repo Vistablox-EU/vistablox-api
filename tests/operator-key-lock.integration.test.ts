@@ -7,6 +7,7 @@ import {
   PostgresOperatorKeyLock,
 } from "../src/infrastructure/blockchain/operator-key-lock.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
+import { privateOperatorLockKey } from "./support/operator-key-lock-fakes.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -39,11 +40,11 @@ class FakeNodeAccount {
   }
 }
 
-// The advisory lock waiters: sessions asking for the operator-key lock that have not been granted it.
+// The advisory lock waiters: sessions asking for the lock with this key that have not been granted it.
 // A bigint advisory key is stored as two 32-bit halves, classid (high) and objid (low), objsubid 1.
-async function waitersForOperatorKey(pool: Pool): Promise<number> {
-  const classid = Math.floor(OPERATOR_KEY_ADVISORY_LOCK_KEY / 2 ** 32);
-  const objid = OPERATOR_KEY_ADVISORY_LOCK_KEY % 2 ** 32;
+async function waitersForKey(pool: Pool, key: number): Promise<number> {
+  const classid = Math.floor(key / 2 ** 32);
+  const objid = key % 2 ** 32;
   const result = await pool.query<{ waiting: number }>(
     `SELECT count(*)::int AS waiting FROM pg_locks
      WHERE locktype = 'advisory' AND NOT granted AND objsubid = 1 AND classid = $1 AND objid = $2`,
@@ -60,17 +61,31 @@ async function until(condition: () => Promise<boolean>, what: string): Promise<v
   }
 }
 
+// Every lock here takes a key of this file's own, never the global
+// OPERATOR_KEY_ADVISORY_LOCK_KEY: test files run in parallel against one
+// database, and another file that builds a real lock (the mint test does) would
+// otherwise queue behind the holders here and be counted among the waiters.
 describe.skipIf(databaseUrl === undefined)("operator-key advisory lock against PostgreSQL", () => {
   const database = createPrismaClient(databaseUrl ?? "");
   const pool = new Pool({ connectionString: databaseUrl });
-  const lock = new PostgresOperatorKeyLock(database);
+  const key = privateOperatorLockKey();
+  const lock = new PostgresOperatorKeyLock(database, { key });
+  const waitersForOperatorKey = (client: Pool) => waitersForKey(client, key);
 
   afterAll(async () => {
     await Promise.all([database.$disconnect(), pool.end()]);
   });
 
-  it("documents its key as a constant distinct from the staff bootstrap's", () => {
+  it("documents its key as a constant distinct from the staff bootstrap's, and takes it unless told otherwise", () => {
     expect(OPERATOR_KEY_ADVISORY_LOCK_KEY).toBe(7_311_040_002);
+    expect(OPERATOR_KEY_ADVISORY_LOCK_KEY).not.toBe(7_311_040_001);
+    expect(new PostgresOperatorKeyLock(database).key).toBe(OPERATOR_KEY_ADVISORY_LOCK_KEY);
+    expect(new PostgresOperatorKeyLock(database, { key: 42 }).key).toBe(42);
+    expect(privateOperatorLockKey()).not.toBe(OPERATOR_KEY_ADVISORY_LOCK_KEY);
+  });
+
+  it.each([0, -1, 1.5, Number.NaN, 2 ** 53])("refuses %s as a lock key", (bad) => {
+    expect(() => new PostgresOperatorKeyLock(database, { key: bad })).toThrow("positive safe integer");
   });
 
   it("without the lock two writers that read the same nonce collide: the control that makes the next test mean something", async () => {
@@ -128,10 +143,10 @@ describe.skipIf(databaseUrl === undefined)("operator-key advisory lock against P
     expect(order).toEqual(["first:enter", "first:exit", "second:enter"]);
   });
 
-  it("takes the documented advisory lock key, not some other: a session holding that key blocks it", async () => {
+  it("takes the advisory lock key it is configured with, not some other: a session holding that key blocks it", async () => {
     const holder = await pool.connect();
     await holder.query("BEGIN");
-    await holder.query("SELECT pg_advisory_xact_lock($1::bigint)", [OPERATOR_KEY_ADVISORY_LOCK_KEY]);
+    await holder.query("SELECT pg_advisory_xact_lock($1::bigint)", [key]);
     let entered = false;
     try {
       const pending = lock.run(async () => {
@@ -165,10 +180,10 @@ describe.skipIf(databaseUrl === undefined)("operator-key advisory lock against P
   });
 
   it("fails a section that cannot get the lock within its wait, with a clear error, without running it", async () => {
-    const impatient = new PostgresOperatorKeyLock(database, { waitMs: 300 });
+    const impatient = new PostgresOperatorKeyLock(database, { key, waitMs: 300 });
     const holder = await pool.connect();
     await holder.query("BEGIN");
-    await holder.query("SELECT pg_advisory_xact_lock($1::bigint)", [OPERATOR_KEY_ADVISORY_LOCK_KEY]);
+    await holder.query("SELECT pg_advisory_xact_lock($1::bigint)", [key]);
     let entered = false;
     try {
       const failure = await impatient

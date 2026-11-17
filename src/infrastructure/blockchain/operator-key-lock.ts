@@ -8,8 +8,10 @@ import type { DatabaseClient } from "../database/prisma.js";
  * settlement jobs and the operator command that opens IPO escrow campaigns.
  * Any constant works as long as nothing else uses it; the neighbouring key
  * 7_311_040_001 is the first-admin bootstrap's (PrismaStaffBootstrapRepository),
- * so a new advisory lock takes the next number. Exported so the integration
- * test can hold it and prove a writer really waits.
+ * so a new advisory lock takes the next number. Exported so a test can assert
+ * the documented value; tests that need to hold or count a lock take a private
+ * key of their own through PostgresOperatorKeyLockOptions.key instead, because
+ * every test file shares one database and this key is global to it.
  */
 export const OPERATOR_KEY_ADVISORY_LOCK_KEY = 7_311_040_002;
 
@@ -35,6 +37,13 @@ export interface OperatorKeyLock {
 }
 
 export interface PostgresOperatorKeyLockOptions {
+  /**
+   * The advisory lock key. Production never sets it: every writer must share
+   * OPERATOR_KEY_ADVISORY_LOCK_KEY, or it would not serialise with the others.
+   * It exists so that test files running in parallel against one database each
+   * use a lock of their own and cannot queue behind, or count, one another.
+   */
+  key?: number;
   /** How long a section waits for another writer's lock before failing. */
   waitMs?: number;
   /**
@@ -61,6 +70,8 @@ export class OperatorKeyLockTimeoutError extends Error {
  * the section itself must not use that transaction.
  */
 export class PostgresOperatorKeyLock implements OperatorKeyLock {
+  /** The advisory lock key this instance takes. */
+  public readonly key: number;
   private readonly waitMs: number;
   private readonly holdMs: number;
 
@@ -68,6 +79,10 @@ export class PostgresOperatorKeyLock implements OperatorKeyLock {
     private readonly database: Pick<DatabaseClient, "$transaction">,
     options: PostgresOperatorKeyLockOptions = {},
   ) {
+    this.key = options.key ?? OPERATOR_KEY_ADVISORY_LOCK_KEY;
+    if (!Number.isSafeInteger(this.key) || this.key <= 0) {
+      throw new Error(`the operator-key lock key must be a positive safe integer, got ${this.key}`);
+    }
     this.waitMs = options.waitMs ?? DEFAULT_WAIT_MS;
     this.holdMs = options.holdMs ?? DEFAULT_HOLD_MS;
   }
@@ -79,7 +94,7 @@ export class PostgresOperatorKeyLock implements OperatorKeyLock {
         async (transaction) => {
           await transaction.$executeRawUnsafe(`SET LOCAL lock_timeout = '${Math.trunc(this.waitMs)}ms'`);
           await transaction.$queryRaw`
-            SELECT 1 AS locked FROM pg_advisory_xact_lock(${OPERATOR_KEY_ADVISORY_LOCK_KEY}::bigint)
+            SELECT 1 AS locked FROM pg_advisory_xact_lock(${this.key}::bigint)
           `;
           acquired = true;
           return section();

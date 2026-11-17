@@ -34,3 +34,17 @@ export class InProcessOperatorKeyLock implements OperatorKeyLock {
     return result;
   }
 }
+
+/**
+ * An advisory lock key private to the calling test file. Test files run in
+ * parallel against one shared database, and the real operator-key lock key
+ * (OPERATOR_KEY_ADVISORY_LOCK_KEY) is global to that database: a test that
+ * holds it by hand, or counts the sessions waiting for it, would see another
+ * file's writers and fail depending on how vitest schedules the two. Pass the
+ * result as `PostgresOperatorKeyLock`'s `key` option. Random within a range
+ * clear of the production keys (7_311_040_001 and 7_311_040_002), so two files
+ * (or two runs against one database) do not share one either.
+ */
+export function privateOperatorLockKey(): number {
+  return 9_000_000_000 + Math.floor(Math.random() * 1_000_000_000);
+}
