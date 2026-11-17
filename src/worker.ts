@@ -29,6 +29,7 @@ import {
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
 import { ExpirePendingWalletRegistrationsService } from "./modules/wallet/application/expire-pending-wallet-registrations.service.js";
+import { walletClaimExpiryCron } from "./modules/wallet/domain/wallet-claim-expiry-schedule.js";
 import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
@@ -46,6 +47,7 @@ import {
   WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS,
 } from "./modules/settlement/application/confirm-wallet-registrations.service.js";
 import { CheckWalletRegistryHealthService } from "./modules/settlement/application/check-wallet-registry-health.service.js";
+import { WalletRegistryExpiryGate } from "./modules/settlement/application/wallet-registry-expiry-gate.js";
 import { RunWalletRegistryWatcherService } from "./modules/settlement/application/run-wallet-registry-watcher.service.js";
 import { WalletRegistryAlertReporter } from "./modules/settlement/application/wallet-registry-alert-reporter.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
@@ -170,14 +172,6 @@ const sendApplicantReminders = new SendApplicantResponseRemindersService(
 const expireOverdueRequests = new ExpireOverdueInformationRequestsService(intakeRepository);
 const transitionCaseToPostIpoStructuring = new TransitionCaseToPostIpoStructuringService(intakeRepository);
 const expireUnfundedReservations = new ExpireUnfundedReservationsService(offeringRepository);
-// Not gated on the registry address or the CHAIN_* bundle: it only touches
-// database rows, and a deployment without a watcher has no other way to
-// retire a pending claim.
-const expirePendingWalletRegistrations = new ExpirePendingWalletRegistrationsService(
-  new PrismaWalletRepository(database),
-  () => new Date(),
-  environment.WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS,
-);
 const commitOfferingFinalization = new CommitOfferingFinalizationService(offeringRepository);
 const sendReconfirmationReminders = new SendReconfirmationRemindersService(offeringRepository, emailSender);
 const notifyReconfirmationWindowOpened = new NotifyReconfirmationWindowOpenedService(offeringRepository, emailSender);
@@ -337,6 +331,31 @@ const checkWalletRegistryHealth =
         },
         () => `req_${ulid()}`,
       );
+
+// The pending-claim expiry sweep (#177, AD-287 decided 2026-11-17). Not gated
+// on the registry address or the CHAIN_* bundle: it only touches database
+// rows. What does hold it back is the watcher's health, read through the same
+// snapshot and thresholds as the health check above: while the watcher is
+// stale or its cursor lags, or if that cannot be read, the sweep expires
+// nothing. Where no watcher runs at all there is nothing to wait for.
+const walletRegistryExpiryGate = new WalletRegistryExpiryGate(
+  walletRegistryHealthRepository ?? new PrismaWalletRegistryHealthRepository(database),
+  {
+    thresholds: walletRegistryThresholds,
+    watcherConfigured: confirmWalletRegistrations !== undefined,
+    pendingOverdueAfterMs: environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000,
+  },
+);
+const expirePendingWalletRegistrations = new ExpirePendingWalletRegistrationsService(
+  new PrismaWalletRepository(database),
+  walletRegistryExpiryGate,
+  logger,
+  () => new Date(),
+  {
+    expireAfterHours: environment.WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS,
+    batchSize: environment.WALLET_REGISTRY_PENDING_EXPIRE_BATCH_SIZE,
+  },
+);
 
 async function runJob(name: string, run: (traceId: string) => Promise<JobRunSummary>): Promise<void> {
   const traceId = `req_${ulid()}`;
@@ -525,9 +544,9 @@ await boss.schedule("maintenance.account_recovery_alert", "*/15 * * * *", null, 
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
-// Every 15 minutes: the TTL is measured in hours, so a claim outlives it by
-// at most a quarter of an hour.
-await boss.schedule("maintenance.wallet_registration_expiry", "*/15 * * * *", null, {
+// Every WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES (15 by default): the TTL
+// is measured in hours, so a claim outlives it by at most one interval.
+await boss.schedule("maintenance.wallet_registration_expiry", walletClaimExpiryCron(environment.WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES), null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });

@@ -104,26 +104,45 @@ describe("wallet-registry worker wiring", () => {
   });
 });
 
-describe("wallet claim expiry worker wiring (#177)", () => {
+describe("wallet claim expiry worker wiring (#177, AD-287)", () => {
   it("creates the expiry queue as a scheduled queue, unconditionally", () => {
     expect(flat).toContain('await ensureJobQueue(boss, "maintenance.wallet_registration_expiry", "scheduled");');
     expect(flat).not.toMatch(/if \([^)]*\) \{ await ensureJobQueue\(boss, "maintenance\.wallet_registration_expiry"/);
   });
 
-  it("schedules the expiry every 15 minutes in UTC on the scheduled retry profile", () => {
+  it("schedules the expiry at the configured interval in UTC on the scheduled retry profile", () => {
     expect(flat).toMatch(
       new RegExp(
-        `await boss\\.schedule\\("maintenance\\.wallet_registration_expiry", "${escape("*/15 * * * *")}", null, \\{ tz: "UTC", \\.\\.\\.RETRY_OPTIONS`,
+        `await boss\\.schedule\\("maintenance\\.wallet_registration_expiry", walletClaimExpiryCron\\(environment\\.WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES\\), null, \\{ tz: "UTC", \\.\\.\\.RETRY_OPTIONS`,
       ),
     );
+    // No cron literal of its own left behind to drift from the setting.
+    expect(flat).not.toMatch(/"maintenance\.wallet_registration_expiry", "[^"]*\*/);
   });
 
-  it("runs the expiry service with the configured lifetime through runJob", () => {
+  it("runs the expiry service through runJob", () => {
     expect(flat).toContain(
       'await boss.work("maintenance.wallet_registration_expiry", async () => { await runJob("maintenance.wallet_registration_expiry", (traceId) => expirePendingWalletRegistrations.execute(traceId)); });',
     );
+  });
+
+  it("builds the expiry service with the gate, the logger, the configured lifetime and the configured batch", () => {
     expect(flat).toMatch(
-      /new ExpirePendingWalletRegistrationsService\( new PrismaWalletRepository\(database\), \(\) => new Date\(\), environment\.WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS, \)/,
+      /new ExpirePendingWalletRegistrationsService\( new PrismaWalletRepository\(database\), walletRegistryExpiryGate, logger, \(\) => new Date\(\), \{ expireAfterHours: environment\.WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS, batchSize: environment\.WALLET_REGISTRY_PENDING_EXPIRE_BATCH_SIZE, \}, \)/,
     );
+  });
+
+  it("gates the sweep on the health check's own thresholds, and on whether a watcher exists in this worker, not on the registry address", () => {
+    const gate = worker.match(/const walletRegistryExpiryGate = new WalletRegistryExpiryGate\(([\s\S]*?)\n\);/)?.[1] ?? "";
+
+    expect(gate).toContain("walletRegistryHealthRepository ?? new PrismaWalletRegistryHealthRepository(database)");
+    expect(gate).toContain("thresholds: walletRegistryThresholds");
+    expect(gate).toContain("watcherConfigured: confirmWalletRegistrations !== undefined");
+    expect(gate).toContain("pendingOverdueAfterMs: environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000");
+    // One thresholds object for the watcher alerts and the gate: no second set of numbers.
+    expect(worker.match(/const walletRegistryThresholds = \{/g)).toHaveLength(1);
+    expect(worker.match(/thresholds: walletRegistryThresholds/g)).toHaveLength(3);
+    expect(worker.indexOf("const walletRegistryThresholds")).toBeLessThan(worker.indexOf("const walletRegistryExpiryGate"));
+    expect(worker.indexOf("const walletRegistryExpiryGate")).toBeLessThan(worker.indexOf("const expirePendingWalletRegistrations"));
   });
 });

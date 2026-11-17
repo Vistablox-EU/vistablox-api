@@ -416,7 +416,8 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
             walletAddress: input.walletAddress,
             registrationCommitment: input.registrationCommitment,
             registeredAt: null,
-            // Expired between the match and this write: stale, not confirmed.
+            // Expired between the match and this write: not confirmed, and
+            // told apart below ("expired").
             expiredAt: null,
           },
           data: { registeredAt: input.registeredAt, ...evidenceColumns(input.evidence) },
@@ -427,13 +428,16 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
           // a conflicting event; a claim that is gone or replaced is stale.
           const current = await transaction.walletRegistration.findUnique({
             where: { accountId: input.accountId },
-            select: { walletAddress: true, registrationCommitment: true, registeredAt: true },
+            select: { walletAddress: true, registrationCommitment: true, registeredAt: true, expiredAt: true },
           });
           const sameClaim =
             current !== null &&
             current.walletAddress === input.walletAddress &&
             current.registrationCommitment === input.registrationCommitment;
-          return sameClaim && current.registeredAt !== null ? "already_registered" : "stale";
+          if (sameClaim && current.registeredAt !== null) return "already_registered";
+          // The same claim, expired since it was matched: not a replaced claim.
+          if (sameClaim && current.expiredAt !== null) return "expired";
+          return "stale";
         }
         await transaction.auditLog.create({
           data: {

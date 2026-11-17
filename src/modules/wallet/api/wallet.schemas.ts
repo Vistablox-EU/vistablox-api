@@ -111,8 +111,9 @@ export const reconcileWalletRegistrationResponseSchema = z.object({
     registration_block_number: z.string(),
     registration_block_hash: z.string(),
     registration_log_index: z.number().int(),
-    // What the call did: confirmed a pending registration, filled in or
-    // replaced the recorded evidence, or found the row already holding this event.
+    // What the call did: confirmed a pending registration (an expired one too:
+    // that reinstates it, and the audit row says so), filled in or replaced the
+    // recorded evidence, or found the row already holding this event.
     outcome: z.enum(["confirmed", "evidence_recorded", "evidence_replaced", "unchanged"]),
     requested_at: dateTime,
     registered_at: dateTime,
@@ -131,7 +132,8 @@ export const operationsWalletAccountResponseSchema = z.object({
     wallet_address: z.string().min(1),
     registration_commitment: z.string().min(1),
     // expired: the claim stayed pending past WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS
-    // and the expiry job retired it (#177). The customer sees no wallet.
+    // and the expiry job retired it (#177). The customer sees no wallet; staff
+    // can still reconcile it against matching on-chain evidence, which confirms it.
     status: z.enum(["pending", "registered", "expired"]),
     requested_at: dateTime,
     registered_at: dateTime.nullable(),

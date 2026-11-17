@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Prisma } from "../src/generated/prisma/client.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { CheckWalletRegistryHealthService } from "../src/modules/settlement/application/check-wallet-registry-health.service.js";
 import { RunWalletRegistryWatcherService } from "../src/modules/settlement/application/run-wallet-registry-watcher.service.js";
+import { WalletRegistryExpiryGate } from "../src/modules/settlement/application/wallet-registry-expiry-gate.js";
 import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 import { PrismaWalletRegistryHealthRepository } from "../src/modules/settlement/repository/prisma-wallet-registry-health.repository.js";
@@ -414,6 +415,73 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
       // The same row, judged an hour from now: no run since, so stalled.
       await check(() => new Date(Date.now() + 3_600_000)).execute();
       expect(logged.some((entry) => entry.fields.event === "wallet_registry.watcher_stalled")).toBe(true);
+    });
+  });
+  // The claim expiry sweep asks the watcher's health before it expires anything
+  // (AD-287, decided 2026-11-17). The gate runs the same policy over the same
+  // reading the health check uses; here it reads the real heartbeat row, which
+  // this file alone owns. The rest of the sweep is in
+  // wallet-claim-expiry.integration.test.ts.
+  describe("the claim expiry gate over the real heartbeat row", () => {
+    const MINUTE = 60_000;
+    const now = new Date("2026-11-17T12:00:00.000Z");
+    const gate = (watcherConfigured = true) =>
+      new WalletRegistryExpiryGate(repository, {
+        thresholds: {
+          watcherStaleAfterMs: 10 * MINUTE,
+          cursorLagAlertBlocks: 900n,
+          cursorAheadToleranceBlocks: 32n,
+          // Other test files share this database; claims pending there must not decide anything here.
+          pendingOverdueAlertCount: 1_000_000,
+          unmatchedEventsAlertCount: 5,
+        },
+        watcherConfigured,
+        pendingOverdueAfterMs: 5 * MINUTE,
+      });
+    const record = (ageMs: number, lagBlocks: bigint) =>
+      repository.recordWatcherHeartbeat({
+        completedAt: new Date(now.getTime() - ageMs),
+        cursorBlock: 50_000n - lagBlocks,
+        safeHeadBlock: 50_000n,
+        eventsFound: 0,
+      });
+
+    beforeEach(async () => {
+      await database.platformSetting.deleteMany({ where: { key: HEARTBEAT_KEY } });
+    });
+    afterAll(async () => {
+      await database.platformSetting.deleteMany({ where: { key: HEARTBEAT_KEY } });
+    });
+
+    it.each([
+      { name: "a fresh heartbeat, the cursor level with the safe head", ageMs: MINUTE, lag: 0n, mayExpire: true },
+      { name: "a heartbeat one ms short of the stale threshold", ageMs: 10 * MINUTE - 1, lag: 0n, mayExpire: true },
+      { name: "a heartbeat exactly at the stale threshold", ageMs: 10 * MINUTE, lag: 0n, mayExpire: false },
+      { name: "a cursor 899 blocks behind", ageMs: MINUTE, lag: 899n, mayExpire: true },
+      { name: "a cursor exactly 900 blocks behind", ageMs: MINUTE, lag: 900n, mayExpire: false },
+      { name: "a cursor 33 blocks ahead of the safe head", ageMs: MINUTE, lag: -33n, mayExpire: false },
+    ])("$name: mayExpire $mayExpire", async ({ ageMs, lag, mayExpire }) => {
+      await record(ageMs, lag);
+
+      expect((await gate().assess(now)).mayExpire).toBe(mayExpire);
+    });
+
+    it("holds the sweep back when no heartbeat has ever been recorded", async () => {
+      await expect(gate().assess(now)).resolves.toEqual({ mayExpire: false, reasons: ["wallet_registry.watcher_stalled"] });
+    });
+
+    it("holds the sweep back when the stored heartbeat cannot be read", async () => {
+      await database.platformSetting.create({
+        data: { key: HEARTBEAT_KEY, value: { completed_at: "not a date" }, description: "unreadable on purpose" },
+      });
+
+      await expect(gate().assess(now)).resolves.toEqual({ mayExpire: false, reasons: ["wallet_registry.watcher_stalled"] });
+    });
+
+    it("lets the sweep run where no watcher runs, whatever the row says", async () => {
+      await record(5 * 24 * 60 * MINUTE, 50_000n);
+
+      await expect(gate(false).assess(now)).resolves.toEqual({ mayExpire: true, reasons: [] });
     });
   });
 });

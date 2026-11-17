@@ -78,7 +78,50 @@ async function appErrorOf(promise: Promise<unknown>): Promise<AppError> {
   throw new Error("expected an AppError");
 }
 
+const expired: RegisteredWallet = { ...pending, expiredAt: new Date("2026-01-02T00:00:00Z") };
+
 describe("ReconcileWalletRegistrationService", () => {
+  // AD-287 (decided 2026-11-17): staff can reconcile an expired claim on
+  // matching on-chain evidence. The customer-facing read hides an expired
+  // claim, so the service has to ask for it.
+  describe("an expired claim", () => {
+    it("is read with includeExpired, verified against its own address and commitment, and handed to the repository as the claim the evidence applies to", async () => {
+      const { service, repository, verifier, reconcile } = build({ wallet: expired });
+
+      const result = await run(service);
+
+      expect(repository.findByAccountId).toHaveBeenCalledWith("acct_1", { includeExpired: true });
+      expect(verifier.verify).toHaveBeenCalledWith({
+        txHash: TX,
+        walletAddress: expired.walletAddress,
+        commitment: expired.registrationCommitment.toLowerCase(),
+      });
+      expect(reconcile).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: "acct_1",
+          actorAccountId: "staff_1",
+          expectedWalletAddress: expired.walletAddress,
+          expectedRegistrationCommitment: expired.registrationCommitment,
+        }),
+      );
+      expect(result.data).toMatchObject({ status: "registered", outcome: "confirmed", registered_at: REGISTERED_AT.toISOString() });
+    });
+
+    it("answers 409 wallet.registration_changed when the customer registered again before the write", async () => {
+      const { service, reconcile } = build({ wallet: expired });
+      reconcile.mockRejectedValue(new WalletRegistrationChangedError());
+
+      expect(await appErrorOf(run(service))).toMatchObject({ code: "wallet.registration_changed", status: 409 });
+    });
+
+    it("still does not call the chain for an account with no claim at all", async () => {
+      const { service, verifier } = build({ wallet: null });
+
+      expect(await appErrorOf(run(service))).toMatchObject({ code: "wallet.account_not_found", status: 404 });
+      expect(verifier.verify).not.toHaveBeenCalled();
+    });
+  });
+
   it("verifies the chain evidence with lower-cased inputs, then records it and reports the outcome", async () => {
     const { service, verifier, reconcile } = build({});
 

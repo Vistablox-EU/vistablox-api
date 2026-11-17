@@ -774,11 +774,12 @@ model WalletRegistration {
   registrationEvidenceFlaggedAt  DateTime? @map("registration_evidence_flagged_at") @db.Timestamptz(6)
   registrationEvidenceFlag       String?   @map("registration_evidence_flag")
   // Set by the maintenance.wallet_registration_expiry job when a pending claim
-  // outlives WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS. Pending means
-  // registeredAt AND expiredAt are both NULL; the check constraint
-  // wallet_registrations_expired_only_pending_check (raw SQL, migration
-  // 20261117202500_wallet_registration_expiry) keeps a row from being both
-  // confirmed and expired. The account's next registration clears it.
+  // outlives WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS (AD-287, decided
+  // 2026-11-17). Pending means registeredAt AND expiredAt are both NULL; the
+  // check constraint wallet_registrations_expired_only_pending_check (raw SQL,
+  // migration 20261117202500_wallet_registration_expiry) keeps a row from being
+  // both confirmed and expired. The account's next registration clears it, and
+  // so does a staff reconcile that confirms the claim. Never deleted.
   expiredAt                      DateTime? @map("expired_at") @db.Timestamptz(6)
 
   account Account @relation(fields: [accountId], references: [id])
