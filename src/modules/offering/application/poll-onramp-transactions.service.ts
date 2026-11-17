@@ -181,19 +181,20 @@ export class PollOnrampTransactionsService {
         }
         break;
       case "other_stage":
-        await this.otherStageOutcomes.handleOtherStageOutcome({
-          reservationId: reservation.reservationId,
-          reservationStage: recording.reservationStage,
-          latestCapitalState: recording.latestCapitalState,
-          providerTransactionId: outcome.transaction.transactionId,
-          txHash: outcome.transaction.txHash,
-          destinationWallet: outcome.transaction.walletAddress,
-          amount: outcome.transaction.purchaseAmountValue,
-          asset: outcome.transaction.purchaseCurrency,
-          state: capitalState,
+        // The recording method wrote nothing: the reservation has left
+        // 'initiated'. The transaction it was asked about (the first covering
+        // success, else the first success, else the failed attempt) goes to
+        // the late-evidence seam, which is idempotent on its id and lists a
+        // success only. The rest of the list follows below.
+        await this.handOverOtherStageOutcome(
+          reservation,
+          recording,
+          outcome.transaction,
+          capitalState,
+          outcome.status !== "failed",
           observedAt,
           traceId,
-        });
+        );
         break;
       case "duplicate":
         // Expected every minute for a purchase_failed reservation.
@@ -222,12 +223,100 @@ export class PollOnrampTransactionsService {
         );
         break;
     }
+
+    // The pick is one transaction, chosen by the list's order. For a
+    // reservation that is still 'initiated' that is all the recording method
+    // may act on. For one that has left it, nothing is being recorded, so which
+    // success Coinbase happens to list first must not decide which ones staff
+    // hear about: the funding transaction would hide a further payment, and an
+    // earlier late one would hide a later one.
+    const stage = stageAfterRecording(recording);
+    if (stage !== null && stage !== "initiated") {
+      await this.offerOtherSuccesses(reservation, transactions, outcome.transaction.transactionId, observedAt, traceId);
+    }
     return {
       status: "resolved",
       capitalState,
       providerTransactionId: outcome.transaction.transactionId,
       recording,
     };
+  }
+
+  /**
+   * Offers every success of the list, bar the one already handled, to the
+   * recording method, each in the state it would have been recorded in. The
+   * reservation has left 'initiated', so the method can only answer
+   * `duplicate` (money already on file for that transaction and state, such as
+   * the funding transaction, which never reads as late) or `other_stage` (the
+   * late-evidence seam's business); it writes nothing. It is deliberately not
+   * done for a reservation that is still 'initiated': there the method would
+   * record a purchase_failed row for each further uncovered success, which
+   * nothing has decided.
+   */
+  private async offerOtherSuccesses(
+    reservation: OnrampReconcileTarget,
+    transactions: OnrampTransactionSummary[],
+    handledTransactionId: string,
+    observedAt: Date,
+    traceId: string,
+  ): Promise<void> {
+    const offered = new Set<string>([handledTransactionId]);
+    for (const candidate of transactions) {
+      if (candidate.status !== "success" || offered.has(candidate.transactionId)) continue;
+      offered.add(candidate.transactionId);
+
+      const covering = isPurchaseCovering(candidate, reservation.amountEur);
+      const capitalState = covering ? "eurc_reserved" : "purchase_failed";
+      const recording = await this.reservations.recordOnrampOutcome({
+        reservationId: reservation.reservationId,
+        provider: "coinbase_cdp",
+        providerReference: candidate.transactionId,
+        capitalState,
+        amountEur: reservation.amountEur,
+        amountEurc: covering ? candidate.purchaseAmountValue : null,
+        recordedAt: observedAt,
+      });
+      if (recording.status === "other_stage") {
+        await this.handOverOtherStageOutcome(reservation, recording, candidate, capitalState, true, observedAt, traceId);
+      } else if (recording.status !== "duplicate") {
+        // Not reachable for a reservation that has left 'initiated' (it never
+        // returns to it); never silent if it happens.
+        this.logger.warn(
+          {
+            trace_id: traceId,
+            reservation_id: reservation.reservationId,
+            provider_reference: candidate.transactionId,
+            recording: recording.status,
+          },
+          "onramp success offered after the reservation left initiated was not late or on file; nothing listed",
+        );
+      }
+    }
+  }
+
+  private handOverOtherStageOutcome(
+    reservation: OnrampReconcileTarget,
+    recording: Extract<OnrampOutcomeRecording, { status: "other_stage" }>,
+    transaction: OnrampTransactionSummary,
+    capitalState: "eurc_reserved" | "purchase_failed",
+    transactionSucceeded: boolean,
+    observedAt: Date,
+    traceId: string,
+  ): Promise<void> {
+    return this.otherStageOutcomes.handleOtherStageOutcome({
+      reservationId: reservation.reservationId,
+      reservationStage: recording.reservationStage,
+      latestCapitalState: recording.latestCapitalState,
+      providerTransactionId: transaction.transactionId,
+      txHash: transaction.txHash,
+      destinationWallet: transaction.walletAddress,
+      amount: transaction.purchaseAmountValue,
+      asset: transaction.purchaseCurrency,
+      state: capitalState,
+      transactionSucceeded,
+      observedAt,
+      traceId,
+    });
   }
 
   private async listAllTransactions(
@@ -247,6 +336,11 @@ export class PollOnrampTransactionsService {
     }
     return { transactions, complete: false };
   }
+}
+
+/** The stage the recording method read under its lock, when its answer carries one (other_stage, duplicate). */
+function stageAfterRecording(recording: OnrampOutcomeRecording): string | null {
+  return recording.status === "other_stage" || recording.status === "duplicate" ? recording.reservationStage : null;
 }
 
 /**

@@ -108,6 +108,10 @@ import {
   createOfferingRouter,
 } from "./modules/offering/api/offering.router.js";
 import { createOfferingOperationsRouter } from "./modules/offering/api/offering-operations.router.js";
+import { createOnrampLateEvidenceRouter } from "./modules/offering/api/onramp-late-evidence.router.js";
+import { ListOnrampLateEvidenceService } from "./modules/offering/application/list-onramp-late-evidence.service.js";
+import { MarkOnrampLateEvidenceReviewedService } from "./modules/offering/application/mark-onramp-late-evidence-reviewed.service.js";
+import type { OnrampLateEvidenceReviewRepository } from "./modules/offering/repository/onramp-late-evidence.repository.js";
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
 import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
@@ -375,6 +379,10 @@ export interface AppDependencies {
       };
       /** Staff featured-flag and media management (PATCH /:offering_id/presentation). */
       presentation?: OfferingPresentationRepository;
+    };
+    /** Staff list of late onramp funding evidence, and the mark-reviewed action (AD-288, issue #168). */
+    onrampLateEvidence?: {
+      repository: OnrampLateEvidenceReviewRepository;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -670,6 +678,20 @@ export function createApp(dependencies: AppDependencies): Express {
             },
       ),
     );
+    // Mounted before the offering-operations router, whose "/:offering_id/..." routes must not see this prefix.
+    if (dependencies.protectedApi.onrampLateEvidence !== undefined) {
+      const lateEvidence = dependencies.protectedApi.onrampLateEvidence;
+      app.use(
+        "/internal/v1/offerings/onramp-late-evidence",
+        createOnrampLateEvidenceRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new ListOnrampLateEvidenceService(lateEvidence.repository),
+          new MarkOnrampLateEvidenceReviewedService(lateEvidence.repository),
+        ),
+      );
+    }
     if (dependencies.protectedApi.offeringOperations !== undefined) {
       const offeringDocuments = dependencies.protectedApi.offeringOperations.documents;
       const offeringPresentation = dependencies.protectedApi.offeringOperations.presentation;

@@ -102,8 +102,14 @@ export interface RecordOnrampOutcomeInput {
  */
 export type OnrampOutcomeRecording =
   | { status: "recorded" }
-  /** This provider transaction in this state is already recorded for the reservation. */
-  | { status: "duplicate" }
+  /**
+   * This provider transaction in this state is already recorded for the
+   * reservation. `reservationStage` is the stage read under the same lock, so
+   * the caller can tell a duplicate on a reservation still 'initiated' from one
+   * on a reservation that has moved on (the late-evidence path needs that to
+   * know whether the rest of the list is late).
+   */
+  | { status: "duplicate"; reservationStage: string }
   /** The latest event is a funded state, so nothing more is recorded. */
   | { status: "already_funded" }
   /** The latest event is neither eurc_purchase_pending nor purchase_failed. */
