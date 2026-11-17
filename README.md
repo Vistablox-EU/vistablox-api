@@ -1,6 +1,6 @@
 # VistaBlox API
 
-API-only backend for VistaBlox. This repository is being implemented from the architecture record in `../Docs/Backend`; when code and those documents disagree, the current design record and `03-Database/CORE_TABLES.md` take precedence.
+API-only backend for VistaBlox. This repository is being implemented from the architecture record in the `vistablox-design-docs` repository; when code and those documents disagree, the current design record and `04-Engineering/DATA/CORE_TABLES.md` take precedence.
 
 ## Implemented foundation
 

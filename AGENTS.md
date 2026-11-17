@@ -2,7 +2,7 @@
 
 API-only backend: Express 5, TypeScript, Zod, Prisma 7 on PostgreSQL 18, a pg-boss worker, Better Auth. `README.md` lists what is already built.
 
-The design record lives in `../Docs/Backend` (repo `vistablox-design-docs`). Start at its `README.md`, then `VISTABLOX_BACKEND_DISCUSSION.md` and `15-Decisions-and-Rationale/ARCHITECTURE_DECISIONS.md` (the AD-### decisions). When code and the design record disagree, the record and `03-Database/CORE_TABLES.md` win. Flag the conflict instead of silently picking one.
+The design record lives in the `vistablox-design-docs` repository (a sibling checkout of this one). Start at its `README.md`, then `00-Governance/CURRENT_POSITION.md` and `00-Governance/DOCUMENT_AUTHORITY.md` (which document wins when two disagree), and `00-Governance/DECISIONS/ARCHITECTURE_DECISIONS.md` (the AD-### decisions). When code and the design record disagree, the record and `04-Engineering/DATA/CORE_TABLES.md` win. Flag the conflict instead of silently picking one.
 
 ## Commands
 

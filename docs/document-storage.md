@@ -1,6 +1,6 @@
 # Private document storage
 
-VistaBlox follows `Docs/Backend/08-Integrations/MINIO_STORAGE.md`: MinIO has no public URL, and the Express API proxies every authorized document download. The API uses MinIO's S3-compatible protocol through `@aws-sdk/client-s3`; it does not generate presigned URLs.
+VistaBlox follows `04-Engineering/INTEGRATIONS/MINIO_STORAGE.md` of the `vistablox-design-docs` repository: MinIO has no public URL, and the Express API proxies every authorized document download. The API uses MinIO's S3-compatible protocol through `@aws-sdk/client-s3`; it does not generate presigned URLs.
 
 ## Bucket boundaries
 
