@@ -6,6 +6,8 @@ import type {
   OnrampTransactionSummary,
 } from "../src/modules/offering/application/coinbase-cdp-client.js";
 import {
+  MAX_ONRAMP_TRANSACTION_PAGES,
+  OnrampPollIncompleteError,
   PollOnrampTransactionsService,
   isPurchaseCovering,
 } from "../src/modules/offering/application/poll-onramp-transactions.service.js";
@@ -42,7 +44,7 @@ function transaction(overrides: Partial<OnrampTransactionSummary> = {}): OnrampT
 function repository(overrides: Partial<ReservationRepository> = {}): ReservationRepository {
   return {
     createReservation: vi.fn(),
-    recordMoneyEvent: vi.fn().mockResolvedValue(undefined),
+    recordMoneyEvent: vi.fn().mockResolvedValue(true),
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn(),
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
@@ -90,7 +92,7 @@ describe("PollOnrampTransactionsService", () => {
       amountEurc: "950.000000",
       recordedAt: now,
     });
-    expect(summary).toEqual({ checked: 1, acted: 1 });
+    expect(summary).toEqual({ checked: 1, acted: 1, failed: 0 });
   });
 
   it("records purchase_failed for a success that does not cover the reservation (wrong asset)", async () => {
@@ -200,7 +202,7 @@ describe("PollOnrampTransactionsService", () => {
         amountEurc: null,
       }),
     );
-    expect(summary).toEqual({ checked: 1, acted: 1 });
+    expect(summary).toEqual({ checked: 1, acted: 1, failed: 0 });
   });
 
   it("leaves capital_state alone while a transaction is still in flight, even alongside a failed attempt", async () => {
@@ -225,7 +227,7 @@ describe("PollOnrampTransactionsService", () => {
     const summary = await service.execute("trace_01");
 
     expect(recordOnrampMoneyEventOnce).not.toHaveBeenCalled();
-    expect(summary).toEqual({ checked: 1, acted: 0 });
+    expect(summary).toEqual({ checked: 1, acted: 0, failed: 0 });
   });
 
   it("prefers a success over an earlier failed attempt on the same reservation", async () => {
@@ -254,6 +256,205 @@ describe("PollOnrampTransactionsService", () => {
     );
   });
 
+  it("funds from a covering success even when an earlier success does not cover", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
+    const listBuyTransactions = vi.fn().mockResolvedValue({
+      transactions: [
+        transaction({ transactionId: "txn_small", purchaseAmountValue: "100.000000" }),
+        transaction({ transactionId: "txn_covering", purchaseAmountValue: "960.000000" }),
+      ],
+      nextPageKey: null,
+    });
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({ listBuyTransactions }),
+      logger,
+      () => now,
+    );
+
+    await service.execute("trace_01");
+
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledTimes(1);
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capitalState: "eurc_reserved",
+        providerReference: "txn_covering",
+        amountEurc: "960.000000",
+      }),
+    );
+  });
+
+  it("waits for an in-flight retry instead of failing on a non-covering success", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn();
+    const listBuyTransactions = vi.fn().mockResolvedValue({
+      transactions: [
+        transaction({ transactionId: "txn_small", purchaseAmountValue: "100.000000" }),
+        transaction({ transactionId: "txn_retry", status: "in_progress" }),
+      ],
+      nextPageKey: null,
+    });
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({ listBuyTransactions }),
+      logger,
+      () => now,
+    );
+
+    const summary = await service.execute("trace_01");
+
+    expect(recordOnrampMoneyEventOnce).not.toHaveBeenCalled();
+    expect(summary).toEqual({ checked: 1, acted: 0, failed: 0 });
+  });
+
+  it("follows the page cursor and funds from a covering success on page 2", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
+    const listBuyTransactions = vi
+      .fn()
+      .mockResolvedValueOnce({
+        transactions: [transaction({ transactionId: "txn_page1_small", purchaseAmountValue: "10.000000" })],
+        nextPageKey: "page_2",
+      })
+      .mockResolvedValueOnce({
+        transactions: [transaction({ transactionId: "txn_page2_covering" })],
+        nextPageKey: null,
+      });
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({ listBuyTransactions }),
+      logger,
+      () => now,
+    );
+
+    await service.execute("trace_01");
+
+    expect(listBuyTransactions).toHaveBeenNthCalledWith(1, { partnerUserRef: "reservation_01" });
+    expect(listBuyTransactions).toHaveBeenNthCalledWith(2, { partnerUserRef: "reservation_01", pageKey: "page_2" });
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledTimes(1);
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
+      expect.objectContaining({ capitalState: "eurc_reserved", providerReference: "txn_page2_covering" }),
+    );
+  });
+
+  it("stops at the page cap and records nothing when no covering success was seen", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn();
+    let page = 0;
+    const listBuyTransactions = vi.fn().mockImplementation(async () => {
+      page += 1;
+      return {
+        transactions: [transaction({ transactionId: `txn_failed_${page}`, status: "failed" })],
+        nextPageKey: `page_${page + 1}`,
+      };
+    });
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({ listBuyTransactions }),
+      logger,
+      () => now,
+    );
+
+    const summary = await service.execute("trace_01");
+
+    expect(listBuyTransactions).toHaveBeenCalledTimes(MAX_ONRAMP_TRANSACTION_PAGES);
+    expect(recordOnrampMoneyEventOnce).not.toHaveBeenCalled();
+    expect(summary).toEqual({ checked: 1, acted: 0, failed: 0 });
+  });
+
+  it("still funds from a covering success seen before the page cap", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
+    const listBuyTransactions = vi
+      .fn()
+      .mockResolvedValueOnce({ transactions: [transaction({ transactionId: "txn_covering" })], nextPageKey: "page_2" })
+      .mockResolvedValue({ transactions: [], nextPageKey: "page_n" });
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({ listBuyTransactions }),
+      logger,
+      () => now,
+    );
+
+    await service.execute("trace_01");
+
+    expect(listBuyTransactions).toHaveBeenCalledTimes(MAX_ONRAMP_TRANSACTION_PAGES);
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
+      expect.objectContaining({ capitalState: "eurc_reserved", providerReference: "txn_covering" }),
+    );
+  });
+
+  it("keeps polling the other reservations when one lookup fails, then fails the run with its counts", async () => {
+    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
+    const listBuyTransactions = vi.fn().mockImplementation(async ({ partnerUserRef }: { partnerUserRef: string }) => {
+      if (partnerUserRef === "reservation_broken") throw new Error("Coinbase CDP request failed with HTTP 503");
+      return { transactions: [transaction({ transactionId: `txn_${partnerUserRef}` })], nextPageKey: null };
+    });
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi
+          .fn()
+          .mockResolvedValue([
+            pending({ reservationId: "reservation_a" }),
+            pending({ reservationId: "reservation_broken" }),
+            pending({ reservationId: "reservation_b" }),
+          ]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({ listBuyTransactions }),
+      logger,
+      () => now,
+    );
+
+    const run = service.execute("trace_01");
+
+    await expect(run).rejects.toBeInstanceOf(OnrampPollIncompleteError);
+    await expect(run).rejects.toMatchObject({ summary: { checked: 3, acted: 2, failed: 1 } });
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledTimes(2);
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationId: "reservation_a", capitalState: "eurc_reserved" }),
+    );
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
+      expect.objectContaining({ reservationId: "reservation_b", capitalState: "eurc_reserved" }),
+    );
+  });
+
+  it("isolates a failed money-event write the same way as a failed lookup", async () => {
+    const recordOnrampMoneyEventOnce = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("database unavailable"))
+      .mockResolvedValue(true);
+    const service = new PollOnrampTransactionsService(
+      repository({
+        listPendingPurchaseReservationsForTimers: vi
+          .fn()
+          .mockResolvedValue([pending({ reservationId: "reservation_a" }), pending({ reservationId: "reservation_b" })]),
+        recordOnrampMoneyEventOnce,
+      }),
+      coinbase({
+        listBuyTransactions: vi.fn().mockResolvedValue({ transactions: [transaction()], nextPageKey: null }),
+      }),
+      logger,
+      () => now,
+    );
+
+    await expect(service.execute("trace_01")).rejects.toMatchObject({
+      summary: { checked: 2, acted: 1, failed: 1 },
+    });
+    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledTimes(2);
+  });
+
   it("does nothing when no transaction exists yet for the reservation", async () => {
     const recordOnrampMoneyEventOnce = vi.fn();
     const service = new PollOnrampTransactionsService(
@@ -266,54 +467,7 @@ describe("PollOnrampTransactionsService", () => {
     const summary = await service.execute("trace_01");
 
     expect(recordOnrampMoneyEventOnce).not.toHaveBeenCalled();
-    expect(summary).toEqual({ checked: 1, acted: 0 });
-  });
-});
-
-describe("PollOnrampTransactionsService recording idempotency", () => {
-  it("does not count an outcome the repository had already recorded", async () => {
-    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(false);
-    const spiedLogger = pino({ level: "silent" });
-    const warn = vi.spyOn(spiedLogger, "warn");
-    const service = new PollOnrampTransactionsService(
-      repository({
-        listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([pending()]),
-        recordOnrampMoneyEventOnce,
-      }),
-      coinbase({
-        listBuyTransactions: vi.fn().mockResolvedValue({
-          transactions: [transaction({ purchaseCurrency: "ETH" })],
-          nextPageKey: null,
-        }),
-      }),
-      spiedLogger,
-      () => now,
-    );
-
-    const summary = await service.execute("trace_01");
-
-    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledTimes(1);
-    expect(warn).not.toHaveBeenCalled();
-    expect(summary).toEqual({ checked: 1, acted: 0 });
-  });
-
-  it("reconciles a single reservation through the same recording path", async () => {
-    const recordOnrampMoneyEventOnce = vi.fn().mockResolvedValue(true);
-    const listPendingPurchaseReservationsForTimers = vi.fn();
-    const service = new PollOnrampTransactionsService(
-      repository({ listPendingPurchaseReservationsForTimers, recordOnrampMoneyEventOnce }),
-      coinbase({
-        listBuyTransactions: vi.fn().mockResolvedValue({ transactions: [transaction()], nextPageKey: null }),
-      }),
-      logger,
-      () => now,
-    );
-
-    await expect(service.reconcileReservation(pending(), "trace_01")).resolves.toBe(true);
-    expect(listPendingPurchaseReservationsForTimers).not.toHaveBeenCalled();
-    expect(recordOnrampMoneyEventOnce).toHaveBeenCalledWith(
-      expect.objectContaining({ capitalState: "eurc_reserved", providerReference: "txn_01" }),
-    );
+    expect(summary).toEqual({ checked: 1, acted: 0, failed: 0 });
   });
 });
 

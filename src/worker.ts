@@ -52,6 +52,7 @@ import { PrismaWalletRegistryHealthRepository } from "./modules/settlement/repos
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
 import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { SCHEDULED_JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
+import { createDeadLetterAlertWebhook } from "./shared/jobs/dead-letter-alert-webhook.js";
 import { registerDeadLetterConsumer } from "./shared/jobs/dead-letter-consumer.js";
 import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
@@ -261,7 +262,9 @@ const settlementRepository = chainClients === undefined ? undefined : new Prisma
 const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
-    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger);
+    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger, undefined, {
+        nonceBlockTag: environment.ESCROW_MINT_NONCE_BLOCK_TAG,
+      });
 const confirmWalletRegistrations =
   chainClients === undefined ||
   settlementRepository === undefined ||
@@ -799,7 +802,13 @@ if (reconcileOnrampWebhook !== undefined) {
 // keeps the settings it was sent with and does not. This logs each entry at
 // error level, at least once, which is what an alert on a terminally failed job
 // keys on.
-await registerDeadLetterConsumer(boss, logger);
+await registerDeadLetterConsumer(
+  boss,
+  logger,
+  environment.DEAD_LETTER_ALERT_WEBHOOK_URL === undefined
+    ? {}
+    : { deliverAlert: createDeadLetterAlertWebhook({ url: environment.DEAD_LETTER_ALERT_WEBHOOK_URL, logger }) },
+);
 
 logger.info("VistaBlox worker started");
 heartbeat.markReady();

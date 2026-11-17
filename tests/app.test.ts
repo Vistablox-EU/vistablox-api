@@ -40,6 +40,7 @@ const offering: PublicOfferingRecord = {
     propertyType: "residential",
     countryCode: "RS",
     city: "Belgrade",
+    media: null,
   },
 };
 
@@ -336,6 +337,29 @@ describe("VistaBlox API", () => {
       page: { next_cursor: null },
     });
     expect(listPublic).toHaveBeenCalledWith({ limit: 21 });
+  });
+
+  it("returns stored offering media on the public list", async () => {
+    const { app } = buildApp({
+      offerings: [
+        {
+          ...offering,
+          featured: true,
+          property: {
+            ...offering.property,
+            media: { heroUrl: "https://cdn.example.com/off_01/hero.jpg", galleryUrls: [] },
+          },
+        },
+      ],
+    });
+
+    const response = await request(app).get("/v1/offerings");
+
+    expect(response.status).toBe(200);
+    expect(response.body.data[0]).toMatchObject({
+      featured: true,
+      property: { media: { hero_url: "https://cdn.example.com/off_01/hero.jpg", gallery_urls: [] } },
+    });
   });
 
   it("rejects invalid pagination inputs as field errors", async () => {

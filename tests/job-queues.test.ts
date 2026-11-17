@@ -120,7 +120,7 @@ describe("queue creation at startup", () => {
   it("the worker starts consuming the dead-letter queue only after creating it", () => {
     const source = sourceOf("src/worker.ts");
     const created = source.indexOf("await ensureDeadLetterQueue(boss);");
-    const consumed = source.indexOf("await registerDeadLetterConsumer(boss, logger);");
+    const consumed = source.search(/await registerDeadLetterConsumer\(\s*boss,\s*logger\b/);
 
     expect(created).toBeGreaterThan(-1);
     expect(consumed).toBeGreaterThan(created);
@@ -197,6 +197,6 @@ describe("worker retry and dead-letter wiring", () => {
   });
 
   it("consumes the dead-letter queue", () => {
-    expect(/await registerDeadLetterConsumer\(boss, logger\);/.test(sourceOf("src/worker.ts"))).toBe(true);
+    expect(/await registerDeadLetterConsumer\(\s*boss,\s*logger\b/.test(sourceOf("src/worker.ts"))).toBe(true);
   });
 });

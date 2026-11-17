@@ -1,3 +1,4 @@
+import type { OfferingMedia } from "../domain/offering-media.policy.js";
 import type { PublicOfferingStatus } from "../domain/public-offering.policy.js";
 
 export interface OfferingCursor {
@@ -16,6 +17,8 @@ export interface PublicOfferingRecord {
     propertyType: "residential";
     countryCode: string;
     city: string | null;
+    /** Stored on the offering, shown under property on the wire. */
+    media: OfferingMedia | null;
   };
   ipoEndAt: Date | null;
 }
@@ -49,6 +52,7 @@ export interface InvestorOfferingDetailRecord {
     propertyType: "residential";
     countryCode: string;
     city: string | null;
+    media: OfferingMedia | null;
     addressLine: string | null;
     ownerDeclaredValueEur: string;
     appraisalValueOpinionEur: string | null;

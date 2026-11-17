@@ -93,7 +93,13 @@ export interface OnrampWebhookJobQueue {
  */
 export interface ReservationRepository {
   createReservation(input: CreateReservationInput): Promise<CreateReservationResult>;
-  recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<void>;
+  /**
+   * Records a money event under the reservation's row lock, the same lock
+   * expireReservation takes, so the two serialise. Returns false (writes
+   * nothing) when the reservation is no longer 'initiated', or when the event
+   * would put an unfunded state over funded money.
+   */
+  recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<boolean>;
   /** Mirrors listPublishedInformationRequestsForTimers: an unfiltered list — the domain policy (isReservationExpired), not SQL, decides which of these are actually due. */
   listInitiatedReservationsForTimers(): Promise<InitiatedReservationForTimer[]>;
   /** Idempotent: returns false (no-op) if the reservation is no longer 'initiated' by the time this runs, matching expireInformationRequest's existence/state-check pattern. */
