@@ -3,8 +3,12 @@ import type { Logger } from "pino";
 import type { JobRunSummary } from "../../../shared/jobs/job-run-summary.js";
 import { toEurcMicros } from "../domain/currency.js";
 import type { CoinbaseCdpClient, OnrampTransactionSummary } from "./coinbase-cdp-client.js";
+import {
+  LoggingOtherStageOnrampOutcomeHandler,
+  type OtherStageOnrampOutcomeHandler,
+} from "./other-stage-onramp-outcome.js";
 import type {
-  PendingPurchaseReservationForTimer,
+  OnrampOutcomeRecording,
   ReservationRepository,
 } from "../repository/reservation.repository.js";
 
@@ -24,6 +28,28 @@ export interface PollOnrampTransactionsSummary extends JobRunSummary {
   failed: number;
 }
 
+/** What reconcileReservation needs to know about a reservation: both the poll's list and the webhook job's lookup satisfy it. */
+export interface OnrampReconcileTarget {
+  reservationId: string;
+  amountEur: string;
+}
+
+/**
+ * What reconciling one reservation concluded. "unresolved": Coinbase has not
+ * reached a conclusion yet (nothing started, an attempt still in flight, or
+ * pages unread past the cap), so nothing was recorded. "resolved": it did,
+ * and `recording` is the single recording method's answer; only
+ * `recording.status === "recorded"` wrote a money event.
+ */
+export type OnrampReconcileResult =
+  | { status: "unresolved" }
+  | {
+      status: "resolved";
+      capitalState: "eurc_reserved" | "purchase_failed";
+      providerTransactionId: string;
+      recording: OnrampOutcomeRecording;
+    };
+
 /** Thrown only after every reservation was tried; `summary` carries the run's counts for the job log. */
 export class OnrampPollIncompleteError extends Error {
   public constructor(public readonly summary: PollOnrampTransactionsSummary) {
@@ -39,10 +65,14 @@ export class OnrampPollIncompleteError extends Error {
  * turns Coinbase's transaction list into a money event. Each minute it asks
  * CDP's Transaction Status API about every reservation still waiting on a
  * purchase (eurc_purchase_pending, or purchase_failed after a retry). The
- * signed CDP webhook (ReconcileOnrampWebhookService, see
- * docs/coinbase-cdp-onramp.md) only triggers reconcileReservation early for
- * one reservation; it never trusts the webhook body's status or amounts, so
- * both paths resolve, check coverage and record identically.
+ * signed CDP webhook (ReconcileOnrampWebhookService, AD-289) calls
+ * reconcileReservation early for one reservation and never trusts the
+ * webhook body's status or amounts, so both paths resolve, check coverage and
+ * record identically, through the one recording method
+ * (ReservationRepository.recordOnrampOutcome: lock, latest event, funded
+ * guard, dedupe per provider transaction and state, stage check). Both
+ * honour what it returns: only a "recorded" outcome counts as acted on, and
+ * an other_stage outcome goes to the late-evidence seam.
  * partnerUserRef was set to the reservation ID at session-token creation
  * (CreateReservationService), so one lookup per reservation resolves
  * unambiguously. The lookup follows the provider's page cursor (up to
@@ -61,6 +91,9 @@ export class PollOnrampTransactionsService {
     private readonly coinbase: CoinbaseCdpClient,
     private readonly logger: Logger,
     private readonly clock: () => Date = () => new Date(),
+    private readonly otherStageOutcomes: OtherStageOnrampOutcomeHandler = new LoggingOtherStageOnrampOutcomeHandler(
+      logger,
+    ),
   ) {}
 
   public async execute(traceId: string): Promise<PollOnrampTransactionsSummary> {
@@ -70,7 +103,8 @@ export class PollOnrampTransactionsService {
     let failed = 0;
     for (const reservation of pending) {
       try {
-        if (await this.reconcileReservation(reservation, traceId)) acted += 1;
+        const result = await this.reconcileReservation(reservation, traceId);
+        if (result.status === "resolved" && result.recording.status === "recorded") acted += 1;
       } catch (error) {
         failed += 1;
         this.logger.error(
@@ -87,11 +121,15 @@ export class PollOnrampTransactionsService {
     return summary;
   }
 
-  /** Returns true when a money event was recorded; false while still pending or when the outcome was already recorded. */
+  /**
+   * Resolves one reservation's outcome from Coinbase and records it through
+   * the single recording method. Used by the poll's loop and by the webhook
+   * job, so neither can record differently from the other.
+   */
   public async reconcileReservation(
-    reservation: PendingPurchaseReservationForTimer,
+    reservation: OnrampReconcileTarget,
     traceId: string,
-  ): Promise<boolean> {
+  ): Promise<OnrampReconcileResult> {
     const { transactions, complete } = await this.listAllTransactions(reservation.reservationId);
     if (!complete) {
       this.logger.warn(
@@ -106,34 +144,90 @@ export class PollOnrampTransactionsService {
     }
 
     const outcome = resolveOutcome(transactions, reservation.amountEur, complete);
-    if (outcome.status === "pending") return false;
+    if (outcome.status === "pending") return { status: "unresolved" };
 
     const funded = outcome.status === "funded";
-    const recorded = await this.reservations.recordOnrampMoneyEventOnce({
+    const capitalState = funded ? "eurc_reserved" : "purchase_failed";
+    const observedAt = this.clock();
+    const recording = await this.reservations.recordOnrampOutcome({
       reservationId: reservation.reservationId,
       provider: "coinbase_cdp",
       providerReference: outcome.transaction.transactionId,
-      capitalState: funded ? "eurc_reserved" : "purchase_failed",
+      capitalState,
       amountEur: reservation.amountEur,
       amountEurc: funded ? outcome.transaction.purchaseAmountValue : null,
-      recordedAt: this.clock(),
+      recordedAt: observedAt,
     });
-    if (recorded && outcome.status === "uncovered_success") {
-      this.logger.warn(
-        {
-          trace_id: traceId,
-          reservation_id: reservation.reservationId,
-          reserved_amount_eur: reservation.amountEur,
-          purchase_currency: outcome.transaction.purchaseCurrency,
-          purchase_amount_value: outcome.transaction.purchaseAmountValue,
-          payment_total_currency: outcome.transaction.paymentTotalCurrency,
-          payment_total_value: outcome.transaction.paymentTotalValue,
-          provider_reference: outcome.transaction.transactionId,
-        },
-        "onramp success does not cover the reserved amount; recorded purchase_failed",
-      );
+
+    switch (recording.status) {
+      case "recorded":
+        // Only a row that was actually written is worth a warning: a
+        // purchase_failed reservation stays in the poll list, so this would
+        // otherwise repeat every minute for the same transaction.
+        if (outcome.status === "uncovered_success") {
+          this.logger.warn(
+            {
+              trace_id: traceId,
+              reservation_id: reservation.reservationId,
+              reserved_amount_eur: reservation.amountEur,
+              purchase_currency: outcome.transaction.purchaseCurrency,
+              purchase_amount_value: outcome.transaction.purchaseAmountValue,
+              payment_total_currency: outcome.transaction.paymentTotalCurrency,
+              payment_total_value: outcome.transaction.paymentTotalValue,
+              provider_reference: outcome.transaction.transactionId,
+            },
+            "onramp success does not cover the reserved amount; recorded purchase_failed",
+          );
+        }
+        break;
+      case "other_stage":
+        await this.otherStageOutcomes.handleOtherStageOutcome({
+          reservationId: reservation.reservationId,
+          reservationStage: recording.reservationStage,
+          latestCapitalState: recording.latestCapitalState,
+          providerTransactionId: outcome.transaction.transactionId,
+          txHash: outcome.transaction.txHash,
+          destinationWallet: outcome.transaction.walletAddress,
+          amount: outcome.transaction.purchaseAmountValue,
+          asset: outcome.transaction.purchaseCurrency,
+          state: capitalState,
+          observedAt,
+          traceId,
+        });
+        break;
+      case "duplicate":
+        // Expected every minute for a purchase_failed reservation.
+        this.logger.debug(
+          {
+            trace_id: traceId,
+            reservation_id: reservation.reservationId,
+            provider_reference: outcome.transaction.transactionId,
+            capital_state: capitalState,
+          },
+          "onramp outcome already recorded; nothing to write",
+        );
+        break;
+      case "already_funded":
+      case "not_awaiting_purchase":
+      case "unknown_reservation":
+        this.logger.info(
+          {
+            trace_id: traceId,
+            reservation_id: reservation.reservationId,
+            provider_reference: outcome.transaction.transactionId,
+            capital_state: capitalState,
+            recording: recording.status,
+          },
+          "onramp outcome not recorded: the reservation is not awaiting this purchase",
+        );
+        break;
     }
-    return recorded;
+    return {
+      status: "resolved",
+      capitalState,
+      providerTransactionId: outcome.transaction.transactionId,
+      recording,
+    };
   }
 
   private async listAllTransactions(

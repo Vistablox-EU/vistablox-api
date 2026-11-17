@@ -453,7 +453,7 @@ const coinbaseOnrampWebhook =
     ? undefined
     : {
         verifier: new CoinbaseOnrampWebhookVerifier(environment.COINBASE_ONRAMP_WEBHOOK_SECRET),
-        receiveWebhook: new ReceiveCoinbaseOnrampWebhookService(offeringRepository),
+        receiveWebhook: new ReceiveCoinbaseOnrampWebhookService(offeringRepository, logger),
       };
 // Necessary but not sufficient on its own: RESERVATION_FUNDING_RAIL_ENABLED
 // is the human "I've verified this live" switch, but it can never actually

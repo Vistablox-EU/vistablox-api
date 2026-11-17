@@ -709,6 +709,27 @@ model MoneyEvent {
   @@schema("money")
 }
 
+/// One verified Coinbase CDP onramp webhook delivery, reduced to ids (AD-289):
+/// never the body, the signature or a secret. Append-only, like money_events,
+/// and unique on the delivery's event id so a redelivery is a no-op. Written in
+/// the same transaction that enqueues the provider_events.coinbase_onramp_webhook
+/// job. partner_user_ref is the reservation id the onramp session was opened
+/// with; it has no foreign key on purpose, so an event for a reservation this
+/// database does not know stays on file as evidence instead of failing the write.
+model OnrampWebhookReceipt {
+  id             String   @id @map("onramp_webhook_receipt_id")
+  eventId        String   @unique(map: "uq_onramp_webhook_receipts_event_id") @map("event_id")
+  eventType      String   @map("event_type")
+  transactionId  String?  @map("transaction_id")
+  txHash         String?  @map("tx_hash")
+  partnerUserRef String   @map("partner_user_ref")
+  receivedAt     DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  @@index([partnerUserRef, receivedAt(sort: Desc)], map: "idx_onramp_webhook_receipts_partner_user_ref")
+  @@map("onramp_webhook_receipts")
+  @@schema("money")
+}
+
 model TreasurySweepBatch {
   id                     String    @id @map("sweep_batch_id")
   sweepDate              DateTime  @map("sweep_date") @db.Date

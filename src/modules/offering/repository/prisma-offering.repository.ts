@@ -2,7 +2,7 @@ import type { PgBoss } from "pg-boss";
 import { ulid } from "ulid";
 import { z } from "zod";
 
-import { enqueueTransactionalJob, JOB_RETRY_OPTIONS } from "../../../shared/jobs/enqueue-job.js";
+import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import type { Prisma } from "../../../generated/prisma/client.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { toCents, toEurcMicros } from "../domain/currency.js";
@@ -31,11 +31,15 @@ import type {
   CreateReservationResult,
   ExpireReservationInput,
   InitiatedReservationForTimer,
-  OnrampWebhookJobQueue,
-  OnrampWebhookReconcileJob,
+  OnrampOutcomeRecording,
+  OnrampWebhookReceipt,
+  OnrampWebhookReceiver,
   PendingPurchaseReservationForTimer,
+  RecordOnrampOutcomeInput,
+  ReservationForOnrampReconciliation,
   ReservationRepository,
 } from "./reservation.repository.js";
+import { decideOnrampRecording } from "../domain/onramp-outcome-recording.policy.js";
 import {
   FUNDED_CAPITAL_STATES,
   isReservationFunded,
@@ -96,7 +100,7 @@ export class PrismaOfferingRepository
     ReconfirmationReminderRepository,
     ReconfirmationWindowOpenedNotificationRepository,
     ReservationRepository,
-    OnrampWebhookJobQueue
+    OnrampWebhookReceiver
 {
   public constructor(
     private readonly database: DatabaseClient,
@@ -782,42 +786,69 @@ export class PrismaOfferingRepository
     }));
   }
 
-  public async findPendingPurchaseReservationForTimers(
+  public async findReservationForOnrampReconciliation(
     reservationId: string,
-  ): Promise<PendingPurchaseReservationForTimer | null> {
+  ): Promise<ReservationForOnrampReconciliation | null> {
     const rows = await this.database.$queryRaw<
-      Array<{ reservation_id: string; account_id: string; amount_eur: string }>
+      Array<{ reservation_id: string; account_id: string; amount_eur: string; reservation_stage: string }>
     >`
-      SELECT reservation.reservation_id, reservation.account_id, reservation.amount_eur::text
+      SELECT
+        reservation.reservation_id,
+        reservation.account_id,
+        reservation.amount_eur::text,
+        reservation.reservation_stage
       FROM offering.reservations AS reservation
-      JOIN LATERAL (
-        SELECT money_event.capital_state
-        FROM money.money_events AS money_event
-        WHERE money_event.reservation_id = reservation.reservation_id
-        ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
-        LIMIT 1
-      ) AS latest_money ON TRUE
       WHERE reservation.reservation_id = ${reservationId}
-        AND reservation.reservation_stage = 'initiated'
-        AND latest_money.capital_state IN ('eurc_purchase_pending', 'purchase_failed')
     `;
     const row = rows[0];
     if (row === undefined) return null;
-    return { reservationId: row.reservation_id, accountId: row.account_id, amountEur: row.amount_eur };
+    return {
+      reservationId: row.reservation_id,
+      accountId: row.account_id,
+      amountEur: row.amount_eur,
+      reservationStage: row.reservation_stage,
+    };
   }
 
-  public async recordOnrampMoneyEventOnce(input: AdvanceReservationCapitalStateInput): Promise<boolean> {
+  public async recordOnrampOutcome(input: RecordOnrampOutcomeInput): Promise<OnrampOutcomeRecording> {
     return this.database.$transaction(async (transaction) => {
+      // The same row lock recordMoneyEvent and expireReservation take, so the
+      // poll, a webhook job and the expiry sweep serialise on one reservation.
+      // The stage and the latest event are read after the lock is held (see
+      // lockReservationWithLatestMoney), and so is the duplicate check below:
+      // a recorder that waited here sees what the one before it committed.
       const current = await lockReservationWithLatestMoney(transaction, input.reservationId);
-      if (current === undefined || current.reservation_stage !== "initiated") return false;
-      if (current.capital_state !== "eurc_purchase_pending" && current.capital_state !== "purchase_failed") {
-        return false;
-      }
-      if (
-        current.capital_state === input.capitalState &&
-        current.provider_reference === input.providerReference
-      ) {
-        return false;
+      if (current === undefined) return { status: "unknown_reservation" };
+
+      const outcomeAlreadyRecorded =
+        (await transaction.moneyEvent.count({
+          where: {
+            reservationId: input.reservationId,
+            provider: input.provider,
+            providerReference: input.providerReference,
+            capitalState: input.capitalState,
+          },
+        })) > 0;
+      const decision = decideOnrampRecording({
+        reservationStage: current.reservation_stage,
+        latestCapitalState: current.capital_state,
+        outcomeAlreadyRecorded,
+      });
+      switch (decision) {
+        case "duplicate":
+          return { status: "duplicate" };
+        case "already_funded":
+          return { status: "already_funded" };
+        case "other_stage":
+          return {
+            status: "other_stage",
+            reservationStage: current.reservation_stage,
+            latestCapitalState: current.capital_state,
+          };
+        case "not_awaiting_purchase":
+          return { status: "not_awaiting_purchase", latestCapitalState: current.capital_state };
+        case "record":
+          break;
       }
 
       await transaction.moneyEvent.create({
@@ -832,25 +863,48 @@ export class PrismaOfferingRepository
           recordedAt: input.recordedAt,
         },
       });
-      return true;
+      return { status: "recorded" };
     });
   }
 
-  // A plain durable send, not a transaction-bound one: no state change has
-  // to commit alongside it, the same reasoning as PrismaKycRepository's
-  // enqueueDiditWebhookProcessing. The job carries only ids, never the
-  // webhook body, so no payload PII is persisted in pgboss.job.
-  public async enqueueOnrampWebhookReconcile(job: OnrampWebhookReconcileJob): Promise<void> {
-    await this.pgBoss.send(
-      "provider_events.coinbase_onramp_webhook",
-      {
-        reservationId: job.reservationId,
-        eventId: job.eventId,
-        eventType: job.eventType,
-        traceId: job.traceId,
-      },
-      JOB_RETRY_OPTIONS,
-    );
+  // The receipt and the job commit together or not at all: a receipt without
+  // its job would be a delivery nobody acts on, and (since a redelivery of its
+  // event id is a no-op) nothing would ever retry it; a job without a receipt
+  // would leave no durable record of what triggered it. The body is never
+  // stored: only the ids in OnrampWebhookReceipt, and the job payload carries
+  // the reservation id and event id, nothing else.
+  public async receiveOnrampWebhook(
+    receipt: OnrampWebhookReceipt,
+    traceId: string,
+  ): Promise<"enqueued" | "duplicate"> {
+    return this.database.$transaction(async (transaction) => {
+      const written = await transaction.onrampWebhookReceipt.createMany({
+        data: [
+          {
+            id: `onramp_webhook_receipt_${ulid()}`,
+            eventId: receipt.eventId,
+            eventType: receipt.eventType,
+            transactionId: receipt.transactionId,
+            txHash: receipt.txHash,
+            partnerUserRef: receipt.partnerUserRef,
+          },
+        ],
+        skipDuplicates: true,
+      });
+      if (written.count === 0) return "duplicate";
+      await enqueueTransactionalJob(
+        this.pgBoss,
+        transaction,
+        "provider_events.coinbase_onramp_webhook",
+        {
+          reservationId: receipt.partnerUserRef,
+          eventId: receipt.eventId,
+          eventType: receipt.eventType,
+        },
+        traceId,
+      );
+      return "enqueued";
+    });
   }
 
   public async expireReservation(input: ExpireReservationInput): Promise<boolean> {
@@ -864,7 +918,7 @@ export class PrismaOfferingRepository
       // the latest capital_state under the same lock as the stage flip so
       // money that has already landed is never swept to 'lapsed' (AD-253
       // keeps the two state machines separate on purpose). recordMoneyEvent
-      // and recordOnrampMoneyEventOnce take this same row lock, so they
+      // and recordOnrampOutcome take this same row lock, so they
       // serialise with this;
       // lockReservationWithLatestMoney reads the money state only after the
       // lock is held, so a waiter sees what the holder committed.

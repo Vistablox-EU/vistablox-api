@@ -1,29 +1,47 @@
+import { createHash } from "node:crypto";
+
 import { Router } from "express";
 import { z } from "zod";
 
-import { AppError } from "../../../shared/errors/app-error.js";
-import type { ReceiveCoinbaseOnrampWebhookService } from "../application/coinbase-onramp-webhook.service.js";
+import type {
+  ParsedCoinbaseOnrampEvent,
+  ReceiveCoinbaseOnrampWebhookService,
+} from "../application/coinbase-onramp-webhook.service.js";
 import type { CoinbaseOnrampWebhookVerifier } from "../infrastructure/coinbase-onramp-webhook-verifier.js";
 
+// A field that is not the string we expect becomes null instead of failing the
+// whole delivery: the receipt stores ids only, and a surprising value in one
+// of them must not turn a verified delivery into a failed write that Coinbase
+// retries. The length limits match the CHECK constraints on
+// money.onramp_webhook_receipts.
+const optionalId = z.string().min(1).max(200).nullish().catch(null);
+
 /**
- * The fields read from a verified CDP onramp webhook body
- * (see docs/coinbase-cdp-onramp.md#webhook). Deliberately lenient and minimal:
- * only eventType and partnerUserRef are read. Status, amounts, the wallet
- * address and the user's country are never taken from the body, because the
- * worker re-fetches the transaction from CDP's Transaction Status API, exactly
- * as the minute poll does.
+ * The fields read from a verified CDP onramp webhook body. ASSUMED names (see
+ * ParsedCoinbaseOnrampEvent): eventType, partnerUserRef, transactionId,
+ * txHash. Status, amounts, the wallet address and the user's country are never
+ * taken from the body: the worker re-fetches the reservation's transactions
+ * from CDP's Transaction Status API, exactly as the minute poll does.
  */
 const coinbaseOnrampWebhookBodySchema = z.object({
   eventType: z.string().min(1).max(100),
-  partnerUserRef: z.string().max(200).nullish(),
+  partnerUserRef: optionalId,
+  transactionId: optionalId,
+  txHash: optionalId,
 });
 
+// ASSUMED header name for the delivery's event id (see the docs): when it is
+// absent, or not a usable id, the digest of the exact signed body stands in,
+// so a redelivery of identical bytes is still recognised as a duplicate.
 const eventIdSchema = z.string().min(1).max(200);
 
 /**
  * Mounted behind express.raw() in app.ts, so request.body is the exact bytes
- * CDP signed. Only ids and the event type ever reach a log line or the job
- * payload; the body itself is never logged.
+ * CDP signed. A bad signature is a 401. After that every delivery is
+ * acknowledged with 200, including one that is JSON of a shape we do not
+ * recognise or an event type we do not act on: Coinbase retries a non-2xx, and
+ * a retry cannot fix either. Only ids and the event type ever reach a log line,
+ * a receipt or the job payload; the body itself is never stored or logged.
  */
 export function createCoinbaseOnrampWebhookRouter(
   verifier: CoinbaseOnrampWebhookVerifier,
@@ -39,35 +57,32 @@ export function createCoinbaseOnrampWebhookRouter(
         readHeader(request.headers["x-webhook-signature"]) ??
         readHeader(request.headers["x-hook0-signature"]),
     });
-    const body = coinbaseOnrampWebhookBodySchema.safeParse(parseJson(rawBody));
-    if (!body.success) throw invalidPayload();
     const eventId = eventIdSchema.safeParse(readHeader(request.headers["x-event-id"]));
-    const result = await receiveWebhook.execute({
-      eventType: body.data.eventType,
-      partnerUserRef: body.data.partnerUserRef ?? null,
-      eventId: eventId.success ? eventId.data : null,
+    await receiveWebhook.execute({
+      eventId: eventId.success ? eventId.data : `body-sha256:${createHash("sha256").update(rawBody).digest("hex")}`,
+      event: parseEvent(rawBody),
       traceId: String(response.locals.traceId),
     });
-    response.json({ received: result.received });
+    response.json({ received: true });
   });
   return router;
 }
 
-function parseJson(rawBody: Buffer): unknown {
+function parseEvent(rawBody: Buffer): ParsedCoinbaseOnrampEvent | null {
+  let json: unknown;
   try {
-    return JSON.parse(rawBody.toString("utf8"));
+    json = JSON.parse(rawBody.toString("utf8"));
   } catch {
-    throw invalidPayload();
+    return null;
   }
-}
-
-function invalidPayload(): AppError {
-  return new AppError({
-    code: "offering.coinbase_webhook_payload_invalid",
-    title: "Invalid webhook payload",
-    status: 400,
-    detail: "The webhook body is not a recognised Coinbase onramp event.",
-  });
+  const body = coinbaseOnrampWebhookBodySchema.safeParse(json);
+  if (!body.success) return null;
+  return {
+    eventType: body.data.eventType,
+    partnerUserRef: body.data.partnerUserRef ?? null,
+    transactionId: body.data.transactionId ?? null,
+    txHash: body.data.txHash ?? null,
+  };
 }
 
 function readHeader(value: string | string[] | undefined): string | undefined {

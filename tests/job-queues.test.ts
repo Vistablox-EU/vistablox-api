@@ -163,7 +163,7 @@ describe("queue creation at startup", () => {
     const workerKinds = queueKinds(sourceOf("src/worker.ts"), "boss");
 
     // The queues the API process enqueues into: PrismaKycRepository.enqueueDiditWebhookProcessing,
-    // PrismaOfferingRepository.enqueueOnrampWebhookReconcile,
+    // PrismaOfferingRepository.receiveOnrampWebhook,
     // PrismaIntakeRepository (the offering-open handoff) and PrismaOfferingRepository
     // (publishFinalOfferingTerms: the reconfirmation notification and the
     // post-IPO handoff). Creating them here is what lets a send() succeed

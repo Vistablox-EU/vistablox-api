@@ -776,9 +776,11 @@ await boss.work("provider_events.didit_webhook", async (jobs) => {
 if (reconcileOnrampWebhook !== undefined) {
   await boss.work("provider_events.coinbase_onramp_webhook", async (jobs) => {
     for (const job of jobs) {
+      // AD-152: trace_id is injected by enqueueTransactionalJob when the
+      // receipt and the job are written together.
       const traceId =
-        typeof job.data === "object" && job.data !== null && "traceId" in job.data
-          ? String((job.data as { traceId: unknown }).traceId)
+        typeof job.data === "object" && job.data !== null && "trace_id" in job.data
+          ? String((job.data as { trace_id: unknown }).trace_id)
           : "unknown";
       try {
         const result = await reconcileOnrampWebhook.execute(job.data);
