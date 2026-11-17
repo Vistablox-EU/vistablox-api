@@ -7,6 +7,7 @@ import type { ClassifyMaterialityService } from "../application/classify-materia
 import type { FinalizeOfferingService } from "../application/finalize-offering.service.js";
 import type { GetOfferingDocumentService } from "../application/get-offering-document.service.js";
 import type { PublishDisclosurePackService } from "../application/publish-disclosure-pack.service.js";
+import type { UpdateOfferingPresentationService } from "../application/update-offering-presentation.service.js";
 import type { UploadOfferingDocumentService } from "../application/upload-offering-document.service.js";
 import { investorOfferingParamsSchema } from "./offering.schemas.js";
 import {
@@ -18,6 +19,8 @@ import {
   offeringDocumentsQuerySchema,
   publishDisclosurePackBodySchema,
   publishDisclosurePackResponseSchema,
+  updateOfferingPresentationBodySchema,
+  updateOfferingPresentationResponseSchema,
   uploadOfferingDocumentResponseSchema,
 } from "./offering-operations.schemas.js";
 
@@ -37,6 +40,7 @@ export function createOfferingOperationsRouter(
   // Only present once document storage (MINIO_* + MINIO_DISCLOSURES_BUCKET)
   // is configured, the same way intake's upload routes are. See server.ts.
   documents?: OfferingDocumentServices,
+  updatePresentation?: UpdateOfferingPresentationService,
 ): Router {
   const router = Router();
   const staffOnly = [requireAuthentication, requireAdminOperations, requireStaffWebAuthn];
@@ -83,6 +87,21 @@ export function createOfferingOperationsRouter(
     });
     response.status(201).json(publishDisclosurePackResponseSchema.parse(result));
   });
+
+  if (updatePresentation !== undefined) {
+    router.patch("/:offering_id/presentation", ...staffOnly, async (request, response) => {
+      const authContext = requireAuthContext(response.locals.authContext);
+      const params = investorOfferingParamsSchema.parse(request.params);
+      const body = updateOfferingPresentationBodySchema.parse(request.body);
+      const result = await updatePresentation.execute({
+        accountId: authContext.accountId,
+        offeringId: params.offering_id,
+        traceId: String(response.locals.traceId),
+        body,
+      });
+      response.json(updateOfferingPresentationResponseSchema.parse(result));
+    });
+  }
 
   if (documents !== undefined) {
     // Raw file body, described by headers: the admin posts the file itself,

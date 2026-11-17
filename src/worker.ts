@@ -29,11 +29,11 @@ import {
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
+import { ReconcileOnrampWebhookService } from "./modules/offering/application/coinbase-onramp-webhook.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
 import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
-import { PrismaOnrampPaymentRepository } from "./modules/offering/repository/prisma-onramp-payment.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { CalculateOperatingDistributionService } from "./modules/rental/application/calculate-operating-distribution.service.js";
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
@@ -52,6 +52,7 @@ import { PrismaWalletRegistryHealthRepository } from "./modules/settlement/repos
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
 import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { SCHEDULED_JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
+import { createDeadLetterAlertWebhook } from "./shared/jobs/dead-letter-alert-webhook.js";
 import { registerDeadLetterConsumer } from "./shared/jobs/dead-letter-consumer.js";
 import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
@@ -160,7 +161,6 @@ const processDiditWebhook = new ProcessDiditWebhookService(
 );
 
 const offeringRepository = new PrismaOfferingRepository(database, boss, kycRepository);
-const onrampPaymentRepository = new PrismaOnrampPaymentRepository(database);
 const intakeRepository = new PrismaIntakeRepository(database, boss, kycRepository);
 const sendApplicantReminders = new SendApplicantResponseRemindersService(
   intakeRepository,
@@ -186,7 +186,11 @@ const coinbaseCdpClient =
 const pollOnrampTransactions =
   coinbaseCdpClient === undefined
     ? undefined
-    : new PollOnrampTransactionsService(offeringRepository, onrampPaymentRepository, coinbaseCdpClient, logger);
+    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger);
+const reconcileOnrampWebhook =
+  pollOnrampTransactions === undefined
+    ? undefined
+    : new ReconcileOnrampWebhookService(offeringRepository, pollOnrampTransactions);
 
 const operatingDistributionRepository = new PrismaOperatingDistributionRepository(database);
 const calculateOperatingDistribution = new CalculateOperatingDistributionService(
@@ -258,7 +262,9 @@ const settlementRepository = chainClients === undefined ? undefined : new Prisma
 const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
-    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger);
+    : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger, undefined, {
+        nonceBlockTag: environment.ESCROW_MINT_NONCE_BLOCK_TAG,
+      });
 const confirmWalletRegistrations =
   chainClients === undefined ||
   settlementRepository === undefined ||
@@ -394,6 +400,9 @@ await ensureJobQueue(boss, "maintenance.account_recovery_alert", "scheduled");
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
 // The webhook itself is received and durably enqueued by server.ts/app.ts.
 await ensureJobQueue(boss, "provider_events.didit_webhook", "event");
+// Registered unconditionally, like server.ts, so a send never hits a missing
+// queue; consumed only when a Coinbase client is configured (below).
+await ensureJobQueue(boss, "provider_events.coinbase_onramp_webhook", "event");
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
   tz: "UTC",
@@ -764,12 +773,44 @@ await boss.work("provider_events.didit_webhook", async (jobs) => {
   }
 });
 
+if (reconcileOnrampWebhook !== undefined) {
+  await boss.work("provider_events.coinbase_onramp_webhook", async (jobs) => {
+    for (const job of jobs) {
+      // AD-152: trace_id is injected by enqueueTransactionalJob when the
+      // receipt and the job are written together.
+      const traceId =
+        typeof job.data === "object" && job.data !== null && "trace_id" in job.data
+          ? String((job.data as { trace_id: unknown }).trace_id)
+          : "unknown";
+      try {
+        const result = await reconcileOnrampWebhook.execute(job.data);
+        logger.info(
+          { trace_id: traceId, job: "provider_events.coinbase_onramp_webhook", ...result },
+          "webhook job completed",
+        );
+      } catch (error) {
+        logger.error(
+          { err: error, trace_id: traceId, job: "provider_events.coinbase_onramp_webhook" },
+          "webhook job failed",
+        );
+        throw error;
+      }
+    }
+  });
+}
+
 // A job sent from this release on that fails after its last retry lands in the
 // dead-letter queue (ensureJobQueue, above); a job queued by an earlier release
 // keeps the settings it was sent with and does not. This logs each entry at
 // error level, at least once, which is what an alert on a terminally failed job
 // keys on.
-await registerDeadLetterConsumer(boss, logger);
+await registerDeadLetterConsumer(
+  boss,
+  logger,
+  environment.DEAD_LETTER_ALERT_WEBHOOK_URL === undefined
+    ? {}
+    : { deliverAlert: createDeadLetterAlertWebhook({ url: environment.DEAD_LETTER_ALERT_WEBHOOK_URL, logger }) },
+);
 
 logger.info("VistaBlox worker started");
 heartbeat.markReady();

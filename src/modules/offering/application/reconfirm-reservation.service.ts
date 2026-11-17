@@ -7,7 +7,8 @@ import type { FinalizeOfferingRepository } from "../repository/finalize-offering
  * reconfirm during the active reconfirmation window opened by
  * FinalizeOfferingService's publish step — no reconfirmation by expiry
  * means the reservation lapses rather than silently finalizing. Ownership,
- * window-open, and disclosure-pack-completeness (AD-037) checks all happen
+ * window-open, disclosure-pack-completeness (AD-037), and pack-postdates-
+ * the-latest-materiality-reset (AD-038) checks all happen
  * atomically inside the repository call (AD-146 discipline), not just
  * against an advisory read.
  */
@@ -62,8 +63,19 @@ export class ReconfirmReservationService {
       });
     }
 
+    if (result.conflict === "disclosure_pack_outdated") {
+      throw new AppError({
+        code: "offering.reconfirmation_disclosure_pack_outdated",
+        title: "Reservation cannot be reconfirmed",
+        status: 409,
+        detail:
+          "A material change was recorded after the current disclosure pack was published; reconfirmation reopens once an updated disclosure pack is published.",
+      });
+    }
+
     const reconfirmedAt = result.reconfirmedAt;
-    if (reconfirmedAt === null) {
+    const disclosurePackVersion = result.disclosurePackVersion;
+    if (reconfirmedAt === null || disclosurePackVersion === null) {
       throw new AppError({
         code: "internal.unexpected",
         title: "Internal server error",
@@ -77,6 +89,7 @@ export class ReconfirmReservationService {
         reservation_id: input.reservationId,
         status: "reconfirmed",
         reconfirmed_at: reconfirmedAt.toISOString(),
+        disclosure_pack_version: disclosurePackVersion,
       },
     };
   }

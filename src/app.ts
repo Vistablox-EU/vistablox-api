@@ -120,9 +120,11 @@ import { UploadOfferingDocumentService } from "./modules/offering/application/up
 import { GetOfferingDocumentService } from "./modules/offering/application/get-offering-document.service.js";
 import { FinalizeOfferingService } from "./modules/offering/application/finalize-offering.service.js";
 import { ReconfirmReservationService } from "./modules/offering/application/reconfirm-reservation.service.js";
+import { UpdateOfferingPresentationService } from "./modules/offering/application/update-offering-presentation.service.js";
 import type { CoinbaseCdpClient } from "./modules/offering/application/coinbase-cdp-client.js";
 import type { DisclosureDocumentStore, WritableDisclosureDocumentStore } from "./modules/offering/application/disclosure-document-store.js";
 import type { OfferingDocumentRepository } from "./modules/offering/repository/offering-document.repository.js";
+import type { OfferingPresentationRepository } from "./modules/offering/repository/offering-presentation.repository.js";
 import type { MalwareScanner } from "./infrastructure/antivirus/clamav-scanner.js";
 import type { DisclosureDocumentRepository } from "./modules/offering/repository/disclosure-document.repository.js";
 import type { ReservationRepository } from "./modules/offering/repository/reservation.repository.js";
@@ -209,6 +211,9 @@ import type {
 import type { GetKycDisplayProfileService } from "./modules/identity/application/kyc-display-profile.service.js";
 import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import { createDiditWebhookRouter, createKycRouter } from "./modules/identity/api/kyc.router.js";
+import { createCoinbaseOnrampWebhookRouter } from "./modules/offering/api/coinbase-onramp-webhook.router.js";
+import type { ReceiveCoinbaseOnrampWebhookService } from "./modules/offering/application/coinbase-onramp-webhook.service.js";
+import type { CoinbaseOnrampWebhookVerifier } from "./modules/offering/infrastructure/coinbase-onramp-webhook-verifier.js";
 import type { KycEligibilityReader } from "./modules/identity/repository/kyc-eligibility-reader.js";
 import { createProfileRouter } from "./modules/profile/api/profile.router.js";
 import { GetProfileService } from "./modules/profile/application/get-profile.service.js";
@@ -261,6 +266,12 @@ export interface AppDependencies {
   // browser's Origin header can never match one.
   corsOrigins: string[];
   authHandler?: RequestHandler;
+  // POST /webhooks/coinbase-onramp: mounted only when server.ts has both a
+  // Coinbase CDP client and COINBASE_ONRAMP_WEBHOOK_SECRET.
+  coinbaseOnrampWebhook?: {
+    verifier: CoinbaseOnrampWebhookVerifier;
+    receiveWebhook: ReceiveCoinbaseOnrampWebhookService;
+  };
   passkeyAssociations?: {
     appleTeamId?: string;
     appleBundleId: string;
@@ -365,6 +376,8 @@ export interface AppDependencies {
         store: WritableDisclosureDocumentStore;
         scanner: MalwareScanner;
       };
+      /** Staff featured-flag and media management (PATCH /:offering_id/presentation). */
+      presentation?: OfferingPresentationRepository;
     };
     /** Staff read of the late-payment manual-review queue (issue #168). */
     latePayments?: {
@@ -559,6 +572,18 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.authHandler,
     );
   }
+  if (dependencies.coinbaseOnrampWebhook !== undefined) {
+    // Ahead of express.json: the HMAC covers the exact bytes CDP sent, so this
+    // route needs the raw body, not a re-serialised parse of it.
+    app.use(
+      "/webhooks/coinbase-onramp",
+      express.raw({ limit: "256kb", type: "application/json" }),
+      createCoinbaseOnrampWebhookRouter(
+        dependencies.coinbaseOnrampWebhook.verifier,
+        dependencies.coinbaseOnrampWebhook.receiveWebhook,
+      ),
+    );
+  }
   app.use(express.json({ limit: "1mb", type: "application/json" }));
 
   app.use("/health", createHealthRouter(dependencies.databaseProbe));
@@ -665,6 +690,7 @@ export function createApp(dependencies: AppDependencies): Express {
     }
     if (dependencies.protectedApi.offeringOperations !== undefined) {
       const offeringDocuments = dependencies.protectedApi.offeringOperations.documents;
+      const offeringPresentation = dependencies.protectedApi.offeringOperations.presentation;
       app.use(
         "/internal/v1/offerings",
         createOfferingOperationsRouter(
@@ -681,6 +707,7 @@ export function createApp(dependencies: AppDependencies): Express {
                 upload: new UploadOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store, offeringDocuments.scanner),
                 read: new GetOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store),
               },
+          offeringPresentation === undefined ? undefined : new UpdateOfferingPresentationService(offeringPresentation),
         ),
       );
     }

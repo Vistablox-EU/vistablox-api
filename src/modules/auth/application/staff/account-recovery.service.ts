@@ -7,11 +7,13 @@ import type {
   AccountRecoveryCaseRecord,
   AccountRecoveryRepository,
   RecoveryCorroborationCategory,
+  RecoveryCaseTarget,
   RecoveryCorroborationFacts,
 } from "../../repository/staff/account-recovery.repository.js";
 import type { CustomerAccountAdministrator } from "../shared/customer-account-administrator.js";
 
 const RECOVERY_COOLDOWN_HOURS = 72;
+const STAFF_RECOVERY_LINK_SENT = "authentication.account_recovery_link_sent";
 
 export class OpenAccountRecoveryCaseService {
   public constructor(
@@ -212,9 +214,11 @@ export class CompleteAccountRecoveryService {
     traceId: string;
   }): Promise<AccountRecoveryCaseRecord> {
     const existingCase = await this.repository.findCase(input.caseId);
-    if (existingCase === null || existingCase.status !== "approved") {
-      throw caseNotApprovedError();
+    if (existingCase === null) throw caseNotApprovedError();
+    if (existingCase.status === "completed") {
+      return this.resendStaffRecoveryLink(existingCase, input);
     }
+    if (existingCase.status !== "approved") throw caseNotApprovedError();
     const target = await this.repository.findTargetForRecovery(existingCase.accountId);
     if (target === null) throw caseNotApprovedError();
 
@@ -223,24 +227,7 @@ export class CompleteAccountRecoveryService {
       completedAt.getTime() + RECOVERY_COOLDOWN_HOURS * 60 * 60 * 1000,
     );
 
-    if (target.isStaff) {
-      // Staff target: unchanged -- a staff passkey replacement link.
-      try {
-        await this.administrator.sendRecoveryCompletionEmail({
-          betterAuthUserId: target.betterAuthUserId,
-          redirectTo: this.recoveryRedirectUrl,
-          traceId: input.traceId,
-        });
-      } catch (error) {
-        throw new AppError({
-          code: "authentication.account_recovery_completion_delivery_failed",
-          title: "Recovery completion email could not be delivered",
-          status: 503,
-          detail: "The recovery case remains approved and this operation can be retried safely.",
-          cause: error,
-        });
-      }
-    } else {
+    if (!target.isStaff) {
       await this.endCustomerDeviceAccess({
         caseId: input.caseId,
         accountId: target.accountId,
@@ -261,16 +248,14 @@ export class CompleteAccountRecoveryService {
     if (updated === null) throw caseNotApprovedError();
 
     if (target.isStaff) {
-      if (target.contactEmail !== null) {
-        try {
-          await this.emailSender.sendAccountRecoveryCompletedEmail({
-            to: target.contactEmail,
-            cooldownEndsAt,
-          });
-        } catch {
-          // Best-effort — completion and the cooldown are already durable.
-        }
-      }
+      await this.deliverStaffRecoveryLink({
+        caseId: input.caseId,
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        target,
+        cooldownEndsAt,
+        at: completedAt,
+      });
     } else {
       await this.notifyCustomer({
         caseId: input.caseId,
@@ -283,6 +268,109 @@ export class CompleteAccountRecoveryService {
     }
 
     return updated;
+  }
+
+  /**
+   * Retrying completion of a staff-target case whose link never went out.
+   * The case is already completed and audited, so this only issues a fresh
+   * link (the bootstrap behind an undelivered one expires on its own). Once a
+   * delivery is on record the case is closed to further sends, so a retry
+   * cannot hand out duplicate links.
+   */
+  private async resendStaffRecoveryLink(
+    existingCase: AccountRecoveryCaseRecord,
+    input: { caseId: string; actorAccountId: string; traceId: string },
+  ): Promise<AccountRecoveryCaseRecord> {
+    const target = await this.repository.findTargetForRecovery(existingCase.accountId);
+    if (target === null || !target.isStaff || existingCase.cooldownEndsAt === null) {
+      throw caseNotApprovedError();
+    }
+    const alreadySent = await this.repository.hasRecoveryAuditEvent({
+      caseId: input.caseId,
+      action: STAFF_RECOVERY_LINK_SENT,
+    });
+    if (alreadySent) throw caseNotApprovedError();
+
+    await this.deliverStaffRecoveryLink({
+      caseId: input.caseId,
+      actorAccountId: input.actorAccountId,
+      traceId: input.traceId,
+      target,
+      cooldownEndsAt: existingCase.cooldownEndsAt,
+      at: this.clock(),
+    });
+    return existingCase;
+  }
+
+  /**
+   * Runs only after completeCase has durably written the status and its
+   * audit, so no link ever exists for a case without that record. The link is
+   * the recovery itself, not a courtesy notice: a send failure is audited and
+   * surfaced as a 503, and retrying completion re-sends (see
+   * resendStaffRecoveryLink). The "sent" audit and the FYI email are
+   * best-effort: the link is already out, and failing the request here would
+   * only invite a retry that sends a duplicate.
+   */
+  private async deliverStaffRecoveryLink(input: {
+    caseId: string;
+    actorAccountId: string;
+    traceId: string;
+    target: RecoveryCaseTarget;
+    cooldownEndsAt: Date;
+    at: Date;
+  }): Promise<void> {
+    try {
+      await this.administrator.sendRecoveryCompletionEmail({
+        betterAuthUserId: input.target.betterAuthUserId,
+        redirectTo: this.recoveryRedirectUrl,
+        traceId: input.traceId,
+      });
+    } catch (error) {
+      try {
+        await this.repository.recordRecoveryAuditEvent({
+          caseId: input.caseId,
+          actorAccountId: input.actorAccountId,
+          traceId: input.traceId,
+          action: "authentication.account_recovery_link_delivery_failed",
+          changes: { account_id: input.target.accountId },
+          occurredAt: input.at,
+        });
+      } catch {
+        // The 503 below still tells the operator the link did not go out.
+      }
+      throw new AppError({
+        code: "authentication.account_recovery_completion_delivery_failed",
+        title: "Recovery completion email could not be delivered",
+        status: 503,
+        detail:
+          "The recovery case is completed, but the recovery link could not be delivered. Retry this operation to send a new link.",
+        cause: error,
+      });
+    }
+
+    try {
+      await this.repository.recordRecoveryAuditEvent({
+        caseId: input.caseId,
+        actorAccountId: input.actorAccountId,
+        traceId: input.traceId,
+        action: STAFF_RECOVERY_LINK_SENT,
+        changes: { account_id: input.target.accountId },
+        occurredAt: input.at,
+      });
+    } catch {
+      // Best-effort, see above.
+    }
+
+    if (input.target.contactEmail !== null) {
+      try {
+        await this.emailSender.sendAccountRecoveryCompletedEmail({
+          to: input.target.contactEmail,
+          cooldownEndsAt: input.cooldownEndsAt,
+        });
+      } catch {
+        // Best-effort: completion and the cooldown are already durable.
+      }
+    }
   }
 
   /**

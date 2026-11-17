@@ -26,6 +26,8 @@ function repository(overrides: Partial<ReservationRepository> = {}): Reservation
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn().mockResolvedValue(true),
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
+    findReservationForOnrampReconciliation: vi.fn().mockResolvedValue(null),
+    recordOnrampOutcome: vi.fn().mockResolvedValue({ status: "unknown_reservation" }),
     ...overrides,
   };
 }

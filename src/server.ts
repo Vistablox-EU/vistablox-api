@@ -59,6 +59,8 @@ import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-co
 import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
 import { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
+import { ReceiveCoinbaseOnrampWebhookService } from "./modules/offering/application/coinbase-onramp-webhook.service.js";
+import { CoinbaseOnrampWebhookVerifier } from "./modules/offering/infrastructure/coinbase-onramp-webhook-verifier.js";
 import {
   GetKycAccountForOperationsService,
   GetKycStatusService,
@@ -88,6 +90,7 @@ import { S3Client } from "@aws-sdk/client-s3";
 import { UploadCaseDocumentService } from "./modules/intake/application/upload-case-document.service.js";
 import { GetCaseDocumentService } from "./modules/intake/application/get-case-document.service.js";
 import { PrismaOfferingDocumentRepository } from "./modules/offering/repository/prisma-offering-document.repository.js";
+import { PrismaOfferingPresentationRepository } from "./modules/offering/repository/prisma-offering-presentation.repository.js";
 import { ClamAvScanner } from "./infrastructure/antivirus/clamav-scanner.js";
 import { PrismaPartnerOrganizationRepository } from "./modules/intake/repository/prisma-partner-organization.repository.js";
 
@@ -110,6 +113,7 @@ await ensureJobQueue(jobQueue, "case_timers.pre_offering_open_handoff", "event")
 await ensureJobQueue(jobQueue, "case_timers.offering_reconfirmation_window_opened", "event");
 await ensureJobQueue(jobQueue, "case_timers.post_ipo_structuring_handoff", "event");
 await ensureJobQueue(jobQueue, "provider_events.didit_webhook", "event");
+await ensureJobQueue(jobQueue, "provider_events.coinbase_onramp_webhook", "event");
 // Reversal (undoing the KYC microservice split): intake, offering,
 // profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
@@ -442,6 +446,16 @@ const coinbaseCdpClient =
         timeoutMs: 8_000,
         logger,
       });
+// POST /webhooks/coinbase-onramp: disabled (not mounted, so 404) unless both
+// the CDP client and COINBASE_ONRAMP_WEBHOOK_SECRET are configured. The
+// minute poll in worker.ts stays the backstop either way.
+const coinbaseOnrampWebhook =
+  coinbaseCdpClient === undefined || environment.COINBASE_ONRAMP_WEBHOOK_SECRET === undefined
+    ? undefined
+    : {
+        verifier: new CoinbaseOnrampWebhookVerifier(environment.COINBASE_ONRAMP_WEBHOOK_SECRET),
+        receiveWebhook: new ReceiveCoinbaseOnrampWebhookService(offeringRepository, logger),
+      };
 // Necessary but not sufficient on its own: RESERVATION_FUNDING_RAIL_ENABLED
 // is the human "I've verified this live" switch, but it can never actually
 // open the rail without a configured Coinbase client to serve it — an
@@ -558,6 +572,7 @@ const app = createApp({
   logger,
   corsOrigins: trustedOrigins,
   authHandler: toNodeHandler(auth),
+  ...(coinbaseOnrampWebhook === undefined ? {} : { coinbaseOnrampWebhook }),
   passkeyAssociations: {
     ...(environment.PASSKEY_APPLE_TEAM_ID === undefined
       ? {}
@@ -596,6 +611,7 @@ const app = createApp({
     offeringOperations: {
       repository: offeringRepository,
       ...(offeringDocuments === undefined ? {} : { documents: offeringDocuments }),
+      presentation: new PrismaOfferingPresentationRepository(database),
     },
     staffWebAuthnRepository,
     staffWebAuthnCeremony: new SimpleWebAuthnCeremony({

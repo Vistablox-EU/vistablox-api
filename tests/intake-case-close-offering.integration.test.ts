@@ -56,7 +56,7 @@ describe.skipIf(databaseUrl === undefined)("intake case close closes its pre-off
         propertyId,
         applicantAccountId,
         stage,
-        ipoEndAt: new Date("2026-10-01T18:00:00.000Z"),
+        ipoEndAt: new Date("2099-12-31T00:00:00.000Z"),
         legalExecutionEventRefs: [],
         legalDocumentRefs: [],
         appraisalDocumentRefs: [],

@@ -202,6 +202,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       mintAmount: 50_000_000_000n,
       attemptedAt: new Date("2026-09-01T11:59:00.000Z"),
       searchFromBlock: null,
+      mintNonce: null,
     });
     await repository.recordEscrowMintSent({ intentId: intent.id, attempt: 1, txHash: "0xdeadbeef" });
     const { positionId } = await repository.recordEscrowMintedPosition({
@@ -250,6 +251,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
         mintAmount,
         attemptedAt,
         searchFromBlock: 1234n,
+        mintNonce: 7n,
       });
 
     const recordInput = (name: MintTestName, escrowMintIntentId: string, chainTxHash: string) => ({
@@ -285,6 +287,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
         attempt: 1,
         attemptedAt,
         searchFromBlock: 1234n,
+        mintNonce: 7n,
       });
       expect(await repository.findEscrowMintIntent(mintPivIds.create, `account_nobody_${suffix}`)).toBeNull();
     });
@@ -304,6 +307,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
         mintAmount,
         attemptedAt,
         searchFromBlock: 1234n,
+        mintNonce: 7n,
       });
       expect(second.created).toBe(false);
       expect(second.intent.id).toBe(first.intent.id);
@@ -539,12 +543,18 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
 
     it("starts a new attempt with a compare-and-set, so only one of several racing runs gets it", async () => {
       const { intent } = await newIntent("restart");
+      expect(intent.mintNonce).toBe(7n);
       await repository.recordEscrowMintSent({ intentId: intent.id, attempt: 1, txHash: "0xold" });
       const restartAt = new Date("2026-10-18T13:00:00.000Z");
 
       const results = await Promise.all(
         Array.from({ length: 4 }, () =>
-          repository.restartEscrowMintAttempt({ intentId: intent.id, expectedAttempt: 1, attemptedAt: restartAt }),
+          repository.restartEscrowMintAttempt({
+            intentId: intent.id,
+            expectedAttempt: 1,
+            attemptedAt: restartAt,
+            mintNonce: 8n,
+          }),
         ),
       );
 
@@ -555,10 +565,16 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
         attempt: 2,
         attemptedAt: restartAt,
         searchFromBlock: 1234n,
+        mintNonce: 8n,
       });
       // A run still holding the old attempt can neither restart again nor record its stale hash.
       expect(
-        await repository.restartEscrowMintAttempt({ intentId: intent.id, expectedAttempt: 1, attemptedAt: restartAt }),
+        await repository.restartEscrowMintAttempt({
+          intentId: intent.id,
+          expectedAttempt: 1,
+          attemptedAt: restartAt,
+          mintNonce: 9n,
+        }),
       ).toBe(false);
       await expect(
         repository.recordEscrowMintSent({ intentId: intent.id, attempt: 1, txHash: "0xstale" }),

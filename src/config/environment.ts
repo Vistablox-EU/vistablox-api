@@ -258,6 +258,12 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.url().optional(),
     ),
+    // metadata.secret from the CDP onramp webhook subscription. Unset leaves
+    // POST /webhooks/coinbase-onramp unmounted; the minute poll still runs.
+    COINBASE_ONRAMP_WEBHOOK_SECRET: z.preprocess(
+      emptyStringToUndefined,
+      z.string().min(16).optional(),
+    ),
     // A human decision, not something this codebase can verify on its own
     // (AD-255's "Still Open" item: live confirmation Coinbase actually
     // supports EUR/Base for this account). Stays false until someone who has
@@ -332,9 +338,25 @@ const environmentSchema = z
     // This many events that match no pending claim in one run:
     // wallet_registry.unmatched_events.
     WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: blankTolerantInteger(1, 10_000, 5),
+    // Block tag at which the IPO escrow finalizer reads the operator's confirmed
+    // nonce when it reconciles an interrupted mint attempt. A pinned nonce below
+    // that count with no mint log is taken as used by another transaction, and the
+    // mint is sent again under a fresh nonce. "finalized" waits for blocks no
+    // reorg can drop; "safe" or "latest" retries sooner at that risk. Blank
+    // means the default.
+    ESCROW_MINT_NONCE_BLOCK_TAG: z.preprocess(
+      (value) => (value === "" ? undefined : value),
+      z.enum(["finalized", "safe", "latest"]).default("finalized"),
+    ),
     KYC_CREATING_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
     KYC_OPEN_ALERT_AFTER_MINUTES: z.coerce.number().int().min(1).max(10080).default(60),
     ACCOUNT_RECOVERY_ALERT_AFTER_HOURS: z.coerce.number().int().min(1).max(720).default(24),
+    // Where the worker POSTs a JSON alert for every dead-lettered job
+    // (docs/dead-letter-jobs.md). Slack-incoming-webhook compatible. Unset
+    // disables delivery; the error-level log line is written either way. The
+    // URL is a credential (a Slack webhook URL is its own bearer token), so it
+    // is never logged.
+    DEAD_LETTER_ALERT_WEBHOOK_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
     // Self-service device replacement email code (AD-271). The code is emailed
     // to the account's bound protected_contact_email (no SMS), verified against
     // a stored hash, single-use, and bound to the requesting session. These
@@ -434,6 +456,16 @@ const environmentSchema = z
     },
   )
   .refine(
+    (environment) =>
+      environment.COINBASE_ONRAMP_WEBHOOK_SECRET === undefined ||
+      environment.COINBASE_CDP_API_KEY_ID !== undefined,
+    {
+      message:
+        "COINBASE_ONRAMP_WEBHOOK_SECRET requires the Coinbase CDP onramp settings, which the webhook's reconcile uses",
+      path: ["COINBASE_ONRAMP_WEBHOOK_SECRET"],
+    },
+  )
+  .refine(
     (environment) => {
       const baseChainValues = [
         environment.CHAIN_NETWORK,
@@ -512,6 +544,16 @@ const environmentSchema = z
     {
       message: "ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING=true is permitted only when APP_ENV=staging",
       path: ["ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING"],
+    },
+  )
+  .refine(
+    (environment) =>
+      environment.NODE_ENV !== "production" ||
+      environment.DEAD_LETTER_ALERT_WEBHOOK_URL === undefined ||
+      environment.DEAD_LETTER_ALERT_WEBHOOK_URL.startsWith("https://"),
+    {
+      message: "DEAD_LETTER_ALERT_WEBHOOK_URL must be an https:// URL when NODE_ENV=production",
+      path: ["DEAD_LETTER_ALERT_WEBHOOK_URL"],
     },
   )
   .refine(
