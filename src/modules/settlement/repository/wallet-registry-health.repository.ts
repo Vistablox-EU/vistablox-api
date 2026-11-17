@@ -22,6 +22,11 @@ export interface WalletRegistryHeartbeatWriter {
 export interface WalletRegistryHealthReading {
   // Null when no run has completed yet, or the stored value cannot be read.
   heartbeat: WalletRegistryHeartbeat | null;
+  // Whether the database holds any trace of the watcher having run: a heartbeat
+  // row (readable or not) or a saved cursor. Unlike `heartbeat`, an unreadable
+  // heartbeat row counts, because something wrote it. It tells a deployment
+  // whose watcher never ran from one whose watcher ran and has stopped.
+  watcherHistoryRecorded: boolean;
   pendingTotal: number;
   pendingOverdue: number;
   oldestPendingRequestedAt: Date | null;

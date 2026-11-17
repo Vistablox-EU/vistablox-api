@@ -20,12 +20,20 @@ export interface WalletRegistryExpiryGateOptions {
   // The same thresholds the health check uses: no new ones (AD-287, decided
   // 2026-11-17).
   thresholds: WalletRegistryAlertThresholds;
-  // False when no watcher runs in this worker (the registry address is unset,
-  // or it is set without the CHAIN_* settings the watcher needs). Then there
-  // is no heartbeat to be stale and no cursor to lag, and no event the
-  // watcher could be about to read, so nothing holds the sweep back; the
-  // health check reports that state on its own.
-  watcherConfigured: boolean;
+  // The registry address is set in this worker. When it is not, the wallet
+  // registry is switched off here: no claim can be confirmed, nobody is
+  // waiting on a watcher, and the health check does not exist either, so
+  // nothing holds the sweep back.
+  registryConfigured: boolean;
+  // The watcher job exists in this worker: the registry address is set AND the
+  // CHAIN_* settings it needs are too. Kept apart from registryConfigured on
+  // purpose. A registry address without the watcher is half a configuration
+  // (environment.ts supports it, and the health check calls it an error:
+  // "pending claims cannot confirm"), and it is what a worker looks like after
+  // it lost its CHAIN_* settings. Its cursor is still saved, so the day the
+  // watcher resumes it reads every event it missed, and a claim expired in the
+  // meantime would see its event counted as unmatched.
+  watcherRunnable: boolean;
   // The reading asks for the overdue cutoff; the verdict below does not use
   // it, so this only has to match the health check's.
   pendingOverdueAfterMs: number;
@@ -46,6 +54,16 @@ export interface WalletRegistryExpiryGateOptions {
  * start is taken as the epoch, and a watcher is stale when its recorded
  * heartbeat is older than the threshold, or there is none.
  *
+ * A watcher that cannot run in this worker is judged by its history, not by
+ * the fact that it is absent. If the registry address is unset the registry is
+ * off and nothing is waited for. If the address is set but the watcher cannot
+ * run (CHAIN_* settings missing) the verdict is the stalest one there is: a
+ * watcher with any recorded history (a heartbeat row, readable or not, or a
+ * saved cursor) has stopped, whatever its heartbeat says, and the sweep waits
+ * with reason wallet_registry.watcher_not_configured; only a deployment whose
+ * watcher has never run at all, so has no event it could be about to read, is
+ * let through.
+ *
  * It does not catch: a snapshot that cannot be read rejects, and the sweep
  * treats that as "may not expire".
  */
@@ -61,7 +79,7 @@ export class WalletRegistryExpiryGate {
     );
     const alerts = evaluateWalletRegistryHealth(
       {
-        watcherConfigured: this.options.watcherConfigured,
+        watcherConfigured: this.options.watcherRunnable,
         workerStartedAt: new Date(0),
         heartbeat: reading.heartbeat,
         pendingTotal: reading.pendingTotal,
@@ -73,7 +91,14 @@ export class WalletRegistryExpiryGate {
       this.options.thresholds,
       now,
     );
-    const reasons = alerts.filter((alert) => UNTRUSTED_WATCHER_EVENTS.has(alert.event)).map((alert) => alert.event);
+    const reasons: string[] = alerts
+      .filter((alert) => UNTRUSTED_WATCHER_EVENTS.has(alert.event))
+      .map((alert) => alert.event);
+    // The policy raises watcher_not_configured for any watcher that cannot run;
+    // it holds the sweep only where the watcher has ever run and the registry is on.
+    if (!this.options.watcherRunnable && this.options.registryConfigured && reading.watcherHistoryRecorded) {
+      reasons.push(WALLET_REGISTRY_ALERT_EVENTS.watcherNotConfigured);
+    }
     return { mayExpire: reasons.length === 0, reasons };
   }
 }

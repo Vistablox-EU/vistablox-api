@@ -1,6 +1,10 @@
 import { z } from "zod";
 
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
+import {
+  WALLET_REGISTRY_CURSOR_SETTING_KEY,
+  WALLET_REGISTRY_HEARTBEAT_SETTING_KEY,
+} from "./wallet-registry-setting-keys.js";
 import type {
   WalletRegistryHealthReader,
   WalletRegistryHealthReading,
@@ -11,7 +15,6 @@ import type {
 // Same table and precedent as the watcher's cursor (prisma-settlement.repository.ts):
 // a platform.settings row, so no migration. A separate row from the cursor, so
 // the cursor's format is untouched and an older build keeps reading it.
-const WALLET_REGISTRY_HEARTBEAT_SETTING_KEY = "wallet_registry.watcher_heartbeat";
 const HEARTBEAT_VERSION = 1;
 const MAX_LISTED_MISMATCH_ACCOUNTS = 20;
 
@@ -75,7 +78,7 @@ export class PrismaWalletRegistryHealthRepository
   }
 
   public async readWalletRegistryHealth(overdueCutoff: Date): Promise<WalletRegistryHealthReading> {
-    const [pending, unresolved, setting] = await Promise.all([
+    const [pending, unresolved, settings] = await Promise.all([
       this.database.$queryRaw<PendingAggregateRow[]>`
         SELECT count(*) AS total,
                count(*) FILTER (WHERE requested_at < ${overdueCutoff}::timestamptz) AS overdue,
@@ -104,15 +107,19 @@ export class PrismaWalletRegistryHealthRepository
         ORDER BY first_seen, account_id
         LIMIT ${MAX_LISTED_MISMATCH_ACCOUNTS}
       `,
-      this.database.platformSetting.findUnique({
-        where: { key: WALLET_REGISTRY_HEARTBEAT_SETTING_KEY },
-        select: { value: true },
+      // The heartbeat row and the cursor row together: the heartbeat is what the
+      // alerts judge, and either row existing is the trace of a watcher that ran.
+      this.database.platformSetting.findMany({
+        where: { key: { in: [WALLET_REGISTRY_HEARTBEAT_SETTING_KEY, WALLET_REGISTRY_CURSOR_SETTING_KEY] } },
+        select: { key: true, value: true },
       }),
     ]);
 
     const aggregate = pending[0];
+    const heartbeatRow = settings.find((setting) => setting.key === WALLET_REGISTRY_HEARTBEAT_SETTING_KEY);
     return {
-      heartbeat: setting === null ? null : parseHeartbeat(setting.value),
+      heartbeat: heartbeatRow === undefined ? null : parseHeartbeat(heartbeatRow.value),
+      watcherHistoryRecorded: settings.length > 0,
       pendingTotal: Number(aggregate?.total ?? 0n),
       pendingOverdue: Number(aggregate?.overdue ?? 0n),
       oldestPendingRequestedAt: aggregate?.oldest ?? null,

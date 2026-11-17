@@ -132,12 +132,16 @@ describe("wallet claim expiry worker wiring (#177, AD-287)", () => {
     );
   });
 
-  it("gates the sweep on the health check's own thresholds, and on whether a watcher exists in this worker, not on the registry address", () => {
+  it("gates the sweep on the health check's own thresholds, and on the registry address and the watcher separately, so a watcher that lost its CHAIN_* settings is not read as no watcher", () => {
     const gate = worker.match(/const walletRegistryExpiryGate = new WalletRegistryExpiryGate\(([\s\S]*?)\n\);/)?.[1] ?? "";
 
     expect(gate).toContain("walletRegistryHealthRepository ?? new PrismaWalletRegistryHealthRepository(database)");
     expect(gate).toContain("thresholds: walletRegistryThresholds");
-    expect(gate).toContain("watcherConfigured: confirmWalletRegistrations !== undefined");
+    // Two inputs, each from its own gate: one boolean for both is what let the
+    // sweep run through a watcher that had stopped for lack of CHAIN_* settings.
+    expect(gate).toContain("registryConfigured: environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS !== undefined");
+    expect(gate).toContain("watcherRunnable: confirmWalletRegistrations !== undefined");
+    expect(gate).not.toContain("watcherConfigured");
     expect(gate).toContain("pendingOverdueAfterMs: environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000");
     // One thresholds object for the watcher alerts and the gate: no second set of numbers.
     expect(worker.match(/const walletRegistryThresholds = \{/g)).toHaveLength(1);

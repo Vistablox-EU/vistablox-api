@@ -30,9 +30,9 @@ export interface ExpirePendingWalletRegistrationsOptions {
  * address differs. Staff can still confirm an expired claim by reconciling it
  * against matching on-chain evidence. The row is kept.
  *
- * It does nothing while the registry watcher is stale or its cursor lags: a
- * claim whose registration event the watcher has not read yet is not
- * abandoned. If the watcher's health cannot be read it does nothing either
+ * It does nothing while the registry watcher is stale, its cursor lags, or it
+ * has run before and cannot run now: a claim whose registration event the
+ * watcher has not read yet is not abandoned. If the watcher's health cannot be read it does nothing either
  * (fail closed toward not expiring). A skipped run says so once, in one log
  * line, and reports 0 checked and 0 acted; the next run asks again.
  */
@@ -93,7 +93,7 @@ export class ExpirePendingWalletRegistrationsService {
         trace_id: traceId,
         reasons: assessment.reasons,
       },
-      "wallet claim expiry skipped: the registry watcher is stale or lagging",
+      "wallet claim expiry skipped: the registry watcher cannot be trusted to have read every claim's event",
     );
     return false;
   }

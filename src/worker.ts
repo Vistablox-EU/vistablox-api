@@ -337,12 +337,17 @@ const checkWalletRegistryHealth =
 // rows. What does hold it back is the watcher's health, read through the same
 // snapshot and thresholds as the health check above: while the watcher is
 // stale or its cursor lags, or if that cannot be read, the sweep expires
-// nothing. Where no watcher runs at all there is nothing to wait for.
+// nothing. A watcher that cannot run here is not "nothing to wait for" unless
+// the registry address is unset or the watcher has never run: with the address
+// set and CHAIN_* lost, a watcher that has run before still has a saved cursor
+// and will read what it missed, so the sweep waits for it too (the gate says
+// why). The two inputs are separate for that reason.
 const walletRegistryExpiryGate = new WalletRegistryExpiryGate(
   walletRegistryHealthRepository ?? new PrismaWalletRegistryHealthRepository(database),
   {
     thresholds: walletRegistryThresholds,
-    watcherConfigured: confirmWalletRegistrations !== undefined,
+    registryConfigured: environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS !== undefined,
+    watcherRunnable: confirmWalletRegistrations !== undefined,
     pendingOverdueAfterMs: environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000,
   },
 );

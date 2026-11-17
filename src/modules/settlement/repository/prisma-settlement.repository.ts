@@ -26,12 +26,12 @@ import type {
   WalletRegistrationRecheckCandidate,
   WalletRegistrationRecord,
 } from "./settlement.repository.js";
+import { WALLET_REGISTRY_CURSOR_SETTING_KEY } from "./wallet-registry-setting-keys.js";
 
-// Reuses the generic platform.settings key-value table (PlatformSetting)
-// rather than a bespoke single-row table -- there is exactly one watermark
-// value to persist and this table already exists for exactly this kind of
-// thing.
-const WALLET_REGISTRY_CURSOR_SETTING_KEY = "wallet_registry.last_processed_block";
+// The watcher's cursor reuses the generic platform.settings key-value table
+// (PlatformSetting) rather than a bespoke single-row table -- there is exactly
+// one watermark value to persist and this table already exists for exactly
+// this kind of thing. Its key is in wallet-registry-setting-keys.ts.
 
 // The partial unique index created by
 // 20261113150200_wallet_claims_confirmed_address_uniqueness:

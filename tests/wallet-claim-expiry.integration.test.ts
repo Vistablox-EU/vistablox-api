@@ -642,7 +642,13 @@ describe.skipIf(databaseUrl === undefined)("wallet claim expiry PostgreSQL integ
     };
     const logger = { info: vi.fn(), warn: vi.fn() };
     type Reader = ConstructorParameters<typeof WalletRegistryExpiryGate>[0];
-    const readerWith = (heartbeat: { ageMs: number; lagBlocks: bigint } | null): Reader => ({
+    // `history` is whether the database holds any trace of a watcher run; it
+    // defaults to "yes" for a heartbeat and "no" for none, and a case names it
+    // when the two differ (a heartbeat row that cannot be read, a cursor only).
+    const readerWith = (
+      heartbeat: { ageMs: number; lagBlocks: bigint } | null,
+      history: boolean = heartbeat !== null,
+    ): Reader => ({
       readWalletRegistryHealth: async () => ({
         heartbeat:
           heartbeat === null
@@ -653,6 +659,7 @@ describe.skipIf(databaseUrl === undefined)("wallet claim expiry PostgreSQL integ
                 safeHeadBlock: 50_000n,
                 eventsFound: 0,
               },
+        watcherHistoryRecorded: history,
         pendingTotal: 1,
         pendingOverdue: 1,
         oldestPendingRequestedAt: longAgo,
@@ -660,10 +667,13 @@ describe.skipIf(databaseUrl === undefined)("wallet claim expiry PostgreSQL integ
       }),
     });
 
-    const sweepWith = (reader: Reader, watcherConfigured = true) =>
+    const RUNNING = { registryConfigured: true, watcherRunnable: true };
+    const WITHOUT_CHAIN = { registryConfigured: true, watcherRunnable: false };
+    const REGISTRY_OFF = { registryConfigured: false, watcherRunnable: false };
+    const sweepWith = (reader: Reader, worker = RUNNING) =>
       new ExpirePendingWalletRegistrationsService(
         walletRepository,
-        new WalletRegistryExpiryGate(reader, { thresholds, watcherConfigured, pendingOverdueAfterMs: 5 * MINUTE }),
+        new WalletRegistryExpiryGate(reader, { thresholds, ...worker, pendingOverdueAfterMs: 5 * MINUTE }),
         logger,
         () => sweepNow,
         { expireAfterHours: 24 },
@@ -721,11 +731,50 @@ describe.skipIf(databaseUrl === undefined)("wallet claim expiry PostgreSQL integ
       expect(logger.warn.mock.calls[0]![0]).toMatchObject({ reasons: ["health_unreadable"] });
     });
 
-    it("expires as usual where no watcher runs in this worker, whatever an old heartbeat says", async () => {
+    // A worker with the registry address but without the CHAIN_* settings has no
+    // watcher, yet a watcher that ran before left its heartbeat and its cursor,
+    // and reads everything it missed the day it runs again. The claims wait.
+    it.each([
+      { name: "a heartbeat from days ago", reader: readerWith({ ageMs: 5 * 24 * 60 * MINUTE, lagBlocks: 50_000n }) },
+      { name: "a heartbeat from a minute ago", reader: readerWith({ ageMs: MINUTE, lagBlocks: 0n }) },
+      { name: "a heartbeat row that cannot be read, or a cursor and no heartbeat", reader: readerWith(null, true) },
+    ])("expires nothing where the registry address is set but no watcher can run, and $name is on record", async ({ reader }) => {
       await createClaim(accountA, { requestedAt: longAgo });
 
-      await sweepWith(readerWith({ ageMs: 5 * 24 * 60 * MINUTE, lagBlocks: 50_000n }), false).execute("trace");
+      await expect(sweepWith(reader, WITHOUT_CHAIN).execute("trace")).resolves.toEqual({ checked: 0, acted: 0 });
 
+      expect(await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } })).toMatchObject({ expiredAt: null });
+      expect(await auditRows(accountA, "expired")).toHaveLength(0);
+      expect(logger.info).toHaveBeenCalledTimes(1);
+      expect(logger.info.mock.calls[0]![0]).toMatchObject({ reasons: ["wallet_registry.watcher_not_configured"] });
+      expect(logger.warn).not.toHaveBeenCalled();
+    });
+
+    it("expires as usual where the registry address is set, no watcher can run, and none ever did", async () => {
+      await createClaim(accountA, { requestedAt: longAgo });
+
+      await sweepWith(readerWith(null), WITHOUT_CHAIN).execute("trace");
+
+      expect(await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } })).toMatchObject({ expiredAt: sweepNow });
+      expect(logger.info).not.toHaveBeenCalled();
+    });
+
+    it("expires as usual where the registry address is unset, whatever an old heartbeat says", async () => {
+      await createClaim(accountA, { requestedAt: longAgo });
+
+      await sweepWith(readerWith({ ageMs: 5 * 24 * 60 * MINUTE, lagBlocks: 50_000n }), REGISTRY_OFF).execute("trace");
+
+      expect(await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } })).toMatchObject({ expiredAt: sweepNow });
+    });
+
+    it("expires the claims it held back on the first run after the watcher is configured and fresh again", async () => {
+      await createClaim(accountA, { requestedAt: longAgo });
+      await sweepWith(readerWith({ ageMs: 5 * 24 * 60 * MINUTE, lagBlocks: 50_000n }), WITHOUT_CHAIN).execute("no chain settings");
+      expect(await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } })).toMatchObject({ expiredAt: null });
+
+      const recovered = await sweepWith(readerWith({ ageMs: MINUTE, lagBlocks: 0n }), RUNNING).execute("watcher back");
+
+      expect(recovered.acted).toBeGreaterThanOrEqual(1);
       expect(await database.walletRegistration.findUniqueOrThrow({ where: { accountId: accountA } })).toMatchObject({ expiredAt: sweepNow });
     });
 
