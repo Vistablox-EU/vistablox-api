@@ -866,12 +866,16 @@ model EscrowMintIntent {
   @@schema("settlement")
 }
 
-// AD-256: evidence that this Piv's IPO escrow campaign is open on-chain,
-// written by settlement.open_ipo_escrow_campaign once openCampaign has a
-// successful receipt (or campaignOf already shows the campaign past
-// NotOpened). Reservations are refused for an offering whose Piv has no row
-// here (#176): funds must not be collected for an offering that cannot
-// settle. Values are what the chain holds, not what was requested.
+// AD-256: the last observation of this Piv's IPO escrow campaign (#176,
+// AD-286). Written by the operator command that opens campaigns (and by the
+// settlement.open_ipo_escrow_campaign job) once campaignOf shows the campaign
+// Open with exactly the parameters the offering would use, and moved to
+// successful / failed / not_opened by the next read that shows it resolved
+// (the same command, or the finalizer). Where the settlement bundle is
+// configured, reservations are refused unless this row's observedState is
+// "open" and deadlineAt is still ahead. A campaign that is not open on-chain,
+// or whose parameters differ from the offering's, has no row. The parameters
+// are what the chain holds, not what was requested.
 model IpoEscrowCampaign {
   pivId                 String   @id @map("piv_id")
   tokenId               Decimal  @unique @map("token_id") @db.Decimal(78, 0)
@@ -883,6 +887,11 @@ model IpoEscrowCampaign {
   // Null when the campaign was found already open (opened by an earlier,
   // interrupted attempt whose hash was not kept).
   openTxHash            String?  @map("open_tx_hash")
+  // The campaign state at the last read: not_opened | open | successful |
+  // failed (CHECK constraint in the migration).
+  observedState         String   @map("observed_state")
+  observedAt            DateTime @map("observed_at") @db.Timestamptz(6)
+  // When the row was first written.
   recordedAt            DateTime @default(now()) @map("recorded_at") @db.Timestamptz(6)
 
   piv Piv @relation(fields: [pivId], references: [id])

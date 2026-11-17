@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { PostgresOperatorKeyLock } from "../src/infrastructure/blockchain/operator-key-lock.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { FinalizeIpoEscrowCampaignsService } from "../src/modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
 import type {
@@ -130,7 +131,10 @@ describe.skipIf(databaseUrl === undefined)(
       const chain = new FakeEscrowChain(campaigns, contributions, contributors);
       const repository = new ScopedRepository(database, [options.piv]);
       const { logger, entries } = makeCapturingLogger();
-      const newService = () => new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger);
+      const newService = () =>
+        new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger, undefined, {
+          operatorKeyLock: new PostgresOperatorKeyLock(database),
+        });
       return { chain, repository, entries, campaigns, newService };
     }
 

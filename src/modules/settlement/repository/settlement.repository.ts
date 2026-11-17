@@ -2,6 +2,7 @@ import type {
   WalletRegistrationEvidence,
   WalletRegistrationEvidenceFlag,
 } from "../../../shared/domain/wallet-registration-evidence.js";
+import type { IpoEscrowCampaignState } from "../domain/ipo-escrow-campaign.policy.js";
 
 export interface PivPendingEscrowResolution {
   pivId: string;
@@ -9,11 +10,13 @@ export interface PivPendingEscrowResolution {
 }
 
 /**
- * An offering whose Piv has a token id and an IPO deadline still in the
- * future, that is open for reservations, and whose escrow campaign is not yet
- * recorded as open (#176). The activation sweep opens one for each.
+ * An offering the operator command may open a campaign for: its Piv has a token
+ * id, it is still open for reservations (pre_offering, final terms not
+ * published) and its IPO deadline is in the future, which openCampaign
+ * requires (InvalidDeadline otherwise). Whether it already has a campaign, and
+ * in what state, is read separately (findIpoEscrowCampaign).
  */
-export interface OfferingAwaitingIpoEscrowCampaign {
+export interface OfferingForIpoEscrowActivation {
   pivId: string;
   tokenId: string;
   // offerings.target_raise_eur, as a decimal string (two places).
@@ -22,10 +25,11 @@ export interface OfferingAwaitingIpoEscrowCampaign {
 }
 
 /**
- * The evidence that a Piv's IPO escrow campaign is open on-chain, with the
- * values campaignOf reports (not the ones the job asked for).
+ * settlement.ipo_escrow_campaigns: the last observation of a Piv's IPO escrow
+ * campaign (#176, AD-286), with the values campaignOf reported (not the ones a
+ * job asked for).
  */
-export interface RecordIpoEscrowCampaignOpenedInput {
+export interface IpoEscrowCampaignRecord {
   pivId: string;
   tokenId: string;
   escrowContractAddress: string;
@@ -34,6 +38,28 @@ export interface RecordIpoEscrowCampaignOpenedInput {
   treasuryAddress: string;
   // Null when the campaign was found already open.
   openTxHash: string | null;
+  observedState: IpoEscrowCampaignState;
+  observedAt: Date;
+}
+
+export interface RecordIpoEscrowCampaignObservationInput {
+  pivId: string;
+  tokenId: string;
+  escrowContractAddress: string;
+  targetAmount: bigint;
+  deadlineAt: Date;
+  treasuryAddress: string;
+  // Null when the campaign was found already open.
+  openTxHash: string | null;
+  state: IpoEscrowCampaignState;
+  // When the chain was read. An observation older than the stored one is ignored.
+  observedAt: Date;
+}
+
+export interface RefreshIpoEscrowCampaignStateInput {
+  pivId: string;
+  state: IpoEscrowCampaignState;
+  observedAt: Date;
 }
 
 export interface RecordEscrowMintedPositionInput {
@@ -187,10 +213,17 @@ export interface WalletRegistrationAddressMismatchInput {
  */
 export interface SettlementRepository {
   findPivsWithPassedIpoDeadline(now: Date): Promise<PivPendingEscrowResolution[]>;
-  findOfferingsAwaitingIpoEscrowCampaign(now: Date): Promise<OfferingAwaitingIpoEscrowCampaign[]>;
-  // Writes the readiness row the reservation gate checks. Idempotent: when a
-  // row already exists for the Piv it is kept unchanged.
-  recordIpoEscrowCampaignOpened(input: RecordIpoEscrowCampaignOpenedInput): Promise<void>;
+  findOfferingsForIpoEscrowActivation(now: Date): Promise<OfferingForIpoEscrowActivation[]>;
+  findIpoEscrowCampaign(pivId: string): Promise<IpoEscrowCampaignRecord | null>;
+  // Writes the observation the reservation gate reads (insert, or replace the
+  // stored observation when this one is not older). Idempotent per observation.
+  recordIpoEscrowCampaignObservation(input: RecordIpoEscrowCampaignObservationInput): Promise<void>;
+  // Moves an existing observation to the state the chain was just read in,
+  // without inserting one: the cheap refresh a reader that already holds the
+  // campaign (the finalizer) records so the offering stops being ready. False
+  // when nothing changed: there is no row, it already holds this state, or the
+  // stored observation is newer.
+  refreshIpoEscrowCampaignState(input: RefreshIpoEscrowCampaignStateInput): Promise<boolean>;
   // Resolves CONFIRMED registrations only: a pending claim proves nothing, so
   // it must never attribute an on-chain contribution to an account.
   resolveAccountIdForWallet(walletAddress: string): Promise<string | null>;

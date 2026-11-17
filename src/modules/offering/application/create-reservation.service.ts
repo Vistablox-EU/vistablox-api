@@ -91,7 +91,7 @@ export class CreateReservationService {
     const blockers = computeReservationBlockers({
       now,
       fundingRailAvailable: this.fundingRailAvailable,
-      settlementEscrowReady: detail.settlementEscrowReady,
+      settlementEscrow: detail.settlementEscrow,
       offeringStatus: detail.status,
       finalTermsPublished: detail.finalOfferingPublishedAt !== null,
       ipoEndAt: detail.ipoEndAt,

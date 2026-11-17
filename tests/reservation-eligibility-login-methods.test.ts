@@ -13,7 +13,7 @@ function blockers(loginMethods: LoginMethod[]) {
   return computeReservationBlockers({
     now,
     fundingRailAvailable: true,
-    settlementEscrowReady: true,
+    settlementEscrow: { gated: false },
     offeringStatus: "pre_offering",
     finalTermsPublished: false,
     ipoEndAt: new Date("2026-10-01T12:00:00.000Z"),

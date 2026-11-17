@@ -26,7 +26,8 @@ const repository: OfferingRepository = {
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
     ipoEndAt: new Date("2099-12-31T00:00:00.000Z"),
-    settlementEscrowReady: false,
+    // Gated and nothing observed: the wire blocker settlement_escrow_not_ready.
+    settlementEscrow: { gated: true, campaign: null },
     issuer: {
       pivId: "piv_01",
       legalName: null,
@@ -137,7 +138,7 @@ const reservationEligibleDetail: InvestorOfferingDetailRecord = {
   platformRightsEndAt: null,
   effectiveRightsEndAt: null,
   ipoEndAt: new Date("2099-12-31T00:00:00.000Z"),
-  settlementEscrowReady: true,
+  settlementEscrow: { gated: false },
   issuer: {
     pivId: "piv_01",
     legalName: null,

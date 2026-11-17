@@ -8,7 +8,7 @@ import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibi
 import { toCents, toEurcMicros } from "../domain/currency.js";
 import { toOfferingMedia } from "../domain/offering-media.policy.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
-import { isWithinIpoPeriod } from "../domain/reservation-eligibility.policy.js";
+import { isSettlementEscrowReady, isWithinIpoPeriod } from "../domain/reservation-eligibility.policy.js";
 import type {
   InvestorOfferingDetailRecord,
   ListPublicOfferingsInput,
@@ -105,7 +105,18 @@ export class PrismaOfferingRepository
      * there. Left unset, no ref is accepted — a process without storage
      * configured cannot have taken an upload either.
      */
-    private readonly options: { disclosuresBucket?: string | undefined } = {},
+    private readonly options: {
+      disclosuresBucket?: string | undefined;
+      /**
+       * Whether reservations wait for the offering's settlement escrow campaign
+       * (#176, AD-286): true only where the settlement bundle is configured
+       * (isSettlementBundleConfigured). Left unset the gate is off, the
+       * dormant launch configuration (AD-234), where no campaign is ever
+       * opened. The read side (getInvestorDetail) and the write side
+       * (createReservation) both take it from here, so they cannot disagree.
+       */
+      settlementEscrowGated?: boolean | undefined;
+    } = {},
   ) {}
 
   public async openOfferingForApprovedCase(
@@ -339,7 +350,7 @@ export class PrismaOfferingRepository
                   appraisalValueOpinionEur: true,
                 },
               },
-              ipoEscrowCampaign: { select: { pivId: true } },
+              ipoEscrowCampaign: { select: { observedState: true, deadlineAt: true } },
               property: {
                 select: {
                   id: true,
@@ -458,7 +469,19 @@ export class PrismaOfferingRepository
       platformRightsEndAt: offering.platformRightsEndAt,
       effectiveRightsEndAt: offering.effectiveRightsEndAt,
       ipoEndAt: offering.piv.case.ipoEndAt,
-      settlementEscrowReady: offering.piv.ipoEscrowCampaign !== null,
+      settlementEscrow:
+        this.options.settlementEscrowGated === true
+          ? {
+              gated: true,
+              campaign:
+                offering.piv.ipoEscrowCampaign === null
+                  ? null
+                  : {
+                      state: offering.piv.ipoEscrowCampaign.observedState,
+                      deadlineAt: offering.piv.ipoEscrowCampaign.deadlineAt,
+                    },
+            }
+          : { gated: false },
       issuer: {
         pivId: offering.piv.id,
         legalName: offering.piv.legalName,
@@ -601,21 +624,35 @@ export class PrismaOfferingRepository
         return { reservation: null, conflict: "offering_not_open" as const, reused: false };
       }
 
-      // #176: no funds are collected for an offering whose IPO escrow
-      // campaign is not recorded open on-chain, since they could not settle.
-      // Re-checked here, not only in the advisory read, matching every other
-      // gate above. Rows are only ever inserted, so reading it after the
-      // offering lock cannot race a removal.
-      const escrowRows = await transaction.$queryRaw<Array<{ ready: boolean }>>`
-        SELECT EXISTS (
-          SELECT 1
+      // #176 (AD-286): where the settlement bundle is configured, no funds are
+      // collected for an offering whose IPO escrow campaign was not last
+      // observed Open with its deadline still ahead, since they could not
+      // settle. Re-checked here, under the offering lock, not only in the
+      // advisory read, matching every other gate above. The campaign row is
+      // read FOR SHARE, so the update that marks the campaign resolved (the
+      // operator command, the finalizer) cannot commit between this read and
+      // this transaction's commit. Where the bundle is dormant there is no
+      // campaign to wait for, and nothing is read.
+      if (this.options.settlementEscrowGated === true) {
+        const campaignRows = await transaction.$queryRaw<Array<{ observed_state: string; deadline_at: Date }>>`
+          SELECT e.observed_state, e.deadline_at
           FROM settlement.ipo_escrow_campaigns e
           JOIN offering.offerings o ON o.piv_id = e.piv_id
           WHERE o.offering_id = ${input.offeringId}
-        ) AS ready
-      `;
-      if (escrowRows[0]?.ready !== true) {
-        return { reservation: null, conflict: "settlement_escrow_not_ready" as const, reused: false };
+          FOR SHARE OF e
+        `;
+        const campaign = campaignRows[0];
+        const ready = isSettlementEscrowReady(
+          {
+            gated: true,
+            campaign:
+              campaign === undefined ? null : { state: campaign.observed_state, deadlineAt: campaign.deadline_at },
+          },
+          input.createdAt,
+        );
+        if (!ready) {
+          return { reservation: null, conflict: "settlement_escrow_not_ready" as const, reused: false };
+        }
       }
 
       // The lock above serializes every reservation for this offering. Check

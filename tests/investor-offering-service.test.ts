@@ -20,7 +20,7 @@ function detail(
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
     ipoEndAt: new Date("2026-10-01T12:00:00.000Z"),
-    settlementEscrowReady: true,
+    settlementEscrow: { gated: false },
     issuer: {
       pivId: "piv_01",
       legalName: "VistaBlox Berlin 01 B.V.",
@@ -190,7 +190,7 @@ describe("authenticated investor offering detail", () => {
 
   it("keeps reservation closed while the offering's settlement escrow is not ready, even with the rail open", async () => {
     const service = new GetInvestorOfferingService(
-      repository(detail({ settlementEscrowReady: false })),
+      repository(detail({ settlementEscrow: { gated: true, campaign: null } })),
       () => currentTime,
       true,
     );

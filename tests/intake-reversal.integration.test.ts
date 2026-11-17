@@ -23,7 +23,6 @@ import { OpenOfferingForApprovedCaseService } from "../src/modules/offering/appl
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
-import { markSettlementEscrowReady } from "./support/settlement-escrow-db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -946,8 +945,6 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
       const fixture = await createCase("pre_offering_open");
       const requested = await requestReversal(fixture, "reopen_pre_offering");
       const sequenceAtRequest = (await readCase(fixture.caseId)).workflowEventSequence;
-      const { pivId } = await database.offering.findUniqueOrThrow({ where: { id: fixture.offeringId! } });
-      await markSettlementEscrowReady(database, pivId);
 
       // A real investor reservation through the offering domain's own path.
       const created = await offeringRepository.createReservation({

@@ -14,6 +14,7 @@ import {
   successfulCampaign,
   type FakeCampaign,
 } from "./support/escrow-mint-fakes.js";
+import { InProcessOperatorKeyLock } from "./support/operator-key-lock-fakes.js";
 
 const T0 = new Date("2026-10-18T12:00:00.000Z");
 const TRACE_ID = "req_test";
@@ -41,11 +42,14 @@ function harness(options: HarnessOptions) {
   );
   const { logger, entries } = makeCapturingLogger();
   let now = T0;
+  const operatorKeyLock = new InProcessOperatorKeyLock(timeline);
   const service = new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger, () => now, {
+    operatorKeyLock,
     ...(options.nonceBlockTag === undefined ? {} : { nonceBlockTag: options.nonceBlockTag }),
   });
   return {
     chain,
+    operatorKeyLock,
     repository,
     entries,
     timeline,
@@ -1116,6 +1120,191 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       expect(summary.errors[0]).toContain("authorizeHolder transaction reverted");
       expect(h.chain.mints).toHaveLength(0);
       expect(h.repository.intents.size).toBe(0);
+    });
+  });
+
+  describe("the operator-key lock (every chain write made with the operator key)", () => {
+    // Records, for each write the service sends and each nonce read it makes,
+    // whether the lock was held at that moment.
+    function observeLock(h: ReturnType<typeof singleContributor>) {
+      const seen: string[] = [];
+      const wrap = (fn: { getMockImplementation: () => unknown; mockImplementation: (impl: never) => unknown }, name: string) => {
+        const impl = fn.getMockImplementation() as (...args: unknown[]) => Promise<unknown>;
+        fn.mockImplementation((async (...args: unknown[]) => {
+          seen.push(`${name}:${h.operatorKeyLock.held ? "locked" : "unlocked"}`);
+          return impl(...args);
+        }) as never);
+      };
+      wrap(h.chain.ipoEscrow.write.finalize, "finalize");
+      wrap(h.chain.ipoEscrow.write.withdrawRaised, "withdrawRaised");
+      wrap(h.chain.property.write.authorizeHolder, "authorizeHolder");
+      wrap(h.chain.property.write.mint, "mint");
+      wrap(h.chain.publicClient.getTransactionCount, "getTransactionCount");
+      wrap(h.chain.publicClient.waitForTransactionReceipt, "waitForReceipt");
+      return seen;
+    }
+
+    it("sends authorizeHolder, reads the pending nonce and sends the mint with the lock held, and waits for receipts without it", async () => {
+      const h = singleContributor();
+      const seen = observeLock(h);
+
+      const summary = await h.run();
+
+      expect(summary.errors).toEqual([]);
+      expect(seen).toEqual([
+        "authorizeHolder:locked",
+        "waitForReceipt:unlocked",
+        "getTransactionCount:locked",
+        "mint:locked",
+        "waitForReceipt:unlocked",
+        "withdrawRaised:locked",
+        "waitForReceipt:unlocked",
+      ]);
+    });
+
+    it("reads the nonce, writes the intent and sends the mint in one locked section, with the hash recorded after it", async () => {
+      const h = singleContributor();
+
+      await h.run();
+
+      const section = h.timeline.slice(h.timeline.indexOf("repo:createEscrowMintIntent") - 1);
+      expect(section.slice(0, 4)).toEqual(["lock:enter", "repo:createEscrowMintIntent", "chain:mint", "lock:exit"]);
+      expect(section[4]).toBe("repo:recordEscrowMintSent");
+    });
+
+    it("sends finalize with the lock held, then waits for its receipt without it", async () => {
+      const campaigns = new Map([
+        [
+          "2",
+          {
+            targetAmount: 300_000_000_000n,
+            totalRaised: 100_000_000_000n,
+            deadline: 1n,
+            treasury: "0xTREASURY",
+            state: CAMPAIGN_STATE_OPEN,
+            swept: false,
+          },
+        ],
+      ]);
+      const h = harness({
+        campaigns,
+        contributions: new Map(),
+        contributors: new Map([["2", []]]),
+        candidates: [{ pivId: "piv_2", tokenId: "2" }],
+        wallets: {},
+      });
+      const seen: string[] = [];
+      const finalize = h.chain.ipoEscrow.write.finalize.getMockImplementation()!;
+      h.chain.ipoEscrow.write.finalize.mockImplementation(async (...args) => {
+        seen.push(h.operatorKeyLock.held ? "finalize:locked" : "finalize:unlocked");
+        return finalize(...args);
+      });
+
+      await h.run();
+
+      expect(seen).toEqual(["finalize:locked"]);
+      expect(h.operatorKeyLock.held).toBe(false);
+    });
+
+    it("releases the lock when a write throws, so the next writer is not blocked", async () => {
+      const h = singleContributor();
+      h.chain.mintModes.push("reject");
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(1);
+      expect(h.operatorKeyLock.held).toBe(false);
+      expect(h.timeline.filter((entry) => entry === "lock:enter")).toHaveLength(
+        h.timeline.filter((entry) => entry === "lock:exit").length,
+      );
+    });
+  });
+
+  describe("recording the state of a campaign that is not Open (AD-286)", () => {
+    const row = (pivId: string): Parameters<InMemorySettlementRepository["ipoEscrowCampaignObservations"]["set"]>[1] => ({
+      pivId,
+      tokenId: "1",
+      escrowContractAddress: "0xescrow",
+      targetAmount: 1n,
+      deadlineAt: new Date("2026-10-01T00:00:00.000Z"),
+      treasuryAddress: "0xtreasury",
+      openTxHash: null,
+      observedState: "open",
+      observedAt: new Date("2026-09-01T00:00:00.000Z"),
+    });
+
+    it("moves the observation of a campaign it finds Successful, so the offering stops being ready", async () => {
+      const h = singleContributor();
+      h.repository.ipoEscrowCampaignObservations.set("piv_1", row("piv_1"));
+
+      await h.run();
+
+      expect(h.repository.campaignRefreshes).toEqual([{ pivId: "piv_1", state: "successful", observedAt: T0 }]);
+      expect(h.repository.ipoEscrowCampaignObservations.get("piv_1")?.observedState).toBe("successful");
+    });
+
+    it("moves it to Failed after finalizing an underfunded campaign, and refreshes nothing while the campaign is still Open", async () => {
+      const campaigns = new Map([
+        [
+          "2",
+          {
+            targetAmount: 300_000_000_000n,
+            totalRaised: 100_000_000_000n,
+            deadline: 1n,
+            treasury: "0xTREASURY",
+            state: CAMPAIGN_STATE_OPEN,
+            swept: false,
+          },
+        ],
+      ]);
+      const h = harness({
+        campaigns,
+        contributions: new Map(),
+        contributors: new Map([["2", []]]),
+        candidates: [{ pivId: "piv_2", tokenId: "2" }],
+        wallets: {},
+      });
+      h.repository.ipoEscrowCampaignObservations.set("piv_2", row("piv_2"));
+
+      await h.run();
+
+      // One refresh only: the read before finalize() saw Open and recorded nothing.
+      expect(h.repository.campaignRefreshes).toEqual([{ pivId: "piv_2", state: "failed", observedAt: T0 }]);
+      expect(h.repository.ipoEscrowCampaignObservations.get("piv_2")?.observedState).toBe("failed");
+    });
+
+    it("also records a campaign that is already swept, which the run otherwise skips", async () => {
+      const h = harness({
+        ...successfulCampaign({ tokenId: "1", contributions: { "0xInvestorA": 100n }, swept: true }),
+        candidates: [{ pivId: "piv_1", tokenId: "1" }],
+        wallets: { "0xInvestorA": "account_a" },
+      });
+      h.repository.ipoEscrowCampaignObservations.set("piv_1", row("piv_1"));
+
+      await h.run();
+
+      expect(h.repository.ipoEscrowCampaignObservations.get("piv_1")?.observedState).toBe("successful");
+      expect(h.chain.mints).toHaveLength(0);
+    });
+
+    it("does not create an observation for an offering that has none", async () => {
+      const h = singleContributor();
+
+      await h.run();
+
+      expect(h.repository.ipoEscrowCampaignObservations.size).toBe(0);
+    });
+
+    it("never stops a mint because the status write failed, and logs it under a stable event name", async () => {
+      const h = singleContributor();
+      h.repository.ipoEscrowCampaignObservations.set("piv_1", row("piv_1"));
+      h.repository.refreshFails = true;
+
+      const summary = await h.run();
+
+      expect(summary).toMatchObject({ errors: [], positionsMinted: 1 });
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect(h.entries.filter((entry) => entry.fields.event === "settlement.ipo_escrow_campaign_observation_failed")).toHaveLength(1);
     });
   });
 });

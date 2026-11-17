@@ -38,7 +38,6 @@ import { CalculateOperatingDistributionService } from "./modules/rental/applicat
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
 import { PrismaOperatingDistributionRepository } from "./modules/rental/repository/prisma-operating-distribution.repository.js";
 import { OpenIpoEscrowCampaignService } from "./modules/settlement/application/open-ipo-escrow-campaign.service.js";
-import { OpenPendingIpoEscrowCampaignsService } from "./modules/settlement/application/open-pending-ipo-escrow-campaigns.service.js";
 import { FinalizeIpoEscrowCampaignsService } from "./modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
 import {
   ConfirmWalletRegistrationsService,
@@ -50,6 +49,7 @@ import { WalletRegistryAlertReporter } from "./modules/settlement/application/wa
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { PrismaWalletRegistryHealthRepository } from "./modules/settlement/repository/prisma-wallet-registry-health.repository.js";
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
+import { PostgresOperatorKeyLock } from "./infrastructure/blockchain/operator-key-lock.js";
 import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { SCHEDULED_JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import { createDeadLetterAlertWebhook } from "./shared/jobs/dead-letter-alert-webhook.js";
@@ -242,17 +242,20 @@ const chainClients =
 // confirmWalletRegistrations below needs none of these four.
 const settlementBundleConfigured = isSettlementBundleConfigured(environment);
 const settlementRepository = chainClients === undefined ? undefined : new PrismaSettlementRepository(database);
+// Every chain write made with the operator key takes this lock for the section
+// from reading the nonce to the node accepting the transaction, so the writers
+// of this worker and the operator command that opens campaigns (src/cli) cannot
+// take the same nonce.
+const operatorKeyLock = new PostgresOperatorKeyLock(database);
 const openIpoEscrowCampaign =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
-    : new OpenIpoEscrowCampaignService(chainClients, settlementRepository);
-// The escrow activation step (#176): opens the campaign of every offering
-// that is open for reservations but has none recorded yet, including the
-// ones opened while settlement was dormant. Same gate as the event job.
-const openPendingIpoEscrowCampaigns =
-  openIpoEscrowCampaign === undefined || settlementRepository === undefined
-    ? undefined
-    : new OpenPendingIpoEscrowCampaignsService(settlementRepository, openIpoEscrowCampaign, logger);
+    : new OpenIpoEscrowCampaignService(chainClients, settlementRepository, operatorKeyLock, logger);
+// Campaigns are opened by this event job when an offering is opened (only where
+// the settlement bundle is configured), and otherwise by an explicit operator
+// command (npm run settlement:open-ipo-escrow-campaigns, AD-286): there is no
+// sweep that opens them.
+
 // Opening an offering hands off to the escrow campaign job only where this
 // process also creates and consumes that job's queue (AD-256). While token
 // settlement is dormant (AD-234) that bundle is unconfigured, no such queue
@@ -266,6 +269,7 @@ const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
     : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger, undefined, {
+        operatorKeyLock,
         nonceBlockTag: environment.ESCROW_MINT_NONCE_BLOCK_TAG,
       });
 const confirmWalletRegistrations =
@@ -378,9 +382,6 @@ if (runOperatingDistributionSweep !== undefined) {
 if (openIpoEscrowCampaign !== undefined) {
   await ensureJobQueue(boss, "settlement.open_ipo_escrow_campaign", "event");
 }
-if (openPendingIpoEscrowCampaigns !== undefined) {
-  await ensureJobQueue(boss, "settlement.open_pending_ipo_escrow_campaigns", "scheduled");
-}
 if (finalizeIpoEscrowCampaigns !== undefined) {
   await ensureJobQueue(boss, "settlement.finalize_ipo_escrow_campaigns", "scheduled");
 }
@@ -441,16 +442,6 @@ await boss.schedule("case_timers.offering_reconfirmation_reminders", "0 * * * *"
 });
 if (pollOnrampTransactions !== undefined) {
   await boss.schedule("case_timers.reservation_onramp_poll", "* * * * *", null, {
-    tz: "UTC",
-    ...RETRY_OPTIONS,
-  });
-}
-if (openPendingIpoEscrowCampaigns !== undefined) {
-  // Hourly: the event job opens a new offering's campaign right away; this
-  // sweep only catches up offerings opened while settlement was dormant and
-  // ones whose event job dead-lettered. Reservations stay refused until it
-  // has run for them (#176).
-  await boss.schedule("settlement.open_pending_ipo_escrow_campaigns", "0 * * * *", null, {
     tz: "UTC",
     ...RETRY_OPTIONS,
   });
@@ -567,32 +558,6 @@ if (pollOnrampTransactions !== undefined) {
 if (runOperatingDistributionSweep !== undefined) {
   await boss.work("rental.operating_distribution_sweep", async () => {
     await runJob("rental.operating_distribution_sweep", () => runOperatingDistributionSweep.execute());
-  });
-}
-if (openPendingIpoEscrowCampaigns !== undefined) {
-  // Same per-item error summary shape as the finalize sweep below.
-  await boss.work("settlement.open_pending_ipo_escrow_campaigns", async () => {
-    const traceId = `req_${ulid()}`;
-    try {
-      const summary = await openPendingIpoEscrowCampaigns.execute(traceId);
-      if (summary.errors.length > 0) {
-        logger.error(
-          { trace_id: traceId, job: "settlement.open_pending_ipo_escrow_campaigns", ...summary },
-          "case timer job completed with campaign errors",
-        );
-      } else {
-        logger.info(
-          { trace_id: traceId, job: "settlement.open_pending_ipo_escrow_campaigns", ...summary },
-          "case timer job completed",
-        );
-      }
-    } catch (error) {
-      logger.error(
-        { err: error, trace_id: traceId, job: "settlement.open_pending_ipo_escrow_campaigns" },
-        "case timer job failed",
-      );
-      throw error;
-    }
   });
 }
 if (finalizeIpoEscrowCampaigns !== undefined) {

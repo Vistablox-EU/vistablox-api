@@ -1,3 +1,5 @@
+import type { ChainSettlementConfig } from "./chain-client.js";
+
 type Setting = string | undefined;
 
 export interface SettlementBundleEnvironment {
@@ -29,4 +31,25 @@ export function isSettlementBundleConfigured(environment: SettlementBundleEnviro
     environment.EURC_TOKEN_ADDRESS !== undefined &&
     environment.PIV_TREASURY_ADDRESS !== undefined
   );
+}
+
+/**
+ * The chain configuration of a process that signs with the operator key and
+ * uses the whole settlement bundle (the operator command), or undefined where
+ * isSettlementBundleConfigured is false. The worker builds its own, because it
+ * also serves consumers that need only part of the bundle.
+ */
+export function settlementChainConfig(environment: SettlementBundleEnvironment): ChainSettlementConfig | undefined {
+  if (!isSettlementBundleConfigured(environment)) return undefined;
+  const network = environment.CHAIN_NETWORK;
+  if (network !== "base" && network !== "base-sepolia") return undefined;
+  return {
+    network,
+    rpcUrl: environment.CHAIN_RPC_URL as string,
+    operatorPrivateKey: environment.CHAIN_OPERATOR_PRIVATE_KEY as `0x${string}`,
+    propertyContractAddress: environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS as `0x${string}`,
+    ipoEscrowContractAddress: environment.VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS as `0x${string}`,
+    eurcTokenAddress: environment.EURC_TOKEN_ADDRESS as `0x${string}`,
+    pivTreasuryAddress: environment.PIV_TREASURY_ADDRESS as `0x${string}`,
+  };
 }

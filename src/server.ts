@@ -11,6 +11,7 @@ import {
   resolveStaffInvitationAcceptUrl,
   resolveWebAuthnSettings,
 } from "./config/environment.js";
+import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { PrismaIdempotencyStore } from "./infrastructure/idempotency/prisma-idempotency-store.js";
@@ -116,6 +117,12 @@ await ensureJobQueue(jobQueue, "provider_events.didit_webhook", "event");
 const kycRepository = new PrismaKycRepository(database, jobQueue);
 const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository, {
   disclosuresBucket: environment.MINIO_DISCLOSURES_BUCKET,
+  // Reservations wait for the offering's settlement escrow campaign only where
+  // the settlement bundle is configured (AD-286, #176); while it is dormant
+  // (AD-234) there is no campaign and no gate. The same predicate the worker
+  // uses to decide whether the bundle exists, so the API and the worker must be
+  // given the same CHAIN_* settings (the &app-environment anchor does).
+  settlementEscrowGated: isSettlementBundleConfigured(environment),
 });
 const intakeRepository = new PrismaIntakeRepository(database, jobQueue, kycRepository);
 const partnerOrganizationRepository = new PrismaPartnerOrganizationRepository(database);

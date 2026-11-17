@@ -5,12 +5,13 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaSettlementRepository } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
+import type { RecordIpoEscrowCampaignObservationInput } from "../src/modules/settlement/repository/settlement.repository.js";
 import { deleteSettlementEscrowReadiness } from "./support/settlement-escrow-db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
-// The escrow activation sweep's queries (#176): which offerings still need
-// their IPO escrow campaign opened, and the readiness record it writes.
+// The operator command's queries (#176, AD-286): which offerings it considers,
+// and the observation of their IPO escrow campaign it writes, refreshes and reads.
 describe.skipIf(databaseUrl === undefined)("IPO escrow campaign readiness PostgreSQL integration", () => {
   const suffix = randomUUID();
   const now = new Date("2026-10-01T12:00:00.000Z");
@@ -98,36 +99,106 @@ describe.skipIf(databaseUrl === undefined)("IPO escrow campaign readiness Postgr
   });
 
   const ours = async () =>
-    (await repository.findOfferingsAwaitingIpoEscrowCampaign(now)).filter((row) => row.pivId.endsWith(suffix));
+    (await repository.findOfferingsForIpoEscrowActivation(now)).filter((row) => row.pivId.endsWith(suffix));
 
-  it("finds only tokenized offerings still open for reservations, before their IPO deadline, with no campaign recorded", async () => {
+  const observation = (name: Name, overrides: Partial<RecordIpoEscrowCampaignObservationInput> = {}) => ({
+    pivId: pivId(name),
+    tokenId: tokenId(name),
+    escrowContractAddress: "0x00000000000000000000000000000000000E5c20",
+    targetAmount: 250_000_500_000n,
+    deadlineAt: future,
+    treasuryAddress: "0x000000000000000000000000000000000000Ba5e",
+    openTxHash: `0x${"AB".repeat(32)}`,
+    state: "open" as const,
+    observedAt: new Date("2026-10-01T12:00:00.000Z"),
+    ...overrides,
+  });
+
+  it("lists only tokenized offerings still open for reservations with an IPO deadline ahead, whether or not a campaign is recorded", async () => {
     expect(await ours()).toEqual([
       { pivId: pivId("awaiting"), tokenId: tokenId("awaiting"), targetRaiseEur: "250000.50", ipoEndAt: future },
     ]);
   });
 
-  it("records the campaign once, keeps the first record on a replay, and then stops listing the offering", async () => {
-    const input = {
+  it("records the observation, canonicalises addresses and the hash, and finds it again", async () => {
+    await repository.recordIpoEscrowCampaignObservation(observation("awaiting"));
+
+    expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toEqual({
       pivId: pivId("awaiting"),
       tokenId: tokenId("awaiting"),
-      escrowContractAddress: "0x00000000000000000000000000000000000E5c20",
+      escrowContractAddress: "0x00000000000000000000000000000000000e5c20",
       targetAmount: 250_000_500_000n,
       deadlineAt: future,
-      treasuryAddress: "0x000000000000000000000000000000000000Ba5e",
-      openTxHash: `0x${"AB".repeat(32)}`,
-    };
-    await repository.recordIpoEscrowCampaignOpened(input);
-    await repository.recordIpoEscrowCampaignOpened({ ...input, openTxHash: null });
-
-    const row = await database.ipoEscrowCampaign.findUniqueOrThrow({ where: { pivId: pivId("awaiting") } });
-    expect(row).toMatchObject({
-      escrowContractAddress: "0x00000000000000000000000000000000000e5c20",
       treasuryAddress: "0x000000000000000000000000000000000000ba5e",
       openTxHash: `0x${"ab".repeat(32)}`,
+      observedState: "open",
+      observedAt: new Date("2026-10-01T12:00:00.000Z"),
+    });
+    expect(await repository.findIpoEscrowCampaign(pivId("closed"))).toBeNull();
+    // Still listed: the command re-reads the campaign of an offering that has a row.
+    expect((await ours()).map((row) => row.pivId)).toEqual([pivId("awaiting")]);
+  });
+
+  it("replaces the stored observation with a newer one but keeps the open tx hash a re-read does not know, and ignores an older one", async () => {
+    const t1 = new Date("2026-10-01T12:00:00.000Z");
+    const t2 = new Date("2026-10-01T13:00:00.000Z");
+    const t0 = new Date("2026-10-01T11:00:00.000Z");
+    await repository.recordIpoEscrowCampaignObservation(observation("awaiting", { observedAt: t1 }));
+
+    await repository.recordIpoEscrowCampaignObservation(
+      observation("awaiting", { observedAt: t2, openTxHash: null, deadlineAt: past }),
+    );
+    expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toMatchObject({
+      observedAt: t2,
+      deadlineAt: past,
+      openTxHash: `0x${"ab".repeat(32)}`,
+    });
+
+    await repository.recordIpoEscrowCampaignObservation(
+      observation("awaiting", { observedAt: t0, state: "failed", deadlineAt: future }),
+    );
+    expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toMatchObject({
+      observedState: "open",
+      observedAt: t2,
+      deadlineAt: past,
+    });
+    // Put it back for the tests below.
+    await repository.recordIpoEscrowCampaignObservation(observation("awaiting", { observedAt: new Date("2026-10-01T14:00:00.000Z") }));
+  });
+
+  it("refreshes only an existing row, only to a different state, and never to an older observation", async () => {
+    const t = new Date("2026-10-02T12:00:00.000Z");
+
+    expect(
+      await repository.refreshIpoEscrowCampaignState({ pivId: pivId("untokenized"), state: "failed", observedAt: t }),
+    ).toBe(false);
+    expect(await repository.findIpoEscrowCampaign(pivId("untokenized"))).toBeNull();
+
+    expect(
+      await repository.refreshIpoEscrowCampaignState({ pivId: pivId("awaiting"), state: "open", observedAt: t }),
+    ).toBe(false);
+    expect(
+      await repository.refreshIpoEscrowCampaignState({
+        pivId: pivId("awaiting"),
+        state: "failed",
+        observedAt: new Date("2026-10-01T00:00:00.000Z"),
+      }),
+    ).toBe(false);
+    expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toMatchObject({ observedState: "open" });
+
+    expect(
+      await repository.refreshIpoEscrowCampaignState({ pivId: pivId("awaiting"), state: "successful", observedAt: t }),
+    ).toBe(true);
+    expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toMatchObject({
+      observedState: "successful",
+      observedAt: t,
       deadlineAt: future,
     });
-    expect(row.tokenId.toString()).toBe(tokenId("awaiting"));
-    expect(row.targetAmount.toString()).toBe("250000500000");
-    expect(await ours()).toEqual([]);
+  });
+
+  it("rejects a state the check constraint does not allow", async () => {
+    await expect(
+      repository.recordIpoEscrowCampaignObservation(observation("pastDeadline", { state: "paused" as never })),
+    ).rejects.toThrow();
   });
 });

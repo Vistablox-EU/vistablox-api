@@ -336,10 +336,16 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
     return false;
   }
   public async recordEscrowMintSent(): Promise<void> {}
-  public async findOfferingsAwaitingIpoEscrowCampaign(): Promise<[]> {
+  public async findOfferingsForIpoEscrowActivation(): Promise<[]> {
     return [];
   }
-  public async recordIpoEscrowCampaignOpened(): Promise<void> {}
+  public async findIpoEscrowCampaign(): Promise<null> {
+    return null;
+  }
+  public async recordIpoEscrowCampaignObservation(): Promise<void> {}
+  public async refreshIpoEscrowCampaignState(): Promise<boolean> {
+    return false;
+  }
   public async recordEscrowMintedPosition(): Promise<{ positionId: string }> {
     return { positionId: "unused" };
   }

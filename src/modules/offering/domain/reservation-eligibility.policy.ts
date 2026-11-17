@@ -74,6 +74,43 @@ export function isWithinIpoPeriod(input: { ipoEndAt: Date | null; now: Date }): 
 }
 
 /**
+ * What the settlement module last observed of an offering's IPO escrow
+ * campaign (settlement.ipo_escrow_campaigns, #176): the campaign state at the
+ * last read and the on-chain deadline it reported.
+ */
+export interface SettlementEscrowCampaignObservation {
+  /** not_opened | open | successful | failed, as the settlement module last read it. */
+  state: string;
+  deadlineAt: Date;
+}
+
+/**
+ * Whether reservations are gated on the offering's settlement escrow at all
+ * (AD-286, decided 2026-11-17). They are only where the settlement bundle is
+ * configured; where it is dormant (AD-234) there is no gate, and no campaign
+ * exists to wait for. The offering repository decides this once, from the same
+ * predicate the worker uses (isSettlementBundleConfigured), and hands the
+ * answer to the read side and the write side alike, so the two cannot disagree.
+ */
+export type SettlementEscrowGate =
+  | { gated: false }
+  | { gated: true; campaign: SettlementEscrowCampaignObservation | null };
+
+/**
+ * True when reservations may proceed as far as settlement is concerned:
+ * the gate is off, or the campaign was last observed Open and its deadline is
+ * still ahead. "Open" is judged at `now`, not remembered: a campaign whose
+ * deadline has passed takes no contribution (the contract refuses it) and is
+ * not ready even when no one has re-read it yet, and one last seen Successful,
+ * Failed or no longer opened is not ready. No row at all is not ready.
+ */
+export function isSettlementEscrowReady(gate: SettlementEscrowGate, now: Date): boolean {
+  if (!gate.gated) return true;
+  const campaign = gate.campaign;
+  return campaign !== null && campaign.state === "open" && now.getTime() < campaign.deadlineAt.getTime();
+}
+
+/**
  * The single source of truth for whether a reservation may be created on an
  * offering right now — GetInvestorOfferingService reports this list as
  * read-only guidance, and CreateReservationService re-checks it against
@@ -85,10 +122,11 @@ export function computeReservationBlockers(input: {
   now: Date;
   fundingRailAvailable: boolean;
   /**
-   * The offering's IPO escrow campaign is recorded open on-chain (#176):
-   * without it the money collected for a reservation has nowhere to settle.
+   * Whether the offering's IPO escrow campaign gates reservations, and if so
+   * what was last observed of it (#176, AD-286): money collected for an
+   * offering whose campaign is not open has nowhere to settle.
    */
-  settlementEscrowReady: boolean;
+  settlementEscrow: SettlementEscrowGate;
   offeringStatus: string;
   finalTermsPublished: boolean;
   /** intake.cases.ipo_end_at for the offering's case; null means no deadline was set. */
@@ -136,7 +174,7 @@ export function computeReservationBlockers(input: {
   }
   if (input.remainingCapacityEur === "0.00") blockers.push("capacity_exhausted");
   if (!input.fundingRailAvailable) blockers.push("funding_rail_unavailable");
-  if (!input.settlementEscrowReady) blockers.push("settlement_escrow_not_ready");
+  if (!isSettlementEscrowReady(input.settlementEscrow, input.now)) blockers.push("settlement_escrow_not_ready");
   if (input.recoveryCooldownEndsAt !== null && input.recoveryCooldownEndsAt > input.now) {
     blockers.push("recovery_cooldown_active");
   }

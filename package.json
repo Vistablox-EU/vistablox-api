@@ -15,6 +15,7 @@
     "staff:bootstrap-first-admin": "node dist/cli/bootstrap-first-admin.js",
     "intake:backfill-events": "node dist/cli/backfill-intake-case-events.js",
     "jobs:replay-dead-letter": "node dist/cli/replay-dead-letter-job.js",
+    "settlement:open-ipo-escrow-campaigns": "node dist/cli/open-ipo-escrow-campaigns.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
