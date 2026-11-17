@@ -60,3 +60,29 @@ export function decideOnrampRecording(input: {
   }
   return "record";
 }
+
+/**
+ * The recorded_at the single recording method writes, so that the new row is
+ * the latest one in the reservation's history by the same ordering every
+ * reader uses (recorded_at DESC, then the id): never earlier than, or equal
+ * to, the latest event already on file.
+ *
+ * The caller's time is the time it observed the outcome, read before it
+ * queued for the reservation row lock; the order the recorders win the lock in
+ * is not the order of those readings (two reconcilers whose reads interleave
+ * with differing views of Coinbase, or an API that stamped the pending event
+ * with a clock ahead of the worker's). Without this, a funded event could be
+ * written under a later-dated failure or pending event, and the expiry sweeper
+ * (which reads the latest event) would lapse a reservation that holds money.
+ * Under the lock the order of the writes is the order of the history.
+ *
+ * One millisecond is the smallest step a JavaScript Date can express. The
+ * latest time arrives as a Date (milliseconds) from a column that holds
+ * microseconds; whether that was truncated or rounded, the value plus one
+ * millisecond is still above what is stored.
+ */
+export function recordedAtAfterLatest(requested: Date, latestRecordedAt: Date | null): Date {
+  if (latestRecordedAt === null) return requested;
+  const earliestAllowed = latestRecordedAt.getTime() + 1;
+  return requested.getTime() >= earliestAllowed ? requested : new Date(earliestAllowed);
+}

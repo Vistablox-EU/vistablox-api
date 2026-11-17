@@ -87,6 +87,12 @@ export interface RecordOnrampOutcomeInput {
   capitalState: OnrampOutcomeCapitalState;
   amountEur: string;
   amountEurc: string | null;
+  /**
+   * When the caller observed the outcome. The stored recorded_at is this time,
+   * or one millisecond after the reservation's latest event when that is later
+   * (recordedAtAfterLatest): the order the recorders win the row lock in is the
+   * order of the history, and readers take the latest event as the state.
+   */
   recordedAt: Date;
 }
 
@@ -166,7 +172,8 @@ export interface ReservationRepository {
    * provider transaction already recorded in the same state is a duplicate; a
    * reservation past 'initiated' is other_stage; a funded latest event is
    * never written over; only a reservation still awaiting its purchase gets a
-   * row. The returned status says which, and only "recorded" wrote.
+   * row, stamped so that it is the latest event of the reservation. The
+   * returned status says which, and only "recorded" wrote.
    */
   recordOnrampOutcome(input: RecordOnrampOutcomeInput): Promise<OnrampOutcomeRecording>;
 }

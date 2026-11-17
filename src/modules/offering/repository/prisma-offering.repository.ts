@@ -39,7 +39,7 @@ import type {
   ReservationForOnrampReconciliation,
   ReservationRepository,
 } from "./reservation.repository.js";
-import { decideOnrampRecording } from "../domain/onramp-outcome-recording.policy.js";
+import { decideOnrampRecording, recordedAtAfterLatest } from "../domain/onramp-outcome-recording.policy.js";
 import {
   FUNDED_CAPITAL_STATES,
   isReservationFunded,
@@ -860,7 +860,12 @@ export class PrismaOfferingRepository
           capitalState: input.capitalState,
           amountEur: input.amountEur,
           amountEurc: input.amountEurc,
-          recordedAt: input.recordedAt,
+          // The order the recorders won the lock in is the order of the
+          // history, whatever time each of them observed its outcome at: the
+          // new row sorts after the latest one (recordedAtAfterLatest), so a
+          // funded event is never filed under a later-dated failure or
+          // pending event, which the expiry sweeper would read as the state.
+          recordedAt: recordedAtAfterLatest(input.recordedAt, current.recorded_at),
         },
       });
       return { status: "recorded" };
@@ -1867,7 +1872,12 @@ async function lockReservationWithLatestMoney(
   transaction: Prisma.TransactionClient,
   reservationId: string,
 ): Promise<
-  | { reservation_stage: string; capital_state: string | null; provider_reference: string | null }
+  | {
+      reservation_stage: string;
+      capital_state: string | null;
+      provider_reference: string | null;
+      recorded_at: Date | null;
+    }
   | undefined
 > {
   const locked = await transaction.$queryRaw<Array<{ reservation_stage: string }>>`
@@ -1879,9 +1889,9 @@ async function lockReservationWithLatestMoney(
   const reservation = locked[0];
   if (reservation === undefined) return undefined;
   const latest = await transaction.$queryRaw<
-    Array<{ capital_state: string; provider_reference: string | null }>
+    Array<{ capital_state: string; provider_reference: string | null; recorded_at: Date }>
   >`
-    SELECT money_event.capital_state, money_event.provider_reference
+    SELECT money_event.capital_state, money_event.provider_reference, money_event.recorded_at
     FROM money.money_events AS money_event
     WHERE money_event.reservation_id = ${reservationId}
     ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
@@ -1891,5 +1901,6 @@ async function lockReservationWithLatestMoney(
     reservation_stage: reservation.reservation_stage,
     capital_state: latest[0]?.capital_state ?? null,
     provider_reference: latest[0]?.provider_reference ?? null,
+    recorded_at: latest[0]?.recorded_at ?? null,
   };
 }

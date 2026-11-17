@@ -327,6 +327,91 @@ describe.skipIf(databaseUrl === undefined)("onramp outcome recording PostgreSQL 
       expect(await database.moneyEvent.count({ where: { reservationId } })).toBe(1);
     });
 
+    // The invariant behind #201's guard: the funded event is the latest one.
+    // recorded_at is the caller's clock, read before it queued for the row
+    // lock, so the order of the locks and the order of the clocks can differ.
+    it("files a funding after the latest event even when the caller's clock reads earlier, so the expiry sweep still sees funded money", async () => {
+      const { reservationId, start } = await newReservation();
+      expect(await repository.recordOnrampOutcome(outcome(reservationId, "purchase_failed", "txn_a", start + 5_000))).toEqual({
+        status: "recorded",
+      });
+
+      // A second reconciler read its clock (start + 2s) before the first one won the lock
+      // with a later reading (start + 5s) and saw the purchase as complete in Coinbase's list.
+      expect(await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_b", start + 2_000))).toEqual({
+        status: "recorded",
+      });
+
+      const byLatest = await database.moneyEvent.findMany({
+        where: { reservationId },
+        orderBy: [{ recordedAt: "desc" }, { id: "desc" }],
+      });
+      expect(byLatest[0]).toMatchObject({ capitalState: "eurc_reserved", providerReference: "txn_b" });
+      expect(byLatest[0]!.recordedAt).toEqual(new Date(start + 5_001));
+      expect(await history(reservationId)).toEqual([
+        ["initiated", null],
+        ["eurc_purchase_pending", "channel_01"],
+        ["purchase_failed", "txn_a"],
+        ["eurc_reserved", "txn_b"],
+      ]);
+
+      // What the expiry sweep reads, and what it then does with it.
+      const listed = (await repository.listInitiatedReservationsForTimers()).find(
+        (reservation) => reservation.reservationId === reservationId,
+      );
+      expect(listed?.latestCapitalState).toBe("eurc_reserved");
+      expect(
+        await repository.expireReservation({
+          reservationId,
+          traceId: `trace_${suffix}`,
+          expiredAt: new Date(start + 16 * 60_000),
+        }),
+      ).toBe(false);
+      expect((await database.reservation.findUnique({ where: { id: reservationId } }))?.reservationStage).toBe("initiated");
+    });
+
+    it("files a funding after a pending event that a faster clock stamped, so a skewed API cannot hide it from the sweep", async () => {
+      const { reservationId, start } = await newReservation();
+      // The API's clock runs ten minutes ahead of the worker's: its pending event is "in the future".
+      await repository.recordMoneyEvent({
+        reservationId,
+        provider: "coinbase_cdp",
+        providerReference: "channel_02",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "100.00",
+        amountEurc: null,
+        recordedAt: new Date(start + 600_000),
+      });
+
+      expect(await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_x", start + 2_000))).toEqual({
+        status: "recorded",
+      });
+
+      expect((await history(reservationId)).at(-1)).toEqual(["eurc_reserved", "txn_x"]);
+      const listed = (await repository.listInitiatedReservationsForTimers()).find(
+        (reservation) => reservation.reservationId === reservationId,
+      );
+      expect(listed?.latestCapitalState).toBe("eurc_reserved");
+    });
+
+    it("keeps the caller's time when it is already after the latest event, and steps one millisecond past an equal one", async () => {
+      const { reservationId, start } = await newReservation();
+      await repository.recordOnrampOutcome(outcome(reservationId, "purchase_failed", "txn_a", start + 5_000));
+
+      // The same instant as the failure on file: the id would decide the order, so it is moved one step.
+      await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_b", start + 5_000));
+      // A time after the latest event is stored as given, not rewritten.
+      const later = await newReservation();
+      await repository.recordOnrampOutcome(outcome(later.reservationId, "purchase_failed", "txn_a", later.start + 5_000));
+      await repository.recordOnrampOutcome(outcome(later.reservationId, "eurc_reserved", "txn_b", later.start + 9_000));
+
+      const recordedAt = async (id: string, state: string) =>
+        (await database.moneyEvent.findFirst({ where: { reservationId: id, capitalState: state } }))?.recordedAt;
+      expect(await recordedAt(reservationId, "eurc_reserved")).toEqual(new Date(start + 5_001));
+      expect(await recordedAt(later.reservationId, "eurc_reserved")).toEqual(new Date(later.start + 9_000));
+      expect(await recordedAt(later.reservationId, "purchase_failed")).toEqual(new Date(later.start + 5_000));
+    });
+
     it("records the same transaction once when two recordings queue behind the reservation lock", async () => {
       const { reservationId, start } = await newReservation();
       const funded = outcome(reservationId, "eurc_reserved", "txn_x", start + 60_000);

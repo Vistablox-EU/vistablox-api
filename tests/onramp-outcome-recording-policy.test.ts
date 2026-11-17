@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   decideOnrampRecording,
   ONRAMP_AWAITING_CAPITAL_STATES,
+  recordedAtAfterLatest,
   type OnrampRecordingDecision,
 } from "../src/modules/offering/domain/onramp-outcome-recording.policy.js";
 
@@ -68,5 +69,29 @@ describe("decideOnrampRecording", () => {
     const written = rows.filter((row) => row.expected === "record");
     expect(written.map((row) => row.latest).sort()).toEqual(["eurc_purchase_pending", "purchase_failed"]);
     expect(written.every((row) => row.stage === "initiated" && !row.recorded)).toBe(true);
+  });
+});
+
+describe("recordedAtAfterLatest", () => {
+  const latest = new Date("2026-11-17T12:00:05.000Z");
+  const cases: Array<{ label: string; requested: string; latest: Date | null; expected: string }> = [
+    { label: "no event on file: the caller's time", requested: "2026-11-17T12:00:01.000Z", latest: null, expected: "2026-11-17T12:00:01.000Z" },
+    { label: "later than the latest: the caller's time", requested: "2026-11-17T12:00:09.000Z", latest, expected: "2026-11-17T12:00:09.000Z" },
+    { label: "one millisecond after the latest: the caller's time", requested: "2026-11-17T12:00:05.001Z", latest, expected: "2026-11-17T12:00:05.001Z" },
+    { label: "the same instant as the latest: one millisecond after it (the id would decide otherwise)", requested: "2026-11-17T12:00:05.000Z", latest, expected: "2026-11-17T12:00:05.001Z" },
+    { label: "earlier than the latest (a reconciler that read its clock before queueing): one millisecond after the latest", requested: "2026-11-17T12:00:02.000Z", latest, expected: "2026-11-17T12:00:05.001Z" },
+    { label: "a clock far behind the latest event's (a skewed API stamped it): one millisecond after the latest", requested: "2026-11-17T09:00:00.000Z", latest, expected: "2026-11-17T12:00:05.001Z" },
+  ];
+
+  it.each(cases)("$label", ({ requested, latest: latestRecordedAt, expected }) => {
+    expect(recordedAtAfterLatest(new Date(requested), latestRecordedAt).toISOString()).toBe(expected);
+  });
+
+  it("never returns a time at or before the latest event, and leaves its inputs alone", () => {
+    const requested = new Date("2026-11-17T11:00:00.000Z");
+    const before = [requested.getTime(), latest.getTime()];
+    const result = recordedAtAfterLatest(requested, latest);
+    expect(result.getTime()).toBeGreaterThan(latest.getTime());
+    expect([requested.getTime(), latest.getTime()]).toEqual(before);
   });
 });
