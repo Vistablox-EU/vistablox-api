@@ -11,6 +11,7 @@ import type {
   CoinbaseCdpClient,
   OnrampTransactionSummary,
 } from "../src/modules/offering/application/coinbase-cdp-client.js";
+import { CheckOnrampLateEvidenceService } from "../src/modules/offering/application/check-onramp-late-evidence.service.js";
 import { ReconcileOnrampWebhookService } from "../src/modules/offering/application/coinbase-onramp-webhook.service.js";
 import { PollOnrampTransactionsService } from "../src/modules/offering/application/poll-onramp-transactions.service.js";
 import { RecordOnrampLateEvidenceService } from "../src/modules/offering/application/record-onramp-late-evidence.service.js";
@@ -27,8 +28,8 @@ const silent = pino({ level: "silent" });
 // Real PostgreSQL: the evidence row the late path writes when the single onramp
 // recording method answers other_stage (AD-288), what the table enforces
 // (unique transaction, the stage and state checks, immutability apart from one
-// review mark) and the mark-reviewed transaction with its audit row. The unit
-// tests pin the classification and the route;
+// review mark), the mark-reviewed transaction with its audit row, and the
+// standing alert's read. The unit tests pin the classification and the route;
 // these pin that the database holds under repetition and concurrency.
 describe.skipIf(databaseUrl === undefined)("onramp late evidence PostgreSQL integration (AD-288)", () => {
   const suffix = randomUUID();
@@ -588,6 +589,64 @@ describe.skipIf(databaseUrl === undefined)("onramp late evidence PostgreSQL inte
       const page = await evidence.listLateEvidence({ limit: 1, after: c.evidenceId });
       expect(page).toHaveLength(2);
       expect(page[0]).toMatchObject({ evidenceId: b.evidenceId, reservationStage: "lapsed", currentReservationStage: "cancelled" });
+    });
+  });
+
+  describe("the standing alert", () => {
+    it("is raised while an entry is unreviewed, on every run, and stops once the last one is marked reviewed", async () => {
+      // Entries left by earlier tests and runs are reviewed first (the one
+      // update the table allows), so what is counted here is this test's. Only
+      // this file writes to the table, and its tests run one after another.
+      await authPool.query("UPDATE money.onramp_late_evidence SET reviewed_at = now() WHERE reviewed_at IS NULL");
+      const lines: Array<Record<string, unknown>> = [];
+      const capturing = pino({ level: "warn" }, { write: (line: string) => void lines.push(JSON.parse(line)) });
+      const check = new CheckOnrampLateEvidenceService(evidence, capturing, () => new Date("2026-11-17T16:00:00.000Z"));
+      expect(await check.execute("trace_alert_0")).toEqual({ checked: 0, acted: 0, unreviewed: 0 });
+      expect(lines).toEqual([]);
+
+      const { reservationId } = await lapsed();
+      const older = await record(reservationId, { observedAt: new Date("2026-11-17T12:00:00.000Z") });
+      const newer = await record(reservationId, { observedAt: new Date("2026-11-17T14:00:00.000Z") });
+
+      expect(await check.execute("trace_alert_1")).toEqual({ checked: 2, acted: 1, unreviewed: 2 });
+      expect(await check.execute("trace_alert_2")).toEqual({ checked: 2, acted: 1, unreviewed: 2 });
+      expect(lines).toHaveLength(2);
+      expect(lines[0]).toMatchObject({
+        level: 40,
+        event: "offering.onramp_late_evidence_unreviewed",
+        severity: "warn",
+        job: "maintenance.onramp_late_evidence_alert",
+        trace_id: "trace_alert_1",
+        unreviewed_count: 2,
+        oldest_unreviewed_age_seconds: 4 * 3600,
+        evidence_ids: [older.evidenceId, newer.evidenceId],
+      });
+      // Counts and ids only: neither the wallet nor an amount is in what the alert says.
+      expect(JSON.stringify(lines)).not.toContain(wallet);
+      expect(JSON.stringify(lines)).not.toContain("99.000000");
+
+      await evidence.markLateEvidenceReviewed({ evidenceId: older.evidenceId, actorAccountId: staffId, traceId: "trace_review", reviewedAt: new Date() });
+      expect(await check.execute("trace_alert_3")).toEqual({ checked: 1, acted: 1, unreviewed: 1 });
+      expect(lines[2]).toMatchObject({ unreviewed_count: 1, evidence_ids: [newer.evidenceId], oldest_unreviewed_age_seconds: 2 * 3600 });
+
+      await evidence.markLateEvidenceReviewed({ evidenceId: newer.evidenceId, actorAccountId: staffId, traceId: "trace_review", reviewedAt: new Date() });
+      expect(await check.execute("trace_alert_4")).toEqual({ checked: 0, acted: 0, unreviewed: 0 });
+      expect(lines).toHaveLength(3);
+    });
+
+    it("lists the oldest unreviewed entries first and no more than the cap, and still counts them all", async () => {
+      await authPool.query("UPDATE money.onramp_late_evidence SET reviewed_at = now() WHERE reviewed_at IS NULL");
+      const { reservationId } = await lapsed();
+      const ids: string[] = [];
+      for (let index = 0; index < 23; index += 1) {
+        ids.push((await record(reservationId, { observedAt: new Date(Date.UTC(2026, 10, 17, 0, index)) })).evidenceId);
+      }
+
+      const snapshot = await evidence.unreviewedLateEvidenceSnapshot();
+
+      expect(snapshot.unreviewedCount).toBe(23);
+      expect(snapshot.oldestObservedAt).toEqual(new Date("2026-11-17T00:00:00.000Z"));
+      expect(snapshot.oldestEvidenceIds).toEqual(ids.slice(0, 20));
     });
   });
 });

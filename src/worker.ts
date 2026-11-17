@@ -36,6 +36,7 @@ import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/appl
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { PrismaOnrampLateEvidenceRepository } from "./modules/offering/repository/prisma-onramp-late-evidence.repository.js";
 import { RecordOnrampLateEvidenceService } from "./modules/offering/application/record-onramp-late-evidence.service.js";
+import { CheckOnrampLateEvidenceService } from "./modules/offering/application/check-onramp-late-evidence.service.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { CalculateOperatingDistributionService } from "./modules/rental/application/calculate-operating-distribution.service.js";
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
@@ -187,9 +188,11 @@ const coinbaseCdpClient =
       });
 // Late onramp funding evidence (AD-288, decided 2026-11-17): what the poll and
 // the webhook job hand over when the single recording method answers
-// other_stage.
+// other_stage, and the standing alert that asks staff to review it. The alert
+// reads only the database, so it is not tied to the Coinbase credentials.
 const onrampLateEvidenceRepository = new PrismaOnrampLateEvidenceRepository(database);
 const recordOnrampLateEvidence = new RecordOnrampLateEvidenceService(onrampLateEvidenceRepository, logger);
+const checkOnrampLateEvidence = new CheckOnrampLateEvidenceService(onrampLateEvidenceRepository, logger);
 const pollOnrampTransactions =
   coinbaseCdpClient === undefined
     ? undefined
@@ -403,6 +406,7 @@ await ensureJobQueue(boss, "maintenance.kyc_renewal", "scheduled");
 await ensureJobQueue(boss, "maintenance.kyc_stuck_session_expiry", "scheduled");
 await ensureJobQueue(boss, "maintenance.kyc_stuck_session_reconciliation", "scheduled");
 await ensureJobQueue(boss, "maintenance.account_recovery_alert", "scheduled");
+await ensureJobQueue(boss, "maintenance.onramp_late_evidence_alert", "scheduled");
 // Reversal (undoing the KYC microservice split): the Didit webhook's own
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
 // The webhook itself is received and durably enqueued by server.ts/app.ts.
@@ -526,6 +530,13 @@ await boss.schedule("maintenance.kyc_stuck_session_reconciliation", "0 * * * *",
   ...RETRY_OPTIONS,
 });
 await boss.schedule("maintenance.account_recovery_alert", "*/15 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
+// Hourly and level-triggered: a warn line while any late onramp evidence is
+// unreviewed (AD-288). Nothing about it is time-critical (the EURC is already
+// in the investor's wallet), so a finer cadence would only repeat the line.
+await boss.schedule("maintenance.onramp_late_evidence_alert", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
@@ -757,6 +768,13 @@ await boss.work("maintenance.account_recovery_alert", async () => {
   metrics.set("vistablox_worker_account_recovery_overdue", overdue);
   if (overdue > 0) logger.warn({ job: "maintenance.account_recovery_alert", overdue_cases: overdue, threshold_hours: environment.ACCOUNT_RECOVERY_ALERT_AFTER_HOURS }, "account recovery cases open beyond review threshold");
   logger.info({ job: "maintenance.account_recovery_alert", checked: overdue, acted: 0 }, "maintenance job completed");
+});
+await boss.work("maintenance.onramp_late_evidence_alert", async () => {
+  await runJob("maintenance.onramp_late_evidence_alert", async (traceId) => {
+    const summary = await checkOnrampLateEvidence.execute(traceId);
+    metrics.set("vistablox_worker_onramp_late_evidence_unreviewed", summary.unreviewed);
+    return summary;
+  });
 });
 await boss.work("provider_events.didit_webhook", async (jobs) => {
   for (const job of jobs) {
