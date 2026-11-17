@@ -26,12 +26,12 @@ import type {
   WalletRegistrationRecheckCandidate,
   WalletRegistrationRecord,
 } from "./settlement.repository.js";
+import { WALLET_REGISTRY_CURSOR_SETTING_KEY } from "./wallet-registry-setting-keys.js";
 
-// Reuses the generic platform.settings key-value table (PlatformSetting)
-// rather than a bespoke single-row table -- there is exactly one watermark
-// value to persist and this table already exists for exactly this kind of
-// thing.
-const WALLET_REGISTRY_CURSOR_SETTING_KEY = "wallet_registry.last_processed_block";
+// The watcher's cursor reuses the generic platform.settings key-value table
+// (PlatformSetting) rather than a bespoke single-row table -- there is exactly
+// one watermark value to persist and this table already exists for exactly
+// this kind of thing. Its key is in wallet-registry-setting-keys.ts.
 
 // The partial unique index created by
 // 20261113150200_wallet_claims_confirmed_address_uniqueness:
@@ -381,7 +381,10 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     // above: nothing guarantees the on-chain event's hex casing matches what
     // was stored when the commitment was generated.
     const row = await this.database.walletRegistration.findFirst({
-      where: { registrationCommitment: { equals: commitment, mode: "insensitive" } },
+      // An expired claim's commitment is dead (#177): an event naming it
+      // matches nothing, and the account registers again for a new one. A row
+      // is never both confirmed and expired, so no confirmed match is lost.
+      where: { registrationCommitment: { equals: commitment, mode: "insensitive" }, expiredAt: null },
       select: WALLET_REGISTRATION_RECORD_SELECT,
     });
     return row === null ? null : toWalletRegistrationRecord(row);
@@ -389,7 +392,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
 
   public async countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number> {
     return this.database.walletRegistration.count({
-      where: { registeredAt: null, requestedAt: { lt: cutoff } },
+      where: { registeredAt: null, expiredAt: null, requestedAt: { lt: cutoff } },
     });
   }
 
@@ -413,6 +416,9 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
             walletAddress: input.walletAddress,
             registrationCommitment: input.registrationCommitment,
             registeredAt: null,
+            // Expired between the match and this write: not confirmed, and
+            // told apart below ("expired").
+            expiredAt: null,
           },
           data: { registeredAt: input.registeredAt, ...evidenceColumns(input.evidence) },
         });
@@ -422,13 +428,16 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
           // a conflicting event; a claim that is gone or replaced is stale.
           const current = await transaction.walletRegistration.findUnique({
             where: { accountId: input.accountId },
-            select: { walletAddress: true, registrationCommitment: true, registeredAt: true },
+            select: { walletAddress: true, registrationCommitment: true, registeredAt: true, expiredAt: true },
           });
           const sameClaim =
             current !== null &&
             current.walletAddress === input.walletAddress &&
             current.registrationCommitment === input.registrationCommitment;
-          return sameClaim && current.registeredAt !== null ? "already_registered" : "stale";
+          if (sameClaim && current.registeredAt !== null) return "already_registered";
+          // The same claim, expired since it was matched: not a replaced claim.
+          if (sameClaim && current.expiredAt !== null) return "expired";
+          return "stale";
         }
         await transaction.auditLog.create({
           data: {

@@ -28,6 +28,9 @@ import {
 } from "./modules/identity/application/kyc-stuck-session.service.js";
 import { OpenOfferingForApprovedCaseService } from "./modules/offering/application/open-offering-for-approved-case.service.js";
 import { ExpireUnfundedReservationsService } from "./modules/offering/application/expire-reservations.service.js";
+import { ExpirePendingWalletRegistrationsService } from "./modules/wallet/application/expire-pending-wallet-registrations.service.js";
+import { walletClaimExpiryCron } from "./modules/wallet/domain/wallet-claim-expiry-schedule.js";
+import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
 import { ReconcileOnrampWebhookService } from "./modules/offering/application/coinbase-onramp-webhook.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
@@ -48,6 +51,7 @@ import {
   WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS,
 } from "./modules/settlement/application/confirm-wallet-registrations.service.js";
 import { CheckWalletRegistryHealthService } from "./modules/settlement/application/check-wallet-registry-health.service.js";
+import { WalletRegistryExpiryGate } from "./modules/settlement/application/wallet-registry-expiry-gate.js";
 import { RunWalletRegistryWatcherService } from "./modules/settlement/application/run-wallet-registry-watcher.service.js";
 import { WalletRegistryAlertReporter } from "./modules/settlement/application/wallet-registry-alert-reporter.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
@@ -343,6 +347,36 @@ const checkWalletRegistryHealth =
         () => `req_${ulid()}`,
       );
 
+// The pending-claim expiry sweep (#177, AD-287 decided 2026-11-17). Not gated
+// on the registry address or the CHAIN_* bundle: it only touches database
+// rows. What does hold it back is the watcher's health, read through the same
+// snapshot and thresholds as the health check above: while the watcher is
+// stale or its cursor lags, or if that cannot be read, the sweep expires
+// nothing. A watcher that cannot run here is not "nothing to wait for" unless
+// the registry address is unset or the watcher has never run: with the address
+// set and CHAIN_* lost, a watcher that has run before still has a saved cursor
+// and will read what it missed, so the sweep waits for it too (the gate says
+// why). The two inputs are separate for that reason.
+const walletRegistryExpiryGate = new WalletRegistryExpiryGate(
+  walletRegistryHealthRepository ?? new PrismaWalletRegistryHealthRepository(database),
+  {
+    thresholds: walletRegistryThresholds,
+    registryConfigured: environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS !== undefined,
+    watcherRunnable: confirmWalletRegistrations !== undefined,
+    pendingOverdueAfterMs: environment.WALLET_REGISTRY_PENDING_WARN_AFTER_MINUTES * 60_000,
+  },
+);
+const expirePendingWalletRegistrations = new ExpirePendingWalletRegistrationsService(
+  new PrismaWalletRepository(database),
+  walletRegistryExpiryGate,
+  logger,
+  () => new Date(),
+  {
+    expireAfterHours: environment.WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS,
+    batchSize: environment.WALLET_REGISTRY_PENDING_EXPIRE_BATCH_SIZE,
+  },
+);
+
 async function runJob(name: string, run: (traceId: string) => Promise<JobRunSummary>): Promise<void> {
   const traceId = `req_${ulid()}`;
   try {
@@ -406,6 +440,7 @@ await ensureJobQueue(boss, "maintenance.kyc_renewal", "scheduled");
 await ensureJobQueue(boss, "maintenance.kyc_stuck_session_expiry", "scheduled");
 await ensureJobQueue(boss, "maintenance.kyc_stuck_session_reconciliation", "scheduled");
 await ensureJobQueue(boss, "maintenance.account_recovery_alert", "scheduled");
+await ensureJobQueue(boss, "maintenance.wallet_registration_expiry", "scheduled");
 await ensureJobQueue(boss, "maintenance.onramp_late_evidence_alert", "scheduled");
 // Reversal (undoing the KYC microservice split): the Didit webhook's own
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
@@ -530,6 +565,12 @@ await boss.schedule("maintenance.kyc_stuck_session_reconciliation", "0 * * * *",
   ...RETRY_OPTIONS,
 });
 await boss.schedule("maintenance.account_recovery_alert", "*/15 * * * *", null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
+// Every WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES (15 by default): the TTL
+// is measured in hours, so a claim outlives it by at most one interval.
+await boss.schedule("maintenance.wallet_registration_expiry", walletClaimExpiryCron(environment.WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES), null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
@@ -768,6 +809,9 @@ await boss.work("maintenance.account_recovery_alert", async () => {
   metrics.set("vistablox_worker_account_recovery_overdue", overdue);
   if (overdue > 0) logger.warn({ job: "maintenance.account_recovery_alert", overdue_cases: overdue, threshold_hours: environment.ACCOUNT_RECOVERY_ALERT_AFTER_HOURS }, "account recovery cases open beyond review threshold");
   logger.info({ job: "maintenance.account_recovery_alert", checked: overdue, acted: 0 }, "maintenance job completed");
+});
+await boss.work("maintenance.wallet_registration_expiry", async () => {
+  await runJob("maintenance.wallet_registration_expiry", (traceId) => expirePendingWalletRegistrations.execute(traceId));
 });
 await boss.work("maintenance.onramp_late_evidence_alert", async () => {
   await runJob("maintenance.onramp_late_evidence_alert", async (traceId) => {

@@ -398,6 +398,140 @@ describe("ConfirmWalletRegistrationsService", () => {
     expect(await repository.getLastProcessedWalletRegistryBlock()).toBe(97n);
   });
 
+  // AD-287 (decided 2026-11-17): a late registry event for a claim the expiry
+  // sweep has expired counts as unmatched, not as stale or ignored.
+  describe("an event for an expired claim", () => {
+    const EXPIRED_AT = new Date("2026-11-16T12:00:00.000Z");
+
+    it("counts it as unmatched, and as new past the cursor, without confirming or recording a mismatch", async () => {
+      const { chain } = makeFakeChain({
+        latestBlock: 20n,
+        events: [{ blockNumber: 15n, wallet: STORED_WALLET, commitment: COMMITMENT }],
+      });
+      const repository = new FakeWalletRegistrationRepository(
+        [{ accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT, expiredAt: EXPIRED_AT }],
+        10n,
+      );
+      const service = new ConfirmWalletRegistrationsService(repository, chain as never);
+
+      const summary = await service.execute();
+
+      expect(summary).toMatchObject({
+        eventsFound: 1,
+        registrationsConfirmed: 0,
+        unmatchedEvents: 1,
+        newUnmatchedEvents: 1,
+        staleConfirmations: 0,
+        confirmationConflicts: 0,
+        eventsReplayed: 0,
+        eventsWithoutIdentity: 0,
+        addressMismatches: [],
+      });
+      expect(repository.confirmCalls).toEqual([]);
+      expect(repository.recordedMismatches).toEqual([]);
+      expect(repository.row("acct_01")).toMatchObject({ registeredAt: null, expiredAt: EXPIRED_AT });
+    });
+
+    it("counts one from another sender as unmatched too: an expired claim has no sender to compare with", async () => {
+      const { chain } = makeFakeChain({
+        latestBlock: 20n,
+        events: [{ blockNumber: 15n, wallet: ATTACKER_WALLET, commitment: COMMITMENT }],
+      });
+      const repository = new FakeWalletRegistrationRepository(
+        [{ accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT, expiredAt: EXPIRED_AT }],
+        10n,
+      );
+
+      const summary = await new ConfirmWalletRegistrationsService(repository, chain as never).execute();
+
+      expect(summary).toMatchObject({ unmatchedEvents: 1, newUnmatchedEvents: 1, addressMismatches: [], addressMismatchesRepeated: 0 });
+      expect(repository.recordedMismatches).toEqual([]);
+    });
+
+    it("does not count it as new when a completed run has already read that block", async () => {
+      const { chain } = makeFakeChain({
+        latestBlock: 100n,
+        events: [
+          { blockNumber: 89n, wallet: STORED_WALLET, commitment: COMMITMENT },
+          { blockNumber: 90n, wallet: STORED_WALLET, commitment: COMMITMENT },
+          { blockNumber: 91n, wallet: STORED_WALLET, commitment: COMMITMENT },
+        ],
+      });
+      const repository = new FakeWalletRegistrationRepository(
+        [{ accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT, expiredAt: EXPIRED_AT }],
+        90n,
+      );
+
+      const summary = await new ConfirmWalletRegistrationsService(repository, chain as never).execute();
+
+      // Block 90 is exactly the cursor: a completed run already covered it.
+      expect(summary).toMatchObject({ unmatchedEvents: 3, newUnmatchedEvents: 1 });
+    });
+
+    it("counts it as unmatched, not stale, when the sweep expires the claim between the match and the write", async () => {
+      const { chain } = makeFakeChain({
+        latestBlock: 20n,
+        events: [{ blockNumber: 15n, wallet: STORED_WALLET, commitment: COMMITMENT }],
+      });
+      const repository = new FakeWalletRegistrationRepository(
+        [{ accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT }],
+        10n,
+      );
+      // The claim matched pending; the sweep gets the row before the write.
+      repository.beforeNextConfirm = () => {
+        repository.row("acct_01").expiredAt = EXPIRED_AT;
+      };
+
+      const summary = await new ConfirmWalletRegistrationsService(repository, chain as never).execute();
+
+      expect(summary).toMatchObject({
+        registrationsConfirmed: 0,
+        unmatchedEvents: 1,
+        newUnmatchedEvents: 1,
+        staleConfirmations: 0,
+      });
+      expect(repository.confirmedAccountIds).toEqual([]);
+      expect(repository.row("acct_01")).toMatchObject({ registeredAt: null, expiredAt: EXPIRED_AT });
+    });
+
+    it("keeps counting a claim the account replaced between the match and the write as stale, not unmatched", async () => {
+      const { chain } = makeFakeChain({
+        latestBlock: 20n,
+        events: [{ blockNumber: 15n, wallet: STORED_WALLET, commitment: COMMITMENT }],
+      });
+      const repository = new FakeWalletRegistrationRepository(
+        [{ accountId: "acct_01", walletAddress: STORED_WALLET, commitment: COMMITMENT }],
+        10n,
+      );
+      repository.beforeNextConfirm = () => {
+        repository.row("acct_01").commitment = `0x${"beef".repeat(16)}`;
+      };
+
+      const summary = await new ConfirmWalletRegistrationsService(repository, chain as never).execute();
+
+      expect(summary).toMatchObject({ staleConfirmations: 1, unmatchedEvents: 0, newUnmatchedEvents: 0 });
+    });
+
+    it("confirms the same event for the live claim once the account has registered again with that commitment", async () => {
+      const { chain } = makeFakeChain({
+        latestBlock: 20n,
+        events: [
+          { blockNumber: 14n, wallet: STORED_WALLET, commitment: COMMITMENT },
+          { blockNumber: 15n, wallet: STORED_WALLET, commitment: `0x${"beef".repeat(16)}` },
+        ],
+      });
+      // One row per account: the renewed claim replaced the expired one in place.
+      const repository = new FakeWalletRegistrationRepository(
+        [{ accountId: "acct_01", walletAddress: STORED_WALLET, commitment: `0x${"beef".repeat(16)}` }],
+        10n,
+      );
+
+      const summary = await new ConfirmWalletRegistrationsService(repository, chain as never).execute();
+
+      expect(summary).toMatchObject({ registrationsConfirmed: 1, unmatchedEvents: 1, newUnmatchedEvents: 1 });
+    });
+  });
+
   describe("newUnmatchedEvents", () => {
     // unmatchedEvents counts every event whose commitment belongs to no
     // registration row at all (an event for a row that exists is classified as

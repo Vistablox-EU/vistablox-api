@@ -14,7 +14,9 @@ export class GetWalletAccountForOperationsService {
   public constructor(private readonly repository: WalletRepository) {}
 
   public async execute(accountId: string) {
-    const wallet = await this.repository.findByAccountId(accountId);
+    // Staff see an expired claim too: "why does my wallet say not registered"
+    // is exactly the ticket this view answers.
+    const wallet = await this.repository.findByAccountId(accountId, { includeExpired: true });
     // A missing record reports 404 rather than a synthesized "not
     // registered" response, since an arbitrary staff-supplied account_id
     // might just be a typo -- same rationale as
@@ -25,9 +27,14 @@ export class GetWalletAccountForOperationsService {
         account_id: accountId,
         wallet_address: wallet.walletAddress,
         registration_commitment: wallet.registrationCommitment,
-        status: wallet.registeredAt === null ? ("pending" as const) : ("registered" as const),
+        status: wallet.registeredAt !== null
+          ? ("registered" as const)
+          : wallet.expiredAt != null
+            ? ("expired" as const)
+            : ("pending" as const),
         requested_at: wallet.requestedAt.toISOString(),
         registered_at: wallet.registeredAt?.toISOString() ?? null,
+        expired_at: wallet.expiredAt?.toISOString() ?? null,
         registration_evidence: {
           status: describeEvidence({
             transactionHash: wallet.registrationTxHash,

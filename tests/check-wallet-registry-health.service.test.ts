@@ -22,6 +22,7 @@ const THRESHOLDS: WalletRegistryAlertThresholds = {
 function healthyReading(overrides: Partial<WalletRegistryHealthReading> = {}): WalletRegistryHealthReading {
   return {
     heartbeat: { completedAt: ago(MINUTE), cursorBlock: 1000n, safeHeadBlock: 1005n, eventsFound: 0 },
+    watcherHistoryRecorded: true,
     pendingTotal: 0,
     pendingOverdue: 0,
     oldestPendingRequestedAt: null,

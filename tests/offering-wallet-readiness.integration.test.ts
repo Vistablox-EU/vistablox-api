@@ -213,6 +213,34 @@ describe.skipIf(databaseUrl === undefined)("offering wallet readiness PostgreSQL
     expect(onrampAddresses).toEqual([]);
   });
 
+  it("treats an expired claim like a pending one: not a ready payment account, nothing for the onramp, no reservation (#177)", async () => {
+    // The sweep sets expired_at; the readiness reads key on registered_at, which
+    // an expired claim never has (the database refuses both on one row), so
+    // expiry cannot make an account look ready. The same row is un-expired
+    // afterwards because the tests below confirm it.
+    await database.walletRegistration.update({ where: { accountId }, data: { expiredAt: new Date() } });
+    try {
+      expect(await readiness()).toMatchObject({
+        walletProvisioned: false,
+        walletAddress: null,
+        payoutWalletRegistered: false,
+      });
+      await expectBlockedByPaymentAccount(
+        reservationService().execute({
+          offeringId,
+          accountId,
+          amountEur: "1000.00",
+          clientIdempotencyKey: `operation_expired_${suffix}`,
+          traceId: `trace_${suffix}`,
+        }),
+      );
+      expect(onrampAddresses).toEqual([]);
+      expect(await database.reservation.count({ where: { accountId } })).toBe(0);
+    } finally {
+      await database.walletRegistration.update({ where: { accountId }, data: { expiredAt: null } });
+    }
+  });
+
   it("refuses to mint a token for the replay of an existing reservation while the account's wallet is only pending", async () => {
     // A reservation can already exist for an account whose wallet is pending
     // (it predates the confirmed-only rule, or was written around the

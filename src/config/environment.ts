@@ -338,6 +338,28 @@ const environmentSchema = z
     // This many events that match no pending claim in one run:
     // wallet_registry.unmatched_events.
     WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: blankTolerantInteger(1, 10_000, 5),
+    // A claim still pending this long after it was requested is expired by the
+    // maintenance.wallet_registration_expiry job (#177): its commitment stops
+    // matching on-chain events and the account registers afresh (AD-287,
+    // decided 2026-11-17: 24 hours by default). Starting value, not calibrated
+    // against real traffic.
+    WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS: blankTolerantInteger(1, 720, 24),
+    // How often that job runs, in minutes (default 15). Only a divisor of 60,
+    // so the cron expression fires at an even spacing within every hour: 7
+    // would fire at :00, :07, ... :56 and then again at :00.
+    WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES: z.preprocess(
+      emptyStringToUndefined,
+      z.coerce
+        .number()
+        .int()
+        .min(1)
+        .max(60)
+        .refine((minutes) => 60 % minutes === 0, { message: "must divide 60 (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30 or 60)" })
+        .default(15),
+    ),
+    // The most claims one run expires (oldest first), so a backlog clears over
+    // a few runs instead of in one long transaction (default 500).
+    WALLET_REGISTRY_PENDING_EXPIRE_BATCH_SIZE: blankTolerantInteger(1, 5000, 500),
     // Block tag at which the IPO escrow finalizer reads the operator's confirmed
     // nonce when it reconciles an interrupted mint attempt. A pinned nonce below
     // that count with no mint log is taken as used by another transaction, and the

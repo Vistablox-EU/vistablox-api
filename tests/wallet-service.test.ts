@@ -301,6 +301,7 @@ describe("GetWalletAccountForOperationsService", () => {
         status: "pending",
         requested_at: now.toISOString(),
         registered_at: null,
+        expired_at: null,
         registration_evidence: {
           status: "none",
           transaction_hash: null,
@@ -313,7 +314,7 @@ describe("GetWalletAccountForOperationsService", () => {
         },
       },
     });
-    expect(repository.findByAccountId).toHaveBeenCalledWith(accountId);
+    expect(repository.findByAccountId).toHaveBeenCalledWith(accountId, { includeExpired: true });
   });
 
   it("reports registered status once registered_at is set", async () => {

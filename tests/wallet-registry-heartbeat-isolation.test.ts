@@ -33,3 +33,38 @@ describe("the wallet-registry heartbeat row in the integration tests", () => {
     expect(integrationFiles.filter(touchesTheHeartbeatRow)).toEqual([OWNER]);
   });
 });
+
+// The watcher's cursor is the second row the health integration test reads (a
+// saved cursor is part of "the watcher has run before") and deletes. Same
+// hazard, same remedy. Naming the key is not the only way to write it for real:
+// the settlement repository's own cursor methods do. So an integration file
+// that builds the confirmation service on the real settlement repository must
+// replace those two methods with its own, as the three that do today do.
+describe("the wallet-registry cursor row in the integration tests", () => {
+  const CURSOR_KEY = "wallet_registry.last_processed_block";
+
+  function readsSource(name: string): string {
+    return withoutComments(readFileSync(`${testsDirectory}${name}`, "utf8"));
+  }
+
+  it("is named by the health integration test only", () => {
+    expect(integrationFiles.filter((name) => readsSource(name).includes(CURSOR_KEY))).toEqual([OWNER]);
+  });
+
+  it("is never written by an integration file that runs the watcher on the real settlement repository", () => {
+    const runsTheWatcherForReal = integrationFiles.filter((name) => {
+      const source = readsSource(name);
+      return (
+        source.includes("PrismaSettlementRepository") &&
+        (source.includes("ConfirmWalletRegistrationsService") || source.includes("RunWalletRegistryWatcherService"))
+      );
+    });
+
+    expect(runsTheWatcherForReal.length).toBeGreaterThan(0);
+    for (const name of runsTheWatcherForReal) {
+      const source = readsSource(name);
+      expect(source, name).toContain("getLastProcessedWalletRegistryBlock");
+      expect(source, name).toContain("setLastProcessedWalletRegistryBlock");
+    }
+  });
+});

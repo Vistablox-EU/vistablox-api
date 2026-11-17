@@ -49,7 +49,10 @@ export interface WalletRegistrationChainVerifier {
   verify(input: { txHash: string; walletAddress: string; commitment: string }): Promise<VerifiedWalletRegistration>;
 }
 
-/** Staff recovery path for a registration event missed by the watcher, or a recorded one that went wrong. */
+/**
+ * Staff recovery path for a registration event missed by the watcher, a recorded one that went wrong,
+ * or an event that arrived after the claim expired (the watcher counts that one as unmatched).
+ */
 export class ReconcileWalletRegistrationService {
   public constructor(
     private readonly repository: WalletRepository,
@@ -59,7 +62,10 @@ export class ReconcileWalletRegistrationService {
 
   public async execute(input: { accountId: string; txHash: string; actorAccountId: string }) {
     const txHash = normalizeChainHash(input.txHash);
-    const wallet = await this.repository.findByAccountId(input.accountId);
+    // An expired claim is reconciled like a pending one (AD-287, decided
+    // 2026-11-17): matching on-chain evidence confirms it, which reinstates it.
+    // The customer-facing reads do not see it; this one does.
+    const wallet = await this.repository.findByAccountId(input.accountId, { includeExpired: true });
     if (wallet === null) throw accountNotFound();
     const reconcile = this.repository.reconcileWalletRegistration;
     if (reconcile === undefined) {

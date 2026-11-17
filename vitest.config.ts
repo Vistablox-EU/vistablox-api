@@ -7,6 +7,11 @@ import { defineConfig } from "vitest/config";
 // runs on its own, in a group that starts after every other test file has
 // finished.
 const bootstrapSuite = "tests/staff-bootstrap-repository.integration.test.ts";
+// The pending-wallet-claim expiry sweep is global, and its stale fixtures are
+// older than any other suite's pending claims (the wallet registry health
+// suite asserts which pending claim is the oldest). So it also runs on its own,
+// after the parallel files and before the bootstrap suite.
+const walletExpirySuite = "tests/wallet-claim-expiry.integration.test.ts";
 
 export default defineConfig({
   test: {
@@ -24,10 +29,14 @@ export default defineConfig({
     // Both projects inherit the options above; an exclude list given here is
     // added to the one above rather than replacing it.
     projects: [
-      { extends: true, test: { name: "parallel", exclude: [bootstrapSuite] } },
+      { extends: true, test: { name: "parallel", exclude: [bootstrapSuite, walletExpirySuite] } },
       {
         extends: true,
-        test: { name: "bootstrap-alone", include: [bootstrapSuite], sequence: { groupOrder: 1 } },
+        test: { name: "wallet-expiry-alone", include: [walletExpirySuite], sequence: { groupOrder: 1 } },
+      },
+      {
+        extends: true,
+        test: { name: "bootstrap-alone", include: [bootstrapSuite], sequence: { groupOrder: 2 } },
       },
     ],
   },
