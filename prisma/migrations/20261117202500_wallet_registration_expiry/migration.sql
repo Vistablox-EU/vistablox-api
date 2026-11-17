@@ -1,18 +1,23 @@
--- Pending wallet claims expire (#177).
+-- Pending wallet claims expire (#177; AD-287, decided 2026-11-17).
 --
 -- A row with registered_at IS NULL is a pending claim. Until now it stayed
 -- pending forever. The worker job maintenance.wallet_registration_expiry now
 -- stamps expired_at on a claim still pending WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS
 -- after requested_at, and writes an audit row settlement.wallet_registration_expired.
--- An expired claim's commitment is dead: the registry watcher no longer matches
--- it, staff reconcile refuses it, and the customer API reports the account as
--- having no wallet. The row is kept (not deleted) so staff can still see what
--- was claimed; the account's next registration overwrites it in place and
--- clears expired_at.
+-- The sweep skips while the registry watcher is stale or lagging.
+--
+-- An expired claim's commitment is dead for the watcher: a late registry event
+-- naming it is counted as unmatched and confirms nothing. The customer API
+-- reports the account as having no wallet. Staff can still reconcile the claim
+-- on matching on-chain evidence, which confirms it and clears expired_at. The
+-- row is kept (never deleted; how long expired rows are retained is not
+-- decided); the account's next registration overwrites it in place, needing
+-- fresh authentication when the address differs, and clears expired_at.
 --
 -- Pending now means registered_at IS NULL AND expired_at IS NULL. A row is never
 -- both confirmed and expired. Additive and idempotent: existing rows all have
--- expired_at NULL and keep their current state.
+-- expired_at NULL and keep their current state, and every statement below can
+-- run again against a database that already has it.
 ALTER TABLE settlement.wallet_registrations
   ADD COLUMN IF NOT EXISTS expired_at timestamptz(6);
 

@@ -64,6 +64,7 @@ The mapping below is a proposal, **pending confirmation by the founder**: who th
 | `case_timers.response_window_expiry` | scheduled | intake | tier_2 |
 | `provider_events.didit_webhook` | event | identity | tier_1 |
 | `maintenance.account_recovery_alert` | scheduled | identity | tier_1 |
+| `maintenance.wallet_registration_expiry` | scheduled | settlement | tier_1 |
 | `maintenance.kyc_renewal` | scheduled | identity | tier_2 |
 | `maintenance.kyc_stuck_session_expiry` | scheduled | identity | tier_2 |
 | `maintenance.kyc_stuck_session_reconciliation` | scheduled | identity | tier_2 |

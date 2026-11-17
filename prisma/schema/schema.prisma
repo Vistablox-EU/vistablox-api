@@ -777,7 +777,7 @@ model WalletRegistration {
   // outlives WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS. Pending means
   // registeredAt AND expiredAt are both NULL; the check constraint
   // wallet_registrations_expired_only_pending_check (raw SQL, migration
-  // 20261116120000_wallet_registration_expiry) keeps a row from being both
+  // 20261117202500_wallet_registration_expiry) keeps a row from being both
   // confirmed and expired. The account's next registration clears it.
   expiredAt                      DateTime? @map("expired_at") @db.Timestamptz(6)
 
