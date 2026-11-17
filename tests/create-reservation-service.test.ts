@@ -13,9 +13,17 @@ import type {
   ReservationRepository,
   ReusedReservationState,
 } from "../src/modules/offering/repository/reservation.repository.js";
+import { CONFIGURED_ESCROW_CONTRACT } from "./support/settlement-escrow-contracts.js";
 
 const now = new Date("2026-09-02T10:00:00.000Z");
 const walletAddress = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
+// What the settlement module last observed of the offering's escrow campaign:
+// Open, with its on-chain deadline still ahead of `now`.
+const openCampaign = {
+  state: "open",
+  deadlineAt: new Date("2026-10-01T12:00:00.000Z"),
+  escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+};
 
 function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): InvestorOfferingDetailRecord {
   return {
@@ -27,6 +35,7 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
     ipoEndAt: new Date("2026-10-01T12:00:00.000Z"),
+    settlementEscrow: { gated: false },
     issuer: {
       pivId: "piv_01",
       legalName: "VistaBlox Berlin 01 B.V.",
@@ -320,6 +329,84 @@ describe("CreateReservationService", () => {
       status: 409,
       fieldErrors: [{ field: "reservation", code: "offering_not_open" }],
     });
+  });
+
+  it("blocks a reservation before writing anything while the offering's settlement escrow is not ready", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(
+      offeringRepository(detail({ settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: null } })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(
+      service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
+    ).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      status: 409,
+      fieldErrors: [{ field: "reservation", code: "settlement_escrow_not_ready" }],
+    });
+    expect(reservations.createReservation).not.toHaveBeenCalled();
+  });
+
+  it("passes the gate when the escrow campaign was last observed Open with its deadline ahead", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(
+      offeringRepository(detail({ settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: openCampaign } })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" });
+
+    expect(reservations.createReservation).toHaveBeenCalledTimes(1);
+  });
+
+  it("blocks when the observed campaign's deadline has passed, though nobody has re-read it since", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(
+      offeringRepository(
+        detail({
+          settlementEscrow: {
+            gated: true,
+            escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+            campaign: { ...openCampaign, deadlineAt: new Date(now.getTime() - 1) },
+          },
+        }),
+      ),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(
+      service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
+    ).rejects.toMatchObject({ fieldErrors: [{ field: "reservation", code: "settlement_escrow_not_ready" }] });
+    expect(reservations.createReservation).not.toHaveBeenCalled();
+  });
+
+  it("maps an atomic settlement_escrow_not_ready conflict from the repository to a 409 without opening a session", async () => {
+    const reservations = reservationRepository({
+      createReservation: vi.fn().mockResolvedValue({ reservation: null, conflict: "settlement_escrow_not_ready" }),
+    });
+    const cdp = coinbase();
+    const service = new CreateReservationService(
+      offeringRepository(detail({ settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: openCampaign } })),
+      reservations,
+      cdp,
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(
+      service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
+    ).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      status: 409,
+      fieldErrors: [{ field: "reservation", code: "settlement_escrow_not_ready" }],
+    });
+    expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
   });
 
   it("records a purchase_failed money event and rethrows when Coinbase session creation fails", async () => {

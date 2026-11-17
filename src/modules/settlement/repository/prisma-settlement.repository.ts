@@ -14,10 +14,14 @@ import type {
   CreateEscrowMintIntentInput,
   EscrowMintIntent,
   EscrowMintIntentStatus,
+  IpoEscrowCampaignRecord,
+  OfferingForIpoEscrowActivation,
   PivPendingEscrowResolution,
   PivTokenHolding,
   PivTokenHoldingsReader,
   RecordEscrowMintedPositionInput,
+  RecordIpoEscrowCampaignObservationInput,
+  RefreshIpoEscrowCampaignStateInput,
   SettlementRepository,
   WalletRegistrationAddressMismatchInput,
   WalletRegistrationConfirmation,
@@ -26,6 +30,7 @@ import type {
   WalletRegistrationRecheckCandidate,
   WalletRegistrationRecord,
 } from "./settlement.repository.js";
+import type { IpoEscrowCampaignState } from "../domain/ipo-escrow-campaign.policy.js";
 import { WALLET_REGISTRY_CURSOR_SETTING_KEY } from "./wallet-registry-setting-keys.js";
 
 // The watcher's cursor reuses the generic platform.settings key-value table
@@ -201,6 +206,98 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
       select: { id: true, tokenId: true },
     });
     return rows.map((row) => ({ pivId: row.id, tokenId: row.tokenId!.toFixed(0) }));
+  }
+
+  public async findOfferingsForIpoEscrowActivation(now: Date): Promise<OfferingForIpoEscrowActivation[]> {
+    // The same "open for reservations" test the reservation gate applies
+    // (status pre_offering, final terms not published), plus a deadline still
+    // ahead: openCampaign reverts with InvalidDeadline for a past one. An
+    // offering that already has a row is listed too: the command re-reads its
+    // campaign and refreshes the observation.
+    const rows = await this.database.$queryRaw<
+      Array<{ piv_id: string; token_id: string; target_raise_eur: string; ipo_end_at: Date }>
+    >`
+      SELECT DISTINCT ON (p.piv_id)
+        p.piv_id,
+        p.token_id::text AS token_id,
+        o.target_raise_eur::text AS target_raise_eur,
+        c.ipo_end_at
+      FROM offering.offerings o
+      JOIN intake.pivs p ON p.piv_id = o.piv_id
+      JOIN intake.intake_cases c ON c.case_id = p.case_id
+      WHERE o.status = 'pre_offering'
+        AND o.final_offering_published_at IS NULL
+        AND p.token_id IS NOT NULL
+        AND c.ipo_end_at > ${now}
+      ORDER BY p.piv_id, o.offering_id
+    `;
+    return rows.map((row) => ({
+      pivId: row.piv_id,
+      tokenId: row.token_id,
+      targetRaiseEur: row.target_raise_eur,
+      ipoEndAt: row.ipo_end_at,
+    }));
+  }
+
+  public async findIpoEscrowCampaign(pivId: string): Promise<IpoEscrowCampaignRecord | null> {
+    const row = await this.database.ipoEscrowCampaign.findUnique({ where: { pivId } });
+    if (row === null) return null;
+    return {
+      pivId: row.pivId,
+      tokenId: row.tokenId.toFixed(0),
+      escrowContractAddress: row.escrowContractAddress,
+      targetAmount: BigInt(row.targetAmount.toFixed(0)),
+      deadlineAt: row.deadlineAt,
+      treasuryAddress: row.treasuryAddress,
+      openTxHash: row.openTxHash,
+      observedState: row.observedState as IpoEscrowCampaignState,
+      observedAt: row.observedAt,
+    };
+  }
+
+  public async recordIpoEscrowCampaignObservation(input: RecordIpoEscrowCampaignObservationInput): Promise<void> {
+    // The row is the last observation, so an observation replaces the stored
+    // one, parameters included, unless it is older: two readers that read the
+    // chain a moment apart may write in either order, and the later read wins.
+    // The open transaction hash is kept when this observation does not know it.
+    await this.database.$executeRaw`
+      INSERT INTO settlement.ipo_escrow_campaigns (
+        piv_id, token_id, escrow_contract_address, target_amount, deadline_at, treasury_address, open_tx_hash,
+        observed_state, observed_at
+      ) VALUES (
+        ${input.pivId},
+        ${input.tokenId}::numeric,
+        ${canonicalWalletAddress(input.escrowContractAddress)},
+        ${input.targetAmount.toString()}::numeric,
+        ${input.deadlineAt},
+        ${canonicalWalletAddress(input.treasuryAddress)},
+        ${input.openTxHash === null ? null : normalizeChainHash(input.openTxHash)},
+        ${input.state},
+        ${input.observedAt}
+      )
+      ON CONFLICT (piv_id) DO UPDATE SET
+        token_id = EXCLUDED.token_id,
+        escrow_contract_address = EXCLUDED.escrow_contract_address,
+        target_amount = EXCLUDED.target_amount,
+        deadline_at = EXCLUDED.deadline_at,
+        treasury_address = EXCLUDED.treasury_address,
+        open_tx_hash = COALESCE(EXCLUDED.open_tx_hash, settlement.ipo_escrow_campaigns.open_tx_hash),
+        observed_state = EXCLUDED.observed_state,
+        observed_at = EXCLUDED.observed_at
+      WHERE settlement.ipo_escrow_campaigns.observed_at <= EXCLUDED.observed_at
+    `;
+  }
+
+  public async refreshIpoEscrowCampaignState(input: RefreshIpoEscrowCampaignStateInput): Promise<boolean> {
+    const updated = await this.database.$executeRaw`
+      UPDATE settlement.ipo_escrow_campaigns
+      SET observed_state = ${input.state}, observed_at = ${input.observedAt}
+      WHERE piv_id = ${input.pivId}
+        AND lower(escrow_contract_address) = lower(${input.escrowContractAddress})
+        AND observed_at <= ${input.observedAt}
+        AND observed_state <> ${input.state}
+    `;
+    return updated > 0;
   }
 
   public async resolveAccountIdForWallet(walletAddress: string): Promise<string | null> {

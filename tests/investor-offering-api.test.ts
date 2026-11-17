@@ -14,6 +14,7 @@ import { createIdempotencyMiddleware } from "../src/shared/http/idempotency.js";
 import type { IdempotencyStore, StoredIdempotentResponse } from "../src/infrastructure/idempotency/idempotency-store.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
+import { CONFIGURED_ESCROW_CONTRACT } from "./support/settlement-escrow-contracts.js";
 
 const repository: OfferingRepository = {
   listPublic: vi.fn().mockResolvedValue([]),
@@ -26,6 +27,8 @@ const repository: OfferingRepository = {
     platformRightsEndAt: null,
     effectiveRightsEndAt: null,
     ipoEndAt: new Date("2099-12-31T00:00:00.000Z"),
+    // Gated and nothing observed: the wire blocker settlement_escrow_not_ready.
+    settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: null },
     issuer: {
       pivId: "piv_01",
       legalName: null,
@@ -103,6 +106,7 @@ describe("authenticated investor offering API", () => {
             "payment_account_not_ready",
             "disclosure_pack_unavailable",
             "funding_rail_unavailable",
+            "settlement_escrow_not_ready",
           ],
         },
       },
@@ -135,6 +139,7 @@ const reservationEligibleDetail: InvestorOfferingDetailRecord = {
   platformRightsEndAt: null,
   effectiveRightsEndAt: null,
   ipoEndAt: new Date("2099-12-31T00:00:00.000Z"),
+  settlementEscrow: { gated: false },
   issuer: {
     pivId: "piv_01",
     legalName: null,

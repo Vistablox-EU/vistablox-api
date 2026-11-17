@@ -1,5 +1,6 @@
 import type { OfferingMedia } from "../domain/offering-media.policy.js";
 import type { PublicOfferingStatus } from "../domain/public-offering.policy.js";
+import type { SettlementEscrowGate } from "../domain/reservation-eligibility.policy.js";
 
 export interface OfferingCursor {
   featured?: boolean;
@@ -39,6 +40,10 @@ export interface InvestorOfferingDetailRecord {
   platformRightsEndAt: Date | null;
   effectiveRightsEndAt: Date | null;
   ipoEndAt: Date | null;
+  // Whether the settlement escrow gates reservations (only where the
+  // settlement bundle is configured, AD-286) and, if so, the campaign's last
+  // observation from settlement.ipo_escrow_campaigns (#176).
+  settlementEscrow: SettlementEscrowGate;
   issuer: {
     pivId: string;
     legalName: string | null;

@@ -16,7 +16,7 @@ export interface CreatedReservation {
   createdAt: Date;
 }
 
-export type CreateReservationConflict = "offering_not_open" | "capacity_exceeded";
+export type CreateReservationConflict = "offering_not_open" | "settlement_escrow_not_ready" | "capacity_exceeded";
 
 /**
  * What a client-idempotency-key hit found: the stored reservation's amount,

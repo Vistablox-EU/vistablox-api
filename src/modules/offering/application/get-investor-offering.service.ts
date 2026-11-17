@@ -53,6 +53,7 @@ export class GetInvestorOfferingService {
     const blockers = computeReservationBlockers({
       now,
       fundingRailAvailable: this.fundingRailAvailable,
+      settlementEscrow: record.settlementEscrow,
       offeringStatus: record.status,
       finalTermsPublished: record.finalOfferingPublishedAt !== null,
       ipoEndAt: record.ipoEndAt,

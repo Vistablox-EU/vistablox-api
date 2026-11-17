@@ -1,9 +1,11 @@
 import type { Logger } from "pino";
 
 import type { ChainClients } from "../../../infrastructure/blockchain/chain-client.js";
+import type { OperatorKeyLock } from "../../../infrastructure/blockchain/operator-key-lock.js";
 import { fromEurcMicros } from "../../../shared/domain/currency.js";
 import { costBasisToUnitCount } from "../../../shared/domain/position.js";
 import type { EscrowMintIntent, SettlementRepository } from "../repository/settlement.repository.js";
+import { recordObservedIpoEscrowCampaignState } from "./ipo-escrow-campaign-observation.js";
 
 // Mirrors VistaBloxIpoEscrow.sol's CampaignState enum ordering exactly.
 const CAMPAIGN_STATE_OPEN = 1;
@@ -92,6 +94,10 @@ interface ConfirmedMint {
 }
 
 export interface FinalizeIpoEscrowCampaignsOptions {
+  // Serializes every write made with the operator key, with the operator
+  // command that opens campaigns (see OperatorKeyLock). Required: a finalizer
+  // without it could race that command for a nonce.
+  operatorKeyLock: OperatorKeyLock;
   // Applies only to intents written before mint nonces were pinned.
   inFlightGraceMs?: number;
   nonceBlockTag?: EscrowMintNonceBlockTag;
@@ -135,12 +141,14 @@ export class FinalizeIpoEscrowCampaignsService {
     private readonly chain: ChainClients,
     private readonly logger: Logger,
     private readonly clock: () => Date = () => new Date(),
-    options: FinalizeIpoEscrowCampaignsOptions = {},
+    options: FinalizeIpoEscrowCampaignsOptions,
   ) {
+    this.operatorKeyLock = options.operatorKeyLock;
     this.inFlightGraceMs = options.inFlightGraceMs ?? ESCROW_MINT_IN_FLIGHT_GRACE_MS;
     this.nonceBlockTag = options.nonceBlockTag ?? DEFAULT_ESCROW_MINT_NONCE_BLOCK_TAG;
   }
 
+  private readonly operatorKeyLock: OperatorKeyLock;
   private readonly inFlightGraceMs: number;
   private readonly nonceBlockTag: EscrowMintNonceBlockTag;
 
@@ -182,6 +190,7 @@ export class FinalizeIpoEscrowCampaignsService {
   ): Promise<void> {
     const tokenId = BigInt(candidate.tokenId);
     let campaign = await this.readCampaign(tokenId);
+    await this.recordObservedState(candidate, campaign, traceId);
 
     if (campaign.swept) {
       // This job mints every contributor before it sweeps, so a campaign it
@@ -195,13 +204,14 @@ export class FinalizeIpoEscrowCampaignsService {
     }
 
     if (campaign.state === CAMPAIGN_STATE_OPEN) {
-      const hash = await this.chain.ipoEscrow.write.finalize!([tokenId]);
+      const hash = await this.operatorKeyLock.run(() => this.chain.ipoEscrow.write.finalize!([tokenId]));
       const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
       if (receipt.status !== "success") {
         throw new Error(`finalize transaction reverted (tx=${hash})`);
       }
       summary.campaignsFinalized += 1;
       campaign = await this.readCampaign(tokenId);
+      await this.recordObservedState(candidate, campaign, traceId);
     }
 
     if (campaign.state === CAMPAIGN_STATE_FAILED) {
@@ -222,11 +232,33 @@ export class FinalizeIpoEscrowCampaignsService {
       if (outcome === "reconciled") summary.mintsReconciled += 1;
     }
 
-    const hash = await this.chain.ipoEscrow.write.withdrawRaised!([tokenId]);
+    const hash = await this.operatorKeyLock.run(() => this.chain.ipoEscrow.write.withdrawRaised!([tokenId]));
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") {
       throw new Error(`withdrawRaised transaction reverted (tx=${hash})`);
     }
+  }
+
+  // The offering stops being ready for reservations once its campaign is not
+  // Open (AD-286, #176): the state this run just read is recorded on the
+  // observation the reservation gate reads. Never throws, never blocks a mint.
+  private async recordObservedState(
+    candidate: { pivId: string; tokenId: string },
+    campaign: Campaign,
+    traceId: string,
+  ): Promise<void> {
+    await recordObservedIpoEscrowCampaignState(
+      { repository: this.repository, logger: this.logger },
+      {
+        pivId: candidate.pivId,
+        tokenId: candidate.tokenId,
+        // Non-null: this.chain.ipoEscrow, which every read above goes through, throws if it were unset.
+        escrowContractAddress: this.chain.config.ipoEscrowContractAddress!,
+        stateCode: campaign.state,
+        observedAt: this.clock(),
+        traceId,
+      },
+    );
   }
 
   private async readCampaign(tokenId: bigint): Promise<Campaign> {
@@ -530,22 +562,24 @@ export class FinalizeIpoEscrowCampaignsService {
     await this.ensureHolderAuthorized(target);
 
     const head = await this.chain.publicClient.getBlockNumber();
-    const nonce = await this.nextOperatorNonce();
-    const created = await this.repository.createEscrowMintIntent({
-      pivId: target.pivId,
-      accountId: target.accountId,
-      walletAddress: target.walletAddress,
-      tokenContractAddress: target.tokenContractAddress,
-      tokenId: target.tokenId.toString(),
-      mintAmount: target.mintAmount,
-      attemptedAt: this.clock(),
-      searchFromBlock: head > SEARCH_FROM_BLOCK_MARGIN ? head - SEARCH_FROM_BLOCK_MARGIN : 0n,
-      mintNonce: nonce,
+    return this.sendMint(target, async () => {
+      const nonce = await this.nextOperatorNonce();
+      const created = await this.repository.createEscrowMintIntent({
+        pivId: target.pivId,
+        accountId: target.accountId,
+        walletAddress: target.walletAddress,
+        tokenContractAddress: target.tokenContractAddress,
+        tokenId: target.tokenId.toString(),
+        mintAmount: target.mintAmount,
+        attemptedAt: this.clock(),
+        searchFromBlock: head > SEARCH_FROM_BLOCK_MARGIN ? head - SEARCH_FROM_BLOCK_MARGIN : 0n,
+        mintNonce: nonce,
+      });
+      if (!created.created) {
+        throw this.claimedByAnotherRun(target);
+      }
+      return { intentId: created.intent.id, attempt: created.intent.attempt, nonce };
     });
-    if (!created.created) {
-      throw this.claimedByAnotherRun(target);
-    }
-    return this.sendMint(target, created.intent.id, created.intent.attempt, nonce);
   }
 
   // Starts the next attempt under `reuseNonce` when the previous attempt's
@@ -557,17 +591,19 @@ export class FinalizeIpoEscrowCampaignsService {
   ): Promise<ConfirmedMint> {
     await this.ensureHolderAuthorized(target);
 
-    const nonce = reuseNonce ?? (await this.nextOperatorNonce());
-    const restarted = await this.repository.restartEscrowMintAttempt({
-      intentId: intent.id,
-      expectedAttempt: intent.attempt,
-      attemptedAt: this.clock(),
-      mintNonce: nonce,
+    return this.sendMint(target, async () => {
+      const nonce = reuseNonce ?? (await this.nextOperatorNonce());
+      const restarted = await this.repository.restartEscrowMintAttempt({
+        intentId: intent.id,
+        expectedAttempt: intent.attempt,
+        attemptedAt: this.clock(),
+        mintNonce: nonce,
+      });
+      if (!restarted) {
+        throw this.claimedByAnotherRun(target);
+      }
+      return { intentId: intent.id, attempt: intent.attempt + 1, nonce };
     });
-    if (!restarted) {
-      throw this.claimedByAnotherRun(target);
-    }
-    return this.sendMint(target, intent.id, intent.attempt + 1, nonce);
   }
 
   // The operator's next nonce, counting transactions still in the mempool. Read
@@ -581,19 +617,24 @@ export class FinalizeIpoEscrowCampaignsService {
     );
   }
 
-  // The intent is already durable on `attempt`, with `nonce`, when this is
-  // called. The hash is recorded the moment the node returns it, before the
-  // receipt wait.
+  // `claimAttempt` reads the nonce and makes the attempt durable (the intent,
+  // with the nonce, is written before the mint is sent). It runs inside the
+  // operator-key lock together with the write, so no other writer can take the
+  // nonce between the read and the send; the hash record and the receipt wait
+  // come after the lock is released. The hash is recorded the moment the node
+  // returns it, before the receipt wait.
   private async sendMint(
     target: MintTarget,
-    intentId: string,
-    attempt: number,
-    nonce: bigint,
+    claimAttempt: () => Promise<{ intentId: string; attempt: number; nonce: bigint }>,
   ): Promise<ConfirmedMint> {
-    const hash = await this.chain.property.write.mint!(
-      [target.walletAddress, target.tokenId, target.mintAmount, "0x"],
-      { nonce: Number(nonce) },
-    );
+    const { intentId, attempt, hash } = await this.operatorKeyLock.run(async () => {
+      const claimed = await claimAttempt();
+      const sentHash = await this.chain.property.write.mint!(
+        [target.walletAddress, target.tokenId, target.mintAmount, "0x"],
+        { nonce: Number(claimed.nonce) },
+      );
+      return { intentId: claimed.intentId, attempt: claimed.attempt, hash: sentHash };
+    });
 
     try {
       await this.repository.recordEscrowMintSent({ intentId, attempt, txHash: hash });
@@ -634,7 +675,9 @@ export class FinalizeIpoEscrowCampaignsService {
     ])) as boolean;
     if (authorized) return;
 
-    const hash = await this.chain.property.write.authorizeHolder!([target.walletAddress, target.tokenId]);
+    const hash = await this.operatorKeyLock.run(() =>
+      this.chain.property.write.authorizeHolder!([target.walletAddress, target.tokenId]),
+    );
     const receipt = await this.chain.publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") {
       throw new Error(`authorizeHolder transaction reverted for ${target.walletAddress} (tx=${hash})`);

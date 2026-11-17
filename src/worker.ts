@@ -57,6 +57,7 @@ import { WalletRegistryAlertReporter } from "./modules/settlement/application/wa
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { PrismaWalletRegistryHealthRepository } from "./modules/settlement/repository/prisma-wallet-registry-health.repository.js";
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
+import { PostgresOperatorKeyLock } from "./infrastructure/blockchain/operator-key-lock.js";
 import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { SCHEDULED_JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import { createDeadLetterAlertWebhook } from "./shared/jobs/dead-letter-alert-webhook.js";
@@ -259,10 +260,21 @@ const chainClients =
 // separate from chainClients's own base-connectivity gate above, since
 // confirmWalletRegistrations below needs none of these four.
 const settlementBundleConfigured = isSettlementBundleConfigured(environment);
+const settlementRepository = chainClients === undefined ? undefined : new PrismaSettlementRepository(database);
+// Every chain write made with the operator key takes this lock for the section
+// from reading the nonce to the node accepting the transaction, so the writers
+// of this worker and the operator command that opens campaigns (src/cli) cannot
+// take the same nonce.
+const operatorKeyLock = new PostgresOperatorKeyLock(database);
 const openIpoEscrowCampaign =
-  chainClients === undefined || !settlementBundleConfigured
+  chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
-    : new OpenIpoEscrowCampaignService(chainClients);
+    : new OpenIpoEscrowCampaignService(chainClients, settlementRepository, operatorKeyLock, logger);
+// Campaigns are opened by this event job when an offering is opened (only where
+// the settlement bundle is configured), and otherwise by an explicit operator
+// command (npm run settlement:open-ipo-escrow-campaigns, AD-286): there is no
+// sweep that opens them.
+
 // Opening an offering hands off to the escrow campaign job only where this
 // process also creates and consumes that job's queue (AD-256). While token
 // settlement is dormant (AD-234) that bundle is unconfigured, no such queue
@@ -272,11 +284,11 @@ const openIpoEscrowCampaign =
 const openOfferingForApprovedCase = new OpenOfferingForApprovedCaseService(offeringRepository, {
   openEscrowCampaign: openIpoEscrowCampaign !== undefined,
 });
-const settlementRepository = chainClients === undefined ? undefined : new PrismaSettlementRepository(database);
 const finalizeIpoEscrowCampaigns =
   chainClients === undefined || settlementRepository === undefined || !settlementBundleConfigured
     ? undefined
     : new FinalizeIpoEscrowCampaignsService(settlementRepository, chainClients, logger, undefined, {
+        operatorKeyLock,
         nonceBlockTag: environment.ESCROW_MINT_NONCE_BLOCK_TAG,
       });
 const confirmWalletRegistrations =

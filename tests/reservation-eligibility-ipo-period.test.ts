@@ -11,6 +11,7 @@ function blockers(input: { now: Date; ipoEndAt: Date | null; finalTermsPublished
   return computeReservationBlockers({
     now: input.now,
     fundingRailAvailable: true,
+    settlementEscrow: { gated: false },
     offeringStatus: "pre_offering",
     finalTermsPublished: input.finalTermsPublished ?? false,
     ipoEndAt: input.ipoEndAt,

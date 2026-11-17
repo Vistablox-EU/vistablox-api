@@ -4,8 +4,11 @@ import type { Logger } from "pino";
 import type {
   CreateEscrowMintIntentInput,
   EscrowMintIntent,
+  IpoEscrowCampaignRecord,
   PivPendingEscrowResolution,
   RecordEscrowMintedPositionInput,
+  RecordIpoEscrowCampaignObservationInput,
+  RefreshIpoEscrowCampaignStateInput,
   SettlementRepository,
 } from "../../src/modules/settlement/repository/settlement.repository.js";
 
@@ -14,6 +17,8 @@ export const CAMPAIGN_STATE_SUCCESSFUL = 2;
 export const CAMPAIGN_STATE_FAILED = 3;
 
 export const PROPERTY_CONTRACT = "0xPROPERTY0000000000000000000000000000000";
+// The escrow contract the fake chain is "configured" with (ChainSettlementConfig.ipoEscrowContractAddress).
+export const IPO_ESCROW_CONTRACT = "0x00000000000000000000000000000000000E5c20";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export interface FakeCampaign {
@@ -102,7 +107,7 @@ export class FakeEscrowChain {
   public finalizedNonceCount: bigint | undefined;
   private txCounter = 0;
 
-  public readonly config = { propertyContractAddress: PROPERTY_CONTRACT };
+  public readonly config = { propertyContractAddress: PROPERTY_CONTRACT, ipoEscrowContractAddress: IPO_ESCROW_CONTRACT };
 
   public constructor(
     private readonly campaigns: Map<string, FakeCampaign>,
@@ -547,6 +552,50 @@ export class InMemorySettlementRepository implements SettlementRepository {
   }
 
   public async setLastProcessedWalletRegistryBlock(): Promise<void> {}
+
+  // The campaign observation the reservation gate reads: this fake keeps it per PIV.
+  public readonly ipoEscrowCampaignObservations = new Map<string, IpoEscrowCampaignRecord>();
+  // Every refreshIpoEscrowCampaignState call, kept off `timeline` so the ordering
+  // assertions over the mint's own writes are unaffected.
+  public readonly campaignRefreshes: RefreshIpoEscrowCampaignStateInput[] = [];
+  public refreshFails = false;
+
+  public async findOfferingsForIpoEscrowActivation(): Promise<[]> {
+    return [];
+  }
+
+  public async findIpoEscrowCampaign(pivId: string): Promise<IpoEscrowCampaignRecord | null> {
+    return this.ipoEscrowCampaignObservations.get(pivId) ?? null;
+  }
+
+  public async recordIpoEscrowCampaignObservation(input: RecordIpoEscrowCampaignObservationInput): Promise<void> {
+    this.ipoEscrowCampaignObservations.set(input.pivId, {
+      pivId: input.pivId,
+      tokenId: input.tokenId,
+      escrowContractAddress: input.escrowContractAddress,
+      targetAmount: input.targetAmount,
+      deadlineAt: input.deadlineAt,
+      treasuryAddress: input.treasuryAddress,
+      openTxHash: input.openTxHash,
+      observedState: input.state,
+      observedAt: input.observedAt,
+    });
+  }
+
+  public async refreshIpoEscrowCampaignState(input: RefreshIpoEscrowCampaignStateInput): Promise<boolean> {
+    this.campaignRefreshes.push(input);
+    if (this.refreshFails) throw new Error("database unavailable");
+    const current = this.ipoEscrowCampaignObservations.get(input.pivId);
+    if (current === undefined || current.observedState === input.state) return false;
+    // As the real repository: only a row recorded for the escrow contract the state was read from moves.
+    if (current.escrowContractAddress.toLowerCase() !== input.escrowContractAddress.toLowerCase()) return false;
+    this.ipoEscrowCampaignObservations.set(input.pivId, {
+      ...current,
+      observedState: input.state,
+      observedAt: input.observedAt,
+    });
+    return true;
+  }
 
   public async recordWalletRegistrationAddressMismatch(): Promise<{ created: boolean }> {
     return { created: true };

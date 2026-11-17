@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Pool } from "pg";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { PostgresOperatorKeyLock } from "../src/infrastructure/blockchain/operator-key-lock.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { FinalizeIpoEscrowCampaignsService } from "../src/modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
 import type {
@@ -16,8 +17,10 @@ import {
   makeCapturingLogger,
   PROPERTY_CONTRACT,
 } from "./support/escrow-mint-fakes.js";
+import { privateOperatorLockKey } from "./support/operator-key-lock-fakes.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
+const lockKey = privateOperatorLockKey();
 
 // The real repository on a real database, but only this suite's PIV: the
 // shared test database holds other suites' tokenized, past-deadline PIVs that
@@ -130,7 +133,12 @@ describe.skipIf(databaseUrl === undefined)(
       const chain = new FakeEscrowChain(campaigns, contributions, contributors);
       const repository = new ScopedRepository(database, [options.piv]);
       const { logger, entries } = makeCapturingLogger();
-      const newService = () => new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger);
+      const newService = () =>
+        new FinalizeIpoEscrowCampaignsService(repository, chain as never, logger, undefined, {
+          // A real lock on a key of this file's own: the global operator-key key is held by hand and
+          // counted by operator-key-lock.integration.test.ts, which runs in parallel on this database.
+          operatorKeyLock: new PostgresOperatorKeyLock(database, { key: lockKey }),
+        });
       return { chain, repository, entries, campaigns, newService };
     }
 
