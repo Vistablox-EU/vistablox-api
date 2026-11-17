@@ -327,6 +327,31 @@ describe.skipIf(databaseUrl === undefined)("onramp outcome recording PostgreSQL 
       expect(await database.moneyEvent.count({ where: { reservationId } })).toBe(1);
     });
 
+    // The state half of the dedupe key (AD-289: per provider transaction AND
+    // state). A key on the transaction alone would refuse this funding as a
+    // duplicate of the failure on file for the same transaction.
+    it("dedupes per provider transaction and state: a failure on file does not make the same transaction's later funding a duplicate", async () => {
+      const { reservationId, start } = await newReservation();
+
+      expect(await repository.recordOnrampOutcome(outcome(reservationId, "purchase_failed", "txn_a", start + 2_000))).toEqual({
+        status: "recorded",
+      });
+      expect(await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_a", start + 3_000))).toEqual({
+        status: "recorded",
+      });
+
+      expect(await history(reservationId)).toEqual([
+        ["initiated", null],
+        ["eurc_purchase_pending", "channel_01"],
+        ["purchase_failed", "txn_a"],
+        ["eurc_reserved", "txn_a"],
+      ]);
+      // And each state is still deduplicated on its own: the funding is on file now.
+      expect(await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_a", start + 4_000))).toEqual({
+        status: "duplicate",
+      });
+    });
+
     // The invariant behind #201's guard: the funded event is the latest one.
     // recorded_at is the caller's clock, read before it queued for the row
     // lock, so the order of the locks and the order of the clocks can differ.
