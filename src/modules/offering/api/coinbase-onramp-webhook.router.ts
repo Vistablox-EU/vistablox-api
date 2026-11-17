@@ -30,9 +30,10 @@ const coinbaseOnrampWebhookBodySchema = z.object({
   txHash: optionalId,
 });
 
-// ASSUMED header name for the delivery's event id (see the docs): when it is
-// absent, or not a usable id, the digest of the exact signed body stands in,
-// so a redelivery of identical bytes is still recognised as a duplicate.
+// CDP's signature-verification page names X-Event-Id as the delivery's event
+// id header. When it is absent, or not a usable id, the digest of the exact
+// signed body stands in, so a redelivery of identical bytes is still
+// recognised as a duplicate.
 const eventIdSchema = z.string().min(1).max(200);
 
 /**

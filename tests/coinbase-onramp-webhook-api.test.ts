@@ -309,22 +309,27 @@ describe("ReconcileOnrampWebhookService", () => {
 });
 
 describe("ReceiveCoinbaseOnrampWebhookService", () => {
-  it("logs an unreadable payload as a warning and a duplicate as info, without ever logging a body", async () => {
+  it("warns about an unreadable payload or an onramp event with no reservation, and only informs about the rest, never logging a body", async () => {
     const lines: Array<Record<string, unknown>> = [];
     const capturing = pino({ level: "info" }, { write: (line: string) => void lines.push(JSON.parse(line)) });
     const receive = vi.fn().mockResolvedValue("duplicate");
     const receiver = new ReceiveCoinbaseOnrampWebhookService({ receiveOnrampWebhook: receive }, capturing);
 
+    const event = { eventType: "onramp.transaction.updated", transactionId: null, txHash: null };
     await receiver.execute({ eventId: "evt_a", event: null, traceId: "trace_01" });
+    await receiver.execute({ eventId: "evt_b", event: { ...event, partnerUserRef: "reservation_01" }, traceId: "trace_01" });
+    await receiver.execute({ eventId: "evt_c", event: { ...event, partnerUserRef: null }, traceId: "trace_01" });
     await receiver.execute({
-      eventId: "evt_b",
-      event: { eventType: "onramp.transaction.updated", partnerUserRef: "reservation_01", transactionId: null, txHash: null },
+      eventId: "evt_d",
+      event: { ...event, eventType: "offramp.transaction.success", partnerUserRef: "reservation_01" },
       traceId: "trace_01",
     });
 
     expect(lines.map((line) => [line.level, line.reason ?? "duplicate", line.event_id])).toEqual([
       [40, "unrecognised_payload", "evt_a"],
       [30, "duplicate", "evt_b"],
+      [40, "no_reservation_reference", "evt_c"],
+      [30, "not_an_onramp_transaction_event", "evt_d"],
     ]);
     expect(receive).toHaveBeenCalledTimes(1);
   });

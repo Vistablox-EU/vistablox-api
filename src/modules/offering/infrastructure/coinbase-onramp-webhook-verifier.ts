@@ -15,13 +15,15 @@ const MAX_AGE_SECONDS = 300;
  * `X-Hook0-Signature` is CDP's deprecated duplicate of the same value and is
  * only read when the current header is absent.
  *
- * Re-checked against the scheme cited above when the webhook was rebuilt on
- * main (AD-289): header shape, the signed string, the 5-minute window and the
- * constant-time comparison all match it, and the tests build their headers
- * from that description. Not established: that the HMAC key is the
- * subscription's `metadata.secret` used as a raw string (this code does no
- * decoding of it), because no real signed delivery has been verified yet. The
- * first one, on staging, settles that.
+ * Re-checked on 2026-11-17, when the webhook was rebuilt on main (AD-289),
+ * against that page as published: header names, the `t`/`v0`/`h`/`v1` shape,
+ * `v0` over `{t}.{rawBody}`, the recommended 5-minute maximum age and the
+ * constant-time comparison match this code, and the tests build their headers
+ * from that description. The page's example passes the subscription's secret
+ * to createHmac as a plain string, as this code does, but says nothing about
+ * decoding it. Its sample function compares only `v1` while its tip says `v0`
+ * is enough; this code checks `v0`. None of this has been exercised by a real
+ * signed delivery yet; the first one, on staging, settles it.
  */
 export class CoinbaseOnrampWebhookVerifier {
   public constructor(

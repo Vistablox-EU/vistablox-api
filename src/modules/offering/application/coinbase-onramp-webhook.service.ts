@@ -77,10 +77,11 @@ export class ReceiveCoinbaseOnrampWebhookService {
     eventType: string | null,
     reason: "unrecognised_payload" | "not_an_onramp_transaction_event" | "no_reservation_reference",
   ): { received: true; outcome: "ignored" } {
-    // A shape we cannot read is the one case worth a warning: if Coinbase
-    // renamed a field, every delivery lands here and the poll alone is
-    // carrying funding.
-    const log = reason === "unrecognised_payload" ? "warn" : "info";
+    // A shape we cannot read, or an onramp transaction event we cannot tie to
+    // a reservation, are the cases worth a warning: if Coinbase renamed a
+    // field, every delivery lands in one of them and the poll alone is
+    // carrying funding. An event type we do not act on is only information.
+    const log = reason === "not_an_onramp_transaction_event" ? "info" : "warn";
     this.logger[log](
       { trace_id: input.traceId, event_id: input.eventId, event_type: eventType, reason },
       "coinbase onramp webhook verified but not actionable; acknowledged without action",
