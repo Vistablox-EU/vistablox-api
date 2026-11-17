@@ -83,6 +83,5 @@ The client classifies every CDP failure by HTTP status and never reads or logs t
 | 401, 403 | `offering.coinbase_provider_auth_rejected` (500) | No | `event: coinbase_cdp.auth_rejected`, `severity: error` |
 | Any other 4xx | `offering.coinbase_provider_request_rejected` (422) | No, not unchanged | `event: coinbase_cdp.request_rejected`, `severity: warn` |
 | Unusable `COINBASE_CDP_API_KEY_SECRET` (no request sent) | `offering.coinbase_provider_key_invalid` (500) | No | `event: coinbase_cdp.key_invalid`, `severity: error` |
-| Purchase succeeds after its reservation lapsed or was cancelled (poll only) | None, held in `money.late_payments` for manual review | No | `event: offering.late_payment_held`, `severity: error` |
 
 Alert lines follow the wallet-registry convention: a structured pino line with a stable dotted `event`, a `severity` (`error` pages, `warn` opens a ticket), and snake_case fields (`operation`, `http_status`). Alert rules key on `event` and `severity`, never on the message text. A 401/403 or invalid key means the API key is wrong, revoked, or lacks permissions; retrying will not help until the configuration is fixed.

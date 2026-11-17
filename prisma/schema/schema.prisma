@@ -629,7 +629,6 @@ model Reservation {
   account                   Account          @relation(fields: [accountId], references: [id])
   reconfirmedDisclosurePack DisclosurePack?  @relation(fields: [reconfirmedDisclosurePackId], references: [id], onDelete: Restrict)
   moneyEvents               MoneyEvent[]
-  latePayments              LatePayment[]
   positions                 PositionLedger[]
 
   @@index([offeringId, reservationStage], map: "idx_reservations_offering_stage")
@@ -707,33 +706,6 @@ model MoneyEvent {
 
   @@index([reservationId, recordedAt(sort: Desc)], map: "idx_money_events_reservation_recorded")
   @@map("money_events")
-  @@schema("money")
-}
-
-/// A provider payment that completed after its reservation had already left
-/// 'initiated' (lapsed or cancelled). Held for manual staff review: it is never
-/// written to money_events, so it never counts as the reservation's funding,
-/// never reinstates the reservation and never triggers a refund.
-/// See docs/investor-offering.md "Late payments".
-model LatePayment {
-  id                          String   @id @map("late_payment_id")
-  reservationId               String   @map("reservation_id")
-  provider                    String
-  providerReference           String   @map("provider_reference")
-  reservationStageAtDetection String   @map("reservation_stage_at_detection")
-  reservedAmountEur           Decimal  @map("reserved_amount_eur") @db.Decimal(15, 2)
-  purchaseCurrency            String   @map("purchase_currency")
-  purchaseAmount              Decimal  @map("purchase_amount") @db.Decimal(20, 6)
-  coversReservation           Boolean  @map("covers_reservation")
-  reviewStatus                String   @default("pending_review") @map("review_status")
-  detectedAt                  DateTime @map("detected_at") @db.Timestamptz(6)
-
-  reservation Reservation @relation(fields: [reservationId], references: [id])
-
-  @@unique([provider, providerReference], map: "uq_late_payments_provider_reference")
-  @@index([reviewStatus, detectedAt], map: "idx_late_payments_review_status_detected")
-  @@index([reservationId], map: "idx_late_payments_reservation")
-  @@map("late_payments")
   @@schema("money")
 }
 

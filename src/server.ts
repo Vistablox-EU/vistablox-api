@@ -54,7 +54,6 @@ import { PrismaCustomerSessionRepository } from "./modules/auth/repository/custo
 import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/customer/better-auth-session-revoker.js";
 import { BetterAuthLoginMethodUnlinker } from "./modules/auth/infrastructure/customer/better-auth-login-method-unlinker.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
-import { PrismaOnrampPaymentRepository } from "./modules/offering/repository/prisma-onramp-payment.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
 import { HttpDiditClient } from "./modules/identity/infrastructure/didit.client.js";
@@ -607,7 +606,6 @@ const app = createApp({
     ...(documentUploadService === undefined ? {} : { documentUpload: documentUploadService }),
     ...(documentDownloadService === undefined ? {} : { documentDownload: documentDownloadService }),
     emailSender,
-    latePayments: { repository: new PrismaOnrampPaymentRepository(database) },
     offeringOperations: {
       repository: offeringRepository,
       ...(offeringDocuments === undefined ? {} : { documents: offeringDocuments }),
