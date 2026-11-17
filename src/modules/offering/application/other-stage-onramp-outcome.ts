@@ -20,6 +20,8 @@ export interface OtherStageOnrampOutcome {
   asset: string;
   /** What the outcome would have been recorded as on a reservation still awaiting its purchase. */
   state: OnrampOutcomeCapitalState;
+  /** True when Coinbase reports this transaction as a success: money moved. A failed attempt moved none. */
+  transactionSucceeded: boolean;
   observedAt: Date;
   traceId: string;
 }
@@ -29,20 +31,23 @@ export interface OtherStageOnrampOutcome {
  * the webhook job hand an other_stage outcome to this and nothing else; the
  * recording method has already refused to write money for it, so a handler
  * must not revive the reservation, hold the funds or offer a refund (AD-243,
- * AD-251, AD-260 step 9, AD-266). #195 replaces the default logging handler
- * with one that writes its ops-visibility entry. It runs once per delivery or
- * poll, so a webhook retry, a duplicate delivery, or the poll and the webhook
- * both seeing the same transaction reach it again: it must be idempotent on
- * providerTransactionId.
+ * AD-251, AD-260 step 9, AD-266). In the worker it is
+ * RecordOnrampLateEvidenceService, which writes the ops-visibility entry;
+ * LoggingOtherStageOnrampOutcomeHandler below is only the default for a
+ * caller that wires none. It runs once per delivery or poll, for the one
+ * transaction the recording method was asked about, so a webhook retry, a
+ * duplicate delivery, or the poll and the webhook both seeing the same
+ * transaction reach it again: it must be idempotent on providerTransactionId.
  */
 export interface OtherStageOnrampOutcomeHandler {
   handleOtherStageOutcome(outcome: OtherStageOnrampOutcome): Promise<void>;
 }
 
 /**
- * The handler until #195 lands: a warning that carries ids and amounts, and
- * never the destination wallet (a public address, but linkable to an investor,
- * so it stays out of log lines like the webhook body does).
+ * The default handler: a warning that carries ids and amounts, and never the
+ * destination wallet (a public address, but linkable to an investor, so it
+ * stays out of log lines like the webhook body does). It records nothing, so
+ * the worker never relies on it (tests/onramp-late-evidence-wiring.test.ts).
  */
 export class LoggingOtherStageOnrampOutcomeHandler implements OtherStageOnrampOutcomeHandler {
   public constructor(private readonly logger: Logger) {}
@@ -59,6 +64,7 @@ export class LoggingOtherStageOnrampOutcomeHandler implements OtherStageOnrampOu
         amount: outcome.amount,
         asset: outcome.asset,
         outcome_state: outcome.state,
+        transaction_succeeded: outcome.transactionSucceeded,
         observed_at: outcome.observedAt.toISOString(),
       },
       "onramp outcome for a reservation that is no longer initiated; nothing recorded",

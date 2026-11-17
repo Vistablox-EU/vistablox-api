@@ -552,6 +552,7 @@ describe("PollOnrampTransactionsService honours what the recording method return
       amount: "950.000000",
       asset: "EURC",
       state: "eurc_reserved",
+      transactionSucceeded: true,
       observedAt: now,
       traceId: "trace_01",
     });

@@ -611,6 +611,7 @@ describe.skipIf(databaseUrl === undefined)("onramp outcome recording PostgreSQL 
           amount: "99.000000",
           asset: "EURC",
           state: "eurc_reserved",
+          transactionSucceeded: true,
           observedAt: new Date("2026-11-17T12:00:00.000Z"),
           traceId: "trace_job",
         },

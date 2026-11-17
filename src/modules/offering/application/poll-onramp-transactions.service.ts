@@ -181,6 +181,11 @@ export class PollOnrampTransactionsService {
         }
         break;
       case "other_stage":
+        // The recording method wrote nothing: the reservation has left
+        // 'initiated'. The one transaction it was asked about (the first
+        // covering success, else the first success, else the failed attempt)
+        // goes to the late-evidence seam, which is idempotent on its id and
+        // lists a success only.
         await this.otherStageOutcomes.handleOtherStageOutcome({
           reservationId: reservation.reservationId,
           reservationStage: recording.reservationStage,
@@ -191,6 +196,7 @@ export class PollOnrampTransactionsService {
           amount: outcome.transaction.purchaseAmountValue,
           asset: outcome.transaction.purchaseCurrency,
           state: capitalState,
+          transactionSucceeded: outcome.status !== "failed",
           observedAt,
           traceId,
         });

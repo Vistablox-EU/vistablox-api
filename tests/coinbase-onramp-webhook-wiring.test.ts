@@ -36,7 +36,7 @@ describe("Coinbase onramp webhook wiring in the worker", () => {
 
   it("builds the reconciling service only on top of the poller, which needs the CDP client", () => {
     expect(worker.flat).toContain(
-      "const pollOnrampTransactions = coinbaseCdpClient === undefined ? undefined : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger);",
+      "const pollOnrampTransactions = coinbaseCdpClient === undefined ? undefined : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger, undefined, recordOnrampLateEvidence);",
     );
     expect(worker.flat).toContain(
       "const reconcileOnrampWebhook = pollOnrampTransactions === undefined ? undefined : new ReconcileOnrampWebhookService(offeringRepository, pollOnrampTransactions);",

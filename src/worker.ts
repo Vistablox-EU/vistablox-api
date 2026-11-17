@@ -34,6 +34,8 @@ import { CommitOfferingFinalizationService } from "./modules/offering/applicatio
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
 import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { PrismaOnrampLateEvidenceRepository } from "./modules/offering/repository/prisma-onramp-late-evidence.repository.js";
+import { RecordOnrampLateEvidenceService } from "./modules/offering/application/record-onramp-late-evidence.service.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { CalculateOperatingDistributionService } from "./modules/rental/application/calculate-operating-distribution.service.js";
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
@@ -183,10 +185,15 @@ const coinbaseCdpClient =
         timeoutMs: 8_000,
         logger,
       });
+// Late onramp funding evidence (AD-288, decided 2026-11-17): what the poll and
+// the webhook job hand over when the single recording method answers
+// other_stage.
+const onrampLateEvidenceRepository = new PrismaOnrampLateEvidenceRepository(database);
+const recordOnrampLateEvidence = new RecordOnrampLateEvidenceService(onrampLateEvidenceRepository, logger);
 const pollOnrampTransactions =
   coinbaseCdpClient === undefined
     ? undefined
-    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger);
+    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger, undefined, recordOnrampLateEvidence);
 const reconcileOnrampWebhook =
   pollOnrampTransactions === undefined
     ? undefined
