@@ -143,6 +143,7 @@ describe("queue creation at startup", () => {
       "case_timers.offering_reconfirmation_window_opened",
       "case_timers.post_ipo_structuring_handoff",
       "case_timers.pre_offering_open_handoff",
+      "provider_events.coinbase_onramp_webhook",
       "provider_events.didit_webhook",
       "settlement.open_ipo_escrow_campaign",
     ]);
@@ -162,6 +163,7 @@ describe("queue creation at startup", () => {
     const workerKinds = queueKinds(sourceOf("src/worker.ts"), "boss");
 
     // The queues the API process enqueues into: PrismaKycRepository.enqueueDiditWebhookProcessing,
+    // PrismaOfferingRepository.receiveOnrampWebhook,
     // PrismaIntakeRepository (the offering-open handoff) and PrismaOfferingRepository
     // (publishFinalOfferingTerms: the reconfirmation notification and the
     // post-IPO handoff). Creating them here is what lets a send() succeed
@@ -173,6 +175,7 @@ describe("queue creation at startup", () => {
       "case_timers.offering_reconfirmation_window_opened",
       "case_timers.post_ipo_structuring_handoff",
       "case_timers.pre_offering_open_handoff",
+      "provider_events.coinbase_onramp_webhook",
       "provider_events.didit_webhook",
     ]);
     // Two processes configuring one queue differently would undo each

@@ -1,3 +1,5 @@
+import type { OnrampOutcomeCapitalState } from "../domain/onramp-outcome-recording.policy.js";
+
 export interface CreateReservationInput {
   reservationId: string;
   offeringId: string;
@@ -69,6 +71,71 @@ export interface PendingPurchaseReservationForTimer {
   amountEur: string;
 }
 
+/** A reservation as the webhook job sees it, whatever stage it is in: the recording method, not the lookup, decides what a stage other than 'initiated' means. */
+export interface ReservationForOnrampReconciliation {
+  reservationId: string;
+  accountId: string;
+  amountEur: string;
+  reservationStage: string;
+}
+
+export interface RecordOnrampOutcomeInput {
+  reservationId: string;
+  provider: string;
+  /** The provider transaction id. Together with capitalState it is what an outcome is deduplicated on. */
+  providerReference: string;
+  capitalState: OnrampOutcomeCapitalState;
+  amountEur: string;
+  amountEurc: string | null;
+  /**
+   * When the caller observed the outcome. The stored recorded_at is this time,
+   * or one millisecond after the reservation's latest event when that is later
+   * (recordedAtAfterLatest): the order the recorders win the row lock in is the
+   * order of the history, and readers take the latest event as the state.
+   */
+  recordedAt: Date;
+}
+
+/**
+ * What recordOnrampOutcome did, for the poller and the webhook job to act on.
+ * Only "recorded" wrote a money event.
+ */
+export type OnrampOutcomeRecording =
+  | { status: "recorded" }
+  /** This provider transaction in this state is already recorded for the reservation. */
+  | { status: "duplicate" }
+  /** The latest event is a funded state, so nothing more is recorded. */
+  | { status: "already_funded" }
+  /** The latest event is neither eurc_purchase_pending nor purchase_failed. */
+  | { status: "not_awaiting_purchase"; latestCapitalState: string | null }
+  /** The reservation left 'initiated' (lapsed, cancelled, or past funding): late evidence, for #195's path. */
+  | { status: "other_stage"; reservationStage: string; latestCapitalState: string | null }
+  | { status: "unknown_reservation" };
+
+/**
+ * The minimised record of one verified Coinbase onramp webhook delivery: ids
+ * only, never the body, the signature or a secret (AD-289).
+ */
+export interface OnrampWebhookReceipt {
+  /** The delivery's event id (header), or a digest of the exact body when the header is missing. */
+  eventId: string;
+  eventType: string;
+  transactionId: string | null;
+  txHash: string | null;
+  /** The reservation id the onramp session was opened with. */
+  partnerUserRef: string;
+}
+
+/**
+ * Writes the receipt and enqueues the provider_events.coinbase_onramp_webhook
+ * job in one transaction (enqueueTransactionalJob), so a receipt without its
+ * job, or a job without its receipt, cannot exist. A delivery whose event id
+ * is already on file writes and enqueues nothing.
+ */
+export interface OnrampWebhookReceiver {
+  receiveOnrampWebhook(receipt: OnrampWebhookReceipt, traceId: string): Promise<"enqueued" | "duplicate">;
+}
+
 /**
  * The one place that performs AD-146's atomic, transaction-scoped capacity
  * check: createReservation locks the offering row (matching the intake
@@ -92,6 +159,21 @@ export interface ReservationRepository {
   listInitiatedReservationsForTimers(): Promise<InitiatedReservationForTimer[]>;
   /** Idempotent: returns false (no-op) if the reservation is no longer 'initiated' by the time this runs, matching expireInformationRequest's existence/state-check pattern. */
   expireReservation(input: ExpireReservationInput): Promise<boolean>;
-  /** Reservations whose latest money event is still eurc_purchase_pending — the ones a Coinbase transaction-status poll can still move forward. */
+  /** Reservations whose latest money event is eurc_purchase_pending or purchase_failed and that are still 'initiated': the ones a Coinbase transaction-status poll can still move forward. */
   listPendingPurchaseReservationsForTimers(): Promise<PendingPurchaseReservationForTimer[]>;
+  /** One reservation in any stage (null only when it does not exist), for the webhook job: a lapsed or cancelled reservation must still reach the recording method's other_stage outcome. */
+  findReservationForOnrampReconciliation(reservationId: string): Promise<ReservationForOnrampReconciliation | null>;
+  /**
+   * The single recording method for onramp outcomes, used by the minute poll
+   * and by the webhook job. Under the reservation's FOR UPDATE row lock (the
+   * one recordMoneyEvent and expireReservation take, so all three serialise)
+   * it reads the stage and the latest money event, and decides by
+   * decideOnrampRecording (domain/onramp-outcome-recording.policy.ts): a
+   * provider transaction already recorded in the same state is a duplicate; a
+   * reservation past 'initiated' is other_stage; a funded latest event is
+   * never written over; only a reservation still awaiting its purchase gets a
+   * row, stamped so that it is the latest event of the reservation. The
+   * returned status says which, and only "recorded" wrote.
+   */
+  recordOnrampOutcome(input: RecordOnrampOutcomeInput): Promise<OnrampOutcomeRecording>;
 }

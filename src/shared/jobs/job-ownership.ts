@@ -35,6 +35,7 @@ export const JOB_QUEUE_OWNERSHIP: Readonly<Record<string, JobQueueOwnership>> = 
   "settlement.finalize_ipo_escrow_campaigns": { kind: "scheduled", owner: "settlement", tier: "tier_1" },
   "settlement.confirm_wallet_registrations": { kind: "scheduled", owner: "settlement", tier: "tier_1" },
   "settlement.check_wallet_registry_health": { kind: "scheduled", owner: "settlement", tier: "tier_1" },
+  "provider_events.coinbase_onramp_webhook": { kind: "event", owner: "payments", tier: "tier_1" },
   "provider_events.didit_webhook": { kind: "event", owner: "identity", tier: "tier_1" },
   "maintenance.kyc_renewal": { kind: "scheduled", owner: "identity", tier: "tier_2" },
   "maintenance.kyc_stuck_session_expiry": { kind: "scheduled", owner: "identity", tier: "tier_2" },
