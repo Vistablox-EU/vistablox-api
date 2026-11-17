@@ -197,7 +197,7 @@ describe.skipIf(databaseUrl === undefined)("onramp outcome recording PostgreSQL 
       for (let poll = 0; poll < 3; poll += 1) {
         expect(
           await repository.recordOnrampOutcome(outcome(reservationId, "purchase_failed", "txn_a", start + 3_000 + poll)),
-        ).toEqual({ status: "duplicate" });
+        ).toEqual({ status: "duplicate", reservationStage: "initiated" });
       }
 
       expect(await history(reservationId)).toEqual([
@@ -224,6 +224,7 @@ describe.skipIf(databaseUrl === undefined)("onramp outcome recording PostgreSQL 
       // Coinbase's list still shows the first attempt as failed.
       expect(await repository.recordOnrampOutcome(outcome(reservationId, "purchase_failed", "txn_a", start + 4_000))).toEqual({
         status: "duplicate",
+        reservationStage: "initiated",
       });
       expect((await history(reservationId)).at(-1)).toEqual(["eurc_purchase_pending", "channel_02"]);
 
@@ -296,6 +297,8 @@ describe.skipIf(databaseUrl === undefined)("onramp outcome recording PostgreSQL 
 
       expect(await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_x", start + 3_000))).toEqual({
         status: "duplicate",
+        // The stage read under the lock rides along: the late path needs it for the rest of the list.
+        reservationStage: "awaiting_reconfirmation",
       });
       expect(await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_other", start + 4_000))).toEqual({
         status: "other_stage",
@@ -349,6 +352,7 @@ describe.skipIf(databaseUrl === undefined)("onramp outcome recording PostgreSQL 
       // And each state is still deduplicated on its own: the funding is on file now.
       expect(await repository.recordOnrampOutcome(outcome(reservationId, "eurc_reserved", "txn_a", start + 4_000))).toEqual({
         status: "duplicate",
+        reservationStage: "initiated",
       });
     });
 

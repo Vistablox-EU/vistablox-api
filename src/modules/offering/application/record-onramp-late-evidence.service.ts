@@ -16,9 +16,16 @@ import type { OtherStageOnrampOutcome, OtherStageOnrampOutcomeHandler } from "./
  * It holds nothing, reinstates nothing and refunds nothing: the EURC is
  * already in the investor's own wallet (AD-243, AD-251, AD-260 step 9,
  * AD-266). The entry is not a money event and never counts as the
- * reservation's funding. A write that fails throws, so the webhook job is
- * retried by pg-boss and the minute poll counts the reservation as failed;
- * both re-observe the same transaction and the write is idempotent.
+ * reservation's funding.
+ *
+ * The entry is written after the recording method has returned, in a
+ * transaction of its own that takes no reservation lock; the recording method
+ * wrote nothing and its lock is released. Idempotence on the provider
+ * transaction id is what makes that safe. A write that fails throws, so the
+ * webhook job is retried by pg-boss and the minute poll counts the reservation
+ * as failed; both re-observe the same transaction. The poll lists 'initiated'
+ * reservations only, so for a reservation that lapsed between the poll's list
+ * and its lock the webhook retry is the only recovery.
  */
 export class RecordOnrampLateEvidenceService implements OtherStageOnrampOutcomeHandler {
   public constructor(

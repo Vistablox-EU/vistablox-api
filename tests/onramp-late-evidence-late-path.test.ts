@@ -66,7 +66,9 @@ function world(stage: string, latestCapitalState: string | null = "eurc_purchase
         ),
       });
       if (decision === "other_stage") return { status: "other_stage", reservationStage: stage, latestCapitalState };
-      if (decision !== "record") return { status: decision as "duplicate" };
+      if (decision === "duplicate") return { status: "duplicate", reservationStage: stage };
+      if (decision === "already_funded") return { status: "already_funded" };
+      if (decision === "not_awaiting_purchase") return { status: "not_awaiting_purchase", latestCapitalState };
       recorded.push(input);
       return { status: "recorded" };
     }),
@@ -158,20 +160,97 @@ describe("a late Coinbase success reaching the evidence list through the webhook
     expect(recorder.recordLateEvidence).not.toHaveBeenCalled();
   });
 
-  it("lists the one transaction the recording method was asked about: the covering success, not every success the list shows", async () => {
+  // Which successes reach the list must not depend on the order Coinbase
+  // returns them in, so each of these runs both ways round.
+  const orderings: Array<[string, <T>(older: T, newer: T) => T[]]> = [
+    ["newest first", (older, newer) => [newer, older]],
+    ["oldest first", (older, newer) => [older, newer]],
+  ];
+
+  it.each(orderings)("lists every success of the list, not only the one the recording method resolves it to, and not the failed attempt, %s", async (_order, arrange) => {
     const { job, shows, webhook, entries } = world("lapsed");
     shows(
-      transaction({ transactionId: "txn_small", purchaseAmountValue: "10.000000" }),
-      transaction({ transactionId: "txn_covering", purchaseAmountValue: "990.000000" }),
+      ...arrange(
+        transaction({ transactionId: "txn_small", purchaseAmountValue: "10.000000" }),
+        transaction({ transactionId: "txn_covering", purchaseAmountValue: "990.000000" }),
+      ),
       transaction({ transactionId: "txn_failed", status: "failed" }),
     );
 
     await job.execute(webhook());
 
-    // One transaction per reservation per observation, as the recording method records one.
-    expect([...entries.values()].map((entry) => [entry.providerTransactionId, entry.state])).toEqual([
+    expect([...entries.values()].map((entry) => [entry.providerTransactionId, entry.state]).sort()).toEqual([
       ["txn_covering", "eurc_reserved"],
+      ["txn_small", "purchase_failed"],
     ]);
+  });
+
+  it.each(orderings)("never lists the transaction already recorded as money, but lists the one beside it, when the reservation moved on, %s", async (_order, arrange) => {
+    const { job, shows, webhook, entries, recorded } = world("awaiting_reconfirmation", "eurc_reserved");
+    recorded.push({ providerReference: "txn_funding", capitalState: "eurc_reserved" } as RecordOnrampOutcomeInput);
+    shows(...arrange(transaction({ transactionId: "txn_funding" }), transaction({ transactionId: "txn_further" })));
+
+    const result = await job.execute(webhook());
+
+    expect(result).toMatchObject({ status: "resolved" });
+    expect([...entries.values()].map((entry) => [entry.providerTransactionId, entry.reservationStage])).toEqual([
+      ["txn_further", "awaiting_reconfirmation"],
+    ]);
+  });
+
+  it("offers each transaction to the recording method once, however often the list shows it", async () => {
+    const { job, shows, webhook, reservations } = world("lapsed");
+    shows(transaction({ transactionId: "txn_a" }), transaction({ transactionId: "txn_a" }), transaction({ transactionId: "txn_b" }));
+
+    await job.execute(webhook());
+
+    const offered = vi.mocked(reservations.recordOnrampOutcome).mock.calls.map(([call]) => call.providerReference);
+    expect(offered).toEqual(["txn_a", "txn_b"]);
+  });
+
+  // While the reservation is initiated the method records the one transaction
+  // it resolves the list to, and nothing offers it the rest: a further uncovered
+  // success would otherwise get a purchase_failed row of its own.
+  it.each([
+    ["recorded: funded now", "eurc_purchase_pending", [transaction({ transactionId: "txn_a" }), transaction({ transactionId: "txn_b" })]],
+    [
+      "recorded: an uncovered success",
+      "eurc_purchase_pending",
+      [
+        transaction({ transactionId: "txn_a", purchaseCurrency: "ETH", purchaseAmountValue: "0.1" }),
+        transaction({ transactionId: "txn_b", purchaseCurrency: "ETH", purchaseAmountValue: "0.2" }),
+      ],
+    ],
+    [
+      "a duplicate of an uncovered success on file",
+      "purchase_failed",
+      [
+        transaction({ transactionId: "txn_a", purchaseCurrency: "ETH", purchaseAmountValue: "0.1" }),
+        transaction({ transactionId: "txn_b", purchaseCurrency: "ETH", purchaseAmountValue: "0.2" }),
+      ],
+    ],
+  ])("offers the rest of the list to nothing while the reservation is still initiated (%s)", async (_label, latest, list) => {
+    const { job, shows, webhook, reservations, entries, recorded } = world("initiated", latest);
+    if (latest === "purchase_failed") {
+      recorded.push({ providerReference: "txn_a", capitalState: "purchase_failed" } as RecordOnrampOutcomeInput);
+    }
+    shows(...list);
+
+    await job.execute(webhook());
+
+    expect(reservations.recordOnrampOutcome).toHaveBeenCalledTimes(1);
+    expect(entries.size).toBe(0);
+  });
+
+  it("lists nothing for a further success on a funded reservation that is still initiated: already_funded is not late", async () => {
+    const { job, shows, webhook, entries, recorded } = world("initiated", "eurc_reserved");
+    recorded.push({ providerReference: "txn_funding", capitalState: "eurc_reserved" } as RecordOnrampOutcomeInput);
+    shows(transaction({ transactionId: "txn_double" }), transaction({ transactionId: "txn_funding" }));
+
+    const result = await job.execute(webhook());
+
+    expect(result).toMatchObject({ status: "resolved", recording: "already_funded" });
+    expect(entries.size).toBe(0);
   });
 
   it("is idempotent on the provider transaction: a redelivered webhook and the poll's re-check leave one entry", async () => {

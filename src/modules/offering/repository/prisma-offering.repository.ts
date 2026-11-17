@@ -836,7 +836,7 @@ export class PrismaOfferingRepository
       });
       switch (decision) {
         case "duplicate":
-          return { status: "duplicate" };
+          return { status: "duplicate", reservationStage: current.reservation_stage };
         case "already_funded":
           return { status: "already_funded" };
         case "other_stage":

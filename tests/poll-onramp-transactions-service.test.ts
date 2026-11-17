@@ -514,7 +514,7 @@ describe("PollOnrampTransactionsService honours what the recording method return
   }
 
   it.each<[string, OnrampOutcomeRecording]>([
-    ["duplicate", { status: "duplicate" }],
+    ["duplicate", { status: "duplicate", reservationStage: "initiated" }],
     ["already_funded", { status: "already_funded" }],
     ["not_awaiting_purchase", { status: "not_awaiting_purchase", latestCapitalState: "eurc_reserved" }],
     ["unknown_reservation", { status: "unknown_reservation" }],
@@ -557,6 +557,131 @@ describe("PollOnrampTransactionsService honours what the recording method return
       traceId: "trace_01",
     });
     expect(summary).toEqual({ checked: 1, acted: 0, failed: 0 });
+  });
+
+  describe("the rest of the list, once the reservation has left initiated", () => {
+    const first = transaction({ transactionId: "txn_first" });
+    const second = transaction({ transactionId: "txn_second", purchaseAmountValue: "990.000000" });
+    const wrongAsset = transaction({ transactionId: "txn_wrong_asset", purchaseCurrency: "ETH", purchaseAmountValue: "0.030000" });
+    const lapsed: OnrampOutcomeRecording = { status: "other_stage", reservationStage: "lapsed", latestCapitalState: "eurc_purchase_pending" };
+
+    function listing(transactions: OnrampTransactionSummary[], answers: OnrampOutcomeRecording[], handler: OtherStageOnrampOutcomeHandler) {
+      const recordOnrampOutcome = vi.fn();
+      for (const answer of answers) recordOnrampOutcome.mockResolvedValueOnce(answer);
+      const service = new PollOnrampTransactionsService(
+        repository({ recordOnrampOutcome }),
+        coinbase({ listBuyTransactions: vi.fn().mockResolvedValue({ transactions, nextPageKey: null }) }),
+        logger,
+        () => now,
+        handler,
+      );
+      return { service, recordOnrampOutcome };
+    }
+    const target = { reservationId: "reservation_01", amountEur: "1000.00" };
+
+    it("offers every other success to the recording method in the state it would be recorded in, and hands each other_stage answer over", async () => {
+      const handleOtherStageOutcome = vi.fn().mockResolvedValue(undefined);
+      const { service, recordOnrampOutcome } = listing([first, wrongAsset, second], [lapsed, lapsed, lapsed], { handleOtherStageOutcome });
+
+      await service.reconcileReservation(target, "trace_01");
+
+      expect(recordOnrampOutcome.mock.calls.map(([call]) => [call.providerReference, call.capitalState, call.amountEurc])).toEqual([
+        ["txn_first", "eurc_reserved", "950.000000"],
+        ["txn_wrong_asset", "purchase_failed", null],
+        ["txn_second", "eurc_reserved", "990.000000"],
+      ]);
+      expect(handleOtherStageOutcome.mock.calls.map(([call]) => [call.providerTransactionId, call.state, call.transactionSucceeded])).toEqual([
+        ["txn_first", "eurc_reserved", true],
+        ["txn_wrong_asset", "purchase_failed", true],
+        ["txn_second", "eurc_reserved", true],
+      ]);
+      expect(handleOtherStageOutcome).toHaveBeenCalledWith(
+        expect.objectContaining({ reservationId: "reservation_01", reservationStage: "lapsed", observedAt: now, traceId: "trace_01" }),
+      );
+    });
+
+    it("does the same when the transaction the method was asked about is a duplicate and the reservation has moved on", async () => {
+      const handleOtherStageOutcome = vi.fn().mockResolvedValue(undefined);
+      const { service, recordOnrampOutcome } = listing(
+        [first, second],
+        [{ status: "duplicate", reservationStage: "awaiting_reconfirmation" }, { ...lapsed, reservationStage: "awaiting_reconfirmation" }],
+        { handleOtherStageOutcome },
+      );
+
+      await service.reconcileReservation(target, "trace_01");
+
+      expect(recordOnrampOutcome).toHaveBeenCalledTimes(2);
+      expect(handleOtherStageOutcome.mock.calls.map(([call]) => call.providerTransactionId)).toEqual(["txn_second"]);
+    });
+
+    it("hands nothing over for a duplicate beside the one the method was asked about", async () => {
+      const handleOtherStageOutcome = vi.fn().mockResolvedValue(undefined);
+      const { service } = listing(
+        [first, second],
+        [lapsed, { status: "duplicate", reservationStage: "lapsed" }],
+        { handleOtherStageOutcome },
+      );
+
+      await service.reconcileReservation(target, "trace_01");
+
+      expect(handleOtherStageOutcome.mock.calls.map(([call]) => call.providerTransactionId)).toEqual(["txn_first"]);
+    });
+
+    it.each<[string, OnrampOutcomeRecording]>([
+      ["recorded", recorded],
+      ["already_funded", { status: "already_funded" }],
+      ["not_awaiting_purchase", { status: "not_awaiting_purchase", latestCapitalState: "eurc_reserved" }],
+      ["a duplicate on a reservation still initiated", { status: "duplicate", reservationStage: "initiated" }],
+    ])("offers nothing further after %s: the reservation is still initiated", async (_label, answer) => {
+      const handleOtherStageOutcome = vi.fn().mockResolvedValue(undefined);
+      const { service, recordOnrampOutcome } = listing([first, wrongAsset, second], [answer], { handleOtherStageOutcome });
+
+      await service.reconcileReservation(target, "trace_01");
+
+      expect(recordOnrampOutcome).toHaveBeenCalledTimes(1);
+      expect(handleOtherStageOutcome).not.toHaveBeenCalled();
+    });
+
+    it("offers a transaction once however often the list shows it, and never a failed attempt", async () => {
+      const failed = transaction({ transactionId: "txn_failed", status: "failed" });
+      const { service, recordOnrampOutcome } = listing(
+        [first, failed, first, second],
+        [lapsed, lapsed],
+        { handleOtherStageOutcome: vi.fn().mockResolvedValue(undefined) },
+      );
+
+      await service.reconcileReservation(target, "trace_01");
+
+      expect(recordOnrampOutcome.mock.calls.map(([call]) => call.providerReference)).toEqual(["txn_first", "txn_second"]);
+    });
+
+    it("lets a failing handover for a later success fail the reconciliation, so the poll counts it and the webhook retries", async () => {
+      const handleOtherStageOutcome = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error("late path unavailable"));
+      const { service } = listing([first, second], [lapsed, lapsed], { handleOtherStageOutcome });
+
+      await expect(service.reconcileReservation(target, "trace_01")).rejects.toThrow("late path unavailable");
+    });
+
+    it("warns, and lists nothing, if the method unexpectedly records money for a success it was offered after the reservation moved on", async () => {
+      const handleOtherStageOutcome = vi.fn().mockResolvedValue(undefined);
+      const lines: string[] = [];
+      const capturing = pino({ level: "warn" }, { write: (line: string) => void lines.push(line) });
+      const recordOnrampOutcome = vi.fn().mockResolvedValueOnce(lapsed).mockResolvedValueOnce(recorded);
+      const service = new PollOnrampTransactionsService(
+        repository({ recordOnrampOutcome }),
+        coinbase({ listBuyTransactions: vi.fn().mockResolvedValue({ transactions: [first, second], nextPageKey: null }) }),
+        capturing,
+        () => now,
+        { handleOtherStageOutcome },
+      );
+
+      await service.reconcileReservation(target, "trace_01");
+
+      expect(handleOtherStageOutcome.mock.calls.map(([call]) => call.providerTransactionId)).toEqual(["txn_first"]);
+      expect(lines.map((line) => JSON.parse(line) as Record<string, unknown>)).toEqual([
+        expect.objectContaining({ provider_reference: "txn_second", recording: "recorded" }),
+      ]);
+    });
   });
 
   it("logs an other_stage outcome by default, with ids and amounts but never the destination wallet", async () => {
@@ -626,7 +751,7 @@ describe("PollOnrampTransactionsService honours what the recording method return
       expect.objectContaining({ provider_reference: "txn_01", reserved_amount_eur: "1000.00" }),
       "onramp success does not cover the reserved amount; recorded purchase_failed",
     );
-    expect(await run({ status: "duplicate" })).not.toHaveBeenCalled();
+    expect(await run({ status: "duplicate", reservationStage: "initiated" })).not.toHaveBeenCalled();
   });
 });
 

@@ -34,8 +34,10 @@ export interface OtherStageOnrampOutcome {
  * AD-251, AD-260 step 9, AD-266). In the worker it is
  * RecordOnrampLateEvidenceService, which writes the ops-visibility entry;
  * LoggingOtherStageOnrampOutcomeHandler below is only the default for a
- * caller that wires none. It runs once per delivery or poll, for the one
- * transaction the recording method was asked about, so a webhook retry, a
+ * caller that wires none. It runs once per transaction the recording method
+ * answered other_stage for: the transaction the list resolves to, and, once
+ * the reservation has left 'initiated', every other success of the list (see
+ * PollOnrampTransactionsService.reconcileReservation). A webhook retry, a
  * duplicate delivery, or the poll and the webhook both seeing the same
  * transaction reach it again: it must be idempotent on providerTransactionId.
  */

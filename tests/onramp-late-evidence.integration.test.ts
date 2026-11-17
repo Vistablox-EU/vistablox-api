@@ -391,6 +391,155 @@ describe.skipIf(databaseUrl === undefined)("onramp late evidence PostgreSQL inte
     });
   });
 
+  // The list is the point of the feature, so which successes reach it must not
+  // depend on the order Coinbase returns its transactions in (not verified, and
+  // a webhook job cannot control it). Once a reservation has left 'initiated'
+  // every success of its list is offered to the recording method, and the
+  // duplicate-first policy keeps the funding transaction itself off the list.
+  describe("every success of the list reaches the evidence list, in whatever order Coinbase returns it", () => {
+    const orders: Array<[string, (older: OnrampTransactionSummary, newer: OnrampTransactionSummary) => OnrampTransactionSummary[]]> = [
+      ["newest first", (older, newer) => [newer, older]],
+      ["oldest first", (older, newer) => [older, newer]],
+    ];
+
+    // Funded by `funding` while initiated (as the poll or a webhook job would
+    // have recorded it), then moved on to a stage only a funded reservation reaches.
+    async function fundedAndMovedOn(funding: OnrampTransactionSummary): Promise<string> {
+      const { reservationId, start } = await newReservation();
+      expect(
+        await offerings.recordOnrampOutcome({
+          reservationId,
+          provider: "coinbase_cdp",
+          providerReference: funding.transactionId,
+          capitalState: "eurc_reserved",
+          amountEur: "100.00",
+          amountEurc: "99.000000",
+          recordedAt: new Date(start + 3_000),
+        }),
+      ).toEqual({ status: "recorded" });
+      await database.reservation.update({ where: { id: reservationId }, data: { reservationStage: "awaiting_reconfirmation" } });
+      return reservationId;
+    }
+
+    it.each(orders)("lists a further success on a funded reservation that moved on, and never its funding transaction, %s", async (_order, arrange) => {
+      const funding = transaction({ transactionId: `txn_funding_${randomUUID()}` });
+      const further = transaction({ transactionId: `txn_further_${randomUUID()}` });
+      const reservationId = await fundedAndMovedOn(funding);
+      const { job, webhook } = worker(arrange(funding, further));
+
+      await job.execute(webhook(reservationId));
+
+      const rows = await rowsFor(reservationId);
+      evidenceIds.push(...rows.map((row) => row.onramp_late_evidence_id));
+      expect(rows.map((row) => [row.provider_transaction_id, row.reservation_stage])).toEqual([
+        [further.transactionId, "awaiting_reconfirmation"],
+      ]);
+      expect((await history(reservationId)).filter(([state]) => state === "eurc_reserved")).toEqual([
+        ["eurc_reserved", funding.transactionId],
+      ]);
+    });
+
+    it.each(orders)("lists a second late success beside one already listed, %s", async (_order, arrange) => {
+      const { reservationId } = await lapsed();
+      const earlier = transaction({ transactionId: `txn_earlier_${randomUUID()}` });
+      const later = transaction({ transactionId: `txn_later_${randomUUID()}` });
+      const firstSighting = worker([earlier]);
+      await firstSighting.job.execute(firstSighting.webhook(reservationId));
+
+      const { job, webhook } = worker(arrange(earlier, later));
+      await job.execute(webhook(reservationId));
+      await job.execute(webhook(reservationId));
+
+      const rows = await rowsFor(reservationId);
+      evidenceIds.push(...rows.map((row) => row.onramp_late_evidence_id));
+      expect(rows.map((row) => row.provider_transaction_id).sort()).toEqual([earlier.transactionId, later.transactionId].sort());
+      // Seeing the earlier one again changed nothing: one audit row each.
+      for (const row of rows) expect(await auditFor(row.onramp_late_evidence_id)).toHaveLength(1);
+    });
+
+    it.each(orders)("lists both of two late successes seen together, and not the failed attempt beside them, %s", async (_order, arrange) => {
+      const { reservationId } = await lapsed();
+      const covering = transaction({ transactionId: `txn_covering_${randomUUID()}` });
+      const small = transaction({ transactionId: `txn_small_${randomUUID()}`, purchaseAmountValue: "10.000000" });
+      const failed = transaction({ transactionId: `txn_failed_${randomUUID()}`, status: "failed" });
+      const { job, webhook } = worker([...arrange(covering, small), failed]);
+
+      await job.execute(webhook(reservationId));
+
+      const rows = await rowsFor(reservationId);
+      evidenceIds.push(...rows.map((row) => row.onramp_late_evidence_id));
+      expect(rows.map((row) => [row.provider_transaction_id, row.state]).sort()).toEqual(
+        [
+          [covering.transactionId, "eurc_reserved"],
+          [small.transactionId, "purchase_failed"],
+        ].sort(),
+      );
+    });
+
+    it.each(orders)("reads a duplicate on a reservation that moved on as late too: a purchase_failed already on file, then another success, %s", async (_order, arrange) => {
+      const { reservationId, start } = await newReservation();
+      const earlier = transaction({ transactionId: `txn_wrong_asset_${randomUUID()}`, purchaseCurrency: "ETH", purchaseAmountValue: "0.030000" });
+      const later = transaction({ transactionId: `txn_wrong_asset_later_${randomUUID()}`, purchaseCurrency: "ETH", purchaseAmountValue: "0.040000" });
+      // While initiated, the poll records the uncovered success as purchase_failed money.
+      const onTime = worker([earlier]);
+      expect(await onTime.poller.reconcileReservation({ reservationId, amountEur: "100.00" }, "trace_poll")).toMatchObject({
+        recording: { status: "recorded" },
+      });
+      expect(await offerings.expireReservation({ reservationId, traceId: `trace_${suffix}`, expiredAt: new Date(start + 10_000) })).toBe(true);
+
+      const { job, webhook } = worker(arrange(earlier, later));
+      await job.execute(webhook(reservationId));
+
+      // The first is money already on file (a duplicate), the second is late evidence.
+      const rows = await rowsFor(reservationId);
+      evidenceIds.push(...rows.map((row) => row.onramp_late_evidence_id));
+      expect(rows.map((row) => [row.provider_transaction_id, row.state])).toEqual([[later.transactionId, "purchase_failed"]]);
+      expect((await history(reservationId)).filter(([state]) => state === "purchase_failed")).toEqual([
+        ["purchase_failed", earlier.transactionId],
+      ]);
+    });
+
+    // The edge of the list, pinned so that a change to it is deliberate. A
+    // further success on a reservation that is funded but still 'initiated' (a
+    // double payment before the reconfirmation window opens) is not late: the
+    // recording method answers already_funded, which the late path does not
+    // consume (AD-289: it consumes other_stage). Whether AD-288's "unmatched"
+    // covers it is open; see docs/investor-offering.md, "What it does not cover".
+    it("lists nothing for a further success on a funded reservation that is still initiated, and writes no money for it", async () => {
+      const { reservationId } = await newReservation();
+      const funding = transaction({ transactionId: `txn_funding_${randomUUID()}` });
+      const further = transaction({ transactionId: `txn_double_${randomUUID()}` });
+      const first = worker([funding]);
+      expect(await first.job.execute(first.webhook(reservationId))).toMatchObject({ recording: "recorded" });
+
+      const { job, webhook } = worker([further, funding]);
+      const result = await job.execute(webhook(reservationId));
+
+      expect(result).toMatchObject({ status: "resolved", recording: "already_funded" });
+      expect(await rowsFor(reservationId)).toEqual([]);
+      expect((await history(reservationId)).filter(([state]) => state === "eurc_reserved")).toEqual([
+        ["eurc_reserved", funding.transactionId],
+      ]);
+    });
+
+    it("offers no further success to the recording method while the reservation is still initiated: no extra purchase_failed row, however many times it is polled", async () => {
+      const { reservationId } = await newReservation();
+      const one = transaction({ transactionId: `txn_one_${randomUUID()}`, purchaseCurrency: "ETH", purchaseAmountValue: "0.030000" });
+      const two = transaction({ transactionId: `txn_two_${randomUUID()}`, purchaseCurrency: "ETH", purchaseAmountValue: "0.040000" });
+      const { poller } = worker([one, two]);
+
+      for (let run = 0; run < 3; run += 1) {
+        await poller.reconcileReservation({ reservationId, amountEur: "100.00" }, "trace_poll");
+      }
+
+      // The method records the one transaction it resolves the list to, as before, and no more.
+      expect((await history(reservationId)).filter(([state]) => state === "purchase_failed")).toEqual([
+        ["purchase_failed", one.transactionId],
+      ]);
+      expect(await rowsFor(reservationId)).toEqual([]);
+    });
+  });
+
   describe("recordLateEvidence", () => {
     it("is idempotent under concurrent writers: one row, one audit row, one winner", async () => {
       const { reservationId } = await lapsed();

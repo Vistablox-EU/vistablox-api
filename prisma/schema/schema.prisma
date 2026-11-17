@@ -737,11 +737,14 @@ model OnrampWebhookReceipt {
 /// evidence, nothing more (AD-288, decided 2026-11-17). The EURC is already in
 /// the investor's own wallet (AD-243), so nothing here holds, reinstates or
 /// refunds anything, and a row is never a money event: it cannot count as the
-/// reservation's funding. One row per provider transaction id, written under
-/// the reservation's row lock by whichever of the poll or the webhook job sees
-/// the transaction first and ignored when the other sees it again. A row is
-/// immutable except that staff can set reviewed_at once (trigger
-/// money.guard_onramp_late_evidence_change).
+/// reservation's funding. One row per provider transaction id. It is written
+/// after the recording method has answered other_stage (which wrote nothing and
+/// has released the reservation's row lock), in a transaction of its own that
+/// takes no reservation lock; the unique id makes it idempotent
+/// (INSERT ... ON CONFLICT DO NOTHING), so whichever of the poll or the webhook
+/// job sees the transaction first writes it and the second sighting inserts
+/// nothing. A row is immutable except that staff can set reviewed_at once
+/// (trigger money.guard_onramp_late_evidence_change).
 model OnrampLateEvidence {
   id                    String    @id @map("onramp_late_evidence_id")
   providerTransactionId String    @unique(map: "uq_onramp_late_evidence_provider_transaction_id") @map("provider_transaction_id")
