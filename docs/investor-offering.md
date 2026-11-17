@@ -212,7 +212,7 @@ A position's `unit_count` and `cost_basis_eur` are both set to the reservation's
 
 Only now does the transaction set `offerings.status = "final_offering"` — the one and only place in this codebase that ever does so.
 
-Out of scope for all three stages above, and not built: any per-jurisdiction override of the 168-hour platform default (no such table is documented — see `AD-040`/`PAYMENT_FLOWS.md`'s "Effective Investor-Rights Window Override"). Locking reservation rows in each stage blocks a concurrent expiry sweep, a concurrent later stage, or a concurrent onramp poll from racing that same reservation: the poll records its outcome under the same `FOR UPDATE` lock on the reservation row (see [late payments](#late-payments-held-for-manual-review)).
+Out of scope for all three stages above, and not built: any per-jurisdiction override of the 168-hour platform default (no such table is documented — see `AD-040`/`PAYMENT_FLOWS.md`'s "Effective Investor-Rights Window Override"). Locking reservation rows in each stage blocks a concurrent expiry sweep, a concurrent later stage, or a concurrent onramp poll from racing that same reservation: the poll records its outcome under the same `FOR UPDATE` lock on the reservation row (see [late payments](#late-payments)).
 
 ## Materiality classification and the change-log
 
