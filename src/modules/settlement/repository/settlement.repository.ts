@@ -58,6 +58,14 @@ export interface RecordIpoEscrowCampaignObservationInput {
 
 export interface RefreshIpoEscrowCampaignStateInput {
   pivId: string;
+  /**
+   * The escrow contract the state was read from (the configured one). Only a
+   * row recorded for that contract is moved: a state read on the configured
+   * contract says nothing about a row that describes the contract before a
+   * redeploy, which stays as it was (and stays not ready, see
+   * isSettlementEscrowReady). Compared case-insensitively.
+   */
+  escrowContractAddress: string;
   state: IpoEscrowCampaignState;
   observedAt: Date;
 }

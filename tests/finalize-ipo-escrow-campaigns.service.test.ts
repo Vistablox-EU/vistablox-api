@@ -9,6 +9,7 @@ import {
   CAMPAIGN_STATE_OPEN,
   FakeEscrowChain,
   InMemorySettlementRepository,
+  IPO_ESCROW_CONTRACT,
   makeCapturingLogger,
   PROPERTY_CONTRACT,
   successfulCampaign,
@@ -1224,7 +1225,7 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
     const row = (pivId: string): Parameters<InMemorySettlementRepository["ipoEscrowCampaignObservations"]["set"]>[1] => ({
       pivId,
       tokenId: "1",
-      escrowContractAddress: "0xescrow",
+      escrowContractAddress: IPO_ESCROW_CONTRACT,
       targetAmount: 1n,
       deadlineAt: new Date("2026-10-01T00:00:00.000Z"),
       treasuryAddress: "0xtreasury",
@@ -1239,7 +1240,9 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
 
       await h.run();
 
-      expect(h.repository.campaignRefreshes).toEqual([{ pivId: "piv_1", state: "successful", observedAt: T0 }]);
+      expect(h.repository.campaignRefreshes).toEqual([
+        { pivId: "piv_1", escrowContractAddress: IPO_ESCROW_CONTRACT, state: "successful", observedAt: T0 },
+      ]);
       expect(h.repository.ipoEscrowCampaignObservations.get("piv_1")?.observedState).toBe("successful");
     });
 
@@ -1269,7 +1272,9 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       await h.run();
 
       // One refresh only: the read before finalize() saw Open and recorded nothing.
-      expect(h.repository.campaignRefreshes).toEqual([{ pivId: "piv_2", state: "failed", observedAt: T0 }]);
+      expect(h.repository.campaignRefreshes).toEqual([
+        { pivId: "piv_2", escrowContractAddress: IPO_ESCROW_CONTRACT, state: "failed", observedAt: T0 },
+      ]);
       expect(h.repository.ipoEscrowCampaignObservations.get("piv_2")?.observedState).toBe("failed");
     });
 
@@ -1285,6 +1290,17 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
 
       expect(h.repository.ipoEscrowCampaignObservations.get("piv_1")?.observedState).toBe("successful");
       expect(h.chain.mints).toHaveLength(0);
+    });
+
+    it("leaves a row recorded for another escrow contract (before a redeploy) as it was, whatever this contract's campaign shows", async () => {
+      const h = singleContributor();
+      const redeployed = { ...row("piv_1"), escrowContractAddress: "0x00000000000000000000000000000000000E5c21" };
+      h.repository.ipoEscrowCampaignObservations.set("piv_1", redeployed);
+
+      const summary = await h.run();
+
+      expect(summary).toMatchObject({ errors: [], positionsMinted: 1 });
+      expect(h.repository.ipoEscrowCampaignObservations.get("piv_1")).toEqual(redeployed);
     });
 
     it("does not create an observation for an offering that has none", async () => {

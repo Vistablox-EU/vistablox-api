@@ -18,15 +18,14 @@ import "dotenv/config";
 import { loadEnvironment } from "../config/environment.js";
 import { createChainClients } from "../infrastructure/blockchain/chain-client.js";
 import { PostgresOperatorKeyLock } from "../infrastructure/blockchain/operator-key-lock.js";
-import { isSettlementBundleConfigured, settlementChainConfig } from "../infrastructure/blockchain/settlement-bundle.js";
 import { createPrismaClient } from "../infrastructure/database/prisma.js";
 import { createLogger } from "../infrastructure/logging/logger.js";
 import {
   OpenIpoEscrowCampaignsCommandService,
   renderIpoEscrowActivationReport,
+  resolveOpenIpoEscrowCampaignsStartup,
 } from "../modules/settlement/application/open-ipo-escrow-campaigns-command.service.js";
 import { OpenIpoEscrowCampaignService } from "../modules/settlement/application/open-ipo-escrow-campaign.service.js";
-import { ipoEscrowActivationRefusal } from "../modules/settlement/domain/ipo-escrow-campaign.policy.js";
 import { PrismaSettlementRepository } from "../modules/settlement/repository/prisma-settlement.repository.js";
 import {
   OPEN_IPO_ESCROW_CAMPAIGNS_USAGE,
@@ -58,15 +57,13 @@ async function main(): Promise<number> {
   const { mode } = parsed.value;
 
   const environment = loadEnvironment();
-  const refusal = ipoEscrowActivationRefusal({
-    settlementBundleConfigured: isSettlementBundleConfigured(environment),
-    chainNetwork: environment.CHAIN_NETWORK,
-  });
-  const chainConfig = settlementChainConfig(environment);
-  if (refusal !== null || chainConfig === undefined) {
-    printError(`Refused (${refusal?.reason ?? "settlement_bundle_not_configured"}): ${refusal?.detail ?? ""}`);
-    return EXIT_REFUSED_OR_FAILED;
+  // The refusal (no bundle, not a testnet) is decided, and tested, in the command service's module.
+  const startup = resolveOpenIpoEscrowCampaignsStartup(environment);
+  if (!startup.ok) {
+    printError(startup.message);
+    return startup.exitCode;
   }
+  const { chainConfig } = startup;
 
   const logger = createLogger(environment.LOG_LEVEL, process.stderr);
   const database = createPrismaClient(environment.DATABASE_URL);

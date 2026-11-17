@@ -17,6 +17,8 @@ export const CAMPAIGN_STATE_SUCCESSFUL = 2;
 export const CAMPAIGN_STATE_FAILED = 3;
 
 export const PROPERTY_CONTRACT = "0xPROPERTY0000000000000000000000000000000";
+// The escrow contract the fake chain is "configured" with (ChainSettlementConfig.ipoEscrowContractAddress).
+export const IPO_ESCROW_CONTRACT = "0x00000000000000000000000000000000000E5c20";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
 export interface FakeCampaign {
@@ -105,7 +107,7 @@ export class FakeEscrowChain {
   public finalizedNonceCount: bigint | undefined;
   private txCounter = 0;
 
-  public readonly config = { propertyContractAddress: PROPERTY_CONTRACT };
+  public readonly config = { propertyContractAddress: PROPERTY_CONTRACT, ipoEscrowContractAddress: IPO_ESCROW_CONTRACT };
 
   public constructor(
     private readonly campaigns: Map<string, FakeCampaign>,
@@ -585,6 +587,8 @@ export class InMemorySettlementRepository implements SettlementRepository {
     if (this.refreshFails) throw new Error("database unavailable");
     const current = this.ipoEscrowCampaignObservations.get(input.pivId);
     if (current === undefined || current.observedState === input.state) return false;
+    // As the real repository: only a row recorded for the escrow contract the state was read from moves.
+    if (current.escrowContractAddress.toLowerCase() !== input.escrowContractAddress.toLowerCase()) return false;
     this.ipoEscrowCampaignObservations.set(input.pivId, {
       ...current,
       observedState: input.state,

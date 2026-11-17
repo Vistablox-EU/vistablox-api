@@ -239,6 +239,21 @@ describe("OpenIpoEscrowCampaignService: opening and recording the observation th
     expect(entries.filter((entry) => entry.fields.event === IPO_ESCROW_CAMPAIGN_ALERT_EVENTS.mismatch)).toHaveLength(1);
   });
 
+  it("says, in the alert it logs for a row of another escrow contract, that the stored observation is the problem and not a campaign on-chain", async () => {
+    const stale = service(chain({ reads: [notOpened] }), repository(recordedRow({ escrowContractAddress: OTHER_ESCROW.toLowerCase() })));
+    const onChain = service(chain({ reads: [[TARGET, 0n, BigInt(DEADLINE_UNIX), OTHER_TREASURY, 1, false]] }), repository());
+
+    await stale.service.activate(request);
+    await onChain.service.activate(request);
+
+    const [staleAlert] = stale.entries.filter((entry) => entry.fields.event === IPO_ESCROW_CAMPAIGN_ALERT_EVENTS.mismatch);
+    const [onChainAlert] = onChain.entries.filter((entry) => entry.fields.event === IPO_ESCROW_CAMPAIGN_ALERT_EVENTS.mismatch);
+    expect(staleAlert?.message).toContain("recorded for another escrow contract");
+    expect(staleAlert?.message).toContain("the contract was redeployed");
+    expect(onChainAlert?.message).toContain("exists on-chain with other parameters");
+    expect(onChainAlert?.message).not.toContain("redeployed");
+  });
+
   it.each([
     ["Successful", 2],
     ["Failed", 3],
@@ -269,7 +284,9 @@ describe("OpenIpoEscrowCampaignService: opening and recording the observation th
       const activation = await service(c, repo).service.activate(request);
 
       expect(activation).toEqual({ kind: "resolved", state: expected, recorded: true });
-      expect(repo.refreshes).toEqual([{ pivId: "piv_1", state: expected, observedAt: NOW }]);
+      expect(repo.refreshes).toEqual([
+        { pivId: "piv_1", escrowContractAddress: ESCROW, state: expected, observedAt: NOW },
+      ]);
       expect(repo.row?.observedState).toBe(expected);
     },
   );

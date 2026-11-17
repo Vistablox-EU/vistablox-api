@@ -1,10 +1,22 @@
 import type { Logger } from "pino";
 
+import type { ChainSettlementConfig } from "../../../infrastructure/blockchain/chain-client.js";
+import {
+  isSettlementBundleConfigured,
+  settlementChainConfig,
+  type SettlementBundleEnvironment,
+} from "../../../infrastructure/blockchain/settlement-bundle.js";
 import { toEurcMicros } from "../../../shared/domain/currency.js";
-import type { IpoEscrowCampaignAction, IpoEscrowCampaignDifference } from "../domain/ipo-escrow-campaign.policy.js";
+import {
+  ipoEscrowActivationRefusal,
+  type IpoEscrowActivationRefusal,
+  type IpoEscrowCampaignAction,
+  type IpoEscrowCampaignDifference,
+} from "../domain/ipo-escrow-campaign.policy.js";
 import type { OfferingForIpoEscrowActivation, SettlementRepository } from "../repository/settlement.repository.js";
 import {
   describeIpoEscrowCampaignDifferences,
+  isRecordedForAnotherEscrowContract,
   type IpoEscrowCampaignActivation,
   type IpoEscrowCampaignRequest,
   type OpenIpoEscrowCampaignService,
@@ -14,6 +26,41 @@ export const IPO_ESCROW_ACTIVATION_ALERT_EVENTS = {
   failed: "settlement.ipo_escrow_campaign_open_failed",
 } as const;
 
+/**
+ * What the command may start with: the chain configuration it signs with, or
+ * the reason it must not run (AD-286: it refuses unless the configured chain is
+ * a testnet, AD-234). Decided from the environment alone, before any database
+ * or chain client exists, and kept out of the CLI file so a test can pin it:
+ * the CLI prints `message` to stderr and exits with `exitCode`.
+ */
+export type OpenIpoEscrowCampaignsStartup =
+  | { ok: true; chainConfig: ChainSettlementConfig }
+  | { ok: false; refusal: IpoEscrowActivationRefusal; message: string; exitCode: 1 };
+
+export function resolveOpenIpoEscrowCampaignsStartup(
+  environment: SettlementBundleEnvironment,
+): OpenIpoEscrowCampaignsStartup {
+  const refusal = ipoEscrowActivationRefusal({
+    settlementBundleConfigured: isSettlementBundleConfigured(environment),
+    chainNetwork: environment.CHAIN_NETWORK,
+  });
+  if (refusal !== null) return refused(refusal);
+  const chainConfig = settlementChainConfig(environment);
+  if (chainConfig === undefined) {
+    // Not reachable while the refusal above covers every network settlementChainConfig rejects; refuse rather than
+    // continue without a configuration if the two ever drift apart.
+    return refused({
+      reason: "settlement_bundle_not_configured",
+      detail: `the settlement bundle could not be resolved for CHAIN_NETWORK ${environment.CHAIN_NETWORK ?? "unset"}`,
+    });
+  }
+  return { ok: true, chainConfig };
+}
+
+function refused(refusal: IpoEscrowActivationRefusal): OpenIpoEscrowCampaignsStartup {
+  return { ok: false, refusal, message: `Refused (${refusal.reason}): ${refusal.detail}`, exitCode: 1 };
+}
+
 export type IpoEscrowActivationMode = "dry_run" | "confirm";
 
 /**
@@ -21,7 +68,9 @@ export type IpoEscrowActivationMode = "dry_run" | "confirm";
  *  - would_open / opened: the chain shows no campaign; it is (to be) opened.
  *  - would_record / recorded: it is already open with the offering's parameters;
  *    the observation is (to be) recorded or refreshed.
- *  - refused_mismatch: it is open with other parameters. Not adopted. Needs an operator.
+ *  - refused_mismatch: it is open with other parameters, or the stored
+ *    observation was recorded for another escrow contract (a redeploy). Not
+ *    adopted, not replaced. Needs an operator.
  *  - resolved_on_chain: it is Successful or Failed although the offering still
  *    takes reservations. It cannot be reopened. Needs an operator.
  *  - failed: the attempt threw (an RPC error, a reverted transaction).
@@ -239,11 +288,17 @@ function describeOutcome(outcome: IpoEscrowActivationOutcome, mode: IpoEscrowAct
       return outcome.adopted === true
         ? "already open on-chain with this offering's parameters; recorded"
         : "open on-chain; observation refreshed";
-    case "refused_mismatch":
-      return (
-        `NEEDS MANUAL ACTION: open on-chain with other parameters, not adopted (` +
-        `${describeIpoEscrowCampaignDifferences(outcome.differences ?? [])})`
-      );
+    case "refused_mismatch": {
+      const differences = outcome.differences ?? [];
+      // A row recorded for the contract before a redeploy is the backend's own record, not a campaign found
+      // on-chain: say so, and where the manual step is written down.
+      return isRecordedForAnotherEscrowContract(differences)
+        ? `NEEDS MANUAL ACTION: the stored observation was recorded for another escrow contract (a redeploy), ` +
+            `not replaced, and the offering is not ready for reservations until an operator removes it; see ` +
+            `docs/investor-offering.md (${describeIpoEscrowCampaignDifferences(differences)})`
+        : `NEEDS MANUAL ACTION: open on-chain with other parameters, not adopted (` +
+            `${describeIpoEscrowCampaignDifferences(differences)})`;
+    }
     case "resolved_on_chain":
       return (
         `NEEDS MANUAL ACTION: ${outcome.chainState ?? "resolved"} on-chain, it takes no contributions; ` +

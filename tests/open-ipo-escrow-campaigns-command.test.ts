@@ -7,6 +7,7 @@ import {
   IPO_ESCROW_ACTIVATION_ALERT_EVENTS,
   OpenIpoEscrowCampaignsCommandService,
   renderIpoEscrowActivationReport,
+  resolveOpenIpoEscrowCampaignsStartup,
   type IpoEscrowActivationMode,
 } from "../src/modules/settlement/application/open-ipo-escrow-campaigns-command.service.js";
 import type {
@@ -237,7 +238,7 @@ describe("OpenIpoEscrowCampaignsCommandService", () => {
         { pivId: "piv_1", tokenId: "1", status: "resolved_on_chain", chainState: "successful", observationUpdated: true },
         { pivId: "piv_2", tokenId: "2", status: "resolved_on_chain", chainState: "failed", observationUpdated: false },
       ]);
-      expect(h.refreshes).toEqual([{ pivId: "piv_1", state: "successful", observedAt: NOW }]);
+      expect(h.refreshes).toEqual([{ pivId: "piv_1", escrowContractAddress: ESCROW, state: "successful", observedAt: NOW }]);
       expect(report.exitCode).toBe(1);
     });
 
@@ -313,6 +314,24 @@ describe("renderIpoEscrowActivationReport", () => {
     expect(text).toContain("1 offering(s) failed or need manual action");
     expect(text).not.toContain("Re-run with --confirm");
   });
+
+  it("names a row recorded for another escrow contract as the stored observation's problem, and points to the manual step", async () => {
+    const h = harness({
+      offerings: [offering(1)],
+      campaigns: { "1": NOT_OPENED },
+      rows: { piv_1: row("piv_1", { escrowContractAddress: "0x00000000000000000000000000000000000e5c21" }) },
+    });
+
+    const report = await h.run("dry_run");
+    const text = renderIpoEscrowActivationReport(header, report).join("\n");
+
+    expect(report.outcomes[0]).toMatchObject({ status: "refused_mismatch" });
+    expect(report.exitCode).toBe(1);
+    expect(text).toContain("the stored observation was recorded for another escrow contract (a redeploy)");
+    expect(text).toContain("docs/investor-offering.md");
+    expect(text).toContain(`escrow_address expected ${ESCROW}, found 0x00000000000000000000000000000000000e5c21`);
+    expect(text).not.toContain("open on-chain with other parameters");
+  });
 });
 
 describe("parseOpenIpoEscrowCampaignsArguments", () => {
@@ -359,5 +378,63 @@ describe("settlementChainConfig", () => {
   it("is undefined while the bundle is dormant or incomplete", () => {
     expect(settlementChainConfig({})).toBeUndefined();
     expect(settlementChainConfig({ ...complete, PIV_TREASURY_ADDRESS: undefined })).toBeUndefined();
+  });
+});
+
+// AD-286: the command refuses unless the configured chain is a testnet (AD-234: Base Sepolia until the
+// activation gate passes). src/cli/open-ipo-escrow-campaigns.ts prints `message` and exits with `exitCode`
+// when this refuses, and builds nothing (no database, no chain client) before it has asked.
+describe("resolveOpenIpoEscrowCampaignsStartup", () => {
+  const complete = {
+    CHAIN_NETWORK: "base-sepolia",
+    CHAIN_RPC_URL: "https://sepolia.base.org",
+    CHAIN_OPERATOR_PRIVATE_KEY: `0x${"1".repeat(64)}`,
+    VISTABLOX_PROPERTY_CONTRACT_ADDRESS: `0x${"a".repeat(40)}`,
+    VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS: `0x${"b".repeat(40)}`,
+    EURC_TOKEN_ADDRESS: `0x${"c".repeat(40)}`,
+    PIV_TREASURY_ADDRESS: `0x${"d".repeat(40)}`,
+  };
+
+  it("starts on Base Sepolia with the whole bundle, with the configuration the command signs with", () => {
+    const startup = resolveOpenIpoEscrowCampaignsStartup(complete);
+
+    expect(startup).toEqual({ ok: true, chainConfig: settlementChainConfig(complete) });
+    expect(startup.ok && startup.chainConfig.network).toBe("base-sepolia");
+  });
+
+  it("refuses on Base mainnet even with the whole bundle, with exit code 1 and the reason in the message", () => {
+    const startup = resolveOpenIpoEscrowCampaignsStartup({ ...complete, CHAIN_NETWORK: "base" });
+
+    expect(startup).toMatchObject({ ok: false, exitCode: 1, refusal: { reason: "not_testnet" } });
+    expect(startup.ok ? "" : startup.message).toContain("Refused (not_testnet)");
+    expect(startup.ok ? "" : startup.message).toContain("CHAIN_NETWORK is base;");
+    expect(startup.ok ? "" : startup.message).toContain("base-sepolia");
+  });
+
+  it("refuses a network it does not know, with the whole bundle", () => {
+    expect(resolveOpenIpoEscrowCampaignsStartup({ ...complete, CHAIN_NETWORK: "ethereum" })).toMatchObject({
+      ok: false,
+      exitCode: 1,
+      refusal: { reason: "not_testnet" },
+    });
+  });
+
+  it("refuses while the settlement bundle is dormant, with exit code 1", () => {
+    expect(resolveOpenIpoEscrowCampaignsStartup({})).toMatchObject({
+      ok: false,
+      exitCode: 1,
+      refusal: { reason: "settlement_bundle_not_configured" },
+    });
+  });
+
+  it.each(Object.keys(complete))("refuses when %s is missing: a partial bundle is not a bundle", (missing) => {
+    const settings: Record<string, string | undefined> = { ...complete };
+    settings[missing] = undefined;
+
+    expect(resolveOpenIpoEscrowCampaignsStartup(settings)).toMatchObject({
+      ok: false,
+      exitCode: 1,
+      refusal: { reason: "settlement_bundle_not_configured" },
+    });
   });
 });

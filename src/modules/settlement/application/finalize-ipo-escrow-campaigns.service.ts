@@ -252,6 +252,8 @@ export class FinalizeIpoEscrowCampaignsService {
       {
         pivId: candidate.pivId,
         tokenId: candidate.tokenId,
+        // Non-null: this.chain.ipoEscrow, which every read above goes through, throws if it were unset.
+        escrowContractAddress: this.chain.config.ipoEscrowContractAddress!,
         stateCode: campaign.state,
         observedAt: this.clock(),
         traceId,

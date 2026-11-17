@@ -188,6 +188,7 @@ export class OpenIpoEscrowCampaignService {
         const recorded = action.hasRow
           ? await this.repository.refreshIpoEscrowCampaignState({
               pivId: request.pivId,
+              escrowContractAddress: inspection.expected.escrowContractAddress,
               state: action.state,
               observedAt: inspection.observedAt,
             })
@@ -294,7 +295,21 @@ export class OpenIpoEscrowCampaignService {
         token_id: request.tokenId.toString(),
         differences,
       },
-      "an IPO escrow campaign exists on-chain with other parameters than the offering's; it is not adopted",
+      isRecordedForAnotherEscrowContract(differences)
+        ? "the stored IPO escrow campaign observation of this offering was recorded for another escrow contract " +
+            "(the contract was redeployed); it is not replaced, and the offering is not ready for reservations " +
+            "until an operator removes it (docs/investor-offering.md)"
+        : "an IPO escrow campaign exists on-chain with other parameters than the offering's; it is not adopted",
     );
   }
+}
+
+/**
+ * Whether a refusal is about the stored observation and not about the chain:
+ * the configured escrow contract is not the one the row was recorded for. (The
+ * chain is always read from the configured contract, so on its own side the two
+ * addresses cannot differ.)
+ */
+export function isRecordedForAnotherEscrowContract(differences: IpoEscrowCampaignDifference[]): boolean {
+  return differences.some((difference) => difference.parameter === "escrow_address");
 }

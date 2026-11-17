@@ -293,6 +293,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
       UPDATE settlement.ipo_escrow_campaigns
       SET observed_state = ${input.state}, observed_at = ${input.observedAt}
       WHERE piv_id = ${input.pivId}
+        AND lower(escrow_contract_address) = lower(${input.escrowContractAddress})
         AND observed_at <= ${input.observedAt}
         AND observed_state <> ${input.state}
     `;

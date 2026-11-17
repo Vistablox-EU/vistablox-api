@@ -6,6 +6,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaSettlementRepository } from "../src/modules/settlement/repository/prisma-settlement.repository.js";
 import type { RecordIpoEscrowCampaignObservationInput } from "../src/modules/settlement/repository/settlement.repository.js";
+import { CONFIGURED_ESCROW_CONTRACT, REDEPLOYED_ESCROW_CONTRACT } from "./support/settlement-escrow-contracts.js";
 import { deleteSettlementEscrowReadiness } from "./support/settlement-escrow-db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -170,24 +171,56 @@ describe.skipIf(databaseUrl === undefined)("IPO escrow campaign readiness Postgr
     const t = new Date("2026-10-02T12:00:00.000Z");
 
     expect(
-      await repository.refreshIpoEscrowCampaignState({ pivId: pivId("untokenized"), state: "failed", observedAt: t }),
+      await repository.refreshIpoEscrowCampaignState({
+        pivId: pivId("untokenized"),
+        escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+        state: "failed",
+        observedAt: t,
+      }),
     ).toBe(false);
     expect(await repository.findIpoEscrowCampaign(pivId("untokenized"))).toBeNull();
 
     expect(
-      await repository.refreshIpoEscrowCampaignState({ pivId: pivId("awaiting"), state: "open", observedAt: t }),
+      await repository.refreshIpoEscrowCampaignState({
+        pivId: pivId("awaiting"),
+        escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+        state: "open",
+        observedAt: t,
+      }),
     ).toBe(false);
     expect(
       await repository.refreshIpoEscrowCampaignState({
         pivId: pivId("awaiting"),
+        escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
         state: "failed",
         observedAt: new Date("2026-10-01T00:00:00.000Z"),
       }),
     ).toBe(false);
     expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toMatchObject({ observedState: "open" });
 
+    // A state read on another escrow contract (the configured one after a redeploy) does not move a row that
+    // describes the contract before it, however new the observation and however different the state.
     expect(
-      await repository.refreshIpoEscrowCampaignState({ pivId: pivId("awaiting"), state: "successful", observedAt: t }),
+      await repository.refreshIpoEscrowCampaignState({
+        pivId: pivId("awaiting"),
+        escrowContractAddress: REDEPLOYED_ESCROW_CONTRACT,
+        state: "successful",
+        observedAt: t,
+      }),
+    ).toBe(false);
+    expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toMatchObject({
+      observedState: "open",
+      escrowContractAddress: CONFIGURED_ESCROW_CONTRACT.toLowerCase(),
+    });
+
+    // The stored address is the canonical lower-case form; the contract it was read from may be checksummed.
+    expect(
+      await repository.refreshIpoEscrowCampaignState({
+        pivId: pivId("awaiting"),
+        escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+        state: "successful",
+        observedAt: t,
+      }),
     ).toBe(true);
     expect(await repository.findIpoEscrowCampaign(pivId("awaiting"))).toMatchObject({
       observedState: "successful",

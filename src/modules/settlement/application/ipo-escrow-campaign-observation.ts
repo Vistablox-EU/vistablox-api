@@ -10,8 +10,8 @@ export const IPO_ESCROW_CAMPAIGN_OBSERVATION_FAILED_EVENT = "settlement.ipo_escr
  * moves the stored observation of an offering's IPO escrow campaign to the
  * state the chain showed, so an offering whose campaign is no longer Open stops
  * being ready for reservations. The finalizer calls it when it sees a campaign
- * that is not Open. It only updates a row that exists, it never reads the
- * chain itself, and an Open state is not recorded here: the operator command
+ * that is not Open. It only updates a row that exists and was recorded for the
+ * escrow contract the state was read from, it never reads the chain itself, and an Open state is not recorded here: the operator command
  * does that, after comparing the campaign's parameters with the offering's.
  *
  * It never throws. The caller is deciding something else (minting positions for
@@ -24,13 +24,22 @@ export async function recordObservedIpoEscrowCampaignState(
     repository: Pick<SettlementRepository, "refreshIpoEscrowCampaignState">;
     logger: Pick<Logger, "error">;
   },
-  input: { pivId: string; tokenId: string; stateCode: number; observedAt: Date; traceId: string },
+  input: {
+    pivId: string;
+    tokenId: string;
+    /** The escrow contract the state was read from: only a row recorded for it is moved. */
+    escrowContractAddress: string;
+    stateCode: number;
+    observedAt: Date;
+    traceId: string;
+  },
 ): Promise<void> {
   try {
     const state = ipoEscrowCampaignStateFromChain(input.stateCode);
     if (state === "open") return;
     await dependencies.repository.refreshIpoEscrowCampaignState({
       pivId: input.pivId,
+      escrowContractAddress: input.escrowContractAddress,
       state,
       observedAt: input.observedAt,
     });
