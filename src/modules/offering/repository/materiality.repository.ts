@@ -16,6 +16,8 @@ export interface ClassifiedMateriality {
   classification: MaterialityClassification;
   thresholdType: MaterialityThresholdType | null;
   resetTriggered: boolean;
+  /** Set iff resetTriggered: reconfirmation waits for a complete pack of at least this version. */
+  requiredDisclosurePackVersion: number | null;
   classifiedAt: Date;
   effectiveRightsEndAt: Date | null;
   reservationsReset: number;
@@ -51,11 +53,13 @@ export interface ClassifyMaterialityResult {
  * has actually run, correctly reopens it rather than racing a premature
  * commit.
  *
- * Deliberately NOT implemented here: AD-038 also says a per-se material
- * change "always resets the disclosure pack." No application code anywhere
- * in this codebase creates or republishes a disclosure_packs row (only
- * read paths exist) — disclosure-pack authoring is a separate, still-unbuilt
- * prerequisite feature, not something this method can do as a side effect.
+ * AD-038 also says a material change "always resets the disclosure pack."
+ * This method does not publish one itself (the new document content is not
+ * something a classification can supply); instead a reset records
+ * required_disclosure_pack_version — one past the latest version published
+ * so far — and reconfirmReservation refuses until a complete pack of at
+ * least that version is current. Staff republish through
+ * DisclosurePackRepository.publishDisclosurePack.
  */
 export interface MaterialityRepository {
   classifyMateriality(input: ClassifyMaterialityInput): Promise<ClassifyMaterialityResult>;

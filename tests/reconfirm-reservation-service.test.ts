@@ -15,6 +15,7 @@ function repository(overrides: Partial<FinalizeOfferingRepository> = {}): Finali
     reconfirmReservation: vi.fn(
       async (input: ReconfirmReservationInput): Promise<ReconfirmReservationResult> => ({
         reconfirmedAt: input.reconfirmedAt,
+        disclosurePackVersion: 1,
         conflict: null,
       }),
     ),
@@ -26,7 +27,7 @@ function repository(overrides: Partial<FinalizeOfferingRepository> = {}): Finali
 
 describe("ReconfirmReservationService", () => {
   it("reconfirms a reservation awaiting reconfirmation and reports the outcome", async () => {
-    const reconfirmReservation = vi.fn().mockResolvedValue({ reconfirmedAt: now, conflict: null });
+    const reconfirmReservation = vi.fn().mockResolvedValue({ reconfirmedAt: now, disclosurePackVersion: 3, conflict: null });
     const service = new ReconfirmReservationService(repository({ reconfirmReservation }), () => now);
 
     const result = await service.execute({
@@ -40,6 +41,7 @@ describe("ReconfirmReservationService", () => {
         reservation_id: "reservation_01",
         status: "reconfirmed",
         reconfirmed_at: now.toISOString(),
+        disclosure_pack_version: 3,
       },
     });
     expect(reconfirmReservation).toHaveBeenCalledWith({
@@ -108,5 +110,20 @@ describe("ReconfirmReservationService", () => {
     await expect(
       service.execute({ accountId: "account_investor", reservationId: "reservation_01", traceId: "req_01" }),
     ).rejects.toMatchObject({ code: "offering.reconfirmation_disclosure_pack_incomplete", status: 409 });
+  });
+
+  it("409s when a materiality reset postdates the current disclosure pack", async () => {
+    const service = new ReconfirmReservationService(
+      repository({
+        reconfirmReservation: vi
+          .fn()
+          .mockResolvedValue({ reconfirmedAt: null, disclosurePackVersion: null, conflict: "disclosure_pack_outdated" }),
+      }),
+      () => now,
+    );
+
+    await expect(
+      service.execute({ accountId: "account_investor", reservationId: "reservation_01", traceId: "req_01" }),
+    ).rejects.toMatchObject({ code: "offering.reconfirmation_disclosure_pack_outdated", status: 409 });
   });
 });

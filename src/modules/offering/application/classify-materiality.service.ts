@@ -72,6 +72,7 @@ export class ClassifyMaterialityService {
         classification: classified.classification,
         threshold_type: classified.thresholdType,
         reset_triggered: classified.resetTriggered,
+        required_disclosure_pack_version: classified.requiredDisclosurePackVersion,
         classified_at: classified.classifiedAt.toISOString(),
         effective_rights_end_at: classified.effectiveRightsEndAt === null ? null : classified.effectiveRightsEndAt.toISOString(),
         reservations_reset: classified.reservationsReset,

@@ -219,6 +219,10 @@ services:
       WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT: ${WALLET_REGISTRY_PENDING_OVERDUE_ALERT_COUNT:-1}
       WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT: ${WALLET_REGISTRY_UNMATCHED_EVENTS_ALERT_COUNT:-5}
       WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS: ${WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS:-24}
+      # Dead-letter alert delivery (docs/dead-letter-jobs.md); unset disables it.
+      DEAD_LETTER_ALERT_WEBHOOK_URL: ${DEAD_LETTER_ALERT_WEBHOOK_URL:-}
+      # IPO escrow mint reconciliation; the default matches environment.ts.
+      ESCROW_MINT_NONCE_BLOCK_TAG: ${ESCROW_MINT_NONCE_BLOCK_TAG:-finalized}
       LOG_LEVEL: ${LOG_LEVEL:-info}
       # The staging object store is the Compose-local MinIO service. These
       # values intentionally override any external endpoint left in the

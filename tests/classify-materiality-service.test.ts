@@ -19,6 +19,7 @@ function repository(overrides: Partial<MaterialityRepository> = {}): Materiality
           classification: input.classification,
           thresholdType: input.thresholdType,
           resetTriggered: input.classification !== "non_material",
+          requiredDisclosurePackVersion: input.classification === "non_material" ? null : 2,
           classifiedAt: input.classifiedAt,
           effectiveRightsEndAt: input.classification === "non_material" ? null : new Date("2026-09-12T12:00:00.000Z"),
           reservationsReset: input.classification === "non_material" ? 0 : 2,
@@ -39,6 +40,7 @@ describe("ClassifyMaterialityService", () => {
         classification: "per_se_material",
         thresholdType: null,
         resetTriggered: true,
+        requiredDisclosurePackVersion: 2,
         classifiedAt: now,
         effectiveRightsEndAt: new Date("2026-09-12T12:00:00.000Z"),
         reservationsReset: 3,
@@ -61,6 +63,7 @@ describe("ClassifyMaterialityService", () => {
         classification: "per_se_material",
         threshold_type: null,
         reset_triggered: true,
+        required_disclosure_pack_version: 2,
         classified_at: now.toISOString(),
         effective_rights_end_at: "2026-09-12T12:00:00.000Z",
         reservations_reset: 3,
@@ -88,6 +91,7 @@ describe("ClassifyMaterialityService", () => {
     });
 
     expect(result.data.reset_triggered).toBe(false);
+    expect(result.data.required_disclosure_pack_version).toBeNull();
     expect(result.data.effective_rights_end_at).toBeNull();
     expect(result.data.reservations_reset).toBe(0);
   });

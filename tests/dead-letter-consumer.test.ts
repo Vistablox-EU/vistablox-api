@@ -36,10 +36,14 @@ describe("dead-letter consumer", () => {
     expect(error).toHaveBeenCalledTimes(1);
     expect(error).toHaveBeenCalledWith(
       {
+        event: "job.dead_lettered",
+        severity: "error",
         job: "case_timers.pre_offering_open_handoff",
         job_id: "source-job-1",
         dead_letter_job_id: "dlq-job-1",
         trace_id: "req_trace_1",
+        owner: "offering",
+        tier: "tier_2",
         retry_count: 16,
         attempts: 17,
         last_error: "connect ECONNREFUSED 10.0.0.1:5432",
@@ -87,10 +91,14 @@ describe("dead-letter consumer", () => {
 
     expect(error).toHaveBeenCalledTimes(1);
     expect(error.mock.calls[0]?.[0]).toEqual({
+      event: "job.dead_lettered",
+      severity: "error",
       job: "unknown",
       job_id: "unknown",
       dead_letter_job_id: "dlq-job-1",
       trace_id: "unknown",
+      owner: "platform",
+      tier: "tier_1",
       retry_count: null,
       attempts: null,
       last_error: null,
@@ -216,5 +224,69 @@ describe("dead-letter consumer", () => {
     expect(options.includeMetadata).toBe(true);
     await handler([deadLetterJob()]);
     expect(error).toHaveBeenCalledTimes(1);
+  });
+
+  it("hands each dead-lettered job to the alert sender, after the log line, without its payload", async () => {
+    const { logger, error } = fakeLogger();
+    const order: string[] = [];
+    error.mockImplementation(() => order.push("log"));
+    const deliverAlert = vi.fn(async () => {
+      order.push("alert");
+    });
+
+    await createDeadLetterHandler(logger, { deliverAlert })([
+      deadLetterJob({
+        sourceName: "settlement.open_ipo_escrow_campaign",
+        data: { case_id: "case_1", investor_email: "someone@example.com", trace_id: "req_trace_1" },
+      }),
+    ]);
+
+    expect(order).toEqual(["log", "alert"]);
+    expect(deliverAlert).toHaveBeenCalledWith({
+      job: "settlement.open_ipo_escrow_campaign",
+      job_id: "source-job-1",
+      dead_letter_job_id: "dlq-job-1",
+      trace_id: "req_trace_1",
+      owner: "settlement",
+      tier: "tier_1",
+      replayable: true,
+      attempts: 17,
+      last_error: "connect ECONNREFUSED 10.0.0.1:5432",
+    });
+    expect(JSON.stringify(deliverAlert.mock.calls)).not.toMatch(/case_1|someone@example\.com/);
+  });
+
+  it("marks scheduled and unknown queues as not replayable", async () => {
+    const { logger } = fakeLogger();
+    const deliverAlert = vi.fn(async () => undefined);
+
+    await createDeadLetterHandler(logger, { deliverAlert })([
+      deadLetterJob({ sourceName: "settlement.finalize_ipo_escrow_campaigns" }),
+      deadLetterJob({ sourceName: "some.unlisted_queue" }),
+    ]);
+
+    expect(deliverAlert.mock.calls.map((call) => (call as unknown[])[0])).toMatchObject([
+      { owner: "settlement", tier: "tier_1", replayable: false },
+      { owner: "platform", tier: "tier_1", replayable: false },
+    ]);
+  });
+
+  it("completes the batch and keeps the log line when an alert sender throws", async () => {
+    const { logger, error, other } = fakeLogger();
+    const deliverAlert = vi.fn().mockRejectedValue(new Error("boom"));
+
+    await expect(
+      createDeadLetterHandler(logger, { deliverAlert })([
+        deadLetterJob({ id: "dlq-a", sourceId: "src-a" }),
+        deadLetterJob({ id: "dlq-b", sourceId: "src-b" }),
+      ]),
+    ).resolves.toBeUndefined();
+
+    expect(error).toHaveBeenCalledTimes(2);
+    expect(deliverAlert).toHaveBeenCalledTimes(2);
+    expect(other).toHaveBeenCalledWith(
+      expect.objectContaining({ event: "job.dead_letter_alert_delivery_failed", dead_letter_job_id: "dlq-a" }),
+      "dead-letter alert delivery threw",
+    );
   });
 });

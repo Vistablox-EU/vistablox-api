@@ -33,6 +33,7 @@ function detail(
       propertyType: "residential",
       countryCode: "DE",
       city: "Berlin",
+      media: { heroUrl: "https://cdn.example.com/berlin/hero.jpg", galleryUrls: ["https://cdn.example.com/berlin/1.jpg"] },
       addressLine: "Example Strasse 1",
       ownerDeclaredValueEur: "600000.00",
       appraisalValueOpinionEur: "625000.00",
@@ -88,6 +89,13 @@ describe("authenticated investor offering detail", () => {
 
     expect(result.data).toMatchObject({
       id: "offering_01",
+      property: {
+        city: "Berlin",
+        media: {
+          hero_url: "https://cdn.example.com/berlin/hero.jpg",
+          gallery_urls: ["https://cdn.example.com/berlin/1.jpg"],
+        },
+      },
       progress: {
         reserved_capacity_eur: "125000.00",
         funded_eur: "100000.00",

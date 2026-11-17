@@ -186,5 +186,26 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
       new Date(cooldownEndsAt.getTime() + 1000),
     );
     expect(lapsedCooldown).toBeNull();
+
+    // A staff-target retry keys its "already sent?" check on this case's own audit trail.
+    const linkSent = { caseId: opened.id, action: "authentication.account_recovery_link_sent" };
+    expect(await repository.hasRecoveryAuditEvent(linkSent)).toBe(false);
+    await repository.recordRecoveryAuditEvent({
+      ...linkSent,
+      actorAccountId: staffAccountId,
+      traceId: `trace_${suffix}`,
+      changes: { account_id: accountId },
+      occurredAt: completedAt,
+    });
+    expect(await repository.hasRecoveryAuditEvent(linkSent)).toBe(true);
+    expect(
+      await repository.hasRecoveryAuditEvent({ ...linkSent, caseId: `${opened.id}_other` }),
+    ).toBe(false);
+    expect(
+      await repository.hasRecoveryAuditEvent({
+        caseId: opened.id,
+        action: "authentication.account_recovery_completed",
+      }),
+    ).toBe(true);
   });
 });

@@ -38,10 +38,13 @@ export type ReconfirmReservationConflict =
   | "not_found"
   | "not_awaiting_reconfirmation"
   | "window_closed"
-  | "disclosure_pack_incomplete";
+  | "disclosure_pack_incomplete"
+  | "disclosure_pack_outdated";
 
 export interface ReconfirmReservationResult {
   reconfirmedAt: Date | null;
+  /** The current disclosure-pack version the reservation was reconfirmed against; null on conflict. */
+  disclosurePackVersion: number | null;
   conflict: ReconfirmReservationConflict | null;
 }
 
