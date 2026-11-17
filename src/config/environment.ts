@@ -258,6 +258,12 @@ const environmentSchema = z
       emptyStringToUndefined,
       z.url().optional(),
     ),
+    // metadata.secret from the CDP onramp webhook subscription. Unset leaves
+    // POST /webhooks/coinbase-onramp unmounted; the minute poll still runs.
+    COINBASE_ONRAMP_WEBHOOK_SECRET: z.preprocess(
+      emptyStringToUndefined,
+      z.string().min(16).optional(),
+    ),
     // A human decision, not something this codebase can verify on its own
     // (AD-255's "Still Open" item: live confirmation Coinbase actually
     // supports EUR/Base for this account). Stays false until someone who has
@@ -469,6 +475,16 @@ const environmentSchema = z
     {
       message: "All Coinbase CDP onramp settings must be configured together",
       path: ["COINBASE_CDP_API_KEY_ID"],
+    },
+  )
+  .refine(
+    (environment) =>
+      environment.COINBASE_ONRAMP_WEBHOOK_SECRET === undefined ||
+      environment.COINBASE_CDP_API_KEY_ID !== undefined,
+    {
+      message:
+        "COINBASE_ONRAMP_WEBHOOK_SECRET requires the Coinbase CDP onramp settings, which the webhook's reconcile uses",
+      path: ["COINBASE_ONRAMP_WEBHOOK_SECRET"],
     },
   )
   .refine(

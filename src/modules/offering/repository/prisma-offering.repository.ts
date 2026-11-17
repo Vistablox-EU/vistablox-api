@@ -31,9 +31,15 @@ import type {
   CreateReservationResult,
   ExpireReservationInput,
   InitiatedReservationForTimer,
+  OnrampOutcomeRecording,
+  OnrampWebhookReceipt,
+  OnrampWebhookReceiver,
   PendingPurchaseReservationForTimer,
+  RecordOnrampOutcomeInput,
+  ReservationForOnrampReconciliation,
   ReservationRepository,
 } from "./reservation.repository.js";
+import { decideOnrampRecording, recordedAtAfterLatest } from "../domain/onramp-outcome-recording.policy.js";
 import {
   FUNDED_CAPITAL_STATES,
   isReservationFunded,
@@ -93,7 +99,8 @@ export class PrismaOfferingRepository
     DisclosurePackRepository,
     ReconfirmationReminderRepository,
     ReconfirmationWindowOpenedNotificationRepository,
-    ReservationRepository
+    ReservationRepository,
+    OnrampWebhookReceiver
 {
   public constructor(
     private readonly database: DatabaseClient,
@@ -779,6 +786,132 @@ export class PrismaOfferingRepository
     }));
   }
 
+  public async findReservationForOnrampReconciliation(
+    reservationId: string,
+  ): Promise<ReservationForOnrampReconciliation | null> {
+    const rows = await this.database.$queryRaw<
+      Array<{ reservation_id: string; account_id: string; amount_eur: string; reservation_stage: string }>
+    >`
+      SELECT
+        reservation.reservation_id,
+        reservation.account_id,
+        reservation.amount_eur::text,
+        reservation.reservation_stage
+      FROM offering.reservations AS reservation
+      WHERE reservation.reservation_id = ${reservationId}
+    `;
+    const row = rows[0];
+    if (row === undefined) return null;
+    return {
+      reservationId: row.reservation_id,
+      accountId: row.account_id,
+      amountEur: row.amount_eur,
+      reservationStage: row.reservation_stage,
+    };
+  }
+
+  public async recordOnrampOutcome(input: RecordOnrampOutcomeInput): Promise<OnrampOutcomeRecording> {
+    return this.database.$transaction(async (transaction) => {
+      // The same row lock recordMoneyEvent and expireReservation take, so the
+      // poll, a webhook job and the expiry sweep serialise on one reservation.
+      // The stage and the latest event are read after the lock is held (see
+      // lockReservationWithLatestMoney), and so is the duplicate check below:
+      // a recorder that waited here sees what the one before it committed.
+      const current = await lockReservationWithLatestMoney(transaction, input.reservationId);
+      if (current === undefined) return { status: "unknown_reservation" };
+
+      const outcomeAlreadyRecorded =
+        (await transaction.moneyEvent.count({
+          where: {
+            reservationId: input.reservationId,
+            provider: input.provider,
+            providerReference: input.providerReference,
+            capitalState: input.capitalState,
+          },
+        })) > 0;
+      const decision = decideOnrampRecording({
+        reservationStage: current.reservation_stage,
+        latestCapitalState: current.capital_state,
+        outcomeAlreadyRecorded,
+      });
+      switch (decision) {
+        case "duplicate":
+          return { status: "duplicate", reservationStage: current.reservation_stage };
+        case "already_funded":
+          return { status: "already_funded" };
+        case "other_stage":
+          return {
+            status: "other_stage",
+            reservationStage: current.reservation_stage,
+            latestCapitalState: current.capital_state,
+          };
+        case "not_awaiting_purchase":
+          return { status: "not_awaiting_purchase", latestCapitalState: current.capital_state };
+        case "record":
+          break;
+      }
+
+      await transaction.moneyEvent.create({
+        data: {
+          id: `money_event_${ulid()}`,
+          reservationId: input.reservationId,
+          provider: input.provider,
+          providerReference: input.providerReference,
+          capitalState: input.capitalState,
+          amountEur: input.amountEur,
+          amountEurc: input.amountEurc,
+          // The order the recorders won the lock in is the order of the
+          // history, whatever time each of them observed its outcome at: the
+          // new row sorts after the latest one (recordedAtAfterLatest), so a
+          // funded event is never filed under a later-dated failure or
+          // pending event, which the expiry sweeper would read as the state.
+          recordedAt: recordedAtAfterLatest(input.recordedAt, current.recorded_at),
+        },
+      });
+      return { status: "recorded" };
+    });
+  }
+
+  // The receipt and the job commit together or not at all: a receipt without
+  // its job would be a delivery nobody acts on, and (since a redelivery of its
+  // event id is a no-op) nothing would ever retry it; a job without a receipt
+  // would leave no durable record of what triggered it. The body is never
+  // stored: only the ids in OnrampWebhookReceipt, and the job payload carries
+  // the reservation id and event id, nothing else.
+  public async receiveOnrampWebhook(
+    receipt: OnrampWebhookReceipt,
+    traceId: string,
+  ): Promise<"enqueued" | "duplicate"> {
+    return this.database.$transaction(async (transaction) => {
+      const written = await transaction.onrampWebhookReceipt.createMany({
+        data: [
+          {
+            id: `onramp_webhook_receipt_${ulid()}`,
+            eventId: receipt.eventId,
+            eventType: receipt.eventType,
+            transactionId: receipt.transactionId,
+            txHash: receipt.txHash,
+            partnerUserRef: receipt.partnerUserRef,
+          },
+        ],
+        skipDuplicates: true,
+      });
+      if (written.count === 0) return "duplicate";
+      await enqueueTransactionalJob(
+        this.pgBoss,
+        transaction,
+        "provider_events.coinbase_onramp_webhook",
+        {
+          reservationId: receipt.partnerUserRef,
+          eventId: receipt.eventId,
+          eventType: receipt.eventType,
+        },
+        traceId,
+      );
+      return "enqueued";
+    });
+  }
+
   public async expireReservation(input: ExpireReservationInput): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
       const current = await lockReservationWithLatestMoney(transaction, input.reservationId);
@@ -790,7 +923,8 @@ export class PrismaOfferingRepository
       // the latest capital_state under the same lock as the stage flip so
       // money that has already landed is never swept to 'lapsed' (AD-253
       // keeps the two state machines separate on purpose). recordMoneyEvent
-      // takes this same row lock, so the two serialise;
+      // and recordOnrampOutcome take this same row lock, so they
+      // serialise with this;
       // lockReservationWithLatestMoney reads the money state only after the
       // lock is held, so a waiter sees what the holder committed.
       if (isReservationFunded(current.capital_state)) return false;
@@ -1738,7 +1872,12 @@ async function lockReservationWithLatestMoney(
   transaction: Prisma.TransactionClient,
   reservationId: string,
 ): Promise<
-  | { reservation_stage: string; capital_state: string | null; provider_reference: string | null }
+  | {
+      reservation_stage: string;
+      capital_state: string | null;
+      provider_reference: string | null;
+      recorded_at: Date | null;
+    }
   | undefined
 > {
   const locked = await transaction.$queryRaw<Array<{ reservation_stage: string }>>`
@@ -1750,9 +1889,9 @@ async function lockReservationWithLatestMoney(
   const reservation = locked[0];
   if (reservation === undefined) return undefined;
   const latest = await transaction.$queryRaw<
-    Array<{ capital_state: string; provider_reference: string | null }>
+    Array<{ capital_state: string; provider_reference: string | null; recorded_at: Date }>
   >`
-    SELECT money_event.capital_state, money_event.provider_reference
+    SELECT money_event.capital_state, money_event.provider_reference, money_event.recorded_at
     FROM money.money_events AS money_event
     WHERE money_event.reservation_id = ${reservationId}
     ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
@@ -1762,5 +1901,6 @@ async function lockReservationWithLatestMoney(
     reservation_stage: reservation.reservation_stage,
     capital_state: latest[0]?.capital_state ?? null,
     provider_reference: latest[0]?.provider_reference ?? null,
+    recorded_at: latest[0]?.recorded_at ?? null,
   };
 }

@@ -629,6 +629,7 @@ model Reservation {
   account                   Account          @relation(fields: [accountId], references: [id])
   reconfirmedDisclosurePack DisclosurePack?  @relation(fields: [reconfirmedDisclosurePackId], references: [id], onDelete: Restrict)
   moneyEvents               MoneyEvent[]
+  lateEvidence              OnrampLateEvidence[]
   positions                 PositionLedger[]
 
   @@index([offeringId, reservationStage], map: "idx_reservations_offering_stage")
@@ -709,6 +710,64 @@ model MoneyEvent {
   @@schema("money")
 }
 
+/// One verified Coinbase CDP onramp webhook delivery, reduced to ids (AD-289):
+/// never the body, the signature or a secret. Append-only, like money_events,
+/// and unique on the delivery's event id so a redelivery is a no-op. Written in
+/// the same transaction that enqueues the provider_events.coinbase_onramp_webhook
+/// job. partner_user_ref is the reservation id the onramp session was opened
+/// with; it has no foreign key on purpose, so an event for a reservation this
+/// database does not know stays on file as evidence instead of failing the write.
+model OnrampWebhookReceipt {
+  id             String   @id @map("onramp_webhook_receipt_id")
+  eventId        String   @unique(map: "uq_onramp_webhook_receipts_event_id") @map("event_id")
+  eventType      String   @map("event_type")
+  transactionId  String?  @map("transaction_id")
+  txHash         String?  @map("tx_hash")
+  partnerUserRef String   @map("partner_user_ref")
+  receivedAt     DateTime @default(now()) @map("received_at") @db.Timestamptz(6)
+
+  @@index([partnerUserRef, receivedAt(sort: Desc)], map: "idx_onramp_webhook_receipts_partner_user_ref")
+  @@map("onramp_webhook_receipts")
+  @@schema("money")
+}
+
+/// A Coinbase onramp success the single recording method refused to write as
+/// money because its reservation had already left 'initiated' (lapsed,
+/// cancelled, or past funding): an ops-visibility list of late funding
+/// evidence, nothing more (AD-288, decided 2026-11-17). The EURC is already in
+/// the investor's own wallet (AD-243), so nothing here holds, reinstates or
+/// refunds anything, and a row is never a money event: it cannot count as the
+/// reservation's funding. One row per provider transaction id. It is written
+/// after the recording method has answered other_stage (which wrote nothing and
+/// has released the reservation's row lock), in a transaction of its own that
+/// takes no reservation lock; the unique id makes it idempotent
+/// (INSERT ... ON CONFLICT DO NOTHING), so whichever of the poll or the webhook
+/// job sees the transaction first writes it and the second sighting inserts
+/// nothing. A row is immutable except that staff can set reviewed_at once
+/// (trigger money.guard_onramp_late_evidence_change).
+model OnrampLateEvidence {
+  id                    String    @id @map("onramp_late_evidence_id")
+  providerTransactionId String    @unique(map: "uq_onramp_late_evidence_provider_transaction_id") @map("provider_transaction_id")
+  txHash                String?   @map("tx_hash")
+  destinationWallet     String    @map("destination_wallet")
+  reservationId         String    @map("reservation_id")
+  /// The reservation's stage when the transaction was seen; never 'initiated'.
+  reservationStage      String    @map("reservation_stage")
+  amount                Decimal   @db.Decimal(20, 6)
+  asset                 String
+  /// eurc_reserved: a success that covers the reservation. purchase_failed: a success that does not (wrong asset, or below the 90% band).
+  state                 String
+  observedAt            DateTime  @map("observed_at") @db.Timestamptz(6)
+  reviewedAt            DateTime? @map("reviewed_at") @db.Timestamptz(6)
+
+  reservation Reservation @relation(fields: [reservationId], references: [id])
+
+  @@index([reviewedAt, observedAt], map: "idx_onramp_late_evidence_review_observed")
+  @@index([reservationId], map: "idx_onramp_late_evidence_reservation")
+  @@map("onramp_late_evidence")
+  @@schema("money")
+}
+
 model TreasurySweepBatch {
   id                     String    @id @map("sweep_batch_id")
   sweepDate              DateTime  @map("sweep_date") @db.Date
@@ -777,7 +836,7 @@ model WalletRegistration {
   // outlives WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS (AD-287, decided
   // 2026-11-17). Pending means registeredAt AND expiredAt are both NULL; the
   // check constraint wallet_registrations_expired_only_pending_check (raw SQL,
-  // migration 20261117202500_wallet_registration_expiry) keeps a row from being
+  // migration 20261117204000_wallet_registration_expiry) keeps a row from being
   // both confirmed and expired. The account's next registration clears it, and
   // so does a staff reconcile that confirms the claim. Never deleted.
   expiredAt                      DateTime? @map("expired_at") @db.Timestamptz(6)

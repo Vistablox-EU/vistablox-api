@@ -108,6 +108,10 @@ import {
   createOfferingRouter,
 } from "./modules/offering/api/offering.router.js";
 import { createOfferingOperationsRouter } from "./modules/offering/api/offering-operations.router.js";
+import { createOnrampLateEvidenceRouter } from "./modules/offering/api/onramp-late-evidence.router.js";
+import { ListOnrampLateEvidenceService } from "./modules/offering/application/list-onramp-late-evidence.service.js";
+import { MarkOnrampLateEvidenceReviewedService } from "./modules/offering/application/mark-onramp-late-evidence-reviewed.service.js";
+import type { OnrampLateEvidenceReviewRepository } from "./modules/offering/repository/onramp-late-evidence.repository.js";
 import { GetInvestorOfferingService } from "./modules/offering/application/get-investor-offering.service.js";
 import { DownloadDisclosureDocumentService } from "./modules/offering/application/download-disclosure-document.service.js";
 import { CreateReservationService } from "./modules/offering/application/create-reservation.service.js";
@@ -208,6 +212,9 @@ import type {
 import type { GetKycDisplayProfileService } from "./modules/identity/application/kyc-display-profile.service.js";
 import type { DiditWebhookVerifier } from "./modules/identity/infrastructure/didit-webhook-verifier.js";
 import { createDiditWebhookRouter, createKycRouter } from "./modules/identity/api/kyc.router.js";
+import { createCoinbaseOnrampWebhookRouter } from "./modules/offering/api/coinbase-onramp-webhook.router.js";
+import type { ReceiveCoinbaseOnrampWebhookService } from "./modules/offering/application/coinbase-onramp-webhook.service.js";
+import type { CoinbaseOnrampWebhookVerifier } from "./modules/offering/infrastructure/coinbase-onramp-webhook-verifier.js";
 import type { KycEligibilityReader } from "./modules/identity/repository/kyc-eligibility-reader.js";
 import { createProfileRouter } from "./modules/profile/api/profile.router.js";
 import { GetProfileService } from "./modules/profile/application/get-profile.service.js";
@@ -260,6 +267,12 @@ export interface AppDependencies {
   // browser's Origin header can never match one.
   corsOrigins: string[];
   authHandler?: RequestHandler;
+  // POST /webhooks/coinbase-onramp: mounted only when server.ts has both a
+  // Coinbase CDP client and COINBASE_ONRAMP_WEBHOOK_SECRET.
+  coinbaseOnrampWebhook?: {
+    verifier: CoinbaseOnrampWebhookVerifier;
+    receiveWebhook: ReceiveCoinbaseOnrampWebhookService;
+  };
   passkeyAssociations?: {
     appleTeamId?: string;
     appleBundleId: string;
@@ -366,6 +379,10 @@ export interface AppDependencies {
       };
       /** Staff featured-flag and media management (PATCH /:offering_id/presentation). */
       presentation?: OfferingPresentationRepository;
+    };
+    /** Staff list of late onramp funding evidence, and the mark-reviewed action (AD-288, issue #168). */
+    onrampLateEvidence?: {
+      repository: OnrampLateEvidenceReviewRepository;
     };
     staffAccountLifecycle?: {
       repository: StaffAccountLifecycleRepository;
@@ -556,6 +573,18 @@ export function createApp(dependencies: AppDependencies): Express {
       dependencies.authHandler,
     );
   }
+  if (dependencies.coinbaseOnrampWebhook !== undefined) {
+    // Ahead of express.json: the HMAC covers the exact bytes CDP sent, so this
+    // route needs the raw body, not a re-serialised parse of it.
+    app.use(
+      "/webhooks/coinbase-onramp",
+      express.raw({ limit: "256kb", type: "application/json" }),
+      createCoinbaseOnrampWebhookRouter(
+        dependencies.coinbaseOnrampWebhook.verifier,
+        dependencies.coinbaseOnrampWebhook.receiveWebhook,
+      ),
+    );
+  }
   app.use(express.json({ limit: "1mb", type: "application/json" }));
 
   app.use("/health", createHealthRouter(dependencies.databaseProbe));
@@ -649,6 +678,20 @@ export function createApp(dependencies: AppDependencies): Express {
             },
       ),
     );
+    // Mounted before the offering-operations router, whose "/:offering_id/..." routes must not see this prefix.
+    if (dependencies.protectedApi.onrampLateEvidence !== undefined) {
+      const lateEvidence = dependencies.protectedApi.onrampLateEvidence;
+      app.use(
+        "/internal/v1/offerings/onramp-late-evidence",
+        createOnrampLateEvidenceRouter(
+          requireAuthentication,
+          requireAdminOperations,
+          requireStaffWebAuthn,
+          new ListOnrampLateEvidenceService(lateEvidence.repository),
+          new MarkOnrampLateEvidenceReviewedService(lateEvidence.repository),
+        ),
+      );
+    }
     if (dependencies.protectedApi.offeringOperations !== undefined) {
       const offeringDocuments = dependencies.protectedApi.offeringOperations.documents;
       const offeringPresentation = dependencies.protectedApi.offeringOperations.presentation;

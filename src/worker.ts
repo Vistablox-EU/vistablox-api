@@ -32,10 +32,14 @@ import { ExpirePendingWalletRegistrationsService } from "./modules/wallet/applic
 import { walletClaimExpiryCron } from "./modules/wallet/domain/wallet-claim-expiry-schedule.js";
 import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-wallet.repository.js";
 import { PollOnrampTransactionsService } from "./modules/offering/application/poll-onramp-transactions.service.js";
+import { ReconcileOnrampWebhookService } from "./modules/offering/application/coinbase-onramp-webhook.service.js";
 import { CommitOfferingFinalizationService } from "./modules/offering/application/commit-offering-finalization.service.js";
 import { SendReconfirmationRemindersService } from "./modules/offering/application/send-reconfirmation-reminders.service.js";
 import { NotifyReconfirmationWindowOpenedService } from "./modules/offering/application/notify-reconfirmation-window-opened.service.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
+import { PrismaOnrampLateEvidenceRepository } from "./modules/offering/repository/prisma-onramp-late-evidence.repository.js";
+import { RecordOnrampLateEvidenceService } from "./modules/offering/application/record-onramp-late-evidence.service.js";
+import { CheckOnrampLateEvidenceService } from "./modules/offering/application/check-onramp-late-evidence.service.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { CalculateOperatingDistributionService } from "./modules/rental/application/calculate-operating-distribution.service.js";
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
@@ -186,10 +190,21 @@ const coinbaseCdpClient =
         timeoutMs: 8_000,
         logger,
       });
+// Late onramp funding evidence (AD-288, decided 2026-11-17): what the poll and
+// the webhook job hand over when the single recording method answers
+// other_stage, and the standing alert that asks staff to review it. The alert
+// reads only the database, so it is not tied to the Coinbase credentials.
+const onrampLateEvidenceRepository = new PrismaOnrampLateEvidenceRepository(database);
+const recordOnrampLateEvidence = new RecordOnrampLateEvidenceService(onrampLateEvidenceRepository, logger);
+const checkOnrampLateEvidence = new CheckOnrampLateEvidenceService(onrampLateEvidenceRepository, logger);
 const pollOnrampTransactions =
   coinbaseCdpClient === undefined
     ? undefined
-    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger);
+    : new PollOnrampTransactionsService(offeringRepository, coinbaseCdpClient, logger, undefined, recordOnrampLateEvidence);
+const reconcileOnrampWebhook =
+  pollOnrampTransactions === undefined
+    ? undefined
+    : new ReconcileOnrampWebhookService(offeringRepository, pollOnrampTransactions);
 
 const operatingDistributionRepository = new PrismaOperatingDistributionRepository(database);
 const calculateOperatingDistribution = new CalculateOperatingDistributionService(
@@ -426,10 +441,14 @@ await ensureJobQueue(boss, "maintenance.kyc_stuck_session_expiry", "scheduled");
 await ensureJobQueue(boss, "maintenance.kyc_stuck_session_reconciliation", "scheduled");
 await ensureJobQueue(boss, "maintenance.account_recovery_alert", "scheduled");
 await ensureJobQueue(boss, "maintenance.wallet_registration_expiry", "scheduled");
+await ensureJobQueue(boss, "maintenance.onramp_late_evidence_alert", "scheduled");
 // Reversal (undoing the KYC microservice split): the Didit webhook's own
 // consumer, back in this worker -- used to live only in src/kyc-server.ts.
 // The webhook itself is received and durably enqueued by server.ts/app.ts.
 await ensureJobQueue(boss, "provider_events.didit_webhook", "event");
+// Registered unconditionally, like server.ts, so a send never hits a missing
+// queue; consumed only when a Coinbase client is configured (below).
+await ensureJobQueue(boss, "provider_events.coinbase_onramp_webhook", "event");
 
 await boss.schedule("case_timers.applicant_reminders", "0 8 * * *", null, {
   tz: "UTC",
@@ -552,6 +571,13 @@ await boss.schedule("maintenance.account_recovery_alert", "*/15 * * * *", null, 
 // Every WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES (15 by default): the TTL
 // is measured in hours, so a claim outlives it by at most one interval.
 await boss.schedule("maintenance.wallet_registration_expiry", walletClaimExpiryCron(environment.WALLET_REGISTRY_PENDING_EXPIRE_SWEEP_MINUTES), null, {
+  tz: "UTC",
+  ...RETRY_OPTIONS,
+});
+// Hourly and level-triggered: a warn line while any late onramp evidence is
+// unreviewed (AD-288). Nothing about it is time-critical (the EURC is already
+// in the investor's wallet), so a finer cadence would only repeat the line.
+await boss.schedule("maintenance.onramp_late_evidence_alert", "0 * * * *", null, {
   tz: "UTC",
   ...RETRY_OPTIONS,
 });
@@ -787,6 +813,13 @@ await boss.work("maintenance.account_recovery_alert", async () => {
 await boss.work("maintenance.wallet_registration_expiry", async () => {
   await runJob("maintenance.wallet_registration_expiry", (traceId) => expirePendingWalletRegistrations.execute(traceId));
 });
+await boss.work("maintenance.onramp_late_evidence_alert", async () => {
+  await runJob("maintenance.onramp_late_evidence_alert", async (traceId) => {
+    const summary = await checkOnrampLateEvidence.execute(traceId);
+    metrics.set("vistablox_worker_onramp_late_evidence_unreviewed", summary.unreviewed);
+    return summary;
+  });
+});
 await boss.work("provider_events.didit_webhook", async (jobs) => {
   for (const job of jobs) {
     const traceId =
@@ -808,6 +841,32 @@ await boss.work("provider_events.didit_webhook", async (jobs) => {
     }
   }
 });
+
+if (reconcileOnrampWebhook !== undefined) {
+  await boss.work("provider_events.coinbase_onramp_webhook", async (jobs) => {
+    for (const job of jobs) {
+      // AD-152: trace_id is injected by enqueueTransactionalJob when the
+      // receipt and the job are written together.
+      const traceId =
+        typeof job.data === "object" && job.data !== null && "trace_id" in job.data
+          ? String((job.data as { trace_id: unknown }).trace_id)
+          : "unknown";
+      try {
+        const result = await reconcileOnrampWebhook.execute(job.data);
+        logger.info(
+          { trace_id: traceId, job: "provider_events.coinbase_onramp_webhook", ...result },
+          "webhook job completed",
+        );
+      } catch (error) {
+        logger.error(
+          { err: error, trace_id: traceId, job: "provider_events.coinbase_onramp_webhook" },
+          "webhook job failed",
+        );
+        throw error;
+      }
+    }
+  });
+}
 
 // A job sent from this release on that fails after its last retry lands in the
 // dead-letter queue (ensureJobQueue, above); a job queued by an earlier release
