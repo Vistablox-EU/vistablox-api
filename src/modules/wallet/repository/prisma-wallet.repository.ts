@@ -14,6 +14,8 @@ import {
   type ReconcileWalletRegistrationInput,
   type ReconcileWalletRegistrationResult,
   type RegisteredWallet,
+  type ExpirePendingWalletRegistrationsResult,
+  type WalletRegistrationExpiryRepository,
   type WalletRepository,
   type WalletStatusReader,
   type WalletStatusSnapshot,
@@ -37,6 +39,7 @@ const WALLET_SELECT = {
   registeredAt: true,
   registrationTxHash: true,
   registrationBlockNumber: true,
+  expiredAt: true,
 } as const;
 
 const REGISTERED_WALLET_SELECT = {
@@ -51,6 +54,7 @@ const REGISTERED_WALLET_SELECT = {
   registrationEvidenceVerifiedAt: true,
   registrationEvidenceFlaggedAt: true,
   registrationEvidenceFlag: true,
+  expiredAt: true,
 } as const;
 
 interface RegisteredWalletRow {
@@ -65,6 +69,7 @@ interface RegisteredWalletRow {
   registrationEvidenceVerifiedAt: Date | null;
   registrationEvidenceFlaggedAt: Date | null;
   registrationEvidenceFlag: string | null;
+  expiredAt: Date | null;
 }
 
 function toRegisteredWallet(row: RegisteredWalletRow): RegisteredWallet {
@@ -84,8 +89,17 @@ function toRegisteredWallet(row: RegisteredWalletRow): RegisteredWallet {
  * an address to an account, and the database enforces that through the
  * partial unique index above. Every address comparison is lower(col) =
  * lower($x) so rows written before the canonical lowercase form still match.
+ *
+ * A pending claim that outlives WALLET_REGISTRY_PENDING_EXPIRE_AFTER_HOURS is
+ * expired (expired_at set, see expirePendingWalletRegistrations). The row stays
+ * for the staff view, but its commitment is dead and every customer-facing read
+ * treats the account as having no wallet. The account's next registration
+ * overwrites it in place with a new commitment, and needs a fresh session when
+ * its address differs from the expired one (AD-287, decided 2026-11-17).
+ * Staff can still confirm an expired claim by reconciling it against matching
+ * on-chain evidence (see reconcileWalletRegistration).
  */
-export class PrismaWalletRepository implements WalletRepository, WalletStatusReader {
+export class PrismaWalletRepository implements WalletRepository, WalletStatusReader, WalletRegistrationExpiryRepository {
   public constructor(private readonly database: DatabaseClient) {}
 
   public async registerWallet(input: {
@@ -135,6 +149,14 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
         // has been written in this pass, and throwing rolls the transaction
         // back: the row, its commitment, requested_at and the audit trail stay
         // exactly as they were, and the refusal itself writes no audit row.
+        //
+        // An EXPIRED claim is still a claim for this rule (AD-287, decided
+        // 2026-11-17): registering again after expiry with an address that
+        // differs from the expired one needs a fresh session, exactly like
+        // replacing a live pending claim, so expiry does not hand a stale
+        // session a free address change. The same address stays free (it is a
+        // replay, though the commitment is renewed below).
+        const ownExpired = own !== null && own.expiredAt != null;
         if (own !== null && own.registeredAt === null && !ownAddressMatches && !input.freshAuthentication) {
           throw new WalletReplacementFreshAuthenticationRequiredError();
         }
@@ -153,7 +175,7 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
         // different account, report that, even if this account's own
         // registration is also confirmed on another address.
         if (own !== null && own.registeredAt !== null) {
-          if (ownAddressMatches) return own; // Idempotent replay of a confirmed registration.
+          if (ownAddressMatches) return withoutExpiry(own); // Idempotent replay of a confirmed registration.
           throw new WalletAddressConflictError(claimedByOther ? "address_claimed" : "address_mismatch");
         }
         // Also covers a replay of a pending claim whose address another
@@ -181,15 +203,46 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
               createdAt: input.requestedAt,
             },
           });
-          return transaction.walletRegistration.findUniqueOrThrow({
-            where: { accountId: input.accountId },
+          return withoutExpiry(
+            await transaction.walletRegistration.findUniqueOrThrow({
+              where: { accountId: input.accountId },
+              select: WALLET_SELECT,
+            }),
+          );
+        }
+
+        if (ownExpired) {
+          // The expired claim is overwritten in place with a fresh commitment,
+          // even for the same address: the old commitment is dead (the
+          // watcher no longer matches it) and must not be handed out again.
+          // Reaching here, the address is the same or the session is fresh.
+          const renewed = await transaction.walletRegistration.update({
+            where: { accountId: input.accountId, registeredAt: null },
+            data: {
+              walletAddress: address,
+              registrationCommitment: input.registrationCommitment,
+              requestedAt: input.requestedAt,
+              expiredAt: null,
+            },
             select: WALLET_SELECT,
           });
+          await transaction.auditLog.create({
+            data: {
+              id: `audit_${ulid()}`,
+              actorAccountId: input.accountId,
+              action: "settlement.wallet_registration_requested",
+              resourceType: "account",
+              resourceId: input.accountId,
+              changes: { wallet_address: address, previous_expired_wallet_address: own.walletAddress },
+              createdAt: input.requestedAt,
+            },
+          });
+          return withoutExpiry(renewed);
         }
 
         // Idempotent replay of the same pending claim: keep the commitment
         // the device may already have signed.
-        if (ownAddressMatches) return own;
+        if (ownAddressMatches) return withoutExpiry(own);
 
         // A pending claim of this account on another address: replace it in
         // place. The old commitment dies with the overwritten column, so the
@@ -214,7 +267,7 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
             createdAt: input.requestedAt,
           },
         });
-        return replaced;
+        return withoutExpiry(replaced);
       }
       // Unreachable: the second pass always finds the row the concurrent
       // request committed, because the lock above waits for it.
@@ -223,18 +276,88 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
   }
 
   public async getStatus(accountId: string): Promise<WalletStatusSnapshot | null> {
-    return this.database.walletRegistration.findUnique({
-      where: { accountId },
+    return this.database.walletRegistration.findFirst({
+      where: { accountId, expiredAt: null },
       select: { requestedAt: true, registeredAt: true },
     });
   }
 
-  public async findByAccountId(accountId: string): Promise<RegisteredWallet | null> {
-    const row = await this.database.walletRegistration.findUnique({
-      where: { accountId },
+  public async findByAccountId(
+    accountId: string,
+    options: { includeExpired?: boolean } = {},
+  ): Promise<RegisteredWallet | null> {
+    const row = await this.database.walletRegistration.findFirst({
+      where: options.includeExpired === true ? { accountId } : { accountId, expiredAt: null },
       select: REGISTERED_WALLET_SELECT,
     });
     return row === null ? null : toRegisteredWallet(row);
+  }
+
+  public async expirePendingWalletRegistrations(input: {
+    cutoff: Date;
+    now: Date;
+    batchSize: number;
+  }): Promise<ExpirePendingWalletRegistrationsResult> {
+    // One run touches at most batchSize claims, oldest first, so a backlog
+    // clears over a few runs instead of in one long transaction.
+    if (!Number.isInteger(input.batchSize) || input.batchSize < 1) {
+      throw new RangeError(`The expiry batch size must be a positive integer, got ${input.batchSize}.`);
+    }
+    return this.database.$transaction(async (transaction) => {
+      const counted = await transaction.$queryRaw<Array<{ count: bigint }>>`
+        SELECT count(*) AS count FROM settlement.wallet_registrations
+        WHERE registered_at IS NULL AND expired_at IS NULL AND requested_at <= ${input.cutoff}
+      `;
+      // SKIP LOCKED: a row locked right now is being confirmed, replaced or
+      // reconciled (all take this row lock) or expired by a concurrent run.
+      // It is left to that transaction, and to the next run if it is still
+      // pending then. The predicate is re-checked on the locked row, so a
+      // claim confirmed or replaced after the count is never expired.
+      //
+      // Two statements on purpose, not one UPDATE ... FROM (SELECT ... LIMIT n
+      // FOR UPDATE SKIP LOCKED): with the sub-select inside the UPDATE, the
+      // planner may run it more than once, and a run then expired twice its
+      // batch (10 of 12 claims for a batch of 5, on PostgreSQL 16). The rows
+      // are locked here and stay locked until the transaction ends, so the
+      // UPDATE below touches exactly the ones chosen.
+      const chosen = await transaction.$queryRaw<Array<{ account_id: string }>>`
+        SELECT account_id FROM settlement.wallet_registrations
+        WHERE registered_at IS NULL AND expired_at IS NULL AND requested_at <= ${input.cutoff}
+        ORDER BY requested_at, account_id
+        LIMIT ${input.batchSize}
+        FOR UPDATE SKIP LOCKED
+      `;
+      const expired =
+        chosen.length === 0
+          ? []
+          : await transaction.$queryRaw<
+              Array<{ account_id: string; wallet_address: string; registration_commitment: string; requested_at: Date }>
+            >`
+              UPDATE settlement.wallet_registrations
+              SET expired_at = ${input.now}
+              WHERE account_id = ANY(${chosen.map((row) => row.account_id)}::text[])
+                AND registered_at IS NULL AND expired_at IS NULL
+              RETURNING account_id, wallet_address, registration_commitment, requested_at
+            `;
+      if (expired.length > 0) {
+        await transaction.auditLog.createMany({
+          data: expired.map((row) => ({
+            id: `audit_${ulid()}`,
+            actorAccountId: null,
+            action: "settlement.wallet_registration_expired",
+            resourceType: "account",
+            resourceId: row.account_id,
+            changes: {
+              wallet_address: row.wallet_address,
+              registration_commitment: row.registration_commitment,
+              requested_at: row.requested_at.toISOString(),
+            },
+            createdAt: input.now,
+          })),
+        });
+      }
+      return { checked: Number(counted[0]?.count ?? 0), expired: expired.length };
+    });
   }
 
   public async reconcileWalletRegistration(
@@ -285,6 +408,14 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
         // `registered_at IS NULL`: staff can still attach evidence to a
         // registration the watcher already confirmed. Nothing has been written
         // yet; throwing rolls the transaction back.
+        //
+        // An EXPIRED claim passes this check like a pending one (AD-287,
+        // decided 2026-11-17: staff can reconcile an expired claim on matching
+        // on-chain evidence). That includes a claim the expiry sweep expired
+        // after the caller read the row as pending: the chain evidence was
+        // verified against this very address and commitment, which the sweep
+        // does not change, and the customer registering again does (it always
+        // issues a new commitment), which is what this check catches.
         if (
           row.walletAddress !== input.expectedWalletAddress ||
           row.registrationCommitment !== input.expectedRegistrationCommitment
@@ -306,16 +437,25 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
           });
 
         // A pending row: the reconcile is the confirmation. registered_at is
-        // written here and nowhere else in this method.
+        // written here and nowhere else in this method. For an expired claim
+        // the same write reinstates it: expired_at is cleared in the same
+        // statement (the CHECK constraint refuses a row that is both), the
+        // confirmed-address and chain-event unique indexes apply as for any
+        // confirmation, and the audit row says which expiry it undid.
         if (row.registeredAt === null) {
           const updated = await transaction.walletRegistration.update({
             where: { accountId: input.accountId },
-            data: { registeredAt: input.registeredAt, ...evidenceData },
+            data: {
+              registeredAt: input.registeredAt,
+              ...evidenceData,
+              ...(row.expiredAt === null ? {} : { expiredAt: null }),
+            },
             select: REGISTERED_WALLET_SELECT,
           });
           await audit("settlement.wallet_registration_reconciled", {
             ...nextForAudit,
             registered_at: input.registeredAt.toISOString(),
+            ...(row.expiredAt === null ? {} : { reinstated_from_expired_at: row.expiredAt.toISOString() }),
           });
           return { kind: "reconciled", outcome: "confirmed", wallet: toRegisteredWallet(updated) };
         }
@@ -413,4 +553,11 @@ export class PrismaWalletRepository implements WalletRepository, WalletStatusRea
       },
     });
   }
+}
+
+// registerWallet's own reads carry expiredAt for its decision; what it returns
+// is always a live registration, so the column is not part of the result.
+function withoutExpiry<T extends { expiredAt: Date | null }>(row: T): Omit<T, "expiredAt"> {
+  const { expiredAt: _expiredAt, ...rest } = row;
+  return rest;
 }

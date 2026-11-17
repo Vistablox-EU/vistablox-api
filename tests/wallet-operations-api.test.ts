@@ -87,6 +87,7 @@ describe("GET /internal/v1/wallet-accounts/:account_id", () => {
         status: "registered",
         requested_at: "2026-09-02T10:00:00.000Z",
         registered_at: "2026-09-02T10:05:00.000Z",
+        expired_at: null,
         registration_evidence: {
           status: "none",
           transaction_hash: null,
@@ -118,6 +119,27 @@ describe("GET /internal/v1/wallet-accounts/:account_id", () => {
     expect(response.status).toBe(200);
     expect(response.body.data.status).toBe("pending");
     expect(response.body.data.registered_at).toBeNull();
+  });
+
+  it("shows staff an expired claim as expired, asking the repository to include it (#177)", async () => {
+    const findByAccountId = vi.fn().mockResolvedValue({
+      walletAddress: "0x71c7656ec7ab88b098defb751b7401b5f6d8976f",
+      registrationCommitment: "0xabc123",
+      requestedAt: new Date("2026-09-02T10:00:00.000Z"),
+      registeredAt: null,
+      expiredAt: new Date("2026-09-03T10:00:00.000Z"),
+    });
+    const { app } = buildApp({ repository: { registerWallet: vi.fn(), findByAccountId } });
+
+    const response = await request(app).get("/internal/v1/wallet-accounts/acct_01");
+
+    expect(response.status).toBe(200);
+    expect(findByAccountId).toHaveBeenCalledWith("acct_01", { includeExpired: true });
+    expect(response.body.data).toMatchObject({
+      status: "expired",
+      registered_at: null,
+      expired_at: "2026-09-03T10:00:00.000Z",
+    });
   });
 
   it("404s for an account with no registered wallet -- not a synthesized empty response", async () => {

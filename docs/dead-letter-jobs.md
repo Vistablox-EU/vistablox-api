@@ -62,8 +62,11 @@ The mapping below is a proposal, **pending confirmation by the founder**: who th
 | `case_timers.post_ipo_structuring_handoff` | event | intake | tier_2 |
 | `case_timers.applicant_reminders` | scheduled | intake | tier_2 |
 | `case_timers.response_window_expiry` | scheduled | intake | tier_2 |
+| `provider_events.coinbase_onramp_webhook` | event | payments | tier_1 |
 | `provider_events.didit_webhook` | event | identity | tier_1 |
 | `maintenance.account_recovery_alert` | scheduled | identity | tier_1 |
+| `maintenance.wallet_registration_expiry` | scheduled | settlement | tier_1 |
+| `maintenance.onramp_late_evidence_alert` | scheduled | payments | tier_1 |
 | `maintenance.kyc_renewal` | scheduled | identity | tier_2 |
 | `maintenance.kyc_stuck_session_expiry` | scheduled | identity | tier_2 |
 | `maintenance.kyc_stuck_session_reconciliation` | scheduled | identity | tier_2 |
@@ -108,6 +111,7 @@ Exit codes: `0` done (or dry run), `1` refused or failed, `2` bad arguments.
   - `case_timers.pre_offering_open_handoff`: it does not re-check the case stage. Confirm the case is still `pre_offering_open` before replaying, or the replay opens the offering anyway.
   - `case_timers.post_ipo_structuring_handoff`: fails for good for a case outside its expected stages; replaying without fixing the case only dead-letters it again.
   - `provider_events.didit_webhook`: skips an event it has already recorded, so a replay is harmless.
+  - `provider_events.coinbase_onramp_webhook`: re-fetches the reservation's transactions from Coinbase and records an outcome only once per provider transaction and state, so a replay is harmless.
 
 ### Finding entries without the alert
 

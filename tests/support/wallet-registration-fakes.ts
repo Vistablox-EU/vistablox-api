@@ -104,6 +104,8 @@ export interface FakeRegistrationRow {
   verifiedAt: Date | null;
   flaggedAt: Date | null;
   flag: WalletRegistrationEvidenceFlag | null;
+  // Set when the claim expiry sweep retired a pending claim (#177).
+  expiredAt: Date | null;
 }
 
 export type FakeRegistrationSeed = Partial<FakeRegistrationRow> & {
@@ -166,6 +168,7 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
       verifiedAt: null,
       flaggedAt: null,
       flag: null,
+      expiredAt: null,
       ...seed,
     };
     this.rows.set(row.accountId, row);
@@ -186,9 +189,11 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
     return this.writesOf("confirm").map((write) => write.accountId);
   }
 
+  // An expired claim's commitment is dead, as in the real repository: it
+  // matches nothing.
   public async findWalletRegistrationByCommitment(commitment: string): Promise<WalletRegistrationRecord | null> {
     for (const row of this.rows.values()) {
-      if (row.commitment.toLowerCase() === commitment.toLowerCase()) return toRecord(row);
+      if (row.expiredAt === null && row.commitment.toLowerCase() === commitment.toLowerCase()) return toRecord(row);
     }
     return null;
   }
@@ -208,6 +213,8 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
       return "stale";
     }
     if (row.registeredAt !== null) return "already_registered";
+    // The same claim, expired since it was matched: told apart from a replaced one.
+    if (row.expiredAt !== null) return "expired";
     if (this.holderOf(input.evidence.transactionHash, input.evidence.logIndex, input.accountId) !== null) {
       return "event_taken";
     }

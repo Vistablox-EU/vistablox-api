@@ -42,7 +42,7 @@ describe("PrismaWalletRepository.registerWallet against a legacy mixed-case row"
       freshAuthentication: false,
     });
 
-    expect(result).toBe(legacyRow);
+    expect(result).toEqual(legacyRow);
     expect(transaction.walletRegistration.create).not.toHaveBeenCalled();
     expect(transaction.auditLog.create).not.toHaveBeenCalled();
     expect(transaction.$executeRaw).not.toHaveBeenCalled();

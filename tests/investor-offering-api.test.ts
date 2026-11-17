@@ -203,6 +203,8 @@ function buildReservationApp(options?: {
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn().mockResolvedValue(false),
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
+    findReservationForOnrampReconciliation: vi.fn().mockResolvedValue(null),
+    recordOnrampOutcome: vi.fn().mockResolvedValue({ status: "unknown_reservation" }),
   };
   const coinbase: CoinbaseCdpClient = {
     createOnrampSessionToken: vi.fn().mockResolvedValue({ token: "session-token-01", channelId: "channel-01" }),

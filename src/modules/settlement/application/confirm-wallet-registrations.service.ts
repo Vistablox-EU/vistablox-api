@@ -109,7 +109,10 @@ export interface ConfirmWalletRegistrationsSummary {
   safeHeadBlock: string;
   eventsFound: number;
   registrationsConfirmed: number;
-  // An event whose commitment belongs to no registration row at all.
+  // An event whose commitment belongs to no live registration row: none at
+  // all, a claim the account replaced, or a claim the expiry sweep has expired
+  // (#177; AD-287, decided 2026-11-17: a late event for an expired claim is
+  // unmatched, not stale).
   unmatchedEvents: number;
   // The part of unmatchedEvents that is news: events in a block past the cursor
   // an earlier completed run reached. Alerts key on this, not on the total.
@@ -316,13 +319,12 @@ export class ConfirmWalletRegistrationsService {
     const evidence = toEvidence(event);
     const record = await this.repository.findWalletRegistrationByCommitment(commitment);
     if (record === null) {
-      summary.unmatchedEvents += 1;
-      // An event at or before the cursor was already read by a completed run,
-      // so here it is an overlap replay, not news. No block number or no cursor
-      // means it cannot be shown to be a replay, so it counts.
-      if (run.cursor === null || event.blockNumber === undefined || event.blockNumber === null || event.blockNumber > run.cursor) {
-        summary.newUnmatchedEvents += 1;
-      }
+      // No live claim has this commitment: a claim the account replaced, an
+      // event nobody asked for, or a claim the expiry sweep has expired (#177).
+      // A late event for an expired claim is counted here like any other
+      // unmatched event (AD-287, decided 2026-11-17): it confirms nothing, and
+      // staff can reconcile the claim from the chain evidence.
+      countUnmatchedEvent(summary, event.blockNumber, run.cursor);
       return null;
     }
 
@@ -399,6 +401,11 @@ export class ConfirmWalletRegistrationsService {
     } else if (outcome === "stale") {
       // The account replaced the claim between the read and the write.
       summary.staleConfirmations += 1;
+    } else if (outcome === "expired") {
+      // The expiry sweep expired the claim between the read and the write: the
+      // event names an expired claim, so it counts as unmatched, exactly as it
+      // would have had the sweep run a moment earlier.
+      countUnmatchedEvent(summary, evidence.blockNumber, run.cursor);
     } else {
       // "already_registered": another run (or the manual reconcile) confirmed
       // the row between the read and the write. Classify against what it holds
@@ -606,6 +613,20 @@ const NO_CHANGE: EvidenceCheck = { rewind: null, apply: null };
 // The event's identity as the stored form wants it, or null when the node did
 // not give a complete one (a removed log, a log of a pending block) or gave
 // something that is not a hash.
+// An event at or before the cursor was already read by a completed run, so
+// there it is an overlap replay, not news. No block number or no cursor means
+// it cannot be shown to be a replay, so it counts.
+function countUnmatchedEvent(
+  summary: ConfirmWalletRegistrationsSummary,
+  blockNumber: bigint | null | undefined,
+  cursor: bigint | null,
+): void {
+  summary.unmatchedEvents += 1;
+  if (cursor === null || blockNumber === undefined || blockNumber === null || blockNumber > cursor) {
+    summary.newUnmatchedEvents += 1;
+  }
+}
+
 function toEvidence(event: WalletRegisteredEvent): WalletRegistrationEvidence | null {
   if (event.removed === true) return null;
   const { transactionHash, blockHash, blockNumber, logIndex } = event;

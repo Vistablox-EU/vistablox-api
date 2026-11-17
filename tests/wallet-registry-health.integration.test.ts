@@ -1,12 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import { Pool } from "pg";
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 
 import { Prisma } from "../src/generated/prisma/client.js";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { CheckWalletRegistryHealthService } from "../src/modules/settlement/application/check-wallet-registry-health.service.js";
 import { RunWalletRegistryWatcherService } from "../src/modules/settlement/application/run-wallet-registry-watcher.service.js";
+import { WalletRegistryExpiryGate } from "../src/modules/settlement/application/wallet-registry-expiry-gate.js";
 import { WalletRegistryAlertReporter } from "../src/modules/settlement/application/wallet-registry-alert-reporter.js";
 import { WorkerMetrics } from "../src/shared/health/worker-metrics.js";
 import { PrismaWalletRegistryHealthRepository } from "../src/modules/settlement/repository/prisma-wallet-registry-health.repository.js";
@@ -14,6 +15,7 @@ import { QUIET_CLAIM_AND_EVIDENCE_COUNTERS } from "./support/wallet-registry-sum
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 const HEARTBEAT_KEY = "wallet_registry.watcher_heartbeat";
+const CURSOR_KEY = "wallet_registry.last_processed_block";
 const MISMATCH_ACTION = "settlement.wallet_registration_address_mismatch";
 
 // Other test files share this database and run in parallel, so nothing here
@@ -37,7 +39,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
 
   async function createAccount(
     name: string,
-    claim: { commitment: string; requestedAt: Date; registeredAt: Date | null },
+    claim: { commitment: string; requestedAt: Date; registeredAt: Date | null; expiredAt?: Date },
   ): Promise<string> {
     const accountId = `account_whealth_${name}_${suffix}`;
     const betterAuthUserId = `auth_whealth_${name}_${suffix}`;
@@ -53,6 +55,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
         registrationCommitment: claim.commitment,
         requestedAt: claim.requestedAt,
         registeredAt: claim.registeredAt,
+        expiredAt: claim.expiredAt ?? null,
       },
     });
     accounts.set(name, accountId);
@@ -83,6 +86,17 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     // Pending, requested in 1990: overdue for any realistic cutoff.
     await createAccount("old1", { commitment: commitment("c1"), requestedAt: longAgo, registeredAt: null });
     await createAccount("old2", { commitment: commitment("c2"), requestedAt: longAgo, registeredAt: null });
+    // Expired pending claims (#177) are out of every pending reading: one older
+    // than any live fixture, which would otherwise be the oldest, and one from
+    // 1990, which would otherwise make three overdue claims between the cutoffs.
+    const expiredAt = new Date("2026-01-01T00:00:00.000Z");
+    await createAccount("expiredOlder", {
+      commitment: commitment("e1"),
+      requestedAt: new Date("1985-01-01T00:00:00.000Z"),
+      registeredAt: null,
+      expiredAt,
+    });
+    await createAccount("expired1990", { commitment: commitment("e2"), requestedAt: longAgo, registeredAt: null, expiredAt });
     // Pending but requested in 2099: never overdue.
     await createAccount("fresh", { commitment: commitment("c3"), requestedAt: farFuture, registeredAt: null });
     // Already confirmed: neither pending nor an open mismatch.
@@ -96,6 +110,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     await createAccount("mismatchMixedCase", { commitment: commitment("d2"), requestedAt: farFuture, registeredAt: null });
     await createAccount("mismatchLegacy", { commitment: commitment("d3"), requestedAt: farFuture, registeredAt: null });
     await createAccount("mismatchReplaced", { commitment: commitment("d4-new"), requestedAt: farFuture, registeredAt: null });
+    await createAccount("mismatchExpired", {
+      commitment: commitment("d6"),
+      requestedAt: farFuture,
+      registeredAt: null,
+      expiredAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
     await createAccount("mismatchConfirmed", {
       commitment: commitment("d5"),
       requestedAt: longAgo,
@@ -109,6 +129,8 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     await recordMismatchRow("mismatchLegacy", commitment("d3"), null);
     // The claim has since been replaced with another commitment.
     await recordMismatchRow("mismatchReplaced", commitment("d4-old"), `${suffix}:replaced`);
+    // The claim expired afterwards.
+    await recordMismatchRow("mismatchExpired", commitment("d6"), `${suffix}:expired`);
     // The claim was confirmed afterwards.
     await recordMismatchRow("mismatchConfirmed", commitment("d5"), `${suffix}:confirmed`);
   });
@@ -121,7 +143,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     await authPool.query('DELETE FROM "auth_user" WHERE "id" = ANY($1)', [
       [...accounts.keys()].map((name) => `auth_whealth_${name}_${suffix}`),
     ]);
-    await database.platformSetting.deleteMany({ where: { key: HEARTBEAT_KEY } });
+    await database.platformSetting.deleteMany({ where: { key: { in: [HEARTBEAT_KEY, CURSOR_KEY] } } });
     await Promise.all([database.$disconnect(), authPool.end()]);
   });
 
@@ -175,6 +197,12 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
 
       expect(unresolvedMismatches.accountIds).not.toContain(accountIdOf("mismatchConfirmed"));
       expect(unresolvedMismatches.accountIds).not.toContain(accountIdOf("mismatchReplaced"));
+    });
+
+    it("drops an account whose claim with the mismatching commitment expired", async () => {
+      const { unresolvedMismatches } = await repository.readWalletRegistryHealth(new Date());
+
+      expect(unresolvedMismatches.accountIds).not.toContain(accountIdOf("mismatchExpired"));
     });
 
     it("reports an account once however many mismatch rows it has, with a total that covers the listing", async () => {
@@ -309,6 +337,80 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
     });
   });
 
+  // Whether the database holds any trace of a watcher run, for the claim expiry
+  // gate: a heartbeat row, readable or not, or a saved cursor. The cursor row is
+  // the watcher's own (PrismaSettlementRepository writes it); this file is the
+  // only integration file that touches it for real (see
+  // wallet-registry-heartbeat-isolation.test.ts).
+  describe("watcher history", () => {
+    beforeEach(async () => {
+      await database.platformSetting.deleteMany({ where: { key: { in: [HEARTBEAT_KEY, CURSOR_KEY] } } });
+    });
+
+    const history = async () => (await repository.readWalletRegistryHealth(new Date())).watcherHistoryRecorded;
+
+    it("is false when the watcher has never run: no heartbeat row and no cursor", async () => {
+      await expect(history()).resolves.toBe(false);
+    });
+
+    it("is true after a run wrote its heartbeat", async () => {
+      await repository.recordWatcherHeartbeat({
+        completedAt: new Date("2026-11-13T12:00:00.000Z"),
+        cursorBlock: 1n,
+        safeHeadBlock: 2n,
+        eventsFound: 0,
+      });
+
+      await expect(history()).resolves.toBe(true);
+    });
+
+    it("is true for a heartbeat row that cannot be read, which reads as no heartbeat but is a trace", async () => {
+      await database.platformSetting.create({
+        data: { key: HEARTBEAT_KEY, value: { completed_at: "not a date" }, description: "unreadable on purpose" },
+      });
+
+      const reading = await repository.readWalletRegistryHealth(new Date());
+
+      expect(reading.heartbeat).toBeNull();
+      expect(reading.watcherHistoryRecorded).toBe(true);
+    });
+
+    it("is true for a saved cursor with no heartbeat: a watcher from before heartbeats, or one whose heartbeat write failed", async () => {
+      await database.platformSetting.create({ data: { key: CURSOR_KEY, value: "1234567", description: "cursor" } });
+
+      const reading = await repository.readWalletRegistryHealth(new Date());
+
+      expect(reading.heartbeat).toBeNull();
+      expect(reading.watcherHistoryRecorded).toBe(true);
+    });
+
+    it("is true when both rows exist, and does not change what the heartbeat reads as", async () => {
+      await database.platformSetting.create({ data: { key: CURSOR_KEY, value: "9", description: "cursor" } });
+      await repository.recordWatcherHeartbeat({
+        completedAt: new Date("2026-11-13T12:00:00.000Z"),
+        cursorBlock: 9n,
+        safeHeadBlock: 10n,
+        eventsFound: 1,
+      });
+
+      const reading = await repository.readWalletRegistryHealth(new Date());
+
+      expect(reading.watcherHistoryRecorded).toBe(true);
+      expect(reading.heartbeat).toMatchObject({ cursorBlock: 9n, safeHeadBlock: 10n });
+    });
+
+    it("is not set by other platform settings", async () => {
+      await database.platformSetting.create({
+        data: { key: `wallet_registry.other_${suffix}`, value: "x", description: "something else" },
+      });
+      try {
+        await expect(history()).resolves.toBe(false);
+      } finally {
+        await database.platformSetting.deleteMany({ where: { key: `wallet_registry.other_${suffix}` } });
+      }
+    });
+  });
+
   // The two jobs as the worker wires them: a completed watcher run writes the
   // heartbeat through the reporter into the real table, and the health check
   // reads it back and judges it.
@@ -388,6 +490,122 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
       // The same row, judged an hour from now: no run since, so stalled.
       await check(() => new Date(Date.now() + 3_600_000)).execute();
       expect(logged.some((entry) => entry.fields.event === "wallet_registry.watcher_stalled")).toBe(true);
+    });
+  });
+  // The claim expiry sweep asks the watcher's health before it expires anything
+  // (AD-287, decided 2026-11-17). The gate runs the same policy over the same
+  // reading the health check uses; here it reads the real heartbeat row, which
+  // this file alone owns. The rest of the sweep is in
+  // wallet-claim-expiry.integration.test.ts.
+  describe("the claim expiry gate over the real heartbeat row", () => {
+    const MINUTE = 60_000;
+    const now = new Date("2026-11-17T12:00:00.000Z");
+    const RUNNING = { registryConfigured: true, watcherRunnable: true };
+    const WITHOUT_CHAIN = { registryConfigured: true, watcherRunnable: false };
+    const REGISTRY_OFF = { registryConfigured: false, watcherRunnable: false };
+    const gate = (worker = RUNNING) =>
+      new WalletRegistryExpiryGate(repository, {
+        thresholds: {
+          watcherStaleAfterMs: 10 * MINUTE,
+          cursorLagAlertBlocks: 900n,
+          cursorAheadToleranceBlocks: 32n,
+          // Other test files share this database; claims pending there must not decide anything here.
+          pendingOverdueAlertCount: 1_000_000,
+          unmatchedEventsAlertCount: 5,
+        },
+        ...worker,
+        pendingOverdueAfterMs: 5 * MINUTE,
+      });
+    const record = (ageMs: number, lagBlocks: bigint) =>
+      repository.recordWatcherHeartbeat({
+        completedAt: new Date(now.getTime() - ageMs),
+        cursorBlock: 50_000n - lagBlocks,
+        safeHeadBlock: 50_000n,
+        eventsFound: 0,
+      });
+
+    beforeEach(async () => {
+      await database.platformSetting.deleteMany({ where: { key: { in: [HEARTBEAT_KEY, CURSOR_KEY] } } });
+    });
+    afterAll(async () => {
+      await database.platformSetting.deleteMany({ where: { key: { in: [HEARTBEAT_KEY, CURSOR_KEY] } } });
+    });
+
+    it.each([
+      { name: "a fresh heartbeat, the cursor level with the safe head", ageMs: MINUTE, lag: 0n, mayExpire: true },
+      { name: "a heartbeat one ms short of the stale threshold", ageMs: 10 * MINUTE - 1, lag: 0n, mayExpire: true },
+      { name: "a heartbeat exactly at the stale threshold", ageMs: 10 * MINUTE, lag: 0n, mayExpire: false },
+      { name: "a cursor 899 blocks behind", ageMs: MINUTE, lag: 899n, mayExpire: true },
+      { name: "a cursor exactly 900 blocks behind", ageMs: MINUTE, lag: 900n, mayExpire: false },
+      { name: "a cursor 33 blocks ahead of the safe head", ageMs: MINUTE, lag: -33n, mayExpire: false },
+    ])("$name: mayExpire $mayExpire", async ({ ageMs, lag, mayExpire }) => {
+      await record(ageMs, lag);
+
+      expect((await gate().assess(now)).mayExpire).toBe(mayExpire);
+    });
+
+    it("holds the sweep back when no heartbeat has ever been recorded", async () => {
+      await expect(gate().assess(now)).resolves.toEqual({ mayExpire: false, reasons: ["wallet_registry.watcher_stalled"] });
+    });
+
+    it("holds the sweep back when the stored heartbeat cannot be read", async () => {
+      await database.platformSetting.create({
+        data: { key: HEARTBEAT_KEY, value: { completed_at: "not a date" }, description: "unreadable on purpose" },
+      });
+
+      await expect(gate().assess(now)).resolves.toEqual({ mayExpire: false, reasons: ["wallet_registry.watcher_stalled"] });
+    });
+
+    // The registry address is set and the CHAIN_* settings are gone: no watcher
+    // runs, but a watcher that ran before left its rows, and reads what it missed
+    // the day it runs again.
+    it("holds the sweep back where the watcher cannot run and its heartbeat is on record, however old", async () => {
+      await record(5 * 24 * 60 * MINUTE, 50_000n);
+
+      await expect(gate(WITHOUT_CHAIN).assess(now)).resolves.toEqual({
+        mayExpire: false,
+        reasons: ["wallet_registry.watcher_not_configured"],
+      });
+    });
+
+    it("holds the sweep back where the watcher cannot run and a fresh heartbeat is on record", async () => {
+      await record(MINUTE, 0n);
+
+      await expect(gate(WITHOUT_CHAIN).assess(now)).resolves.toEqual({
+        mayExpire: false,
+        reasons: ["wallet_registry.watcher_not_configured"],
+      });
+    });
+
+    it("holds the sweep back where the watcher cannot run and only its saved cursor is on record", async () => {
+      await database.platformSetting.create({ data: { key: CURSOR_KEY, value: "49000", description: "cursor" } });
+
+      await expect(gate(WITHOUT_CHAIN).assess(now)).resolves.toEqual({
+        mayExpire: false,
+        reasons: ["wallet_registry.watcher_not_configured"],
+      });
+    });
+
+    it("holds the sweep back where the watcher cannot run and its heartbeat row cannot be read", async () => {
+      await database.platformSetting.create({
+        data: { key: HEARTBEAT_KEY, value: { completed_at: "not a date" }, description: "unreadable on purpose" },
+      });
+
+      await expect(gate(WITHOUT_CHAIN).assess(now)).resolves.toEqual({
+        mayExpire: false,
+        reasons: ["wallet_registry.watcher_not_configured"],
+      });
+    });
+
+    it("lets the sweep run where the watcher cannot run and has never run: no heartbeat row, no cursor", async () => {
+      await expect(gate(WITHOUT_CHAIN).assess(now)).resolves.toEqual({ mayExpire: true, reasons: [] });
+    });
+
+    it("lets the sweep run where the registry address is unset, whatever the rows say", async () => {
+      await record(5 * 24 * 60 * MINUTE, 50_000n);
+      await database.platformSetting.create({ data: { key: CURSOR_KEY, value: "1", description: "cursor" } });
+
+      await expect(gate(REGISTRY_OFF).assess(now)).resolves.toEqual({ mayExpire: true, reasons: [] });
     });
   });
 });

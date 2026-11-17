@@ -193,12 +193,18 @@ export interface ConfirmWalletRegistrationInput {
 // address_conflict: another account already holds the address confirmed; the
 //   claim stays pending, nothing else was written, and the conflict is
 //   recorded in audit_log.
+// expired: the claim as matched (same account, address and commitment) was
+//   expired by the claim expiry sweep between the match and the write; nothing
+//   was written. Told apart from "stale" so the caller counts the event as one
+//   that names an expired claim, which it counts as unmatched (AD-287, decided
+//   2026-11-17), not as a replaced claim.
 export type WalletRegistrationConfirmation =
   | "confirmed"
   | "already_registered"
   | "stale"
   | "event_taken"
-  | "address_conflict";
+  | "address_conflict"
+  | "expired";
 
 export interface WalletRegistrationAddressMismatchInput {
   accountId: string;
@@ -264,7 +270,9 @@ export interface SettlementRepository {
   recordEscrowMintedPosition(input: RecordEscrowMintedPositionInput): Promise<{ positionId: string }>;
   // The row a WalletRegistered commitment belongs to, whatever its state:
   // classifying a replayed or reorganized event needs the registered rows
-  // too, not only the pending ones.
+  // too, not only the pending ones. Except an expired claim (#177): its
+  // commitment is dead, so an event naming it matches nothing and is counted
+  // as unmatched.
   findWalletRegistrationByCommitment(commitment: string): Promise<WalletRegistrationRecord | null>;
   countPendingWalletRegistrationsBefore(cutoff: Date): Promise<number>;
   // Confirms the exact pending claim the event was matched to and records the
