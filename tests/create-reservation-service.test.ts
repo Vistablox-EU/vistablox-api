@@ -41,6 +41,7 @@ function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): Investor
       propertyType: "residential",
       countryCode: "DE",
       city: "Berlin",
+      media: null,
       addressLine: "Example Strasse 1",
       ownerDeclaredValueEur: "600000.00",
       appraisalValueOpinionEur: "625000.00",
@@ -90,7 +91,7 @@ function reservationRepository(
   );
   return {
     createReservation,
-    recordMoneyEvent: vi.fn().mockResolvedValue(undefined),
+    recordMoneyEvent: vi.fn().mockResolvedValue(true),
     listInitiatedReservationsForTimers: vi.fn().mockResolvedValue([]),
     expireReservation: vi.fn().mockResolvedValue(false),
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
@@ -209,7 +210,9 @@ describe("CreateReservationService", () => {
   });
 
   it("keeps the funding rail closed by default, blocking every reservation attempt", async () => {
-    const service = new CreateReservationService(offeringRepository(detail()), reservationRepository(), coinbase());
+    const service = new CreateReservationService(offeringRepository(detail()), reservationRepository(), coinbase(), {
+      clock: () => now,
+    });
 
     await expect(
       service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
@@ -279,6 +282,25 @@ describe("CreateReservationService", () => {
     await expect(
       service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
     ).rejects.toMatchObject({ code: "offering.reservation_amount_exceeds_capacity", status: 422 });
+  });
+
+  it("refuses a reservation once ipo_end_at has passed, before writing anything", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(
+      offeringRepository(detail({ ipoEndAt: now })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(
+      service.execute({ offeringId: "offering_01", accountId: "account_01", amountEur: "1000.00", traceId: "req_01" }),
+    ).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      status: 409,
+      fieldErrors: [{ field: "reservation", code: "offering_not_open" }],
+    });
+    expect(reservations.createReservation).not.toHaveBeenCalled();
   });
 
   it("maps an atomic offering_not_open conflict from the repository to a 409", async () => {
@@ -458,6 +480,20 @@ describe("CreateReservationService", () => {
       await expect(replayService(reservations).execute(replayRequest)).resolves.toMatchObject({
         data: { reservation_id: "reservation_existing" },
       });
+    });
+
+    it("refuses a retry, handing out no onramp URL, when the reservation lapsed or was funded during the Coinbase call (#122)", async () => {
+      // assertReplayable passed on the state read before the Coinbase call;
+      // the repository's locked re-check is what refuses the write.
+      const reservations = replayedReservation({}, {});
+      reservations.recordMoneyEvent = vi.fn().mockResolvedValue(false);
+      const cdp = coinbase();
+
+      await expect(replayService(reservations, cdp).execute(replayRequest)).rejects.toMatchObject({
+        code: "offering.reservation_replay_unavailable",
+        status: 409,
+      });
+      expect(cdp.buildOnrampUrl).not.toHaveBeenCalled();
     });
 
     it("refuses a reused key carrying a different amount, and never records the retry's amount", async () => {

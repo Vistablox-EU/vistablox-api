@@ -957,7 +957,7 @@ describe.skipIf(databaseUrl === undefined)("intake case reversal PostgreSQL inte
         amountEur: "5000.00",
         disclosurePackVersionAtReservation: null,
         traceId: uid("trace"),
-        createdAt: new Date(),
+        createdAt: now,
       });
       expect(created.conflict).toBeNull();
       // The reservation does not move the case's workflow sequence, so the

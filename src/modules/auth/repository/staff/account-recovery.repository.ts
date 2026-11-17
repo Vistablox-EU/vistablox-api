@@ -108,4 +108,6 @@ export interface AccountRecoveryRepository {
     changes: Record<string, string | number | boolean | null>;
     occurredAt: Date;
   }): Promise<void>;
+  /** Whether the audit log already holds an event with this action for the case. */
+  hasRecoveryAuditEvent(input: { caseId: string; action: string }): Promise<boolean>;
 }

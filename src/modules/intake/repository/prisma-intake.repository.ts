@@ -2251,6 +2251,62 @@ export class PrismaIntakeRepository
         throw new CaseReviewConflictError(current.stage, "close the case");
       }
 
+      // A case closed from pre_offering_open has a live pre-offering. Close it in this same transaction so it leaves the public
+      // listing and stops accepting reservations at the same instant the case becomes terminal. The offering row is locked as
+      // createReservation locks it, so a reservation either committed before this point (and is cancelled below) or waits and then
+      // sees the offering closed. Lock order is case then offering, as in runReversalExecution.
+      const offerings = await transaction.$queryRaw<Array<{ offering_id: string }>>`
+        SELECT offering.offering_id
+        FROM offering.offerings AS offering
+        JOIN intake.pivs AS piv ON piv.piv_id = offering.piv_id
+        WHERE piv.case_id = ${input.caseId}
+          AND offering.status = 'pre_offering'
+        ORDER BY offering.offering_id
+        FOR UPDATE OF offering
+      `;
+      const closedOfferings: Array<{ offeringId: string; cancelledReservationIds: string[] }> = [];
+      for (const { offering_id: offeringId } of offerings) {
+        await transaction.offering.update({ where: { id: offeringId }, data: { status: "closed" } });
+        // Every open reservation is cancelled: none of them can reconfirm or finalize against a closed offering. Money events are
+        // left as they are. In phase 1 the backend holds no investor funds (AD-240, AD-243): onramp EURC stays in the investor's own
+        // wallet and an escrow contribution is reclaimed by the investor from the escrow contract (AD-256, AD-258), so there is
+        // nothing for the platform to refund here.
+        const openReservations = await transaction.$queryRaw<Array<{ reservation_id: string }>>`
+          SELECT reservation_id
+          FROM offering.reservations
+          WHERE offering_id = ${offeringId}
+            AND reservation_stage IN ('initiated', 'awaiting_reconfirmation', 'reconfirmed')
+          ORDER BY reservation_id
+          FOR UPDATE
+        `;
+        const cancelledReservationIds = openReservations.map((row) => row.reservation_id);
+        if (cancelledReservationIds.length > 0) {
+          await transaction.reservation.updateMany({
+            where: { id: { in: cancelledReservationIds } },
+            data: { reservationStage: "cancelled" },
+          });
+        }
+        await transaction.auditLog.create({
+          data: {
+            id: `audit_${ulid()}`,
+            actorAccountId: input.accountId,
+            action: "offering.closed_with_case",
+            resourceType: "offering",
+            resourceId: offeringId,
+            changes: {
+              trace_id: input.traceId,
+              case_id: input.caseId,
+              case_outcome: input.outcome,
+              previous_status: "pre_offering",
+              new_status: "closed",
+              cancelled_reservation_ids: cancelledReservationIds,
+            },
+            createdAt: input.closedAt,
+          },
+        });
+        closedOfferings.push({ offeringId, cancelledReservationIds });
+      }
+
       await transaction.intakeCase.update({
         where: { id: input.caseId },
         data: {
@@ -2295,7 +2351,10 @@ export class PrismaIntakeRepository
         traceId: input.traceId,
         fromStage: current.stage,
         toStage: input.outcome,
-        metadata: input.outcome === "rejected" ? { rejection_reason_code: input.rejectionReasonCode } : {},
+        metadata: {
+          ...(input.outcome === "rejected" ? { rejection_reason_code: input.rejectionReasonCode } : {}),
+          ...(closedOfferings.length > 0 ? { closed_offering_ids: closedOfferings.map((offering) => offering.offeringId) } : {}),
+        },
         occurredAt: input.closedAt,
       });
       return {

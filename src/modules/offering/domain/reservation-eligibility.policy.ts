@@ -63,6 +63,17 @@ export function isInvestmentEligible(input: {
 }
 
 /**
+ * True while the offering's IPO period is still running. ipo_end_at is the
+ * end of collection (CORE_TABLES.md: an extension updates it in place), so
+ * the instant it is reached the period is over. A missing deadline fails
+ * closed: an approved case always has one, and reverting the approval clears
+ * it, so an offering without one is not open for collection.
+ */
+export function isWithinIpoPeriod(input: { ipoEndAt: Date | null; now: Date }): boolean {
+  return input.ipoEndAt !== null && input.now.getTime() < input.ipoEndAt.getTime();
+}
+
+/**
  * The single source of truth for whether a reservation may be created on an
  * offering right now — GetInvestorOfferingService reports this list as
  * read-only guidance, and CreateReservationService re-checks it against
@@ -80,6 +91,8 @@ export function computeReservationBlockers(input: {
   settlementEscrowReady: boolean;
   offeringStatus: string;
   finalTermsPublished: boolean;
+  /** intake.cases.ipo_end_at for the offering's case; null means no deadline was set. */
+  ipoEndAt: Date | null;
   hasDisclosurePack: boolean;
   remainingCapacityEur: string;
   accountStatus: AccountReadinessStatus;
@@ -111,8 +124,14 @@ export function computeReservationBlockers(input: {
   // window (CORE_TABLES.md: it only becomes 'final_offering' once the
   // window closes and the finalization batch commits) — so closing new
   // reservations off once final terms publish needs its own check, not
-  // just the status one.
-  if (input.offeringStatus !== "pre_offering" || input.finalTermsPublished) {
+  // just the status one. The IPO period also ends collection (AD-244,
+  // PAYMENT_FLOWS.md "Property pre-offering"): no new reservation once
+  // ipo_end_at has passed, and none without a deadline at all.
+  if (
+    input.offeringStatus !== "pre_offering" ||
+    input.finalTermsPublished ||
+    !isWithinIpoPeriod({ ipoEndAt: input.ipoEndAt, now: input.now })
+  ) {
     blockers.push("offering_not_open");
   }
   if (input.remainingCapacityEur === "0.00") blockers.push("capacity_exhausted");

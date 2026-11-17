@@ -8,6 +8,7 @@ import {
   isLoginMethodsComplete,
 } from "../domain/reservation-eligibility.policy.js";
 import type { OfferingRepository } from "../repository/offering.repository.js";
+import type { OfferingMedia } from "../domain/offering-media.policy.js";
 
 export class GetInvestorOfferingService {
   public constructor(
@@ -55,6 +56,7 @@ export class GetInvestorOfferingService {
       settlementEscrowReady: record.settlementEscrowReady,
       offeringStatus: record.status,
       finalTermsPublished: record.finalOfferingPublishedAt !== null,
+      ipoEndAt: record.ipoEndAt,
       hasDisclosurePack:
         record.currentDisclosurePack !== null && record.currentDisclosurePack.documents.length > 0,
       remainingCapacityEur,
@@ -97,7 +99,7 @@ export class GetInvestorOfferingService {
           property_type: record.property.propertyType,
           country_code: record.property.countryCode,
             city: record.property.city,
-            media: null,
+            media: toMediaResponse(record.property.media),
             address_line: record.property.addressLine,
           owner_declared_value_eur: record.property.ownerDeclaredValueEur,
           appraisal_value_opinion_eur: record.property.appraisalValueOpinionEur,
@@ -135,4 +137,8 @@ export class GetInvestorOfferingService {
       },
     };
   }
+}
+
+function toMediaResponse(media: OfferingMedia | null) {
+  return media === null ? null : { hero_url: media.heroUrl, gallery_urls: media.galleryUrls };
 }

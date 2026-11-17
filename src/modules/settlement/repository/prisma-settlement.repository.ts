@@ -169,6 +169,7 @@ interface EscrowMintIntentRow {
   attempt: number;
   attemptedAt: Date;
   searchFromBlock: bigint | null;
+  mintNonce: bigint | null;
 }
 
 function toEscrowMintIntent(row: EscrowMintIntentRow): EscrowMintIntent {
@@ -186,6 +187,7 @@ function toEscrowMintIntent(row: EscrowMintIntentRow): EscrowMintIntent {
     attempt: row.attempt,
     attemptedAt: row.attemptedAt,
     searchFromBlock: row.searchFromBlock,
+    mintNonce: row.mintNonce,
   };
 }
 
@@ -315,6 +317,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
           attempt: 1,
           attemptedAt: input.attemptedAt,
           searchFromBlock: input.searchFromBlock,
+          mintNonce: input.mintNonce,
         },
       ],
       skipDuplicates: true,
@@ -329,6 +332,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     intentId: string;
     expectedAttempt: number;
     attemptedAt: Date;
+    mintNonce: bigint;
   }): Promise<boolean> {
     const updated = await this.database.escrowMintIntent.updateMany({
       where: { id: input.intentId, attempt: input.expectedAttempt, status: { in: ["sending", "mint_sent"] } },
@@ -337,6 +341,7 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
         mintTxHash: null,
         attempt: { increment: 1 },
         attemptedAt: input.attemptedAt,
+        mintNonce: input.mintNonce,
       },
     });
     return updated.count === 1;

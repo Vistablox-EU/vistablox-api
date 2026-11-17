@@ -6,7 +6,7 @@ How to run, watch and repair the part of wallet onboarding that happens after th
 
 Built: the watcher reports its health as structured log events with stable names, thresholds are configurable, and this page says what each event means and what to do.
 
-**Not built: delivery.** Nothing sends these events to a person. `AD-089` records Slack or email webhooks as the phase-1 alert channel and `AD-088` records host logs read by hand as the log pipeline; neither a webhook sender nor a log shipper exists in this repository yet. Until one does, an event reaches someone only if they read the worker log. The grep commands below are the interim way. When a delivery mechanism is chosen it should key on the `event` and `severity` fields described here, throttle repeats (the health events repeat every 5 minutes while a condition holds) and add an "absent" rule on `wallet_registry.health_checked`.
+**Not built: delivery.** Nothing sends these events to a person. `AD-089` records Slack or email webhooks as the phase-1 alert channel and `AD-088` records host logs read by hand as the log pipeline; no log shipper exists in this repository yet, and the only webhook sender is the one for dead-lettered jobs ([`dead-letter-jobs.md`](dead-letter-jobs.md)), which does not carry these events. Until one does, an event reaches someone only if they read the worker log. The grep commands below are the interim way. When a delivery mechanism is chosen it should key on the `event` and `severity` fields described here, throttle repeats (the health events repeat every 5 minutes while a condition holds) and add an "absent" rule on `wallet_registry.health_checked`.
 
 ## Ownership
 
@@ -68,7 +68,7 @@ The worker writes JSON lines to stdout. Run these from the project directory on 
     docker compose --env-file .env.staging -f docker-compose.staging.yml logs --no-log-prefix --since 1h worker | grep '"event":"wallet_registry\.'
     docker compose --env-file .env.staging -f docker-compose.staging.yml logs --no-log-prefix --since 1h worker | grep '"event":"wallet_registry\.' | grep '"severity":"error"'
 
-A job that exhausted its retries also logs `job dead-lettered after exhausting retries` with the job name and a `last_error` that has URLs replaced by `[url]`.
+A job that exhausted its retries also logs `job dead-lettered after exhausting retries` (`"event":"job.dead_lettered"`) with the job name and a `last_error` that has URLs replaced by `[url]`. Unlike the events above, dead-lettered jobs are delivered to a person when `DEAD_LETTER_ALERT_WEBHOOK_URL` is set; see [`dead-letter-jobs.md`](dead-letter-jobs.md) for the alert and the replay runbook.
 
 ## Metrics
 

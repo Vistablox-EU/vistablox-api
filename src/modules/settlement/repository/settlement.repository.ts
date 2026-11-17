@@ -76,6 +76,9 @@ export interface EscrowMintIntent {
   attempt: number;
   attemptedAt: Date;
   searchFromBlock: bigint | null;
+  // The operator nonce the latest attempt's mint is sent with. Null for an
+  // attempt started before nonces were pinned, or a mint adopted from the chain.
+  mintNonce: bigint | null;
 }
 
 export interface CreateEscrowMintIntentInput {
@@ -87,6 +90,7 @@ export interface CreateEscrowMintIntentInput {
   mintAmount: bigint;
   attemptedAt: Date;
   searchFromBlock: bigint | null;
+  mintNonce: bigint | null;
 }
 
 /**
@@ -201,11 +205,13 @@ export interface SettlementRepository {
   ): Promise<{ intent: EscrowMintIntent; created: boolean }>;
   // Compare-and-set start of another send attempt on an intent that is still
   // at the attempt the caller read: back to `sending`, hash cleared, attempt
-  // incremented. False means another run got there first.
+  // incremented, and the new attempt's mint nonce stored. False means another
+  // run got there first.
   restartEscrowMintAttempt(input: {
     intentId: string;
     expectedAttempt: number;
     attemptedAt: Date;
+    mintNonce: bigint;
   }): Promise<boolean>;
   // Records the hash of the mint transaction on the attempt that sent it
   // (`sending` -> `mint_sent`). Idempotent for the same hash; throws if the

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { publicOfferingStatuses } from "../domain/public-offering.policy.js";
 
-const investorImageUrl = z.url().refine((value) => new URL(value).protocol === "https:", {
+export const investorImageUrl = z.url().refine((value) => URL.canParse(value) && new URL(value).protocol === "https:", {
   message: "Investor-facing media URLs must use HTTPS.",
 });
 
@@ -168,6 +168,7 @@ export const reconfirmReservationResponseSchema = z.object({
     reservation_id: z.string().min(1),
     status: z.literal("reconfirmed"),
     reconfirmed_at: z.iso.datetime(),
+    disclosure_pack_version: z.number().int().positive(),
   }),
 });
 

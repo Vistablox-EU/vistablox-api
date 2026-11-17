@@ -94,6 +94,7 @@ export class CreateReservationService {
       settlementEscrowReady: detail.settlementEscrowReady,
       offeringStatus: detail.status,
       finalTermsPublished: detail.finalOfferingPublishedAt !== null,
+      ipoEndAt: detail.ipoEndAt,
       hasDisclosurePack:
         detail.currentDisclosurePack !== null && detail.currentDisclosurePack.documents.length > 0,
       remainingCapacityEur,
@@ -190,7 +191,11 @@ export class CreateReservationService {
       throw error;
     }
 
-    await this.reservations.recordMoneyEvent({
+    // The checks above ran before the Coinbase call; expiry or a landed
+    // payment may have changed the reservation since. The repository
+    // re-checks under the reservation lock, and a refused write means the
+    // hold can no longer take a new payment session.
+    const pendingRecorded = await this.reservations.recordMoneyEvent({
       reservationId,
       provider: "coinbase_cdp",
       providerReference: session.channelId,
@@ -199,6 +204,7 @@ export class CreateReservationService {
       amountEurc: null,
       recordedAt: this.clock(),
     });
+    if (!pendingRecorded) throw reservationReplayUnavailableError();
 
     const onrampUrl = this.coinbase.buildOnrampUrl({
       sessionToken: session.token,

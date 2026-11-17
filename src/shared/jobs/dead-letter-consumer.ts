@@ -2,6 +2,8 @@ import type { Logger } from "pino";
 import type { JobWithMetadata, PgBoss } from "pg-boss";
 
 import { stripUrls } from "../logging/log-redaction.js";
+import type { DeliverDeadLetterAlert } from "./dead-letter-alert-webhook.js";
+import { ownershipOf } from "./job-ownership.js";
 import { DEAD_LETTER_QUEUE } from "./job-queues.js";
 
 const MAX_LAST_ERROR_LENGTH = 500;
@@ -48,32 +50,60 @@ function lastErrorOf(output: unknown): string | null {
 }
 
 /**
- * Logs one error-level line for every job that failed after its last retry.
- * That line is the alert hook (ALERTING.md: a dead-letter job alerts; LOGGING_STRATEGY.md:
- * "a pg-boss job exhausting retries into dead-letter" is an `error`): alert on
- * the message, route on `job`. The payload is deliberately not logged, only
- * the identifiers needed to find it; the dead-letter queue keeps the payload.
+ * Logs one error-level line for every job that failed after its last retry,
+ * then hands the same facts to `deliverAlert` (the dead-letter alert webhook,
+ * when one is configured). The line is the alert hook either way (ALERTING.md:
+ * a dead-letter job alerts; LOGGING_STRATEGY.md: "a pg-boss job exhausting
+ * retries into dead-letter" is an `error`): alert on `event`, route on `owner`
+ * and `tier` (job-ownership.ts). The payload is deliberately neither logged nor
+ * sent, only the identifiers needed to find it; the dead-letter queue keeps the
+ * payload.
  */
 export function createDeadLetterHandler(
   logger: Logger,
+  options: { deliverAlert?: DeliverDeadLetterAlert } = {},
 ): (jobs: JobWithMetadata<unknown>[]) => Promise<void> {
   return async (jobs) => {
     for (const job of jobs) {
       // The retries the original job consumed; one more than that is how many
       // times it actually ran.
       const retryCount = typeof job.sourceRetryCount === "number" ? job.sourceRetryCount : null;
+      const queue = job.sourceName ?? "unknown";
+      const ownership = ownershipOf(queue);
+      const fields = {
+        job: queue,
+        job_id: job.sourceId ?? "unknown",
+        dead_letter_job_id: job.id,
+        trace_id: traceIdOf(job.data),
+        owner: ownership.owner,
+        tier: ownership.tier,
+        retry_count: retryCount,
+        attempts: retryCount === null ? null : retryCount + 1,
+        last_error: lastErrorOf(job.output),
+      };
       logger.error(
-        {
-          job: job.sourceName ?? "unknown",
-          job_id: job.sourceId ?? "unknown",
-          dead_letter_job_id: job.id,
-          trace_id: traceIdOf(job.data),
-          retry_count: retryCount,
-          attempts: retryCount === null ? null : retryCount + 1,
-          last_error: lastErrorOf(job.output),
-        },
+        { event: "job.dead_lettered", severity: "error", ...fields },
         "job dead-lettered after exhausting retries",
       );
+      if (options.deliverAlert !== undefined) {
+        const { retry_count: _retryCount, ...alert } = fields;
+        // A delivery failure must not fail the entry: the line above is the
+        // record, and a throw would log this entry again on every retry. The
+        // webhook sender never throws; this guards any other sender.
+        try {
+          await options.deliverAlert({ ...alert, replayable: ownership.known && ownership.kind === "event" });
+        } catch {
+          logger.warn(
+            {
+              event: "job.dead_letter_alert_delivery_failed",
+              severity: "warning",
+              job: queue,
+              dead_letter_job_id: job.id,
+            },
+            "dead-letter alert delivery threw",
+          );
+        }
+      }
     }
   };
 }
@@ -85,6 +115,10 @@ export function createDeadLetterHandler(
  * payload stays in the dead-letter queue (see DEAD_LETTER_QUEUE_OPTIONS) to
  * replay from.
  */
-export async function registerDeadLetterConsumer(boss: PgBoss, logger: Logger): Promise<void> {
-  await boss.work(DEAD_LETTER_QUEUE, { includeMetadata: true }, createDeadLetterHandler(logger));
+export async function registerDeadLetterConsumer(
+  boss: PgBoss,
+  logger: Logger,
+  options: { deliverAlert?: DeliverDeadLetterAlert } = {},
+): Promise<void> {
+  await boss.work(DEAD_LETTER_QUEUE, { includeMetadata: true }, createDeadLetterHandler(logger, options));
 }

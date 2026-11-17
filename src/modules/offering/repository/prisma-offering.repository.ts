@@ -6,7 +6,9 @@ import { enqueueTransactionalJob } from "../../../shared/jobs/enqueue-job.js";
 import type { Prisma } from "../../../generated/prisma/client.js";
 import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibility-reader.js";
 import { toCents, toEurcMicros } from "../domain/currency.js";
+import { toOfferingMedia } from "../domain/offering-media.policy.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
+import { isWithinIpoPeriod } from "../domain/reservation-eligibility.policy.js";
 import type {
   InvestorOfferingDetailRecord,
   ListPublicOfferingsInput,
@@ -43,7 +45,13 @@ import {
   isReconfirmationWindowOpen,
 } from "../domain/finalization.policy.js";
 import { materialityResetTriggered } from "../domain/materiality.policy.js";
-import { isCompleteDisclosurePack, isCoreReadingDocumentType, type DisclosureDocumentType } from "../domain/disclosure-pack.policy.js";
+import {
+  isCompleteDisclosurePack,
+  isCoreReadingDocumentType,
+  requiredDisclosurePackVersionAfterReset,
+  satisfiesRequiredDisclosurePackVersion,
+  type DisclosureDocumentType,
+} from "../domain/disclosure-pack.policy.js";
 import type {
   CommitOfferingFinalizationInput,
   CommitOfferingFinalizationResult,
@@ -71,6 +79,8 @@ import type {
   ReservationForReconfirmationWindowOpenedNotification,
 } from "./reconfirmation-window-opened-notification.repository.js";
 
+// Terminal intake stages (REAL_ESTATE_INTAKE_LIFECYCLE.md): a case in one of these must not have an open offering.
+const closedCaseStages = new Set(["rejected", "withdrawn", "expired"]);
 const reconfirmationReminderIntervalHoursSettingSchema = z.object({ hours: z.number().int().min(1).max(168) });
 
 export class PrismaOfferingRepository
@@ -102,6 +112,13 @@ export class PrismaOfferingRepository
     input: OpenOfferingForApprovedCaseInput,
   ): Promise<OpenedOffering> {
     return this.database.$transaction(async (transaction) => {
+      // closeCase locks the case row before it closes the case's pre-offering. Take the same lock first, so a case closed after
+      // approval but before this job ran never gets a listed, reservable offering: it is created already closed.
+      const lockedCase = await transaction.$queryRaw<Array<{ stage: string }>>`
+        SELECT stage FROM intake.intake_cases WHERE case_id = ${input.caseId} FOR UPDATE
+      `;
+      const caseClosed = closedCaseStages.has(lockedCase[0]?.stage ?? "");
+      const offeringStatus = caseClosed ? "closed" : "pre_offering";
       const existingPiv = await transaction.piv.findUnique({
         where: { propertyId: input.propertyId },
         select: { id: true, offerings: { select: { id: true }, take: 1 } },
@@ -117,6 +134,7 @@ export class PrismaOfferingRepository
             pivId: existingPiv.id,
             minimumRaiseEur: input.ipoValueEur,
             targetRaiseEur: input.ipoValueEur,
+            status: offeringStatus,
           },
           select: { id: true },
         });
@@ -128,7 +146,7 @@ export class PrismaOfferingRepository
         select: { ipoEndAt: true },
       });
       const ipoEndAt = intakeCase.ipoEndAt;
-      if (input.openEscrowCampaign && ipoEndAt === null) {
+      if (input.openEscrowCampaign && !caseClosed && ipoEndAt === null) {
         throw new Error(
           `Intake case ${input.caseId} has no ipo_end_at set; cannot open an IPO escrow campaign without a deadline.`,
         );
@@ -159,6 +177,7 @@ export class PrismaOfferingRepository
           pivId: piv.id,
           minimumRaiseEur: input.ipoValueEur,
           targetRaiseEur: input.ipoValueEur,
+          status: offeringStatus,
         },
         select: { id: true },
       });
@@ -175,6 +194,7 @@ export class PrismaOfferingRepository
             piv_id: piv.id,
             target_raise_eur: input.ipoValueEur,
             token_id: tokenId.toString(),
+            status: offeringStatus,
           },
           createdAt: input.openedAt,
         },
@@ -201,7 +221,7 @@ export class PrismaOfferingRepository
       // settlement is activated is an explicit activation step, safe to
       // re-run because OpenIpoEscrowCampaignService skips a campaign that is
       // already open on-chain.
-      if (input.openEscrowCampaign && ipoEndAt !== null) {
+      if (input.openEscrowCampaign && ipoEndAt !== null && !caseClosed) {
         await enqueueTransactionalJob(
           this.pgBoss,
           transaction,
@@ -253,6 +273,8 @@ export class PrismaOfferingRepository
         featured: true,
         targetRaiseEur: true,
         createdAt: true,
+        heroImageUrl: true,
+        galleryImageUrls: true,
         piv: {
           select: {
             case: { select: { ipoEndAt: true } },
@@ -280,6 +302,7 @@ export class PrismaOfferingRepository
           propertyType: row.piv.property.propertyType,
           countryCode: row.piv.property.countryCode,
           city: row.piv.property.city,
+          media: toOfferingMedia(row.heroImageUrl, row.galleryImageUrls),
         },
       };
     });
@@ -300,6 +323,8 @@ export class PrismaOfferingRepository
           finalOfferingPublishedAt: true,
           platformRightsEndAt: true,
           effectiveRightsEndAt: true,
+          heroImageUrl: true,
+          galleryImageUrls: true,
           piv: {
             select: {
               id: true,
@@ -447,6 +472,7 @@ export class PrismaOfferingRepository
         propertyType: offering.piv.property.propertyType,
         countryCode: offering.piv.property.countryCode,
         city: offering.piv.property.city,
+        media: toOfferingMedia(offering.heroImageUrl, offering.galleryImageUrls),
         addressLine: offering.piv.property.addressLine,
         ownerDeclaredValueEur: offering.piv.property.ownerDeclaredValueEur.toFixed(2),
         appraisalValueOpinionEur:
@@ -546,12 +572,16 @@ export class PrismaOfferingRepository
           status: string;
           target_raise_eur: string;
           final_offering_published_at: Date | null;
+          ipo_end_at: Date | null;
         }>
       >`
-        SELECT offering_id, status, target_raise_eur::text, final_offering_published_at
-        FROM offering.offerings
-        WHERE offering_id = ${input.offeringId}
-        FOR UPDATE
+        SELECT o.offering_id, o.status, o.target_raise_eur::text, o.final_offering_published_at,
+               c.ipo_end_at
+        FROM offering.offerings o
+        LEFT JOIN intake.pivs p ON p.piv_id = o.piv_id
+        LEFT JOIN intake.intake_cases c ON c.case_id = p.case_id
+        WHERE o.offering_id = ${input.offeringId}
+        FOR UPDATE OF o
       `;
       const offering = locked[0];
       // Status stays 'pre_offering' through the reconfirmation window, so
@@ -559,10 +589,14 @@ export class PrismaOfferingRepository
       // reservation-eligibility.policy.ts. Without this, a request that
       // passed the advisory check before publication could take the lock
       // afterwards and create a reservation outside the reconfirmation batch.
+      // The IPO deadline is read here, live, for the same reason: it is
+      // mutable (an extension updates it in place), and a request that passed
+      // the advisory check just before ipo_end_at must not slip in after it.
       if (
         offering === undefined ||
         offering.status !== "pre_offering" ||
-        offering.final_offering_published_at !== null
+        offering.final_offering_published_at !== null ||
+        !isWithinIpoPeriod({ ipoEndAt: offering.ipo_end_at, now: input.createdAt })
       ) {
         return { reservation: null, conflict: "offering_not_open" as const, reused: false };
       }
@@ -680,18 +714,29 @@ export class PrismaOfferingRepository
     });
   }
 
-  public async recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<void> {
-    await this.database.moneyEvent.create({
-      data: {
-        id: `money_event_${ulid()}`,
-        reservationId: input.reservationId,
-        provider: input.provider,
-        providerReference: input.providerReference,
-        capitalState: input.capitalState,
-        amountEur: input.amountEur,
-        amountEurc: input.amountEurc,
-        recordedAt: input.recordedAt,
-      },
+  public async recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<boolean> {
+    return this.database.$transaction(async (transaction) => {
+      // Takes the same row lock as expireReservation, so a money event and a
+      // lapse serialise: neither can act on a state the other is changing.
+      const current = await lockReservationWithLatestMoney(transaction, input.reservationId);
+      if (current === undefined || current.reservation_stage !== "initiated") return false;
+      // An unfunded event must never become the latest over funded money: the
+      // expiry sweeper reads the latest event and would lapse a paid hold.
+      if (isReservationFunded(current.capital_state) && !isReservationFunded(input.capitalState)) return false;
+
+      await transaction.moneyEvent.create({
+        data: {
+          id: `money_event_${ulid()}`,
+          reservationId: input.reservationId,
+          provider: input.provider,
+          providerReference: input.providerReference,
+          capitalState: input.capitalState,
+          amountEur: input.amountEur,
+          amountEurc: input.amountEurc,
+          recordedAt: input.recordedAt,
+        },
+      });
+      return true;
     });
   }
 
@@ -755,30 +800,18 @@ export class PrismaOfferingRepository
 
   public async expireReservation(input: ExpireReservationInput): Promise<boolean> {
     return this.database.$transaction(async (transaction) => {
-      const locked = await transaction.$queryRaw<
-        Array<{ reservation_id: string; reservation_stage: string; capital_state: string | null }>
-      >`
-        SELECT reservation.reservation_id, reservation.reservation_stage, latest_money.capital_state
-        FROM offering.reservations AS reservation
-        LEFT JOIN LATERAL (
-          SELECT money_event.capital_state
-          FROM money.money_events AS money_event
-          WHERE money_event.reservation_id = reservation.reservation_id
-          ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
-          LIMIT 1
-        ) AS latest_money ON TRUE
-        WHERE reservation.reservation_id = ${input.reservationId}
-        FOR UPDATE OF reservation
-      `;
-      const current = locked[0];
+      const current = await lockReservationWithLatestMoney(transaction, input.reservationId);
       if (current === undefined) return false;
       if (current.reservation_stage !== "initiated") return false;
-      // The onramp poll inserts money_events without taking the reservation
-      // row lock, so the capital_state snapshot ExpireUnfundedReservationsService
-      // took at list time can be stale by the instant we hold the lock. Re-read
-      // the latest capital_state under the same lock as the stage flip so money
-      // that has already landed is never swept to 'lapsed' (AD-253 keeps the
-      // two state machines separate on purpose).
+      // The capital_state snapshot ExpireUnfundedReservationsService took at
+      // list time can be stale by the instant we hold the lock (an onramp
+      // poll or a new payment session may have recorded money since). Re-read
+      // the latest capital_state under the same lock as the stage flip so
+      // money that has already landed is never swept to 'lapsed' (AD-253
+      // keeps the two state machines separate on purpose). recordMoneyEvent
+      // takes this same row lock, so the two serialise;
+      // lockReservationWithLatestMoney reads the money state only after the
+      // lock is held, so a waiter sees what the holder committed.
       if (isReservationFunded(current.capital_state)) return false;
 
       await transaction.reservation.update({
@@ -1040,6 +1073,29 @@ export class PrismaOfferingRepository
 
   public async reconfirmReservation(input: ReconfirmReservationInput): Promise<ReconfirmReservationResult> {
     return this.database.$transaction(async (transaction) => {
+      const target = await transaction.reservation.findUnique({
+        where: { id: input.reservationId },
+        select: { offeringId: true },
+      });
+      // Not found and not-yours both report the same conflict, deliberately
+      // — a reservation ID belonging to someone else must not be
+      // distinguishable from one that doesn't exist.
+      if (target === null) {
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "not_found" as const };
+      }
+      // Share-lock the offering before the reservation (the same
+      // offering-then-reservations order classifyMateriality,
+      // publishDisclosurePack and commitOfferingFinalization use). It
+      // serializes this reconfirmation against a concurrent materiality reset
+      // or pack republish: without it, a reset committing between the pack
+      // check below and this commit would find no "reconfirmed" row to
+      // invalidate, leaving a reconfirmation against a superseded pack.
+      await transaction.$queryRaw`
+        SELECT offering_id
+        FROM offering.offerings
+        WHERE offering_id = ${target.offeringId}
+        FOR SHARE
+      `;
       const locked = await transaction.$queryRaw<
         Array<{ reservation_id: string; account_id: string; offering_id: string; reservation_stage: string }>
       >`
@@ -1049,14 +1105,11 @@ export class PrismaOfferingRepository
         FOR UPDATE
       `;
       const reservation = locked[0];
-      // Not found and not-yours both report the same conflict, deliberately
-      // — a reservation ID belonging to someone else must not be
-      // distinguishable from one that doesn't exist.
       if (reservation === undefined || reservation.account_id !== input.accountId) {
-        return { reconfirmedAt: null, conflict: "not_found" as const };
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "not_found" as const };
       }
       if (reservation.reservation_stage !== "awaiting_reconfirmation") {
-        return { reconfirmedAt: null, conflict: "not_awaiting_reconfirmation" as const };
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "not_awaiting_reconfirmation" as const };
       }
 
       const offering = await transaction.offering.findUniqueOrThrow({
@@ -1065,7 +1118,7 @@ export class PrismaOfferingRepository
           effectiveRightsEndAt: true,
           disclosurePacks: {
             where: { isCurrent: true, supersededAt: null },
-            select: { version: true, documents: { select: { documentType: true } } },
+            select: { id: true, version: true, documents: { select: { documentType: true } } },
             take: 1,
           },
         },
@@ -1074,7 +1127,7 @@ export class PrismaOfferingRepository
         offering.effectiveRightsEndAt === null ||
         !isReconfirmationWindowOpen({ effectiveRightsEndAt: offering.effectiveRightsEndAt, now: input.reconfirmedAt })
       ) {
-        return { reconfirmedAt: null, conflict: "window_closed" as const };
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "window_closed" as const };
       }
 
       // AD-037: "An investor must not be able to reconfirm against an
@@ -1085,13 +1138,33 @@ export class PrismaOfferingRepository
       const currentDocumentTypes = (currentPack?.documents ?? []).map(
         (document) => document.documentType as DisclosureDocumentType,
       );
-      if (!isCompleteDisclosurePack(currentDocumentTypes)) {
-        return { reconfirmedAt: null, conflict: "disclosure_pack_incomplete" as const };
+      if (currentPack === undefined || !isCompleteDisclosurePack(currentDocumentTypes)) {
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "disclosure_pack_incomplete" as const };
+      }
+
+      // AD-038: a material change resets the disclosure pack, so a pack
+      // published before the latest reset is superseded in substance even
+      // while it is still the current row.
+      const requirement = await transaction.materialityRecord.aggregate({
+        where: { offeringId: reservation.offering_id, resetTriggered: true },
+        _max: { requiredDisclosurePackVersion: true },
+      });
+      if (
+        !satisfiesRequiredDisclosurePackVersion({
+          currentPackVersion: currentPack.version,
+          requiredVersion: requirement._max.requiredDisclosurePackVersion,
+        })
+      ) {
+        return { reconfirmedAt: null, disclosurePackVersion: null, conflict: "disclosure_pack_outdated" as const };
       }
 
       await transaction.reservation.update({
         where: { id: input.reservationId },
-        data: { reservationStage: "reconfirmed", reconfirmedAt: input.reconfirmedAt },
+        data: {
+          reservationStage: "reconfirmed",
+          reconfirmedAt: input.reconfirmedAt,
+          reconfirmedDisclosurePackId: currentPack.id,
+        },
       });
       await transaction.auditLog.create({
         data: {
@@ -1105,13 +1178,14 @@ export class PrismaOfferingRepository
             // PAYMENT_FLOWS.md: "Reconfirmation must reference a specific
             // disclosure-pack version and that version must remain
             // downloadable for audit purposes."
-            disclosure_pack_version: offering.disclosurePacks[0]?.version ?? null,
+            disclosure_pack_id: currentPack.id,
+            disclosure_pack_version: currentPack.version,
           },
           createdAt: input.reconfirmedAt,
         },
       });
 
-      return { reconfirmedAt: input.reconfirmedAt, conflict: null };
+      return { reconfirmedAt: input.reconfirmedAt, disclosurePackVersion: currentPack.version, conflict: null };
     });
   }
 
@@ -1292,8 +1366,19 @@ export class PrismaOfferingRepository
       const resetTriggered = materialityResetTriggered(input.classification);
       let effectiveRightsEndAt = offering.effective_rights_end_at;
       let reservationsReset = 0;
+      let requiredDisclosurePackVersion: number | null = null;
 
       if (resetTriggered) {
+        // AD-038: the reset invalidates every pack published so far, so
+        // reconfirmation waits for a newer one (see reconfirmReservation).
+        // Pack publishing takes the same offering row lock, so this max is
+        // stable for the rest of the transaction.
+        const latestPack = await transaction.disclosurePack.aggregate({
+          where: { offeringId: input.offeringId },
+          _max: { version: true },
+        });
+        requiredDisclosurePackVersion = requiredDisclosurePackVersionAfterReset(latestPack._max.version);
+
         // Only already-reconfirmed reservations have anything to invalidate;
         // ones still awaiting_reconfirmation are untouched by a reset — they
         // simply reconfirm (or not) against the now-later window like normal.
@@ -1307,7 +1392,7 @@ export class PrismaOfferingRepository
         for (const reservation of reconfirmed) {
           await transaction.reservation.update({
             where: { id: reservation.reservation_id },
-            data: { reservationStage: "awaiting_reconfirmation", reconfirmedAt: null },
+            data: { reservationStage: "awaiting_reconfirmation", reconfirmedAt: null, reconfirmedDisclosurePackId: null },
           });
         }
         reservationsReset = reconfirmed.length;
@@ -1336,6 +1421,7 @@ export class PrismaOfferingRepository
           classification: input.classification,
           thresholdType: input.thresholdType,
           resetTriggered,
+          requiredDisclosurePackVersion,
           classifiedByAccountId: input.accountId,
           classifiedAt: input.classifiedAt,
         },
@@ -1353,6 +1439,7 @@ export class PrismaOfferingRepository
             classification: input.classification,
             threshold_type: input.thresholdType,
             reset_triggered: resetTriggered,
+            required_disclosure_pack_version: requiredDisclosurePackVersion,
             reservations_reset: reservationsReset,
           },
           createdAt: input.classifiedAt,
@@ -1366,6 +1453,7 @@ export class PrismaOfferingRepository
           classification: input.classification,
           thresholdType: input.thresholdType,
           resetTriggered,
+          requiredDisclosurePackVersion,
           classifiedAt: input.classifiedAt,
           effectiveRightsEndAt,
           reservationsReset,
@@ -1658,4 +1746,40 @@ function normalizeCurrency(value: string): string {
   const [euros, fraction = "00"] = value.split(".");
   const cents = BigInt(euros!) * 100n + BigInt(fraction.padEnd(2, "0").slice(0, 2));
   return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
+}
+
+// Takes the reservation row lock first and reads the latest money event in a
+// separate statement. Under READ COMMITTED a FOR UPDATE that waited on a lock
+// re-checks only the locked row; a money_events subquery in the same statement
+// would keep its pre-wait snapshot and miss an event the lock holder just
+// committed. The second statement gets a fresh snapshot.
+async function lockReservationWithLatestMoney(
+  transaction: Prisma.TransactionClient,
+  reservationId: string,
+): Promise<
+  | { reservation_stage: string; capital_state: string | null; provider_reference: string | null }
+  | undefined
+> {
+  const locked = await transaction.$queryRaw<Array<{ reservation_stage: string }>>`
+    SELECT reservation.reservation_stage
+    FROM offering.reservations AS reservation
+    WHERE reservation.reservation_id = ${reservationId}
+    FOR UPDATE
+  `;
+  const reservation = locked[0];
+  if (reservation === undefined) return undefined;
+  const latest = await transaction.$queryRaw<
+    Array<{ capital_state: string; provider_reference: string | null }>
+  >`
+    SELECT money_event.capital_state, money_event.provider_reference
+    FROM money.money_events AS money_event
+    WHERE money_event.reservation_id = ${reservationId}
+    ORDER BY money_event.recorded_at DESC, money_event.money_event_id DESC
+    LIMIT 1
+  `;
+  return {
+    reservation_stage: reservation.reservation_stage,
+    capital_state: latest[0]?.capital_state ?? null,
+    provider_reference: latest[0]?.provider_reference ?? null,
+  };
 }
