@@ -13,12 +13,17 @@ import type {
   ReservationRepository,
   ReusedReservationState,
 } from "../src/modules/offering/repository/reservation.repository.js";
+import { CONFIGURED_ESCROW_CONTRACT } from "./support/settlement-escrow-contracts.js";
 
 const now = new Date("2026-09-02T10:00:00.000Z");
 const walletAddress = "0x71C7656EC7ab88b098defB751B7401B5f6d8976F";
 // What the settlement module last observed of the offering's escrow campaign:
 // Open, with its on-chain deadline still ahead of `now`.
-const openCampaign = { state: "open", deadlineAt: new Date("2026-10-01T12:00:00.000Z") };
+const openCampaign = {
+  state: "open",
+  deadlineAt: new Date("2026-10-01T12:00:00.000Z"),
+  escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+};
 
 function detail(overrides: Partial<InvestorOfferingDetailRecord> = {}): InvestorOfferingDetailRecord {
   return {
@@ -327,7 +332,7 @@ describe("CreateReservationService", () => {
   it("blocks a reservation before writing anything while the offering's settlement escrow is not ready", async () => {
     const reservations = reservationRepository();
     const service = new CreateReservationService(
-      offeringRepository(detail({ settlementEscrow: { gated: true, campaign: null } })),
+      offeringRepository(detail({ settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: null } })),
       reservations,
       coinbase(),
       { clock: () => now, fundingRailAvailable: true },
@@ -346,7 +351,7 @@ describe("CreateReservationService", () => {
   it("passes the gate when the escrow campaign was last observed Open with its deadline ahead", async () => {
     const reservations = reservationRepository();
     const service = new CreateReservationService(
-      offeringRepository(detail({ settlementEscrow: { gated: true, campaign: openCampaign } })),
+      offeringRepository(detail({ settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: openCampaign } })),
       reservations,
       coinbase(),
       { clock: () => now, fundingRailAvailable: true },
@@ -362,7 +367,11 @@ describe("CreateReservationService", () => {
     const service = new CreateReservationService(
       offeringRepository(
         detail({
-          settlementEscrow: { gated: true, campaign: { state: "open", deadlineAt: new Date(now.getTime() - 1) } },
+          settlementEscrow: {
+            gated: true,
+            escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+            campaign: { ...openCampaign, deadlineAt: new Date(now.getTime() - 1) },
+          },
         }),
       ),
       reservations,
@@ -382,7 +391,7 @@ describe("CreateReservationService", () => {
     });
     const cdp = coinbase();
     const service = new CreateReservationService(
-      offeringRepository(detail({ settlementEscrow: { gated: true, campaign: openCampaign } })),
+      offeringRepository(detail({ settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: openCampaign } })),
       reservations,
       cdp,
       { clock: () => now, fundingRailAvailable: true },

@@ -76,12 +76,19 @@ export function isWithinIpoPeriod(input: { ipoEndAt: Date | null; now: Date }): 
 /**
  * What the settlement module last observed of an offering's IPO escrow
  * campaign (settlement.ipo_escrow_campaigns, #176): the campaign state at the
- * last read and the on-chain deadline it reported.
+ * last read, the on-chain deadline it reported, and the escrow contract it was
+ * read from.
  */
 export interface SettlementEscrowCampaignObservation {
   /** not_opened | open | successful | failed, as the settlement module last read it. */
   state: string;
   deadlineAt: Date;
+  /**
+   * The escrow contract the observation was read from. An observation of
+   * another contract (the contract was redeployed since) says nothing about
+   * the one this backend now uses.
+   */
+  escrowContractAddress: string;
 }
 
 /**
@@ -91,23 +98,40 @@ export interface SettlementEscrowCampaignObservation {
  * exists to wait for. The offering repository decides this once, from the same
  * predicate the worker uses (isSettlementBundleConfigured), and hands the
  * answer to the read side and the write side alike, so the two cannot disagree.
+ *
+ * Where it is gated, `escrowContractAddress` is the escrow contract this
+ * backend is configured to use (VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS): the
+ * campaign has to have been observed on that contract.
  */
 export type SettlementEscrowGate =
   | { gated: false }
-  | { gated: true; campaign: SettlementEscrowCampaignObservation | null };
+  | { gated: true; escrowContractAddress: string; campaign: SettlementEscrowCampaignObservation | null };
+
+function sameContractAddress(a: string, b: string): boolean {
+  return a.toLowerCase() === b.toLowerCase();
+}
 
 /**
  * True when reservations may proceed as far as settlement is concerned:
- * the gate is off, or the campaign was last observed Open and its deadline is
- * still ahead. "Open" is judged at `now`, not remembered: a campaign whose
- * deadline has passed takes no contribution (the contract refuses it) and is
- * not ready even when no one has re-read it yet, and one last seen Successful,
- * Failed or no longer opened is not ready. No row at all is not ready.
+ * the gate is off, or the campaign was last observed Open on the configured
+ * escrow contract and its deadline is still ahead. "Open" is judged at `now`,
+ * not remembered: a campaign whose deadline has passed takes no contribution
+ * (the contract refuses it) and is not ready even when no one has re-read it
+ * yet, and one last seen Successful, Failed or no longer opened is not ready.
+ * No row at all is not ready, and neither is a row recorded for another escrow
+ * contract: contribute() on the configured one would revert, whatever the old
+ * contract's campaign did (addresses compare case-insensitively, as an EIP-55
+ * checksum is only a case pattern).
  */
 export function isSettlementEscrowReady(gate: SettlementEscrowGate, now: Date): boolean {
   if (!gate.gated) return true;
   const campaign = gate.campaign;
-  return campaign !== null && campaign.state === "open" && now.getTime() < campaign.deadlineAt.getTime();
+  return (
+    campaign !== null &&
+    sameContractAddress(campaign.escrowContractAddress, gate.escrowContractAddress) &&
+    campaign.state === "open" &&
+    now.getTime() < campaign.deadlineAt.getTime()
+  );
 }
 
 /**

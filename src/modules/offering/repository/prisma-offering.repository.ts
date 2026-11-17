@@ -8,7 +8,12 @@ import type { KycEligibilityReader } from "../../identity/repository/kyc-eligibi
 import { toCents, toEurcMicros } from "../domain/currency.js";
 import { toOfferingMedia } from "../domain/offering-media.policy.js";
 import { publicOfferingStatuses, isPublicOfferingStatus } from "../domain/public-offering.policy.js";
-import { isSettlementEscrowReady, isWithinIpoPeriod } from "../domain/reservation-eligibility.policy.js";
+import {
+  isSettlementEscrowReady,
+  isWithinIpoPeriod,
+  type SettlementEscrowCampaignObservation,
+  type SettlementEscrowGate,
+} from "../domain/reservation-eligibility.policy.js";
 import type {
   InvestorOfferingDetailRecord,
   ListPublicOfferingsInput,
@@ -83,6 +88,42 @@ import type {
 const closedCaseStages = new Set(["rejected", "withdrawn", "expired"]);
 const reconfirmationReminderIntervalHoursSettingSchema = z.object({ hours: z.number().int().min(1).max(168) });
 
+/**
+ * The gate for one offering: off where no escrow contract is configured (the
+ * settlement bundle is dormant), otherwise the configured contract and what was
+ * last observed of the offering's campaign. The read side and the write side
+ * build theirs here, from the same option.
+ */
+function settlementEscrowGate(
+  configuredEscrowContractAddress: string | undefined,
+  campaign: SettlementEscrowCampaignObservation | null,
+): SettlementEscrowGate {
+  return configuredEscrowContractAddress === undefined
+    ? { gated: false }
+    : { gated: true, escrowContractAddress: configuredEscrowContractAddress, campaign };
+}
+
+export interface PrismaOfferingRepositoryOptions {
+  /**
+   * Where staff uploads land (MINIO_DISCLOSURES_BUCKET); publishDisclosurePack
+   * only accepts document_refs that are accepted rows there. Left unset, no ref
+   * is accepted — a process without storage configured cannot have taken an
+   * upload either.
+   */
+  disclosuresBucket?: string | undefined;
+  /**
+   * The escrow contract (VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS) reservations
+   * wait on, #176 and AD-286: set only where the settlement bundle is
+   * configured (see offeringRepositoryOptions). Where it is set, an offering
+   * takes reservations only while its IPO escrow campaign was last observed
+   * Open on that contract with its deadline ahead. Left unset the gate is off,
+   * the dormant launch configuration (AD-234), where no campaign is ever
+   * opened. The read side (getInvestorDetail) and the write side
+   * (createReservation) both take it from here, so they cannot disagree.
+   */
+  settlementEscrowContractAddress?: string | undefined;
+}
+
 export class PrismaOfferingRepository
   implements
     OfferingRepository,
@@ -99,24 +140,7 @@ export class PrismaOfferingRepository
     private readonly database: DatabaseClient,
     private readonly pgBoss: PgBoss,
     private readonly kycEligibilityReader: KycEligibilityReader,
-    /**
-     * `disclosuresBucket` is where staff uploads land (MINIO_DISCLOSURES_BUCKET);
-     * publishDisclosurePack only accepts document_refs that are accepted rows
-     * there. Left unset, no ref is accepted — a process without storage
-     * configured cannot have taken an upload either.
-     */
-    private readonly options: {
-      disclosuresBucket?: string | undefined;
-      /**
-       * Whether reservations wait for the offering's settlement escrow campaign
-       * (#176, AD-286): true only where the settlement bundle is configured
-       * (isSettlementBundleConfigured). Left unset the gate is off, the
-       * dormant launch configuration (AD-234), where no campaign is ever
-       * opened. The read side (getInvestorDetail) and the write side
-       * (createReservation) both take it from here, so they cannot disagree.
-       */
-      settlementEscrowGated?: boolean | undefined;
-    } = {},
+    private readonly options: PrismaOfferingRepositoryOptions = {},
   ) {}
 
   public async openOfferingForApprovedCase(
@@ -350,7 +374,7 @@ export class PrismaOfferingRepository
                   appraisalValueOpinionEur: true,
                 },
               },
-              ipoEscrowCampaign: { select: { observedState: true, deadlineAt: true } },
+              ipoEscrowCampaign: { select: { observedState: true, deadlineAt: true, escrowContractAddress: true } },
               property: {
                 select: {
                   id: true,
@@ -469,19 +493,16 @@ export class PrismaOfferingRepository
       platformRightsEndAt: offering.platformRightsEndAt,
       effectiveRightsEndAt: offering.effectiveRightsEndAt,
       ipoEndAt: offering.piv.case.ipoEndAt,
-      settlementEscrow:
-        this.options.settlementEscrowGated === true
-          ? {
-              gated: true,
-              campaign:
-                offering.piv.ipoEscrowCampaign === null
-                  ? null
-                  : {
-                      state: offering.piv.ipoEscrowCampaign.observedState,
-                      deadlineAt: offering.piv.ipoEscrowCampaign.deadlineAt,
-                    },
-            }
-          : { gated: false },
+      settlementEscrow: settlementEscrowGate(
+        this.options.settlementEscrowContractAddress,
+        offering.piv.ipoEscrowCampaign === null
+          ? null
+          : {
+              state: offering.piv.ipoEscrowCampaign.observedState,
+              deadlineAt: offering.piv.ipoEscrowCampaign.deadlineAt,
+              escrowContractAddress: offering.piv.ipoEscrowCampaign.escrowContractAddress,
+            },
+      ),
       issuer: {
         pivId: offering.piv.id,
         legalName: offering.piv.legalName,
@@ -626,16 +647,19 @@ export class PrismaOfferingRepository
 
       // #176 (AD-286): where the settlement bundle is configured, no funds are
       // collected for an offering whose IPO escrow campaign was not last
-      // observed Open with its deadline still ahead, since they could not
-      // settle. Re-checked here, under the offering lock, not only in the
-      // advisory read, matching every other gate above. The campaign row is
-      // read FOR SHARE, so the update that marks the campaign resolved (the
-      // operator command, the finalizer) cannot commit between this read and
-      // this transaction's commit. Where the bundle is dormant there is no
-      // campaign to wait for, and nothing is read.
-      if (this.options.settlementEscrowGated === true) {
-        const campaignRows = await transaction.$queryRaw<Array<{ observed_state: string; deadline_at: Date }>>`
-          SELECT e.observed_state, e.deadline_at
+      // observed Open, on the configured escrow contract, with its deadline
+      // still ahead, since they could not settle. Re-checked here, under the
+      // offering lock, not only in the advisory read, matching every other gate
+      // above. The campaign row is read FOR SHARE, so the update that marks the
+      // campaign resolved (the operator command, the finalizer) cannot commit
+      // between this read and this transaction's commit. Where the bundle is
+      // dormant there is no campaign to wait for, and nothing is read.
+      const settlementEscrowContractAddress = this.options.settlementEscrowContractAddress;
+      if (settlementEscrowContractAddress !== undefined) {
+        const campaignRows = await transaction.$queryRaw<
+          Array<{ observed_state: string; deadline_at: Date; escrow_contract_address: string }>
+        >`
+          SELECT e.observed_state, e.deadline_at, e.escrow_contract_address
           FROM settlement.ipo_escrow_campaigns e
           JOIN offering.offerings o ON o.piv_id = e.piv_id
           WHERE o.offering_id = ${input.offeringId}
@@ -643,11 +667,16 @@ export class PrismaOfferingRepository
         `;
         const campaign = campaignRows[0];
         const ready = isSettlementEscrowReady(
-          {
-            gated: true,
-            campaign:
-              campaign === undefined ? null : { state: campaign.observed_state, deadlineAt: campaign.deadline_at },
-          },
+          settlementEscrowGate(
+            settlementEscrowContractAddress,
+            campaign === undefined
+              ? null
+              : {
+                  state: campaign.observed_state,
+                  deadlineAt: campaign.deadline_at,
+                  escrowContractAddress: campaign.escrow_contract_address,
+                },
+          ),
           input.createdAt,
         );
         if (!ready) {

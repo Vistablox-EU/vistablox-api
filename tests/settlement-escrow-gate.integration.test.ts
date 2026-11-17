@@ -7,6 +7,9 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createPrismaClient } from "../src/infrastructure/database/prisma.js";
 import { PrismaKycRepository } from "../src/modules/identity/repository/prisma-kyc.repository.js";
 import { PrismaOfferingRepository } from "../src/modules/offering/repository/prisma-offering.repository.js";
+import { offeringRepositoryOptions } from "../src/modules/offering/repository/offering-repository-options.js";
+import { isSettlementEscrowReady } from "../src/modules/offering/domain/reservation-eligibility.policy.js";
+import { CONFIGURED_ESCROW_CONTRACT, REDEPLOYED_ESCROW_CONTRACT } from "./support/settlement-escrow-contracts.js";
 import { markSettlementEscrowReady } from "./support/settlement-escrow-db.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
@@ -17,8 +20,9 @@ function sleep(ms: number): Promise<void> {
 }
 
 // #176, AD-286: where the settlement bundle is configured, a reservation needs
-// the offering's IPO escrow campaign to have been last observed Open with its
-// deadline ahead, checked again under the offering lock. Where it is dormant
+// the offering's IPO escrow campaign to have been last observed Open, on the
+// configured escrow contract, with its deadline ahead, checked again under the
+// offering lock. Where it is dormant
 // nothing about the campaign is read. Real PostgreSQL: the lock behaviour is
 // the point. (Reservations leave append-only money events behind, so every id
 // is suffixed and nothing is cleaned up, as in the other reservation suites.)
@@ -31,6 +35,9 @@ describe.skipIf(databaseUrl === undefined)("settlement escrow gate PostgreSQL in
   let boss: PgBoss;
   let gated: PrismaOfferingRepository;
   let dormant: PrismaOfferingRepository;
+  // Built the way server.ts builds the API's: from an environment, through offeringRepositoryOptions.
+  let fromConfiguredEnvironment: PrismaOfferingRepository;
+  let fromDormantEnvironment: PrismaOfferingRepository;
 
   type Campaign = Parameters<typeof markSettlementEscrowReady>[2];
 
@@ -90,8 +97,25 @@ describe.skipIf(databaseUrl === undefined)("settlement escrow gate PostgreSQL in
   beforeAll(async () => {
     boss = new PgBoss(databaseUrl ?? "");
     const kyc = new PrismaKycRepository(database, boss);
-    gated = new PrismaOfferingRepository(database, boss, kyc, { settlementEscrowGated: true });
+    gated = new PrismaOfferingRepository(database, boss, kyc, {
+      settlementEscrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+    });
     dormant = new PrismaOfferingRepository(database, boss, kyc);
+    fromConfiguredEnvironment = new PrismaOfferingRepository(
+      database,
+      boss,
+      kyc,
+      offeringRepositoryOptions({
+        CHAIN_NETWORK: "base-sepolia",
+        CHAIN_RPC_URL: "https://sepolia.base.example",
+        CHAIN_OPERATOR_PRIVATE_KEY: "0x01",
+        VISTABLOX_PROPERTY_CONTRACT_ADDRESS: "0x00000000000000000000000000000000000000a1",
+        VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS: CONFIGURED_ESCROW_CONTRACT,
+        EURC_TOKEN_ADDRESS: "0x00000000000000000000000000000000000000a3",
+        PIV_TREASURY_ADDRESS: "0x00000000000000000000000000000000000000a4",
+      }),
+    );
+    fromDormantEnvironment = new PrismaOfferingRepository(database, boss, kyc, offeringRepositoryOptions({}));
     await boss.start();
     await authPool.query(
       'INSERT INTO "auth_user" ("id", "name", "email", "emailVerified", "population") VALUES ($1, $2, $3, $4, $5)',
@@ -122,6 +146,39 @@ describe.skipIf(databaseUrl === undefined)("settlement escrow gate PostgreSQL in
 
       expect(result.conflict).toBeNull();
       expect(await database.reservation.count({ where: { offeringId } })).toBe(1);
+    });
+
+    it("accepts the configured contract whatever the letter case of the stored address (an EIP-55 checksum is only a case pattern)", async () => {
+      const { offeringId } = await createOffering({
+        state: "open",
+        escrowContractAddress: CONFIGURED_ESCROW_CONTRACT.toLowerCase(),
+      });
+
+      const result = await reserve(gated, offeringId);
+
+      expect(result.conflict).toBeNull();
+    });
+
+    it("refuses a campaign observed Open with its deadline ahead on another escrow contract (a redeploy), and writes nothing", async () => {
+      const { offeringId } = await createOffering({ state: "open", escrowContractAddress: REDEPLOYED_ESCROW_CONTRACT });
+
+      const result = await reserve(gated, offeringId);
+
+      expect(result).toEqual({ reservation: null, conflict: "settlement_escrow_not_ready", reused: false });
+      expect(await database.reservation.count({ where: { offeringId } })).toBe(0);
+    });
+
+    it("accepts the same row once the configured contract is the one it was recorded for", async () => {
+      const { offeringId } = await createOffering({ state: "open", escrowContractAddress: REDEPLOYED_ESCROW_CONTRACT });
+      const afterRedeploy = new PrismaOfferingRepository(
+        database,
+        boss,
+        new PrismaKycRepository(database, boss),
+        { settlementEscrowContractAddress: REDEPLOYED_ESCROW_CONTRACT },
+      );
+
+      expect((await reserve(gated, offeringId)).conflict).toBe("settlement_escrow_not_ready");
+      expect((await reserve(afterRedeploy, offeringId)).conflict).toBeNull();
     });
 
     it.each(["successful", "failed", "not_opened"] as const)(
@@ -222,14 +279,38 @@ describe.skipIf(databaseUrl === undefined)("settlement escrow gate PostgreSQL in
       const failed = await createOffering({ state: "failed", deadlineAt });
 
       expect(await gated.getInvestorDetail({ offeringId: none.offeringId, accountId })).toMatchObject({
-        settlementEscrow: { gated: true, campaign: null },
+        settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: null },
       });
       expect(await gated.getInvestorDetail({ offeringId: open.offeringId, accountId })).toMatchObject({
-        settlementEscrow: { gated: true, campaign: { state: "open", deadlineAt } },
+        settlementEscrow: {
+          gated: true,
+          escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+          campaign: { state: "open", deadlineAt, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT },
+        },
       });
       expect(await gated.getInvestorDetail({ offeringId: failed.offeringId, accountId })).toMatchObject({
-        settlementEscrow: { gated: true, campaign: { state: "failed", deadlineAt } },
+        settlementEscrow: {
+          gated: true,
+          escrowContractAddress: CONFIGURED_ESCROW_CONTRACT,
+          campaign: { state: "failed", deadlineAt, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT },
+        },
       });
+    });
+
+    it("reports a row recorded for another escrow contract as not ready, the same answer createReservation gives", async () => {
+      const ready = await createOffering({ state: "open" });
+      const redeployed = await createOffering({ state: "open", escrowContractAddress: REDEPLOYED_ESCROW_CONTRACT });
+      const now = new Date();
+
+      const readyDetail = await gated.getInvestorDetail({ offeringId: ready.offeringId, accountId });
+      const redeployedDetail = await gated.getInvestorDetail({ offeringId: redeployed.offeringId, accountId });
+
+      expect(redeployedDetail).toMatchObject({
+        settlementEscrow: { campaign: { state: "open", escrowContractAddress: REDEPLOYED_ESCROW_CONTRACT } },
+      });
+      expect(isSettlementEscrowReady(readyDetail!.settlementEscrow, now)).toBe(true);
+      expect(isSettlementEscrowReady(redeployedDetail!.settlementEscrow, now)).toBe(false);
+      expect((await reserve(gated, redeployed.offeringId)).conflict).toBe("settlement_escrow_not_ready");
     });
 
     it("reports no gate where the bundle is dormant, whatever is recorded", async () => {
@@ -240,6 +321,32 @@ describe.skipIf(databaseUrl === undefined)("settlement escrow gate PostgreSQL in
         settlementEscrow: { gated: false },
       });
       expect(await dormant.getInvestorDetail({ offeringId: failed.offeringId, accountId })).toMatchObject({
+        settlementEscrow: { gated: false },
+      });
+    });
+  });
+
+  describe("a repository built the way server.ts builds it, from the environment", () => {
+    it("is gated where the settlement bundle is configured: no recorded campaign, no reservation", async () => {
+      const none = await createOffering(null);
+      const open = await createOffering({ state: "open" });
+      const redeployed = await createOffering({ state: "open", escrowContractAddress: REDEPLOYED_ESCROW_CONTRACT });
+
+      expect((await reserve(fromConfiguredEnvironment, none.offeringId)).conflict).toBe("settlement_escrow_not_ready");
+      expect((await reserve(fromConfiguredEnvironment, redeployed.offeringId)).conflict).toBe(
+        "settlement_escrow_not_ready",
+      );
+      expect((await reserve(fromConfiguredEnvironment, open.offeringId)).conflict).toBeNull();
+      expect(await fromConfiguredEnvironment.getInvestorDetail({ offeringId: none.offeringId, accountId })).toMatchObject({
+        settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT },
+      });
+    });
+
+    it("is not gated where the bundle is dormant", async () => {
+      const none = await createOffering(null);
+
+      expect((await reserve(fromDormantEnvironment, none.offeringId)).conflict).toBeNull();
+      expect(await fromDormantEnvironment.getInvestorDetail({ offeringId: none.offeringId, accountId })).toMatchObject({
         settlementEscrow: { gated: false },
       });
     });

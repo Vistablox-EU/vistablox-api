@@ -11,7 +11,6 @@ import {
   resolveStaffInvitationAcceptUrl,
   resolveWebAuthnSettings,
 } from "./config/environment.js";
-import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { PrismaIdempotencyStore } from "./infrastructure/idempotency/prisma-idempotency-store.js";
@@ -54,6 +53,7 @@ import { PrismaSessionMirror } from "./modules/auth/infrastructure/shared/prisma
 import { PrismaCustomerSessionRepository } from "./modules/auth/repository/customer/prisma-customer-session.repository.js";
 import { BetterAuthSessionRevoker } from "./modules/auth/infrastructure/customer/better-auth-session-revoker.js";
 import { BetterAuthLoginMethodUnlinker } from "./modules/auth/infrastructure/customer/better-auth-login-method-unlinker.js";
+import { offeringRepositoryOptions } from "./modules/offering/repository/offering-repository-options.js";
 import { PrismaOfferingRepository } from "./modules/offering/repository/prisma-offering.repository.js";
 import { HttpCoinbaseCdpClient } from "./modules/offering/infrastructure/http-coinbase-cdp.client.js";
 import { PrismaIntakeRepository } from "./modules/intake/repository/prisma-intake.repository.js";
@@ -115,15 +115,17 @@ await ensureJobQueue(jobQueue, "provider_events.didit_webhook", "event");
 // profile, and wallet read identity.kyc_eligibility directly via a shared
 // PrismaKycRepository, the same instance /v1/kyc's own services below use.
 const kycRepository = new PrismaKycRepository(database, jobQueue);
-const offeringRepository = new PrismaOfferingRepository(database, jobQueue, kycRepository, {
-  disclosuresBucket: environment.MINIO_DISCLOSURES_BUCKET,
-  // Reservations wait for the offering's settlement escrow campaign only where
-  // the settlement bundle is configured (AD-286, #176); while it is dormant
-  // (AD-234) there is no campaign and no gate. The same predicate the worker
-  // uses to decide whether the bundle exists, so the API and the worker must be
-  // given the same CHAIN_* settings (the &app-environment anchor does).
-  settlementEscrowGated: isSettlementBundleConfigured(environment),
-});
+// Reservations wait for the offering's settlement escrow campaign only where the
+// settlement bundle is configured (AD-286, #176); while it is dormant (AD-234)
+// there is no campaign and no gate. offeringRepositoryOptions decides that, from
+// the same predicate the worker uses, so the API and the worker must be given
+// the same CHAIN_* settings (the &app-environment anchor does).
+const offeringRepository = new PrismaOfferingRepository(
+  database,
+  jobQueue,
+  kycRepository,
+  offeringRepositoryOptions(environment),
+);
 const intakeRepository = new PrismaIntakeRepository(database, jobQueue, kycRepository);
 const partnerOrganizationRepository = new PrismaPartnerOrganizationRepository(database);
 const accountRepository = new PrismaAccountRepository(database);

@@ -5,6 +5,7 @@ import type {
   InvestorOfferingDetailRecord,
   OfferingRepository,
 } from "../src/modules/offering/repository/offering.repository.js";
+import { CONFIGURED_ESCROW_CONTRACT } from "./support/settlement-escrow-contracts.js";
 
 const currentTime = new Date("2026-09-01T12:00:00.000Z");
 
@@ -190,7 +191,7 @@ describe("authenticated investor offering detail", () => {
 
   it("keeps reservation closed while the offering's settlement escrow is not ready, even with the rail open", async () => {
     const service = new GetInvestorOfferingService(
-      repository(detail({ settlementEscrow: { gated: true, campaign: null } })),
+      repository(detail({ settlementEscrow: { gated: true, escrowContractAddress: CONFIGURED_ESCROW_CONTRACT, campaign: null } })),
       () => currentTime,
       true,
     );
