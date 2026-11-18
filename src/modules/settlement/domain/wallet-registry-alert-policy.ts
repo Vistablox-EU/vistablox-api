@@ -23,6 +23,9 @@ export const WALLET_REGISTRY_ALERT_EVENTS = {
   cursorAheadOfChain: "wallet_registry.cursor_ahead_of_chain",
   pendingOverdue: "wallet_registry.pending_overdue",
   unmatchedEvents: "wallet_registry.unmatched_events",
+  eventsWithoutIdentity: "wallet_registry.events_without_identity",
+  registrationConflict: "wallet_registry.registration_conflict",
+  evidenceFlagged: "wallet_registry.evidence_flagged",
   heartbeatWriteFailed: "wallet_registry.heartbeat_write_failed",
   healthChecked: "wallet_registry.health_checked",
   healthCheckFailed: "wallet_registry.health_check_failed",
@@ -70,6 +73,11 @@ export interface WalletRegistryHealthSnapshot {
   // that commitment and is unconfirmed.
   unresolvedMismatchCount: number;
   unresolvedMismatchAccountIds: readonly string[];
+  // Confirmed registrations whose recorded chain evidence is flagged (the
+  // transaction or its event is gone from the chain). Staff clear the flag by
+  // replacing the evidence; the watcher clears it when the same event is back.
+  flaggedEvidenceCount: number;
+  flaggedEvidenceAccountIds: readonly string[];
 }
 
 export interface WalletRegistryAlert {
@@ -195,12 +203,34 @@ export function evaluateWalletRegistryHealth(
     });
   }
 
+  // Level-triggered, like the reminder above: it lasts as long as the flag is
+  // set (AD-284). A warning, not an incident: the registration stays confirmed.
+  if (snapshot.flaggedEvidenceCount > 0) {
+    alerts.push({
+      event: WALLET_REGISTRY_ALERT_EVENTS.evidenceFlagged,
+      severity: "warn",
+      message: "confirmed wallet registrations have flagged chain evidence",
+      details: {
+        flagged_count: snapshot.flaggedEvidenceCount,
+        account_ids: snapshot.flaggedEvidenceAccountIds,
+      },
+    });
+  }
+
   return alerts;
 }
 
 export interface WalletRegistryRunSignals {
   // Events that matched no pending claim in a block past the previous cursor.
   newUnmatchedEvents: number;
+  // Events of an existing registration that the node gave no complete identity
+  // for, in a block past the previous cursor.
+  newEventsWithoutIdentity: number;
+  // Two accounts' confirmed claims on one address, in a block past the cursor.
+  newConfirmationConflicts: number;
+  // A different transaction from the registered wallet itself for a
+  // registration with complete, unflagged evidence, past the cursor.
+  newWalletConflictingEvents: number;
 }
 
 /**
@@ -212,9 +242,9 @@ export function evaluateWalletRegistryRun(
   signals: WalletRegistryRunSignals,
   thresholds: WalletRegistryAlertThresholds,
 ): WalletRegistryAlert[] {
-  if (signals.newUnmatchedEvents < thresholds.unmatchedEventsAlertCount) return [];
-  return [
-    {
+  const alerts: WalletRegistryAlert[] = [];
+  if (signals.newUnmatchedEvents >= thresholds.unmatchedEventsAlertCount) {
+    alerts.push({
       event: WALLET_REGISTRY_ALERT_EVENTS.unmatchedEvents,
       severity: "warn",
       message: "wallet registry events matched no pending registration",
@@ -222,6 +252,34 @@ export function evaluateWalletRegistryRun(
         new_unmatched_events: signals.newUnmatchedEvents,
         threshold_count: thresholds.unmatchedEventsAlertCount,
       },
-    },
-  ];
+    });
+  }
+
+  // AD-284: any count above zero. Only conflicts a stranger cannot raise are
+  // counted into these two fields.
+  if (signals.newConfirmationConflicts > 0 || signals.newWalletConflictingEvents > 0) {
+    alerts.push({
+      event: WALLET_REGISTRY_ALERT_EVENTS.registrationConflict,
+      severity: "warn",
+      message: "wallet registry events conflict with a confirmed registration",
+      details: {
+        new_confirmation_conflicts: signals.newConfirmationConflicts,
+        new_wallet_conflicting_events: signals.newWalletConflictingEvents,
+      },
+    });
+  }
+
+  // AD-284: shares the unmatched-events threshold, no setting of its own.
+  if (signals.newEventsWithoutIdentity >= thresholds.unmatchedEventsAlertCount) {
+    alerts.push({
+      event: WALLET_REGISTRY_ALERT_EVENTS.eventsWithoutIdentity,
+      severity: "warn",
+      message: "wallet registry events of an existing registration had no complete identity",
+      details: {
+        new_events_without_identity: signals.newEventsWithoutIdentity,
+        threshold_count: thresholds.unmatchedEventsAlertCount,
+      },
+    });
+  }
+  return alerts;
 }

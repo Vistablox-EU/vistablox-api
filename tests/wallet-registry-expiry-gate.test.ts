@@ -51,6 +51,7 @@ function reading(overrides: Partial<WalletRegistryHealthReading> = {}): WalletRe
     pendingOverdue: 0,
     oldestPendingRequestedAt: null,
     unresolvedMismatches: { count: 0, accountIds: [] },
+    flaggedEvidence: { count: 0, accountIds: [] },
     ...overrides,
   };
 }
@@ -111,6 +112,8 @@ describe("WalletRegistryExpiryGate", () => {
           pendingOverdue: 0,
           oldestPendingRequestedAt: null,
           unresolvedMismatchCount: 0,
+          flaggedEvidenceCount: 0,
+          flaggedEvidenceAccountIds: [],
           unresolvedMismatchAccountIds: [],
         },
         thresholds,

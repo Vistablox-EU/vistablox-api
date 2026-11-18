@@ -14,6 +14,7 @@ import {
   WALLET_REGISTRY_EVIDENCE_FINAL_DEPTH,
   WALLET_REGISTRY_EVIDENCE_RECHECK_BATCH,
   decideRegisteredRowEvent,
+  isDifferentTransactionFromRegisteredWallet,
   finalCursor,
   rewindTargetFor,
 } from "../domain/wallet-registration-event.policy.js";
@@ -123,6 +124,9 @@ export interface ConfirmWalletRegistrationsSummary {
   // Another account already holds the address confirmed; the claim stays
   // pending and the conflict is in audit_log.
   confirmationConflicts: number;
+  // The part of confirmationConflicts that is news (an event in a block past the
+  // cursor an earlier completed run reached). AD-284: the alert keys on this.
+  newConfirmationConflicts: number;
   // First-seen mismatches only (see recordWalletRegistrationAddressMismatch).
   addressMismatches: WalletRegistrationMismatchSignal[];
   // Mismatches this run read that were already recorded by an earlier read.
@@ -135,9 +139,16 @@ export interface ConfirmWalletRegistrationsSummary {
   // An event the node did not give a complete identity for (removed, or
   // missing a hash, block number or log index). Never confirmed without it.
   eventsWithoutIdentity: number;
+  // The part of eventsWithoutIdentity that is news (see newConfirmationConflicts).
+  newEventsWithoutIdentity: number;
   // A different on-chain event for a row another event already confirmed, or
   // an event another row already backs. Nothing is written for it.
   conflictingEvents: number;
+  // The part of conflictingEvents that is news and that a stranger cannot raise
+  // (AD-284): a different transaction, sent from the registered wallet itself,
+  // for a registration whose recorded evidence is complete and not flagged. An
+  // event from any other sender is counted in conflictingEvents only.
+  newWalletConflictingEvents: number;
   // Evidence written to a row that was already registered without it.
   evidenceRecorded: number;
   // Evidence replaced because the transaction was mined again in another block.
@@ -246,13 +257,16 @@ export class ConfirmWalletRegistrationsService {
       newUnmatchedEvents: 0,
       staleConfirmations: 0,
       confirmationConflicts: 0,
+      newConfirmationConflicts: 0,
       addressMismatches: [],
       addressMismatchesRepeated: 0,
       pendingRegistrationsOverdue,
       pendingWarnAfterMinutes: Math.round(this.pendingWarnAfterMs / 60_000),
       eventsReplayed: 0,
       eventsWithoutIdentity: 0,
+      newEventsWithoutIdentity: 0,
       conflictingEvents: 0,
+      newWalletConflictingEvents: 0,
       evidenceRecorded: 0,
       evidenceRefreshed: 0,
       evidenceRefreshDeferred: 0,
@@ -329,9 +343,9 @@ export class ConfirmWalletRegistrationsService {
     }
 
     if (record.registeredAt === null) {
-      return this.processPendingEvent(record, evidence, wallet, commitment, head, summary, run);
+      return this.processPendingEvent(record, evidence, wallet, commitment, head, summary, run, event.blockNumber);
     }
-    return this.processRegisteredEvent(record, evidence, wallet, head, summary);
+    return this.processRegisteredEvent(record, evidence, wallet, head, summary, run, event.blockNumber);
   }
 
   /** Returns the cursor position a deferred refresh asks for, or null. */
@@ -343,6 +357,7 @@ export class ConfirmWalletRegistrationsService {
     head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
     run: EventRun,
+    blockNumber: bigint | null | undefined,
   ): Promise<bigint | null> {
     if (record.walletAddress.toLowerCase() !== wallet.toLowerCase()) {
       // Durable record, not just the log line the worker emits from this
@@ -376,7 +391,7 @@ export class ConfirmWalletRegistrationsService {
       // Never confirm without the event's identity: that would recreate the
       // blank-evidence rows this job exists to avoid. The row stays pending;
       // the overdue count and the manual reconcile cover it.
-      summary.eventsWithoutIdentity += 1;
+      countEventWithoutIdentity(summary, blockNumber, run.cursor);
       return null;
     }
 
@@ -398,6 +413,7 @@ export class ConfirmWalletRegistrationsService {
       // Another account already holds the address confirmed. The claim stays
       // pending and the conflict is in audit_log.
       summary.confirmationConflicts += 1;
+      if (isNewBlock(evidence.blockNumber, run.cursor)) summary.newConfirmationConflicts += 1;
     } else if (outcome === "stale") {
       // The account replaced the claim between the read and the write.
       summary.staleConfirmations += 1;
@@ -412,7 +428,7 @@ export class ConfirmWalletRegistrationsService {
       // now, once.
       const reread = await this.repository.findWalletRegistrationByCommitment(commitment);
       if (reread !== null && reread.registeredAt !== null) {
-        return this.processRegisteredEvent(reread, evidence, wallet, head, summary);
+        return this.processRegisteredEvent(reread, evidence, wallet, head, summary, run, evidence.blockNumber);
       }
     }
     return null;
@@ -425,9 +441,11 @@ export class ConfirmWalletRegistrationsService {
     wallet: string,
     head: bigint,
     summary: ConfirmWalletRegistrationsSummary,
+    run: EventRun,
+    blockNumber: bigint | null | undefined,
   ): Promise<bigint | null> {
     if (evidence === null) {
-      summary.eventsWithoutIdentity += 1;
+      countEventWithoutIdentity(summary, blockNumber, run.cursor);
       return null;
     }
     const decision = decideRegisteredRowEvent(record, wallet, evidence);
@@ -439,6 +457,9 @@ export class ConfirmWalletRegistrationsService {
       // No mismatch audit row: whether and how to record a second event for a
       // confirmed registration is a policy of its own.
       summary.conflictingEvents += 1;
+      if (isDifferentTransactionFromRegisteredWallet(record, wallet, evidence) && isNewBlock(evidence.blockNumber, run.cursor)) {
+        summary.newWalletConflictingEvents += 1;
+      }
       return null;
     }
     const outcome = await this.repository.replaceWalletRegistrationEvidence({
@@ -622,9 +643,20 @@ function countUnmatchedEvent(
   cursor: bigint | null,
 ): void {
   summary.unmatchedEvents += 1;
-  if (cursor === null || blockNumber === undefined || blockNumber === null || blockNumber > cursor) {
-    summary.newUnmatchedEvents += 1;
-  }
+  if (isNewBlock(blockNumber, cursor)) summary.newUnmatchedEvents += 1;
+}
+
+function countEventWithoutIdentity(
+  summary: ConfirmWalletRegistrationsSummary,
+  blockNumber: bigint | null | undefined,
+  cursor: bigint | null,
+): void {
+  summary.eventsWithoutIdentity += 1;
+  if (isNewBlock(blockNumber, cursor)) summary.newEventsWithoutIdentity += 1;
+}
+
+function isNewBlock(blockNumber: bigint | null | undefined, cursor: bigint | null): boolean {
+  return cursor === null || blockNumber === undefined || blockNumber === null || blockNumber > cursor;
 }
 
 function toEvidence(event: WalletRegisteredEvent): WalletRegistrationEvidence | null {

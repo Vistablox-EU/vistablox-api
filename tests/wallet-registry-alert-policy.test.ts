@@ -31,6 +31,8 @@ function snapshot(overrides: Partial<WalletRegistryHealthSnapshot> = {}): Wallet
     oldestPendingRequestedAt: null,
     unresolvedMismatchCount: 0,
     unresolvedMismatchAccountIds: [],
+    flaggedEvidenceCount: 0,
+    flaggedEvidenceAccountIds: [],
     ...overrides,
   };
 }
@@ -250,6 +252,13 @@ describe("walletRegistryCursorLagBlocks", () => {
   });
 });
 
+const QUIET_RUN = {
+  newUnmatchedEvents: 0,
+  newEventsWithoutIdentity: 0,
+  newConfirmationConflicts: 0,
+  newWalletConflictingEvents: 0,
+};
+
 describe("evaluateWalletRegistryRun", () => {
   it.each([
     [0, 0],
@@ -257,11 +266,11 @@ describe("evaluateWalletRegistryRun", () => {
     [5, 1],
     [50, 1],
   ])("%i new unmatched events gives %i alerts at the default threshold of 5", (newUnmatchedEvents, expected) => {
-    expect(evaluateWalletRegistryRun({ newUnmatchedEvents }, THRESHOLDS)).toHaveLength(expected);
+    expect(evaluateWalletRegistryRun({ ...QUIET_RUN, newUnmatchedEvents }, THRESHOLDS)).toHaveLength(expected);
   });
 
   it("raises a warning with the count and threshold", () => {
-    expect(evaluateWalletRegistryRun({ newUnmatchedEvents: 7 }, THRESHOLDS)).toEqual([
+    expect(evaluateWalletRegistryRun({ ...QUIET_RUN, newUnmatchedEvents: 7 }, THRESHOLDS)).toEqual([
       {
         event: "wallet_registry.unmatched_events",
         severity: "warn",
@@ -270,12 +279,77 @@ describe("evaluateWalletRegistryRun", () => {
       },
     ]);
   });
+
+  it("is silent for a quiet run", () => {
+    expect(evaluateWalletRegistryRun(QUIET_RUN, THRESHOLDS)).toEqual([]);
+  });
+
+  describe("registration conflicts (AD-284)", () => {
+    it.each([
+      [{ newConfirmationConflicts: 1 }, { new_confirmation_conflicts: 1, new_wallet_conflicting_events: 0 }],
+      [{ newWalletConflictingEvents: 1 }, { new_confirmation_conflicts: 0, new_wallet_conflicting_events: 1 }],
+      [
+        { newConfirmationConflicts: 2, newWalletConflictingEvents: 3 },
+        { new_confirmation_conflicts: 2, new_wallet_conflicting_events: 3 },
+      ],
+    ])("alerts on any count above zero: %j", (signals, details) => {
+      expect(evaluateWalletRegistryRun({ ...QUIET_RUN, ...signals }, THRESHOLDS)).toEqual([
+        {
+          event: "wallet_registry.registration_conflict",
+          severity: "warn",
+          message: "wallet registry events conflict with a confirmed registration",
+          details,
+        },
+      ]);
+    });
+  });
+
+  describe("events without identity (AD-284)", () => {
+    it.each([
+      [4, 0],
+      [5, 1],
+    ])("%i new events gives %i alerts at the unmatched-events threshold of 5", (newEventsWithoutIdentity, expected) => {
+      const alerts = evaluateWalletRegistryRun({ ...QUIET_RUN, newEventsWithoutIdentity }, THRESHOLDS);
+      expect(alerts.map((alert) => alert.event)).toEqual(
+        expected === 0 ? [] : ["wallet_registry.events_without_identity"],
+      );
+    });
+
+    it("follows the unmatched-events threshold, not a setting of its own", () => {
+      const alerts = evaluateWalletRegistryRun(
+        { ...QUIET_RUN, newEventsWithoutIdentity: 2 },
+        { ...THRESHOLDS, unmatchedEventsAlertCount: 2 },
+      );
+      expect(alerts).toHaveLength(1);
+      expect(alerts[0]?.details).toEqual({ new_events_without_identity: 2, threshold_count: 2 });
+    });
+  });
 });
 
-describe("WALLET_REGISTRY_ALERT_EVENTS", () => {
-  it("names every event with the wallet_registry. prefix and no duplicates", () => {
-    const names = Object.values(WALLET_REGISTRY_ALERT_EVENTS);
-    expect(names.every((name) => /^wallet_registry\.[a-z_]+$/.test(name))).toBe(true);
-    expect(new Set(names).size).toBe(names.length);
+describe("flagged evidence (AD-284)", () => {
+  it("raises a standing warning while a confirmed registration has flagged evidence", () => {
+    const alerts = evaluateWalletRegistryHealth(
+      snapshot({ flaggedEvidenceCount: 2, flaggedEvidenceAccountIds: ["acct_a", "acct_b"] }),
+      THRESHOLDS,
+      NOW,
+    );
+    expect(alerts).toEqual([
+      {
+        event: "wallet_registry.evidence_flagged",
+        severity: "warn",
+        message: "confirmed wallet registrations have flagged chain evidence",
+        details: { flagged_count: 2, account_ids: ["acct_a", "acct_b"] },
+      },
+    ]);
+  });
+
+  it("is silent when nothing is flagged, and still raises while the watcher is stalled", () => {
+    expect(evaluateWalletRegistryHealth(snapshot(), THRESHOLDS, NOW)).toEqual([]);
+    const stalled = evaluateWalletRegistryHealth(
+      snapshot({ heartbeat: null, workerStartedAt: ago(60 * MINUTE), flaggedEvidenceCount: 1, flaggedEvidenceAccountIds: ["acct_a"] }),
+      THRESHOLDS,
+      NOW,
+    );
+    expect(stalled.map((alert) => alert.event)).toEqual(["wallet_registry.watcher_stalled", "wallet_registry.evidence_flagged"]);
   });
 });

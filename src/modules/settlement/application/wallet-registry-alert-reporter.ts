@@ -37,6 +37,7 @@ const METRICS = {
   heartbeatAgeSeconds: `${METRIC_PREFIX}_watcher_heartbeat_age_seconds`,
   cursorLagBlocks: `${METRIC_PREFIX}_cursor_lag_blocks`,
   unresolvedMismatches: `${METRIC_PREFIX}_address_mismatch_unresolved`,
+  flaggedEvidence: `${METRIC_PREFIX}_evidence_flagged`,
   alertsActive: `${METRIC_PREFIX}_health_alerts_active`,
 } as const;
 
@@ -150,7 +151,12 @@ export class WalletRegistryAlertReporter {
     this.logger.info({ trace_id: traceId, job, ...summary }, "case timer job completed");
 
     for (const alert of evaluateWalletRegistryRun(
-      { newUnmatchedEvents: summary.newUnmatchedEvents },
+      {
+        newUnmatchedEvents: summary.newUnmatchedEvents,
+        newEventsWithoutIdentity: summary.newEventsWithoutIdentity,
+        newConfirmationConflicts: summary.newConfirmationConflicts,
+        newWalletConflictingEvents: summary.newWalletConflictingEvents,
+      },
       this.options.thresholds,
     )) {
       this.logAlert(alert, job, traceId);
@@ -214,6 +220,7 @@ export class WalletRegistryAlertReporter {
         pending_total: snapshot.pendingTotal,
         pending_overdue: snapshot.pendingOverdue,
         unresolved_address_mismatches: snapshot.unresolvedMismatchCount,
+        flagged_evidence: snapshot.flaggedEvidenceCount,
         alerts_active: alerts.length,
       },
       "wallet registry health checked",
@@ -226,6 +233,7 @@ export class WalletRegistryAlertReporter {
     this.metrics.set(METRICS.heartbeatAgeSeconds, heartbeatAgeSeconds ?? -1);
     this.metrics.set(METRICS.cursorLagBlocks, lag === null ? 0 : Number(lag));
     this.metrics.set(METRICS.unresolvedMismatches, snapshot.unresolvedMismatchCount);
+    this.metrics.set(METRICS.flaggedEvidence, snapshot.flaggedEvidenceCount);
     this.metrics.set(METRICS.alertsActive, alerts.length);
   }
 

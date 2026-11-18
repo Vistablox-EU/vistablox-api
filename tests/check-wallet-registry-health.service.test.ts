@@ -27,6 +27,7 @@ function healthyReading(overrides: Partial<WalletRegistryHealthReading> = {}): W
     pendingOverdue: 0,
     oldestPendingRequestedAt: null,
     unresolvedMismatches: { count: 0, accountIds: [] },
+    flaggedEvidence: { count: 0, accountIds: [] },
     ...overrides,
   };
 }
@@ -118,6 +119,21 @@ describe("CheckWalletRegistryHealthService", () => {
       ["warn", "wallet_registry.address_mismatch_unresolved"],
     ]);
     expect(logged[3]?.fields).toMatchObject({ unresolved_count: 1, account_ids: ["acct_a"] });
+  });
+
+  it("reports confirmed registrations with flagged evidence as a warning with the account ids, and counts them in the proof of life", async () => {
+    const { service, logged } = setup(async () =>
+      healthyReading({ flaggedEvidence: { count: 2, accountIds: ["acct_a", "acct_b"] } }),
+    );
+
+    await service.execute();
+
+    expect(logged.map((entry) => [entry.level, entry.fields.event])).toEqual([
+      ["info", "wallet_registry.health_checked"],
+      ["warn", "wallet_registry.evidence_flagged"],
+    ]);
+    expect(logged[0]?.fields).toMatchObject({ flagged_evidence: 2, alerts_active: 1 });
+    expect(logged[1]?.fields).toMatchObject({ severity: "warn", flagged_count: 2, account_ids: ["acct_a", "acct_b"] });
   });
 
   it("raises watcher_not_configured, as an error once claims are waiting, when the watcher cannot run", async () => {

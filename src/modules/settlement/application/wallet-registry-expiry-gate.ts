@@ -87,6 +87,8 @@ export class WalletRegistryExpiryGate {
         oldestPendingRequestedAt: reading.oldestPendingRequestedAt,
         unresolvedMismatchCount: reading.unresolvedMismatches.count,
         unresolvedMismatchAccountIds: reading.unresolvedMismatches.accountIds,
+        flaggedEvidenceCount: reading.flaggedEvidence.count,
+        flaggedEvidenceAccountIds: reading.flaggedEvidence.accountIds,
       },
       this.options.thresholds,
       now,

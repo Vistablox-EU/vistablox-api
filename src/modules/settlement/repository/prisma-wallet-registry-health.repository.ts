@@ -47,6 +47,11 @@ interface PendingAggregateRow {
   oldest: Date | null;
 }
 
+interface FlaggedEvidenceRow {
+  total: bigint;
+  account_id: string;
+}
+
 interface UnresolvedMismatchRow {
   total: bigint;
   account_id: string;
@@ -78,7 +83,7 @@ export class PrismaWalletRegistryHealthRepository
   }
 
   public async readWalletRegistryHealth(overdueCutoff: Date): Promise<WalletRegistryHealthReading> {
-    const [pending, unresolved, settings] = await Promise.all([
+    const [pending, unresolved, flagged, settings] = await Promise.all([
       this.database.$queryRaw<PendingAggregateRow[]>`
         SELECT count(*) AS total,
                count(*) FILTER (WHERE requested_at < ${overdueCutoff}::timestamptz) AS overdue,
@@ -107,6 +112,16 @@ export class PrismaWalletRegistryHealthRepository
         ORDER BY first_seen, account_id
         LIMIT ${MAX_LISTED_MISMATCH_ACCOUNTS}
       `,
+      // Confirmed rows only: a flag is set by the evidence re-check on a
+      // confirmed registration, and clears when the evidence is replaced.
+      this.database.$queryRaw<FlaggedEvidenceRow[]>`
+        SELECT count(*) OVER () AS total, account_id
+        FROM settlement.wallet_registrations
+        WHERE registered_at IS NOT NULL
+          AND registration_evidence_flag IS NOT NULL
+        ORDER BY registration_evidence_flagged_at, account_id
+        LIMIT ${MAX_LISTED_MISMATCH_ACCOUNTS}
+      `,
       // The heartbeat row and the cursor row together: the heartbeat is what the
       // alerts judge, and either row existing is the trace of a watcher that ran.
       this.database.platformSetting.findMany({
@@ -126,6 +141,10 @@ export class PrismaWalletRegistryHealthRepository
       unresolvedMismatches: {
         count: Number(unresolved[0]?.total ?? 0n),
         accountIds: unresolved.map((row) => row.account_id),
+      },
+      flaggedEvidence: {
+        count: Number(flagged[0]?.total ?? 0n),
+        accountIds: flagged.map((row) => row.account_id),
       },
     };
   }

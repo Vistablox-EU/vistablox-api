@@ -163,6 +163,36 @@ describe("reportRun", () => {
     }
   });
 
+  it("raises the AD-284 per-run warnings from the new counters, each with its own event", async () => {
+    const { reporter, events } = setup();
+
+    await reporter.reportRun(
+      summary({ newConfirmationConflicts: 1, newWalletConflictingEvents: 2, newEventsWithoutIdentity: 5 }),
+      117n,
+      TRACE,
+    );
+
+    expect(events("wallet_registry.registration_conflict")).toMatchObject([
+      { level: "warn", fields: { severity: "warn", new_confirmation_conflicts: 1, new_wallet_conflicting_events: 2 } },
+    ]);
+    expect(events("wallet_registry.events_without_identity")).toMatchObject([
+      { level: "warn", fields: { severity: "warn", new_events_without_identity: 5, threshold_count: 5 } },
+    ]);
+  });
+
+  it("stays quiet for conflicts and identity-less events that are not new", async () => {
+    const { reporter, events } = setup();
+
+    await reporter.reportRun(
+      summary({ confirmationConflicts: 3, conflictingEvents: 3, eventsWithoutIdentity: 9 }),
+      117n,
+      TRACE,
+    );
+
+    expect(events("wallet_registry.registration_conflict")).toEqual([]);
+    expect(events("wallet_registry.events_without_identity")).toEqual([]);
+  });
+
   it("no longer logs the per-run overdue warning; the health check owns it", async () => {
     const { reporter, events } = setup();
 
@@ -296,6 +326,8 @@ function snapshot(overrides: Partial<WalletRegistryHealthSnapshot> = {}): Wallet
     oldestPendingRequestedAt: null,
     unresolvedMismatchCount: 0,
     unresolvedMismatchAccountIds: [],
+    flaggedEvidenceCount: 0,
+    flaggedEvidenceAccountIds: [],
     ...overrides,
   };
 }
@@ -324,6 +356,7 @@ describe("reportHealth", () => {
           pending_total: 0,
           pending_overdue: 0,
           unresolved_address_mismatches: 0,
+          flagged_evidence: 0,
           alerts_active: 0,
         },
       },

@@ -664,6 +664,7 @@ describe.skipIf(databaseUrl === undefined)("wallet claim expiry PostgreSQL integ
         pendingOverdue: 1,
         oldestPendingRequestedAt: longAgo,
         unresolvedMismatches: { count: 0, accountIds: [] },
+        flaggedEvidence: { count: 0, accountIds: [] },
       }),
     });
 
