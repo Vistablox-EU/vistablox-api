@@ -428,6 +428,22 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
     );
   }
 
+  public async adoptEscrowMintTransaction(input: {
+    intentId: string;
+    attempt: number;
+    txHash: string;
+  }): Promise<void> {
+    const updated = await this.database.escrowMintIntent.updateMany({
+      where: { id: input.intentId, attempt: input.attempt, status: "mint_sent" },
+      data: { mintTxHash: input.txHash },
+    });
+    if (updated.count === 1) return;
+    throw new Error(
+      `escrow mint intent ${input.intentId} is not at attempt ${input.attempt} in 'mint_sent'; ` +
+        `cannot adopt mint tx ${input.txHash}`,
+    );
+  }
+
   public async recordEscrowMintedPosition(
     input: RecordEscrowMintedPositionInput,
   ): Promise<{ positionId: string }> {

@@ -271,6 +271,11 @@ export interface SettlementRepository {
   // (`sending` -> `mint_sent`). Idempotent for the same hash; throws if the
   // intent is on another attempt or already holds a different hash.
   recordEscrowMintSent(input: { intentId: string; attempt: number; txHash: string }): Promise<void>;
+  // Replaces the recorded hash of a `mint_sent` attempt with a mint found
+  // on-chain for it, when the recorded transaction never got a receipt (it was
+  // replaced or its nonce taken). Idempotent for the same hash; throws if the
+  // intent is on another attempt or not `mint_sent`.
+  adoptEscrowMintTransaction(input: { intentId: string; attempt: number; txHash: string }): Promise<void>;
   // Records the confirmed mint: flips the intent to `recorded` and writes the
   // position and its mint event in one transaction. Replaying it for an
   // intent that is already recorded returns the existing position.
