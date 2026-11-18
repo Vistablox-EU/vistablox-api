@@ -232,6 +232,7 @@ describe("dead-letter consumer", () => {
     error.mockImplementation(() => order.push("log"));
     const deliverAlert = vi.fn(async () => {
       order.push("alert");
+      return true;
     });
 
     await createDeadLetterHandler(logger, { deliverAlert })([
@@ -258,7 +259,7 @@ describe("dead-letter consumer", () => {
 
   it("marks scheduled and unknown queues as not replayable", async () => {
     const { logger } = fakeLogger();
-    const deliverAlert = vi.fn(async () => undefined);
+    const deliverAlert = vi.fn(async () => true);
 
     await createDeadLetterHandler(logger, { deliverAlert })([
       deadLetterJob({ sourceName: "settlement.finalize_ipo_escrow_campaigns" }),

@@ -78,7 +78,7 @@ describe("dead-letter alert webhook", () => {
     const { logger, warn } = fakeLogger();
     const fetch = vi.fn().mockResolvedValue(new Response("invalid_token", { status: 403 }));
 
-    await expect(createDeadLetterAlertWebhook({ url: WEBHOOK_URL, logger, fetch })(alert())).resolves.toBeUndefined();
+    await expect(createDeadLetterAlertWebhook({ url: WEBHOOK_URL, logger, fetch })(alert())).resolves.toBe(false);
 
     expect(warn).toHaveBeenCalledWith(
       {
@@ -97,7 +97,7 @@ describe("dead-letter alert webhook", () => {
     const { logger, warn } = fakeLogger();
     const fetch = vi.fn().mockRejectedValue(new TypeError(`fetch failed for ${WEBHOOK_URL}`));
 
-    await expect(createDeadLetterAlertWebhook({ url: WEBHOOK_URL, logger, fetch })(alert())).resolves.toBeUndefined();
+    await expect(createDeadLetterAlertWebhook({ url: WEBHOOK_URL, logger, fetch })(alert())).resolves.toBe(false);
 
     expect(warn).toHaveBeenCalledWith(
       expect.objectContaining({
