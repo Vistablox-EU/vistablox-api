@@ -4,6 +4,7 @@ import { Pool } from "pg";
 import { PgBoss } from "pg-boss";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
+import { createPrismaClient, type DatabaseClient } from "../src/infrastructure/database/prisma.js";
 import { planDeadLetterReplay, replayDeadLetterJob, replayJobIdFor } from "../src/shared/jobs/dead-letter-replay.js";
 import { JOB_RETRY_OPTIONS } from "../src/shared/jobs/enqueue-job.js";
 import { DEAD_LETTER_QUEUE, ensureDeadLetterQueue, ensureJobQueue } from "../src/shared/jobs/job-queues.js";
@@ -21,13 +22,16 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
   const bossSchema = `pgboss_replay_${suffix}`;
   const pool = new Pool({ connectionString: databaseUrl });
   let boss: PgBoss;
+  let database: DatabaseClient;
 
   // Sends a job that dead-letters on its first failure, fails it, and returns
   // the dead-letter entry's id.
   async function deadLetter(queue: string, data: Record<string, unknown>): Promise<{ id: string; sourceId: string }> {
     const sourceId = await boss.send(queue, data, { retryLimit: 0, deadLetter: DEAD_LETTER_QUEUE });
     if (sourceId === null) throw new Error("send returned null");
-    const [fetched] = await boss.fetch(queue);
+    // Earlier tests leave replayed jobs in these queues, so fetch a batch and
+    // pick this test's job out of it.
+    const fetched = (await boss.fetch(queue, { batchSize: 50 })).find((job) => job.id === sourceId);
     expect(fetched?.id).toBe(sourceId);
     await boss.fail(queue, sourceId, new Error("dependency down"));
     const { rows } = await pool.query<{ id: string }>(
@@ -39,6 +43,7 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
   }
 
   beforeAll(async () => {
+    database = createPrismaClient(databaseUrl ?? "");
     boss = new PgBoss({ connectionString: databaseUrl ?? "", schema: bossSchema });
     await boss.start();
     await ensureDeadLetterQueue(boss);
@@ -48,6 +53,7 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
 
   afterAll(async () => {
     await boss.stop({ graceful: false });
+    await database.$disconnect();
     await pool.query(`DROP SCHEMA IF EXISTS "${bossSchema}" CASCADE`);
     await pool.end();
   }, 30_000);
@@ -71,7 +77,7 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
     });
     if (!plan.ok) throw new Error("expected a plan");
 
-    expect(await replayDeadLetterJob(boss, plan)).toEqual({ status: "sent", jobId: plan.replayJobId });
+    expect(await replayDeadLetterJob(boss, database, plan, "damir")).toEqual({ status: "sent", jobId: plan.replayJobId });
     const replayed = await boss.getJobById(EVENT_QUEUE, plan.replayJobId);
     expect(replayed).toMatchObject({
       state: "created",
@@ -81,7 +87,29 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
     });
 
     // A second send of the same plan (two operators racing) is a no-op.
-    expect(await replayDeadLetterJob(boss, plan)).toEqual({ status: "already_replayed", jobId: plan.replayJobId });
+    expect(await replayDeadLetterJob(boss, database, plan, "other")).toEqual({
+      status: "already_replayed",
+      jobId: plan.replayJobId,
+    });
+    // Exactly one audit row, from the first replay, with key names and no values.
+    const audit = await database.auditLog.findMany({ where: { resourceType: "job", resourceId: entry.id } });
+    expect(audit).toHaveLength(1);
+    expect(audit[0]).toMatchObject({
+      action: "job.dead_letter_replayed",
+      eventKey: `job.dead_letter_replayed:${entry.id}`,
+      actorAccountId: null,
+      changes: {
+        operator: "damir",
+        queue: EVENT_QUEUE,
+        source_job_id: entry.sourceId,
+        replay_job_id: plan.replayJobId,
+        owner: "settlement",
+        tier: "tier_1",
+        attempts: 1,
+        payload_keys: ["case_id", "trace_id"],
+      },
+    });
+    expect(JSON.stringify(audit[0]?.changes)).not.toContain("case_replay_1");
     expect(await planDeadLetterReplay(boss, entry.id)).toMatchObject({ ok: false, reason: "already_replayed" });
     const { rows } = await pool.query(`SELECT 1 FROM "${bossSchema}".job WHERE name = $1 AND data->>'case_id' = $2`, [
       EVENT_QUEUE,
@@ -104,5 +132,32 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
 
   it("refuses an id that is not a dead-letter entry", async () => {
     expect(await planDeadLetterReplay(boss, randomUUID())).toMatchObject({ ok: false, reason: "not_found" });
+  });
+
+  it("rolls the send back when the audit insert fails", async () => {
+    const entry = await deadLetter(EVENT_QUEUE, { case_id: "case_replay_rollback" });
+    const plan = await planDeadLetterReplay(boss, entry.id);
+    if (!plan.ok) throw new Error("expected a plan");
+    // The unique event_key makes the audit insert fail.
+    await database.auditLog.create({
+      data: {
+        id: `audit_${randomUUID()}`,
+        eventKey: `job.dead_letter_replayed:${entry.id}`,
+        action: "job.dead_letter_replayed",
+        resourceType: "job",
+        resourceId: entry.id,
+      },
+    });
+    await expect(replayDeadLetterJob(boss, database, plan, "damir")).rejects.toThrow();
+    expect(await boss.getJobById(EVENT_QUEUE, plan.replayJobId)).toBeNull();
+  });
+
+  it("writes no audit row for a dry run or a refused replay", async () => {
+    const before = await database.auditLog.count({ where: { action: "job.dead_letter_replayed" } });
+    const scheduled = await deadLetter(SCHEDULED_QUEUE, {});
+    expect(await planDeadLetterReplay(boss, scheduled.id)).toMatchObject({ ok: false });
+    const event = await deadLetter(EVENT_QUEUE, { case_id: "case_dry_run" });
+    expect(await planDeadLetterReplay(boss, event.id)).toMatchObject({ ok: true });
+    expect(await database.auditLog.count({ where: { action: "job.dead_letter_replayed" } })).toBe(before);
   });
 });

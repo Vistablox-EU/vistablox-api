@@ -95,9 +95,11 @@ The replay command sends the dead-lettered payload, unchanged, back to the queue
 
 Without `--confirm` this is a **dry run**: it prints the queue, the owner and tier, the source job id, the attempt count, the payload's key names (never its values) and the id the replay will get, and changes nothing. Check that it is the job you expect, then send it:
 
-    docker compose --env-file .env.staging -f docker-compose.staging.yml exec worker npm run jobs:replay-dead-letter -- --dead-letter-job-id <dead_letter_job_id> --confirm
+    docker compose --env-file .env.staging -f docker-compose.staging.yml exec worker npm run jobs:replay-dead-letter -- --dead-letter-job-id <dead_letter_job_id> --confirm --operator <your name>
 
-The replay logs `"event":"job.dead_letter_replayed"` with both ids. Then watch the job's queue in the worker log until it succeeds. If it fails again it is retried for another 3 hours and, failing that, dead-letters again with a new `dead_letter_job_id`.
+`--operator` is required with `--confirm`. A confirmed replay writes one `audit.audit_log` row in the same database transaction as the send, so the job and its audit row commit together or not at all (AD-148): action `job.dead_letter_replayed`, resource `job` / the `dead_letter_job_id`, `event_key` `job.dead_letter_replayed:<dead_letter_job_id>`, and `changes` with the operator, queue, source job id, replay job id, owner, tier, attempts and the payload's key names (never its values). `actor_account_id` is null: the command has no signed-in account, so the operator name is self-declared. The row outlives pg-boss's retention of the replayed job.
+
+The replay also logs `"event":"job.dead_letter_replayed"` with both ids. That line goes to the command's own stderr, which is the operator's terminal under `docker compose exec`, not the worker log; the audit row is the durable record. Then watch the job's queue in the worker log until it succeeds. If it fails again it is retried for another 3 hours and, failing that, dead-letters again with a new `dead_letter_job_id`.
 
 Exit codes: `0` done (or dry run), `1` refused or failed, `2` bad arguments.
 
