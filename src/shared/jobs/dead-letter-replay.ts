@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 
 import type { PgBoss } from "pg-boss";
+import { ulid } from "ulid";
 
+import type { PrismaClient } from "../../generated/prisma/client.js";
 import { JOB_RETRY_OPTIONS } from "./enqueue-job.js";
 import { type JobAlertTier, type JobOwner, ownershipOf } from "./job-ownership.js";
 import { DEAD_LETTER_QUEUE } from "./job-queues.js";
@@ -101,20 +103,58 @@ export async function planDeadLetterReplay(
   };
 }
 
+export const DEAD_LETTER_REPLAYED_ACTION = "job.dead_letter_replayed";
+
 /**
  * Sends the dead-lettered payload, unchanged, back to its source queue with
  * the event retry profile and the dead-letter queue, as a new job with the
- * plan's deterministic id. "already_replayed" means another replay of the
- * same entry got there first.
+ * plan's deterministic id, and writes the audit.audit_log row for it (AD-148,
+ * ASYNC_JOBS.md: replay is allowed only through audited internal operations).
+ * The send is bound to a Prisma transaction through pg-boss's per-call `db`
+ * adapter, as enqueueTransactionalJob does, so the replayed job and its audit
+ * row commit together or not at all: if the audit insert fails, the send is
+ * rolled back. The audit row's changes hold key names only, never payload
+ * values. "already_replayed" means another replay of the same entry got there
+ * first; it writes no audit row (the first replay wrote it).
  */
 export async function replayDeadLetterJob(
   boss: PgBoss,
+  database: PrismaClient,
   plan: DeadLetterReplayPlan,
+  operator: string,
 ): Promise<{ status: "sent"; jobId: string } | { status: "already_replayed"; jobId: string }> {
-  const sent = await boss.send(plan.queue, plan.data as object, {
-    ...JOB_RETRY_OPTIONS,
-    deadLetter: DEAD_LETTER_QUEUE,
-    id: plan.replayJobId,
+  return database.$transaction(async (transaction) => {
+    const sent = await boss.send(plan.queue, plan.data as object, {
+      ...JOB_RETRY_OPTIONS,
+      deadLetter: DEAD_LETTER_QUEUE,
+      id: plan.replayJobId,
+      db: {
+        executeSql: async (text: string, values?: unknown[]) => ({
+          rows: await transaction.$queryRawUnsafe<unknown[]>(text, ...(values ?? [])),
+        }),
+      },
+    });
+    if (sent === null) return { status: "already_replayed", jobId: plan.replayJobId } as const;
+    await transaction.auditLog.create({
+      data: {
+        id: `audit_${ulid()}`,
+        eventKey: `${DEAD_LETTER_REPLAYED_ACTION}:${plan.deadLetterJobId}`,
+        actorAccountId: null,
+        action: DEAD_LETTER_REPLAYED_ACTION,
+        resourceType: "job",
+        resourceId: plan.deadLetterJobId,
+        changes: {
+          operator,
+          queue: plan.queue,
+          source_job_id: plan.sourceJobId,
+          replay_job_id: sent,
+          owner: plan.owner,
+          tier: plan.tier,
+          attempts: plan.attempts,
+          payload_keys: plan.payloadKeys,
+        },
+      },
+    });
+    return { status: "sent", jobId: sent } as const;
   });
-  return sent === null ? { status: "already_replayed", jobId: plan.replayJobId } : { status: "sent", jobId: sent };
 }

@@ -2,7 +2,7 @@
  * Replays one dead-lettered job (docs/dead-letter-jobs.md).
  *
  *   npm run jobs:replay-dead-letter -- --dead-letter-job-id <uuid>            (dry run)
- *   npm run jobs:replay-dead-letter -- --dead-letter-job-id <uuid> --confirm
+ *   npm run jobs:replay-dead-letter -- --dead-letter-job-id <uuid> --confirm --operator <name>
  *
  * Run from a shell inside the worker or API container, where the container's
  * own environment is read through the normal loadEnvironment(). Fix the cause
@@ -15,6 +15,7 @@ import "dotenv/config";
 import { PgBoss } from "pg-boss";
 
 import { loadEnvironment } from "../config/environment.js";
+import { createPrismaClient } from "../infrastructure/database/prisma.js";
 import { createLogger } from "../infrastructure/logging/logger.js";
 import { planDeadLetterReplay, replayDeadLetterJob } from "../shared/jobs/dead-letter-replay.js";
 import { parseReplayDeadLetterJobArguments, REPLAY_DEAD_LETTER_JOB_USAGE } from "./replay-dead-letter-job-arguments.js";
@@ -41,7 +42,8 @@ async function main(): Promise<number> {
     print(REPLAY_DEAD_LETTER_JOB_USAGE);
     return 0;
   }
-  const { mode, deadLetterJobId } = parsed.value;
+  const { deadLetterJobId } = parsed.value;
+  const mode = parsed.value.mode;
 
   const environment = loadEnvironment();
   const logger = createLogger(environment.LOG_LEVEL, process.stderr);
@@ -54,6 +56,7 @@ async function main(): Promise<number> {
     migrate: false,
     createSchema: false,
   });
+  const database = createPrismaClient(environment.DATABASE_URL);
   boss.on("error", (error) => printError(`pg-boss: ${error.message}`));
   try {
     await boss.start();
@@ -72,10 +75,12 @@ async function main(): Promise<number> {
     print(`  replay job id:      ${plan.replayJobId}`);
     if (mode === "dry_run") {
       print();
-      print("Re-run with --confirm to send it.");
+      print("Re-run with --confirm --operator <name> to send it.");
       return 0;
     }
-    const result = await replayDeadLetterJob(boss, plan);
+    if (parsed.value.mode !== "confirm") return 0;
+    const operator = parsed.value.operator;
+    const result = await replayDeadLetterJob(boss, database, plan, operator);
     if (result.status === "already_replayed") {
       printError(`Refused (already_replayed): ${plan.queue} job ${result.jobId} already exists`);
       return EXIT_REFUSED_OR_FAILED;
@@ -90,6 +95,7 @@ async function main(): Promise<number> {
         original_job_id: plan.sourceJobId,
         owner: plan.owner,
         tier: plan.tier,
+        operator,
       },
       "dead-lettered job replayed by operator",
     );
@@ -101,6 +107,7 @@ async function main(): Promise<number> {
     return EXIT_REFUSED_OR_FAILED;
   } finally {
     await boss.stop({ graceful: false }).catch(() => undefined);
+    await database.$disconnect().catch(() => undefined);
   }
 }
 

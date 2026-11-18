@@ -96,11 +96,24 @@ describe("replay-dead-letter arguments", () => {
   it("is a dry run unless --confirm is given", () => {
     expect(parseReplayDeadLetterJobArguments(["--dead-letter-job-id", id])).toEqual({
       ok: true,
-      value: { mode: "dry_run", deadLetterJobId: id },
+      value: { mode: "dry_run", deadLetterJobId: id, operator: null },
     });
-    expect(parseReplayDeadLetterJobArguments(["--dead-letter-job-id", id.toUpperCase(), "--confirm"])).toEqual({
+    expect(
+      parseReplayDeadLetterJobArguments(["--dead-letter-job-id", id.toUpperCase(), "--confirm", "--operator", " damir "]),
+    ).toEqual({
       ok: true,
-      value: { mode: "confirm", deadLetterJobId: id },
+      value: { mode: "confirm", deadLetterJobId: id, operator: "damir" },
+    });
+  });
+
+  it("requires a non-empty --operator with --confirm", () => {
+    expect(parseReplayDeadLetterJobArguments(["--dead-letter-job-id", id, "--confirm"])).toEqual({
+      ok: false,
+      error: "--operator is required with --confirm",
+    });
+    expect(parseReplayDeadLetterJobArguments(["--dead-letter-job-id", id, "--confirm", "--operator", "  "])).toEqual({
+      ok: false,
+      error: "--operator must not be empty",
     });
   });
 
