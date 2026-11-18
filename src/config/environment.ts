@@ -97,12 +97,6 @@ const environmentSchema = z
     // production. Unset means production: a real production deploy stays
     // protected without anyone having to remember to set it.
     APP_ENV: z.preprocess(emptyStringToUndefined, z.enum(["staging", "production"]).optional()),
-    // Staging-only test-account relaxation. This permits one staff account to
-    // record both recovery reviews while preserving the Didit gate and audit.
-    ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: z
-      .enum(["true", "false"])
-      .default("false")
-      .transform((value) => value === "true"),
     ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING: z
       .enum(["true", "false"])
       .default("false")
@@ -548,15 +542,6 @@ const environmentSchema = z
       // rpId or a subdomain of it.
       message: "BETTER_AUTH_URL's hostname must equal WEBAUTHN_RP_ID or be a subdomain of it",
       path: ["WEBAUTHN_RP_ID"],
-    },
-  )
-  .refine(
-    (environment) =>
-      environment.ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE === false ||
-      environment.APP_ENV === "staging",
-    {
-      message: "ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE=true is permitted only when APP_ENV=staging",
-      path: ["ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE"],
     },
   )
   .refine(

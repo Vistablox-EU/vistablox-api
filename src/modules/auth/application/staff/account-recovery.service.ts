@@ -155,7 +155,6 @@ export class DecideAccountRecoveryCaseService {
     private readonly repository: AccountRecoveryRepository,
     private readonly emailSender: EmailSender,
     private readonly clock: () => Date = () => new Date(),
-    private readonly singleReviewerMode = false,
   ) {}
 
   public async execute(input: {
@@ -167,7 +166,7 @@ export class DecideAccountRecoveryCaseService {
   }): Promise<AccountRecoveryCaseRecord> {
     const existingCase = await this.repository.findCase(input.caseId);
     if (existingCase === null) throw caseNotFoundError();
-    if (existingCase.reviewedByPrimary === input.actorAccountId && !this.singleReviewerMode) {
+    if (existingCase.reviewedByPrimary === input.actorAccountId) {
       throw sameReviewerError();
     }
 
@@ -178,7 +177,6 @@ export class DecideAccountRecoveryCaseService {
       reason: input.reason,
       traceId: input.traceId,
       decidedAt: this.clock(),
-      allowSameReviewer: this.singleReviewerMode,
     });
     if (updated === null) throw decisionUnavailableError();
 

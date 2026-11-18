@@ -403,7 +403,6 @@ const accountRecovery = {
   callbackUrl: environment.DIDIT_CALLBACK_URL,
   recoveryRedirectUrl:
     environment.ACCOUNT_RECOVERY_REDIRECT_URL ?? "com.vistablox.app://recover-account",
-  singleReviewerMode: environment.ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE,
   skipDiditInStaging: environment.ACCOUNT_RECOVERY_SKIP_DIDIT_IN_STAGING,
   emailSender,
 };
