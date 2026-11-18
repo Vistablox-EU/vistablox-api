@@ -29,7 +29,9 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
   async function deadLetter(queue: string, data: Record<string, unknown>): Promise<{ id: string; sourceId: string }> {
     const sourceId = await boss.send(queue, data, { retryLimit: 0, deadLetter: DEAD_LETTER_QUEUE });
     if (sourceId === null) throw new Error("send returned null");
-    const [fetched] = await boss.fetch(queue);
+    // Earlier tests leave replayed jobs in these queues, so fetch a batch and
+    // pick this test's job out of it.
+    const fetched = (await boss.fetch(queue, { batchSize: 50 })).find((job) => job.id === sourceId);
     expect(fetched?.id).toBe(sourceId);
     await boss.fail(queue, sourceId, new Error("dependency down"));
     const { rows } = await pool.query<{ id: string }>(
