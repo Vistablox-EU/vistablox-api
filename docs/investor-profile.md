@@ -145,6 +145,31 @@ The endpoint reads the chain head once (uncached) and pins everything else to th
 | `token_paused` | Always `false` on a 200 |
 | `simulation` | Always `"passed"` on a 200: the calldata ran without reverting from the wallet at that block |
 
+### Amount unit and range
+
+`amount` is a **raw on-chain ERC-1155 token amount**: a base-10 integer string passed unchanged as the `value` argument of `safeTransferFrom(from, to, id, value, data)`. There is no scaling, no decimals and no fractional amount. The contract is ERC-1155 and has no `decimals()`; the API neither multiplies nor divides. The same unit is used by `amount` and `preflight.sender_balance` on this endpoint and by `tokens[].balance` on `GET /v1/investor-profile/wallet/balance`, so `amount: "3"` moves exactly three units of that balance.
+
+For a token minted from an IPO escrow campaign, one token unit equals one EURC base unit contributed (EURC has 6 decimals), because the finalizer mints `contributionOf` as-is (`finalize-ipo-escrow-campaigns.service.ts`). A contribution of 250.00 EUR therefore mints `250000000` units, and `amount: "1"` moves 0.000001 EUR of that position. A client that shows whole euros or "shares" divides by `10^6` for display only and sends the raw integer.
+
+Validation (`422 validation.invalid_field`, `field` `amount`): the string must match `^[1-9][0-9]*$`. A JSON number, a decimal point, an exponent, a sign, whitespace, `"0"` and leading zeros (`"007"`) are all rejected. There is no maximum length in the schema: an amount above `2^256 - 1` (`115792089237316195423570985008687907853269984665640564039457584007913129639935`) passes validation but answers `422 wallet.insufficient_balance` without a chain read. Any other amount above the sender's balance at the pinned block answers the same code, after the chain read.
+
+On a `200`, `data.amount` echoes the request's string exactly, and `unsigned_transaction.data` encodes it as the `value` argument.
+
+### Response of a prepared transfer
+
+| Field | Meaning |
+| --- | --- |
+| `data.piv_id`, `data.token_id` | The PIV and its ERC-1155 token id (decimal string) |
+| `data.amount` | The requested amount, as sent |
+| `data.from_wallet_address`, `data.to_wallet_address` | Sender (the caller's confirmed wallet) and recipient, lowercase |
+| `data.unsigned_transaction.chain_id` | Chain the call is for |
+| `data.unsigned_transaction.to` | The property token contract |
+| `data.unsigned_transaction.data` | `safeTransferFrom` calldata, `0x` hex |
+| `data.unsigned_transaction.value` | Native-currency value to send with the call (decimal string; `"0"`) |
+| `data.preflight` | The advisory snapshot described above |
+
+The transaction is **unsigned**. The backend does not sign, submit or hold a key (AD-240); the customer's wallet/device must sign and submit it itself. A `200` does not mean the transfer happened.
+
 A transfer is prepared only for a confirmed wallet registration (`registered_at` set, wallet `status` `registered`). A pending claim is an address the customer submitted whose registry event has not been seen yet; it proves nothing about who controls the address, so this endpoint treats it as no wallet. It answers `404 wallet.not_registered`, with the same code, title and status as an account that has no wallet row; only `detail` differs (it says the registration is not confirmed yet), and clients should key on `code`. To tell a pending claim from a missing wallet, read `GET /v1/investor-profile/wallet` (`status` is `pending`). The mobile client therefore sees `404 wallet.not_registered` from this endpoint until the registration is confirmed.
 
 The wallet check is the first one the service makes. It reads the wallet row once and uses that same row for the `from` address of the chain read and for `from_wallet_address`; for a pending claim no holdings are read, no chain call is made and no calldata is built. Refusals are made in this order: `401 authentication.required`, `403 authorization.forbidden` (not a customer account), `422 validation.invalid_field` (malformed body), `404 wallet.not_registered` (no wallet row, then a pending claim), `404 wallet.piv_not_held`, `422 wallet.insufficient_balance` for an amount above uint256 (no chain read), `503 wallet.chain_unavailable`, then the chain-state `422` codes in the table below. This endpoint makes no KYC check (KYC gates `POST /v1/investor-profile/wallet` only); one added later belongs before the wallet check. Steps up to and including `404 wallet.piv_not_held` depend only on the request and the caller's own rows, so the `404` for a pending claim reveals nothing about the address, about other accounts' claims on it, or about chain state. The "Current behaviour" note further down describes what a confirmed wallet gets.
