@@ -4,13 +4,13 @@ import type { PgBoss } from "pg-boss";
 
 import { JOB_RETRY_OPTIONS } from "./enqueue-job.js";
 import { type JobAlertTier, type JobOwner, ownershipOf } from "./job-ownership.js";
-import { DEAD_LETTER_QUEUE } from "./job-queues.js";
+import { DEAD_LETTER_QUEUE, DEAD_LETTER_QUEUE_OPTIONS } from "./job-queues.js";
 
 /**
  * The job id a replay of one dead-letter entry is sent with. It is derived
  * from the entry's id, so replaying the same entry twice sends the same id,
  * and pg-boss's insert (ON CONFLICT DO NOTHING) drops the second send while
- * the first replayed job is still kept. A replay that dead-letters again gets
+ * the first replayed job is still kept (as long as the entry itself). A replay that dead-letters again gets
  * a new dead-letter entry, and so a new id of its own.
  */
 export function replayJobIdFor(deadLetterJobId: string): string {
@@ -106,6 +106,11 @@ export async function planDeadLetterReplay(
  * the event retry profile and the dead-letter queue, as a new job with the
  * plan's deterministic id. "already_replayed" means another replay of the
  * same entry got there first.
+ *
+ * The replayed job is kept for as long as the dead-letter entry (its
+ * deleteAfterSeconds is the dead-letter queue's), because the job's row is the
+ * once-only guard: pg-boss's default would delete it 7 days after it
+ * completes, while the entry stays replayable for 30.
  */
 export async function replayDeadLetterJob(
   boss: PgBoss,
@@ -114,6 +119,7 @@ export async function replayDeadLetterJob(
   const sent = await boss.send(plan.queue, plan.data as object, {
     ...JOB_RETRY_OPTIONS,
     deadLetter: DEAD_LETTER_QUEUE,
+    deleteAfterSeconds: DEAD_LETTER_QUEUE_OPTIONS.deleteAfterSeconds,
     id: plan.replayJobId,
   });
   return sent === null ? { status: "already_replayed", jobId: plan.replayJobId } : { status: "sent", jobId: sent };

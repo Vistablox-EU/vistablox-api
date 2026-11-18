@@ -6,7 +6,12 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { planDeadLetterReplay, replayDeadLetterJob, replayJobIdFor } from "../src/shared/jobs/dead-letter-replay.js";
 import { JOB_RETRY_OPTIONS } from "../src/shared/jobs/enqueue-job.js";
-import { DEAD_LETTER_QUEUE, ensureDeadLetterQueue, ensureJobQueue } from "../src/shared/jobs/job-queues.js";
+import {
+  DEAD_LETTER_QUEUE,
+  DEAD_LETTER_QUEUE_OPTIONS,
+  ensureDeadLetterQueue,
+  ensureJobQueue,
+} from "../src/shared/jobs/job-queues.js";
 
 const databaseUrl = process.env.TEST_DATABASE_URL;
 
@@ -27,8 +32,9 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
   async function deadLetter(queue: string, data: Record<string, unknown>): Promise<{ id: string; sourceId: string }> {
     const sourceId = await boss.send(queue, data, { retryLimit: 0, deadLetter: DEAD_LETTER_QUEUE });
     if (sourceId === null) throw new Error("send returned null");
-    const [fetched] = await boss.fetch(queue);
-    expect(fetched?.id).toBe(sourceId);
+    // An earlier test's replayed job may still be queued, so take the batch.
+    const fetched = await boss.fetch(queue, { batchSize: 100 });
+    expect(fetched.map((job) => job.id)).toContain(sourceId);
     await boss.fail(queue, sourceId, new Error("dependency down"));
     const { rows } = await pool.query<{ id: string }>(
       `SELECT id FROM "${bossSchema}".job WHERE name = $1 AND source_id = $2`,
@@ -88,6 +94,47 @@ describe.skipIf(databaseUrl === undefined)("dead-letter replay PostgreSQL integr
       "case_replay_1",
     ]);
     expect(rows).toHaveLength(2);
+  });
+
+  it("keeps the replay guard for the dead-letter queue's retention, past pg-boss's default deletion", async () => {
+    const entry = await deadLetter(EVENT_QUEUE, { case_id: "case_replay_guard", trace_id: "req_replay_guard" });
+    const plan = await planDeadLetterReplay(boss, entry.id);
+    if (!plan.ok) throw new Error("expected a plan");
+    expect(await replayDeadLetterJob(boss, plan)).toEqual({ status: "sent", jobId: plan.replayJobId });
+
+    const deletionSeconds = async (): Promise<number | undefined> =>
+      (
+        await pool.query<{ deletion_seconds: number }>(
+          `SELECT deletion_seconds FROM "${bossSchema}".job WHERE name = $1 AND id = $2`,
+          [EVENT_QUEUE, plan.replayJobId],
+        )
+      ).rows[0]?.deletion_seconds;
+    expect(await deletionSeconds()).toBe(DEAD_LETTER_QUEUE_OPTIONS.deleteAfterSeconds);
+
+    // A failed replay that is retried is the same row and keeps the setting.
+    // Earlier tests' replayed jobs are still queued, so take the whole batch.
+    const fetched = await boss.fetch(EVENT_QUEUE, { batchSize: 100 });
+    expect(fetched.map((job) => job.id)).toContain(plan.replayJobId);
+    await boss.fail(EVENT_QUEUE, plan.replayJobId, new Error("still down"));
+    expect((await boss.getJobById(EVENT_QUEUE, plan.replayJobId))?.state).toBe("retry");
+    expect(await deletionSeconds()).toBe(DEAD_LETTER_QUEUE_OPTIONS.deleteAfterSeconds);
+
+    // Complete it, then age it past pg-boss's default 7-day deletion.
+    await pool.query(`UPDATE "${bossSchema}".job SET start_after = now() WHERE name = $1 AND id = $2`, [
+      EVENT_QUEUE,
+      plan.replayJobId,
+    ]);
+    const retried = await boss.fetch(EVENT_QUEUE, { batchSize: 100 });
+    expect(retried.map((job) => job.id)).toContain(plan.replayJobId);
+    await boss.complete(EVENT_QUEUE, plan.replayJobId);
+    await pool.query(
+      `UPDATE "${bossSchema}".job SET completed_on = now() - interval '8 days' WHERE name = $1 AND id = $2`,
+      [EVENT_QUEUE, plan.replayJobId],
+    );
+    await boss.supervise(EVENT_QUEUE);
+
+    expect(await boss.getJobById(EVENT_QUEUE, plan.replayJobId)).not.toBeNull();
+    expect(await planDeadLetterReplay(boss, entry.id)).toMatchObject({ ok: false, reason: "already_replayed" });
   });
 
   it("refuses a scheduled queue's entry", async () => {
