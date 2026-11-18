@@ -1,9 +1,11 @@
+import type { Logger } from "pino";
 import { z } from "zod";
 
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { ListOfferingsQuery, ListOfferingsResponse } from "../api/offering.schemas.js";
 import type { OfferingCursor, OfferingRepository } from "../repository/offering.repository.js";
 import type { OfferingMedia } from "../domain/offering-media.policy.js";
+import { sanitizeOfferingMedia } from "./sanitize-offering-media.js";
 
 const cursorPayloadSchema = z.object({
   featured: z.boolean().optional(),
@@ -12,7 +14,10 @@ const cursorPayloadSchema = z.object({
 });
 
 export class ListPublicOfferingsService {
-  public constructor(private readonly repository: OfferingRepository) {}
+  public constructor(
+    private readonly repository: OfferingRepository,
+    private readonly logger?: Logger,
+  ) {}
 
   public async execute(query: ListOfferingsQuery): Promise<ListOfferingsResponse> {
     const after = query.after === undefined ? undefined : decodeCursor(query.after);
@@ -35,7 +40,7 @@ export class ListPublicOfferingsService {
             property_type: row.property.propertyType,
             country_code: row.property.countryCode,
             city: row.property.city,
-            media: toMediaResponse(row.property.media),
+            media: toMediaResponse(sanitizeOfferingMedia(row.id, row.property.media, this.logger)),
           },
       })),
       page: {

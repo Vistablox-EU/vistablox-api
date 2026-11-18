@@ -1,3 +1,5 @@
+import type { Logger } from "pino";
+
 import { AppError } from "../../../shared/errors/app-error.js";
 import type { InvestorOfferingDetailResponse } from "../api/offering.schemas.js";
 import { subtractCurrencyFloorZero } from "../domain/currency.js";
@@ -9,12 +11,14 @@ import {
 } from "../domain/reservation-eligibility.policy.js";
 import type { OfferingRepository } from "../repository/offering.repository.js";
 import type { OfferingMedia } from "../domain/offering-media.policy.js";
+import { sanitizeOfferingMedia } from "./sanitize-offering-media.js";
 
 export class GetInvestorOfferingService {
   public constructor(
     private readonly repository: OfferingRepository,
     private readonly clock: () => Date = () => new Date(),
     private readonly fundingRailAvailable = false,
+    private readonly logger?: Logger,
   ) {}
 
   public async execute(input: {
@@ -99,7 +103,7 @@ export class GetInvestorOfferingService {
           property_type: record.property.propertyType,
           country_code: record.property.countryCode,
             city: record.property.city,
-            media: toMediaResponse(record.property.media),
+            media: toMediaResponse(sanitizeOfferingMedia(record.id, record.property.media, this.logger)),
             address_line: record.property.addressLine,
           owner_declared_value_eur: record.property.ownerDeclaredValueEur,
           appraisal_value_opinion_eur: record.property.appraisalValueOpinionEur,
