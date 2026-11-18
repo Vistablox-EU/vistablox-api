@@ -7,7 +7,7 @@ import { ONRAMP_LATE_EVIDENCE_ALERT_JOB } from "../src/modules/offering/applicat
 import { JOB_QUEUE_OWNERSHIP } from "../src/shared/jobs/job-ownership.js";
 import { withoutComments } from "./support/without-comments.js";
 
-// src/worker.ts, src/server.ts and src/app.ts are start-up scripts and wiring
+// src/worker.ts, src/server.ts and src/composition/compose-offering.ts are start-up scripts and wiring
 // that cannot be imported into a test, so what they connect is checked from
 // their source, the way tests/coinbase-onramp-webhook-wiring.test.ts does.
 // What nothing else covers is that the late-evidence pieces are connected at
@@ -21,7 +21,7 @@ function load(path: string): { code: string; flat: string } {
 
 const worker = load("../src/worker.ts");
 const server = load("../src/server.ts");
-const app = load("../src/app.ts");
+const app = load("../src/composition/compose-offering.ts");
 
 const queue = "maintenance.onramp_late_evidence_alert";
 
