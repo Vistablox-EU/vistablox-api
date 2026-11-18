@@ -428,6 +428,19 @@ export class InMemorySettlementRepository implements SettlementRepository {
     return this.walletToAccount.get(walletAddress) ?? null;
   }
 
+  /** Wallets with an unconfirmed claim, for the finalizer's "why unattributable" message. */
+  public readonly claims = new Map<string, "pending" | "expired">();
+
+  /** Confirms a wallet's registration, as the watcher or a staff reconcile would. */
+  public registerWallet(walletAddress: string, accountId: string): void {
+    this.walletToAccount.set(walletAddress, accountId);
+    this.claims.delete(walletAddress);
+  }
+
+  public async findWalletClaimState(walletAddress: string): Promise<"pending" | "expired" | "none"> {
+    return this.claims.get(walletAddress) ?? "none";
+  }
+
   public async hasPosition(pivId: string, accountId: string): Promise<boolean> {
     return this.positions.some((p) => p.input.pivId === pivId && p.input.accountId === accountId);
   }

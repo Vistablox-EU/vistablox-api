@@ -242,6 +242,98 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
     expect(seven.campaigns.get("7")!.swept).toBe(true);
   });
 
+  describe("a contributor without a confirmed registration", () => {
+    const wallets = { "0xInvestorA": "account_a", "0xInvestorB": "account_b" };
+
+    it.each([
+      ["first", ["0xStranger", "0xInvestorA", "0xInvestorB"]],
+      ["in the middle", ["0xInvestorA", "0xStranger", "0xInvestorB"]],
+      ["last", ["0xInvestorA", "0xInvestorB", "0xStranger"]],
+    ])("is skipped when %s, and every other contributor is minted once without a sweep", async (_where, order) => {
+      const h = harness({
+        ...successfulCampaign({ tokenId: "8", contributions: Object.fromEntries(order.map((w) => [w, 100n])) }),
+        candidates: [{ pivId: "piv_8", tokenId: "8" }],
+        wallets,
+      });
+
+      const summary = await h.run();
+
+      expect(summary.positionsMinted).toBe(2);
+      expect(summary.campaignsUnresolved).toBe(1);
+      expect(h.chain.property.write.mint).toHaveBeenCalledTimes(2);
+      expect(h.repository.recordedPositions.map((p) => p.accountId).sort()).toEqual(["account_a", "account_b"]);
+      expect(h.chain.ipoEscrow.write.withdrawRaised).not.toHaveBeenCalled();
+      expect(summary.errors).toHaveLength(1);
+      expect(summary.errors[0]).toContain("piv_id=piv_8");
+      expect(summary.errors[0]).toContain("token_id=8");
+      expect(summary.errors[0]).toContain("0xStranger");
+      expect(summary.errors[0]).toContain("no registration row");
+    });
+
+    it("tells a pending claim and an expired claim from a wallet with no row", async () => {
+      const h = harness({
+        ...successfulCampaign({
+          tokenId: "8",
+          contributions: { "0xPending": 100n, "0xExpired": 100n, "0xNone": 100n },
+        }),
+        candidates: [{ pivId: "piv_8", tokenId: "8" }],
+        wallets: {},
+      });
+      h.repository.claims.set("0xPending", "pending");
+      h.repository.claims.set("0xExpired", "expired");
+
+      const summary = await h.run();
+
+      expect(summary.errors).toHaveLength(3);
+      expect(summary.errors[0]).toContain("pending");
+      expect(summary.errors[1]).toContain("expired");
+      expect(summary.errors[2]).toContain("no registration row");
+      const logged = h.entries.filter((entry) => entry.level === "error").map((e) => e.fields["claim_state"]);
+      expect(logged).toEqual(["pending", "expired", "none"]);
+    });
+
+    it("is minted and swept on a rerun once its claim is confirmed, without minting the others again", async () => {
+      const h = harness({
+        ...successfulCampaign({
+          tokenId: "8",
+          contributions: { "0xInvestorA": 100n, "0xLate": 100n, "0xInvestorB": 100n },
+        }),
+        candidates: [{ pivId: "piv_8", tokenId: "8" }],
+        wallets,
+      });
+      h.repository.claims.set("0xLate", "pending");
+
+      await h.run();
+      h.repository.registerWallet("0xLate", "account_late");
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(second.campaignsUnresolved).toBe(0);
+      expect(second.positionsMinted).toBe(1);
+      expect(h.chain.property.write.mint).toHaveBeenCalledTimes(3);
+      expect(h.repository.recordedPositions).toHaveLength(3);
+      expect(h.chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
+    });
+
+    it("is minted on the next run once staff reinstate its expired claim", async () => {
+      const h = harness({
+        ...successfulCampaign({ tokenId: "8", contributions: { "0xLate": 100n, "0xInvestorA": 100n } }),
+        candidates: [{ pivId: "piv_8", tokenId: "8" }],
+        wallets,
+      });
+      h.repository.claims.set("0xLate", "expired");
+
+      const first = await h.run();
+      expect(first.errors[0]).toContain("expired");
+      h.repository.registerWallet("0xLate", "account_late");
+      const second = await h.run();
+
+      expect(second.errors).toEqual([]);
+      expect(h.repository.recordedPositions.map((p) => p.accountId).sort()).toEqual(["account_a", "account_late"]);
+      expect(h.chain.ipoEscrow.write.withdrawRaised).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it("logs each failed campaign at error level with its piv_id, token_id and trace_id", async () => {
     const h = harness({
       ...successfulCampaign({ tokenId: "6", contributions: { "0xUnregistered": 100n } }),

@@ -69,6 +69,10 @@ export interface FinalizeIpoEscrowCampaignsSummary {
   campaignsFinalized: number;
   campaignsSuccessful: number;
   campaignsFailed: number;
+  // Successful campaigns left unswept because at least one contributor does not
+  // resolve to a confirmed registration. Every other contributor was still
+  // minted; each unattributable one has an entry in `errors`.
+  campaignsUnresolved: number;
   positionsMinted: number;
   // Of positionsMinted, the ones recorded for a mint that an earlier,
   // interrupted run had already sent: no new mint transaction was sent for them.
@@ -160,6 +164,7 @@ export class FinalizeIpoEscrowCampaignsService {
       campaignsFinalized: 0,
       campaignsSuccessful: 0,
       campaignsFailed: 0,
+      campaignsUnresolved: 0,
       positionsMinted: 0,
       mintsReconciled: 0,
       errors: [],
@@ -226,10 +231,27 @@ export class FinalizeIpoEscrowCampaignsService {
     summary.campaignsSuccessful += 1;
 
     const contributors = (await this.chain.ipoEscrow.read.contributorsOf!([tokenId])) as readonly string[];
+    let unattributable = 0;
     for (const walletAddress of contributors) {
       const outcome = await this.mintForContributor(candidate.pivId, tokenId, walletAddress, traceId);
+      if (outcome === "unattributable") {
+        // One contributor without a confirmed registration must not hold back
+        // the others: record it and carry on. The sweep below still waits for
+        // every contributor to have a position.
+        unattributable += 1;
+        summary.errors.push(
+          `piv_id=${candidate.pivId} token_id=${candidate.tokenId}: ` +
+            (await this.unattributableMessage(tokenId, walletAddress, traceId, candidate.pivId)),
+        );
+        continue;
+      }
       if (outcome !== "skipped") summary.positionsMinted += 1;
       if (outcome === "reconciled") summary.mintsReconciled += 1;
+    }
+
+    if (unattributable > 0) {
+      summary.campaignsUnresolved += 1;
+      return;
     }
 
     const hash = await this.operatorKeyLock.run(() => this.chain.ipoEscrow.write.withdrawRaised!([tokenId]));
@@ -274,19 +296,48 @@ export class FinalizeIpoEscrowCampaignsService {
     return { targetAmount, totalRaised, deadline, treasury, state, swept };
   }
 
+  // Says why a contributor wallet has no confirmed registration, so an operator
+  // can tell a claim that will clear (the watcher or a staff reconcile) from a
+  // wallet nobody registered. Logs it at error level with the same fields as a
+  // failed campaign.
+  private async unattributableMessage(
+    tokenId: bigint,
+    walletAddress: string,
+    traceId: string,
+    pivId: string,
+  ): Promise<string> {
+    const claim = await this.repository.findWalletClaimState(walletAddress);
+    const reason =
+      claim === "pending"
+        ? "its claim is pending: waiting for the registry event or a staff reconcile"
+        : claim === "expired"
+          ? "its claim expired: a staff reconcile can reinstate it"
+          : "no registration row exists for it";
+    const message =
+      `No registered account found for contributor wallet ${walletAddress} (token_id=${tokenId}); ` +
+      `cannot mint without a KYC-attributable account (${reason}); contributor skipped, campaign not swept`;
+    this.logger.error(
+      {
+        err: new Error(message),
+        trace_id: traceId,
+        piv_id: pivId,
+        token_id: tokenId.toString(),
+        wallet: walletAddress,
+        claim_state: claim,
+      },
+      "escrow contributor has no confirmed registration",
+    );
+    return message;
+  }
+
   private async mintForContributor(
     pivId: string,
     tokenId: bigint,
     walletAddress: string,
     traceId: string,
-  ): Promise<"skipped" | "minted" | "reconciled"> {
+  ): Promise<"skipped" | "minted" | "reconciled" | "unattributable"> {
     const accountId = await this.repository.resolveAccountIdForWallet(walletAddress);
-    if (accountId === null) {
-      throw new Error(
-        `No registered account found for contributor wallet ${walletAddress} (token_id=${tokenId}); ` +
-          "cannot mint without a KYC-attributable account",
-      );
-    }
+    if (accountId === null) return "unattributable";
 
     if (await this.repository.hasPosition(pivId, accountId)) {
       return "skipped"; // Already minted and recorded on a prior, possibly-interrupted run.

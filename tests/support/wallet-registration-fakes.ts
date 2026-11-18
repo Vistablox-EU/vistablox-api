@@ -330,6 +330,9 @@ export class FakeWalletRegistrationRepository implements SettlementRepository {
   public async resolveAccountIdForWallet(): Promise<string | null> {
     return null;
   }
+  public async findWalletClaimState(): Promise<"pending" | "expired" | "none"> {
+    return "none";
+  }
   public async hasPosition(): Promise<boolean> {
     return false;
   }
