@@ -223,6 +223,7 @@ services:
       WALLET_REGISTRY_PENDING_EXPIRE_BATCH_SIZE: ${WALLET_REGISTRY_PENDING_EXPIRE_BATCH_SIZE:-500}
       # Dead-letter alert delivery (docs/dead-letter-jobs.md); unset disables it.
       DEAD_LETTER_ALERT_WEBHOOK_URL: ${DEAD_LETTER_ALERT_WEBHOOK_URL:-}
+      DEAD_LETTER_ALERT_WINDOW_MINUTES: ${DEAD_LETTER_ALERT_WINDOW_MINUTES:-60}
       # IPO escrow mint reconciliation; the default matches environment.ts.
       ESCROW_MINT_NONCE_BLOCK_TAG: ${ESCROW_MINT_NONCE_BLOCK_TAG:-finalized}
       LOG_LEVEL: ${LOG_LEVEL:-info}

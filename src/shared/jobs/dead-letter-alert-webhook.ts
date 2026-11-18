@@ -20,9 +20,16 @@ export type DeadLetterAlert = {
   replayable: boolean;
   attempts: number | null;
   last_error: string | null;
+  /**
+   * Set by the throttle (dead-letter-alert-throttle.ts) on the first alert of
+   * a queue after a window: how many dead letters of the queue were counted
+   * and not sent since `since` (ISO time of the previous alert).
+   */
+  suppressed?: { count: number; since: string };
 };
 
-export type DeliverDeadLetterAlert = (alert: DeadLetterAlert) => Promise<void>;
+/** Resolves true when the receiver accepted the alert, false when it did not. */
+export type DeliverDeadLetterAlert = (alert: DeadLetterAlert) => Promise<boolean>;
 
 const EMAIL_ADDRESS = /[^\s@<>()"',;:]+@[^\s@<>()"',;:]+\.[a-z]{2,}/gi;
 
@@ -44,6 +51,9 @@ export function deadLetterAlertPayload(alert: DeadLetterAlert): {
     `:rotating_light: [${alert.tier}] Job dead-lettered: ${alert.job} (owner: ${alert.owner})`,
     `job_id: ${alert.job_id} | dead_letter_job_id: ${alert.dead_letter_job_id} | attempts: ${attempts} | trace_id: ${alert.trace_id}`,
     `last_error: ${lastError ?? "none recorded"}`,
+    ...(alert.suppressed === undefined
+      ? []
+      : [`${alert.suppressed.count} more of ${alert.job} since ${alert.suppressed.since} (not sent; see the worker's job.dead_lettered log lines)`]),
     alert.replayable
       ? `Replay: npm run jobs:replay-dead-letter -- --dead-letter-job-id ${alert.dead_letter_job_id} (dry run first; see docs/dead-letter-jobs.md)`
       : "Not replayable (scheduled or unknown queue); see docs/dead-letter-jobs.md",
@@ -58,7 +68,8 @@ export function deadLetterAlertPayload(alert: DeadLetterAlert): {
  * (an email relay, PagerDuty via a transform) can read the fields.
  *
  * Delivery is best effort and never throws: a failure is logged and the
- * consumer moves on, because the error-level dead-letter line has already
+ * consumer moves on (it resolves false so the throttle does not open a window
+ * for an alert that never arrived), because the error-level dead-letter line has already
  * been written and stays the record. The URL is a credential and never
  * appears in a log line.
  */
@@ -92,7 +103,9 @@ export function createDeadLetterAlertWebhook(options: {
           },
           "dead-letter alert webhook rejected the alert",
         );
+        return false;
       }
+      return true;
     } catch (error) {
       options.logger.warn(
         {
@@ -105,6 +118,7 @@ export function createDeadLetterAlertWebhook(options: {
         },
         "dead-letter alert webhook could not be reached",
       );
+      return false;
     }
   };
 }

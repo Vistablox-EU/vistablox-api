@@ -379,6 +379,11 @@ const environmentSchema = z
     // URL is a credential (a Slack webhook URL is its own bearer token), so it
     // is never logged.
     DEAD_LETTER_ALERT_WEBHOOK_URL: z.preprocess(emptyStringToUndefined, z.url().optional()),
+    // Per source queue, the first dead letter alerts at once and further ones
+    // within this many minutes are counted, not sent; the next alert after the
+    // window says how many more there were. The error log line is written for
+    // every dead letter regardless. 0 turns the throttle off.
+    DEAD_LETTER_ALERT_WINDOW_MINUTES: z.coerce.number().int().min(0).max(1440).default(60),
     // Self-service device replacement email code (AD-271). The code is emailed
     // to the account's bound protected_contact_email (no SMS), verified against
     // a stored hash, single-use, and bound to the requesting session. These

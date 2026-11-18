@@ -61,6 +61,7 @@ import { PostgresOperatorKeyLock } from "./infrastructure/blockchain/operator-ke
 import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
 import { SCHEDULED_JOB_RETRY_OPTIONS } from "./shared/jobs/enqueue-job.js";
 import { createDeadLetterAlertWebhook } from "./shared/jobs/dead-letter-alert-webhook.js";
+import { throttleDeadLetterAlerts } from "./shared/jobs/dead-letter-alert-throttle.js";
 import { registerDeadLetterConsumer } from "./shared/jobs/dead-letter-consumer.js";
 import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
@@ -893,7 +894,12 @@ await registerDeadLetterConsumer(
   logger,
   environment.DEAD_LETTER_ALERT_WEBHOOK_URL === undefined
     ? {}
-    : { deliverAlert: createDeadLetterAlertWebhook({ url: environment.DEAD_LETTER_ALERT_WEBHOOK_URL, logger }) },
+    : {
+        deliverAlert: throttleDeadLetterAlerts(
+          createDeadLetterAlertWebhook({ url: environment.DEAD_LETTER_ALERT_WEBHOOK_URL, logger }),
+          { windowMs: environment.DEAD_LETTER_ALERT_WINDOW_MINUTES * 60_000 },
+        ),
+      },
 );
 
 logger.info("VistaBlox worker started");
