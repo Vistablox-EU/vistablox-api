@@ -208,4 +208,82 @@ describe.skipIf(databaseUrl === undefined)("account recovery PostgreSQL integrat
       }),
     ).toBe(true);
   });
+
+  it("marks the primary review audit entry only when the Didit gate was actually waived", async () => {
+    const reviewedAt = new Date("2026-09-03T12:00:00.000Z");
+    const primaryAudit = async (caseId: string) =>
+      database.auditLog.findFirstOrThrow({
+        where: {
+          action: "authentication.account_recovery_primary_review_recorded",
+          resourceId: caseId,
+        },
+      });
+    const review = (caseId: string, allowMissingDidit: boolean) =>
+      repository.recordPrimaryReview({
+        caseId,
+        reviewerAccountId: reviewerOneId,
+        corroborationCategory: "other_policy_approved",
+        traceId: `trace_${suffix}`,
+        reviewedAt,
+        allowMissingDidit,
+      });
+    const decide = (caseId: string) =>
+      repository.decideCase({
+        caseId,
+        reviewerAccountId: reviewerTwoId,
+        decision: "rejected",
+        reason: "Closing the case.",
+        traceId: `trace_${suffix}`,
+        decidedAt: reviewedAt,
+      });
+
+    // Switch on, but a Didit session exists: the gate was not bypassed.
+    const withSession = await repository.openCase({
+      accountId,
+      actorAccountId: staffAccountId,
+      traceId: `trace_${suffix}`,
+      openedAt: reviewedAt,
+    });
+    await repository.recordDiditSession({
+      caseId: withSession.id,
+      diditReference: `didit_waiver_${suffix}`,
+      actorAccountId: staffAccountId,
+      traceId: `trace_${suffix}`,
+      recordedAt: reviewedAt,
+    });
+    expect(await review(withSession.id, true)).not.toBeNull();
+    expect((await primaryAudit(withSession.id)).changes).not.toHaveProperty("didit_gate_waived");
+    await decide(withSession.id);
+
+    // Switch on and no Didit session: the gate was bypassed, and the audit says so.
+    const withoutSession = await repository.openCase({
+      accountId,
+      actorAccountId: staffAccountId,
+      traceId: `trace_${suffix}`,
+      openedAt: reviewedAt,
+    });
+    expect(await review(withoutSession.id, true)).not.toBeNull();
+    expect((await primaryAudit(withoutSession.id)).changes).toMatchObject({
+      didit_gate_waived: true,
+      corroboration_category: "other_policy_approved",
+    });
+    await decide(withoutSession.id);
+
+    // Switch off and no Didit session: the review is refused and nothing is audited.
+    const refused = await repository.openCase({
+      accountId,
+      actorAccountId: staffAccountId,
+      traceId: `trace_${suffix}`,
+      openedAt: reviewedAt,
+    });
+    expect(await review(refused.id, false)).toBeNull();
+    expect(
+      await database.auditLog.count({
+        where: {
+          action: "authentication.account_recovery_primary_review_recorded",
+          resourceId: refused.id,
+        },
+      }),
+    ).toBe(0);
+  });
 });
