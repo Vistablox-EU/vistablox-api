@@ -51,6 +51,8 @@ export class CheckWalletRegistryHealthService {
         oldestPendingRequestedAt: reading.oldestPendingRequestedAt,
         unresolvedMismatchCount: reading.unresolvedMismatches.count,
         unresolvedMismatchAccountIds: reading.unresolvedMismatches.accountIds,
+        flaggedEvidenceCount: reading.flaggedEvidence.count,
+        flaggedEvidenceAccountIds: reading.flaggedEvidence.accountIds,
       };
       const alerts = evaluateWalletRegistryHealth(snapshot, this.options.thresholds, now);
       this.reporter.reportHealth(snapshot, alerts, traceId, now);

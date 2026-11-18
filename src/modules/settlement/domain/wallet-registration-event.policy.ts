@@ -69,6 +69,24 @@ export function decideRegisteredRowEvent(
 }
 
 /**
+ * A conflicting event that a stranger cannot raise (AD-284): the registered
+ * wallet itself sent a different transaction for a registration whose recorded
+ * evidence is complete and not flagged. An event from any other sender is not
+ * this: the registry takes any caller and a commitment is public once mined,
+ * so anyone can send one for the cost of a transaction.
+ */
+export function isDifferentTransactionFromRegisteredWallet(
+  record: RegisteredRowView,
+  eventWalletAddress: string,
+  evidence: WalletRegistrationEvidence,
+): boolean {
+  if (record.walletAddress.toLowerCase() !== eventWalletAddress.toLowerCase()) return false;
+  if (record.transactionHash === null || record.blockHash === null || record.logIndex === null) return false;
+  if (record.evidenceFlag !== null) return false;
+  return record.transactionHash.toLowerCase() !== evidence.transactionHash.toLowerCase();
+}
+
+/**
  * Where the cursor should go after a run: not past the scanned range, and not
  * past any block whose confirmations changed this run, so the next run reads
  * those blocks again. Never below 0.

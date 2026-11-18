@@ -84,6 +84,9 @@ describe("wallet registration runbook", () => {
     "wallet_registry.heartbeat_write_failed": "warn",
     "wallet_registry.pending_overdue": "warn",
     "wallet_registry.unmatched_events": "warn",
+    "wallet_registry.events_without_identity": "warn",
+    "wallet_registry.registration_conflict": "warn",
+    "wallet_registry.evidence_flagged": "warn",
     "wallet_registry.address_mismatch_unresolved": "warn",
     "wallet_registry.health_checked": "info",
   };
@@ -121,12 +124,17 @@ describe("wallet registration runbook", () => {
       oldestPendingRequestedAt: new Date(now.getTime() - 3_600_000),
       unresolvedMismatchCount: 1,
       unresolvedMismatchAccountIds: ["acct_a"],
+      flaggedEvidenceCount: 1,
+      flaggedEvidenceAccountIds: ["acct_f"],
     };
     const alerts = [
       ...evaluateWalletRegistryHealth(base, thresholds, now),
       ...evaluateWalletRegistryHealth({ ...base, heartbeat: { ...base.heartbeat!, cursorBlock: 6000n } }, thresholds, now),
       ...evaluateWalletRegistryHealth({ ...base, watcherConfigured: false }, thresholds, now),
-      ...evaluateWalletRegistryRun({ newUnmatchedEvents: 9 }, thresholds),
+      ...evaluateWalletRegistryRun(
+        { newUnmatchedEvents: 9, newEventsWithoutIdentity: 9, newConfirmationConflicts: 1, newWalletConflictingEvents: 1 },
+        thresholds,
+      ),
     ];
 
     // Every health and run event the policy raises is in the set under test.
@@ -139,6 +147,9 @@ describe("wallet registration runbook", () => {
         "wallet_registry.pending_overdue",
         "wallet_registry.address_mismatch_unresolved",
         "wallet_registry.unmatched_events",
+        "wallet_registry.evidence_flagged",
+        "wallet_registry.registration_conflict",
+        "wallet_registry.events_without_identity",
       ]),
     );
     for (const alert of alerts) {

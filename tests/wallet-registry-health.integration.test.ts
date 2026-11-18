@@ -39,7 +39,13 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
 
   async function createAccount(
     name: string,
-    claim: { commitment: string; requestedAt: Date; registeredAt: Date | null; expiredAt?: Date },
+    claim: {
+      commitment: string;
+      requestedAt: Date;
+      registeredAt: Date | null;
+      expiredAt?: Date;
+      flaggedAt?: Date;
+    },
   ): Promise<string> {
     const accountId = `account_whealth_${name}_${suffix}`;
     const betterAuthUserId = `auth_whealth_${name}_${suffix}`;
@@ -56,6 +62,16 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
         requestedAt: claim.requestedAt,
         registeredAt: claim.registeredAt,
         expiredAt: claim.expiredAt ?? null,
+        ...(claim.flaggedAt === undefined
+          ? {}
+          : {
+              registrationTxHash: hex("7a", 64).toLowerCase(),
+              registrationBlockNumber: 1n,
+              registrationBlockHash: hex("7b", 64).toLowerCase(),
+              registrationLogIndex: 0,
+              registrationEvidenceFlag: "event_missing",
+              registrationEvidenceFlaggedAt: claim.flaggedAt,
+            }),
       },
     });
     accounts.set(name, accountId);
@@ -104,6 +120,14 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
       commitment: commitment("c4"),
       requestedAt: longAgo,
       registeredAt: new Date("2026-01-01T00:00:00.000Z"),
+    });
+    // Confirmed with its recorded evidence flagged (1990, so it sorts ahead of
+    // any other file's flagged row in the 20-account listing).
+    await createAccount("flagged", {
+      commitment: commitment("f1"),
+      requestedAt: longAgo,
+      registeredAt: new Date("2026-01-01T00:00:00.000Z"),
+      flaggedAt: longAgo,
     });
     // Mismatch cases.
     await createAccount("mismatchOpen", { commitment: commitment("d1"), requestedAt: farFuture, registeredAt: null });
@@ -175,6 +199,33 @@ describe.skipIf(databaseUrl === undefined)("PrismaWalletRegistryHealthRepository
       expect(typeof reading.pendingTotal).toBe("number");
       expect(typeof reading.pendingOverdue).toBe("number");
       expect(reading.oldestPendingRequestedAt).toBeInstanceOf(Date);
+    });
+  });
+
+  describe("flagged evidence", () => {
+    it("lists a confirmed registration whose evidence is flagged, and not an unflagged one", async () => {
+      const { flaggedEvidence } = await repository.readWalletRegistryHealth(new Date());
+
+      expect(flaggedEvidence.count).toBeGreaterThanOrEqual(1);
+      expect(flaggedEvidence.accountIds).toContain(accountIdOf("flagged"));
+      expect(flaggedEvidence.accountIds).not.toContain(accountIdOf("confirmed"));
+      expect(flaggedEvidence.accountIds.length).toBeLessThanOrEqual(20);
+    });
+
+    it("stops listing it once the flag is cleared", async () => {
+      await database.walletRegistration.update({
+        where: { accountId: accountIdOf("flagged") },
+        data: { registrationEvidenceFlag: null, registrationEvidenceFlaggedAt: null },
+      });
+      try {
+        const { flaggedEvidence } = await repository.readWalletRegistryHealth(new Date());
+        expect(flaggedEvidence.accountIds).not.toContain(accountIdOf("flagged"));
+      } finally {
+        await database.walletRegistration.update({
+          where: { accountId: accountIdOf("flagged") },
+          data: { registrationEvidenceFlag: "event_missing", registrationEvidenceFlaggedAt: longAgo },
+        });
+      }
     });
   });
 

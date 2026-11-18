@@ -9,9 +9,12 @@ import type { ConfirmWalletRegistrationsSummary } from "../../src/modules/settle
 export const QUIET_CLAIM_AND_EVIDENCE_COUNTERS = {
   staleConfirmations: 0,
   confirmationConflicts: 0,
+  newConfirmationConflicts: 0,
   eventsReplayed: 0,
   eventsWithoutIdentity: 0,
+  newEventsWithoutIdentity: 0,
   conflictingEvents: 0,
+  newWalletConflictingEvents: 0,
   evidenceRecorded: 0,
   evidenceRefreshed: 0,
   evidenceRefreshDeferred: 0,

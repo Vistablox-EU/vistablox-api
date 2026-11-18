@@ -35,6 +35,11 @@ export interface WalletRegistryHealthReading {
     // The oldest few (at most 20), enough to find them; the count is the total.
     accountIds: string[];
   };
+  // Confirmed registrations whose recorded chain evidence is flagged.
+  flaggedEvidence: {
+    count: number;
+    accountIds: string[];
+  };
 }
 
 export interface WalletRegistryHealthReader {
