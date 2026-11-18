@@ -76,6 +76,40 @@ export interface FinalizeIpoEscrowCampaignsSummary {
   errors: string[];
 }
 
+const MAX_ERRORS_IN_FAILURE_MESSAGE = 3;
+
+// Thrown by the job handler once every campaign has been tried and at least one
+// failed, so pg-boss records the run as failed (and retries it) rather than
+// completed. execute itself keeps per-campaign isolation and never throws for
+// one bad campaign.
+export class FinalizeIpoEscrowCampaignsError extends Error {
+  public constructor(
+    public readonly failedCampaigns: number,
+    public readonly pivsChecked: number,
+    public readonly errors: string[],
+  ) {
+    const shown = errors.slice(0, MAX_ERRORS_IN_FAILURE_MESSAGE).join("; ");
+    const more =
+      errors.length > MAX_ERRORS_IN_FAILURE_MESSAGE
+        ? ` (+${errors.length - MAX_ERRORS_IN_FAILURE_MESSAGE} more)`
+        : "";
+    super(
+      `escrow campaign finalization failed for ${failedCampaigns} of ${pivsChecked} campaigns: ${shown}${more}`,
+    );
+    this.name = "FinalizeIpoEscrowCampaignsError";
+  }
+}
+
+export function assertNoCampaignErrors(summary: FinalizeIpoEscrowCampaignsSummary): void {
+  if (summary.errors.length > 0) {
+    throw new FinalizeIpoEscrowCampaignsError(
+      summary.errors.length,
+      summary.pivsChecked,
+      summary.errors,
+    );
+  }
+}
+
 interface MintTarget {
   pivId: string;
   accountId: string;

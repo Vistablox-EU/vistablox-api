@@ -1,7 +1,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  assertNoCampaignErrors,
   ESCROW_MINT_IN_FLIGHT_GRACE_MS,
+  FinalizeIpoEscrowCampaignsError,
   FinalizeIpoEscrowCampaignsService,
   type EscrowMintNonceBlockTag,
 } from "../src/modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
@@ -1322,5 +1324,39 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       expect(h.repository.recordedPositions).toHaveLength(1);
       expect(h.entries.filter((entry) => entry.fields.event === "settlement.ipo_escrow_campaign_observation_failed")).toHaveLength(1);
     });
+  });
+});
+
+describe("assertNoCampaignErrors", () => {
+  const summary = (errors: string[]) => ({
+    pivsChecked: 7,
+    campaignsFinalized: 0,
+    campaignsSuccessful: 0,
+    campaignsFailed: 0,
+    positionsMinted: 0,
+    mintsReconciled: 0,
+    errors,
+  });
+
+  it("does nothing when no campaign failed", () => {
+    expect(() => assertNoCampaignErrors(summary([]))).not.toThrow();
+  });
+
+  it("throws one aggregate error with the counts and only the first few messages", () => {
+    const errors = ["piv_id=a: x", "piv_id=b: y", "piv_id=c: z", "piv_id=d: w", "piv_id=e: v"];
+
+    let thrown: unknown;
+    try {
+      assertNoCampaignErrors(summary(errors));
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeInstanceOf(FinalizeIpoEscrowCampaignsError);
+    const message = (thrown as Error).message;
+    expect(message).toContain("5 of 7 campaigns");
+    expect(message).toContain("piv_id=c: z");
+    expect(message).not.toContain("piv_id=d");
+    expect(message).toContain("(+2 more)");
   });
 });
