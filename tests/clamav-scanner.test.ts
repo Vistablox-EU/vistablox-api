@@ -45,6 +45,10 @@ interface Session {
 
 const UNKNOWN_COMMAND = "UNKNOWN COMMAND\0";
 
+// Pause between the pieces of a multi-part reply (see FakeClamd's finish).
+const REPLY_PART_GAP_MS = 15;
+const pause = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 class FakeClamd {
   public readonly sessions: Session[] = [];
   private readonly server: net.Server;
@@ -92,10 +96,23 @@ class FakeClamd {
     let accepted = false;
     let finished = false;
 
-    const finish = (parts: Array<string | Buffer>): void => {
+    // Sends the reply pieces in order, then closes. Back-to-back writes on a
+    // loopback socket are coalesced and reach the scanner as one 'data' event,
+    // which would make a "reply in several pieces" test vacuous: a scanner that
+    // decided on the first 'data' event would still pass. So Nagle is off and
+    // each piece but the last is followed by a pause, which sends every piece in
+    // its own segment and delivers it as its own 'data' event.
+    const finish = async (parts: Array<string | Buffer>): Promise<void> => {
       if (finished) return;
       finished = true;
-      for (const part of parts.slice(0, -1)) socket.write(part);
+      if (socket.destroyed) return;
+      socket.setNoDelay(true);
+      for (const part of parts.slice(0, -1)) {
+        socket.write(part);
+        await pause(REPLY_PART_GAP_MS);
+        // The scanner may have timed out or the test torn the fake down meanwhile.
+        if (socket.destroyed) return;
+      }
       const last = parts.at(-1);
       if (last === undefined) socket.end();
       else socket.end(last);
@@ -118,7 +135,7 @@ class FakeClamd {
         // to be exactly the command's name.
         const name = session.commandLine.subarray(1, nul).toString("latin1");
         if (session.commandLine[0] !== 0x7a || name !== "INSTREAM") {
-          finish([UNKNOWN_COMMAND]);
+          void finish([UNKNOWN_COMMAND]);
           return;
         }
         accepted = true;
@@ -130,7 +147,7 @@ class FakeClamd {
           session.lengthFields.push(Buffer.from(pending.subarray(0, 4)));
           session.terminated = true;
           session.trailing = Buffer.from(pending.subarray(4));
-          if (this.behaviour.kind === "reply") finish(this.behaviour.parts);
+          if (this.behaviour.kind === "reply") void finish(this.behaviour.parts);
           return;
         }
         if (pending.length < 4 + length) return;
@@ -292,6 +309,8 @@ describe("ClamAvScanner verdicts", () => {
   });
 
   it("assembles a reply that arrives in several pieces", async () => {
+    // The fake sends each piece in its own segment, so the scanner sees three
+    // 'data' events; no single one of them contains "FOUND".
     const fake = await startFake({ kind: "reply", parts: ["stream: Eicar-Test-", "Signature FO", "UND\0"] });
 
     await expect(scannerFor(fake).scan(Buffer.from("x"))).resolves.toBe("infected");
