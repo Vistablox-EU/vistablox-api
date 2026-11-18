@@ -1,4 +1,5 @@
 import { AppError } from "../../../shared/errors/app-error.js";
+import { ChainStateUnavailableError } from "../../../shared/errors/chain-state-unavailable-error.js";
 import { fromEurcMicros } from "../../../shared/domain/currency.js";
 import type { PivTokenHoldingsReader } from "../../settlement/repository/settlement.repository.js";
 import type { WalletRepository } from "../repository/wallet.repository.js";
@@ -31,15 +32,33 @@ export class GetWalletBalanceService {
     }
 
     const holdings = await this.pivTokenHoldingsReader.listTokenHoldings(accountId);
-    const [capitalMicros, tokenBalances] = await Promise.all([
-      this.chainReader.getCapitalBalance(wallet.walletAddress),
-      holdings.length === 0
-        ? Promise.resolve([])
-        : this.chainReader.getTokenBalances(
-            wallet.walletAddress,
-            holdings.map((holding) => holding.tokenId),
-          ),
-    ]);
+    // A failed read is never papered over with a stale or zero balance: it
+    // is a retryable 503, the same code the transfer preparation uses. The
+    // cause stays in the server log only.
+    let capitalMicros: bigint;
+    let tokenBalances: bigint[];
+    try {
+      [capitalMicros, tokenBalances] = await Promise.all([
+        this.chainReader.getCapitalBalance(wallet.walletAddress),
+        holdings.length === 0
+          ? Promise.resolve([])
+          : this.chainReader.getTokenBalances(
+              wallet.walletAddress,
+              holdings.map((holding) => holding.tokenId),
+            ),
+      ]);
+    } catch (error) {
+      if (error instanceof ChainStateUnavailableError) {
+        throw new AppError({
+          code: "wallet.chain_unavailable",
+          title: "Chain state unavailable",
+          status: 503,
+          detail: "The on-chain state could not be read. Try again shortly.",
+          cause: error,
+        });
+      }
+      throw error;
+    }
 
     return {
       data: {

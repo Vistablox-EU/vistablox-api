@@ -4,6 +4,7 @@ import {
   GetWalletBalanceService,
   type WalletChainReader,
 } from "../src/modules/wallet/application/get-wallet-balance.service.js";
+import { ChainStateUnavailableError } from "../src/shared/errors/chain-state-unavailable-error.js";
 import type { WalletRepository } from "../src/modules/wallet/repository/wallet.repository.js";
 import type { PivTokenHoldingsReader } from "../src/modules/settlement/repository/settlement.repository.js";
 
@@ -102,5 +103,26 @@ describe("GetWalletBalanceService", () => {
       code: "wallet.not_registered",
       status: 404,
     });
+  });
+
+  it("answers a chain outage with a retryable 503 and keeps the cause out of the response", async () => {
+    const cause = new ChainStateUnavailableError("HttpRequestError: HTTP request failed. (status 502)");
+    const chainReader = buildChainReader({ getCapitalBalance: vi.fn().mockRejectedValue(cause) });
+    const service = new GetWalletBalanceService(buildRepository(), buildHoldingsReader(), chainReader);
+
+    await expect(service.execute(accountId)).rejects.toMatchObject({
+      code: "wallet.chain_unavailable",
+      status: 503,
+      message: "The on-chain state could not be read. Try again shortly.",
+      cause,
+    });
+  });
+
+  it("does not map other failures (a contract error) to the retryable 503", async () => {
+    const failure = new Error("execution reverted");
+    const chainReader = buildChainReader({ getTokenBalances: vi.fn().mockRejectedValue(failure) });
+    const service = new GetWalletBalanceService(buildRepository(), buildHoldingsReader(), chainReader);
+
+    await expect(service.execute(accountId)).rejects.toBe(failure);
   });
 });

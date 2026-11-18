@@ -283,7 +283,7 @@ export function classifyRevert(error: unknown): TransferRevert | undefined {
 // Safe to log: viem's class name and its shortMessage (a fixed sentence per
 // error class, never the URL), plus the numeric JSON-RPC code and HTTP status
 // when the chain has them. The node's own message is deliberately left out.
-function describe(error: unknown): string {
+export function describe(error: unknown): string {
   if (error instanceof BaseError) {
     const numeric = (key: "code" | "status") => {
       const found = error.walk((candidate) => typeof (candidate as Record<string, unknown>)[key] === "number");
