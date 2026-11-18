@@ -4,6 +4,8 @@ import type {
 } from "../../../shared/domain/wallet-registration-evidence.js";
 import type { IpoEscrowCampaignState } from "../domain/ipo-escrow-campaign.policy.js";
 
+export type WalletClaimState = "pending" | "expired" | "none";
+
 export interface PivPendingEscrowResolution {
   pivId: string;
   tokenId: string;
@@ -241,6 +243,11 @@ export interface SettlementRepository {
   // Resolves CONFIRMED registrations only: a pending claim proves nothing, so
   // it must never attribute an on-chain contribution to an account.
   resolveAccountIdForWallet(walletAddress: string): Promise<string | null>;
+  // Why a wallet has no confirmed registration, for the finalizer's error:
+  // "pending" (a claim waiting for the watcher or a staff reconcile), "expired"
+  // (a claim the expiry sweep closed) or "none" (no row). Pending wins over
+  // expired when several accounts hold claims on the address.
+  findWalletClaimState(walletAddress: string): Promise<WalletClaimState>;
   hasPosition(pivId: string, accountId: string): Promise<boolean>;
   findEscrowMintIntent(pivId: string, accountId: string): Promise<EscrowMintIntent | null>;
   // Writes the intent in `sending` unless one already exists for this

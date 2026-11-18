@@ -23,6 +23,7 @@ import type {
   RecordIpoEscrowCampaignObservationInput,
   RefreshIpoEscrowCampaignStateInput,
   SettlementRepository,
+  WalletClaimState,
   WalletRegistrationAddressMismatchInput,
   WalletRegistrationConfirmation,
   WalletRegistrationEvidenceKey,
@@ -315,6 +316,16 @@ export class PrismaSettlementRepository implements SettlementRepository, PivToke
       LIMIT 1
     `;
     return rows[0]?.account_id ?? null;
+  }
+
+  public async findWalletClaimState(walletAddress: string): Promise<WalletClaimState> {
+    const rows = await this.database.$queryRaw<Array<{ expired: boolean }>>`
+      SELECT (expired_at IS NOT NULL) AS expired FROM settlement.wallet_registrations
+      WHERE lower(wallet_address) = lower(${walletAddress})
+        AND registered_at IS NULL
+    `;
+    if (rows.length === 0) return "none";
+    return rows.some((row) => !row.expired) ? "pending" : "expired";
   }
 
   public async hasPosition(pivId: string, accountId: string): Promise<boolean> {
