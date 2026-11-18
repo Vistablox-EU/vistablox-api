@@ -1,9 +1,12 @@
+import { createHash } from "node:crypto";
 import net from "node:net";
 import type { AddressInfo } from "node:net";
 
 import { afterEach, describe, expect, it } from "vitest";
 
+import { CLAMAV_SMOKE_CHECKS, EICAR_TEST_STRING, runClamavSmoke } from "../src/cli/clamav-smoke-checks.js";
 import { ClamAvScanner } from "../src/infrastructure/antivirus/clamav-scanner.js";
+import type { MalwareScanner } from "../src/infrastructure/antivirus/clamav-scanner.js";
 
 // A stand-in for clamd's INSTREAM session, strict where clamd is strict.
 //
@@ -342,5 +345,71 @@ describe("ClamAvScanner verdicts", () => {
     fakes.splice(fakes.indexOf(fake), 1);
 
     await expect(new ClamAvScanner("127.0.0.1", port, 1_000).scan(Buffer.from("abc"))).rejects.toBeInstanceOf(Error);
+  });
+});
+
+// The opt-in `npm run clamav:smoke` check (src/cli/clamav-smoke.ts) decides
+// pass or fail with this function; a wrong comparison here would let a broken
+// scanner or clamd pass. It is exercised against the fake, never a real clamd.
+describe("runClamavSmoke", () => {
+  it("uses the standard EICAR test string", () => {
+    expect(EICAR_TEST_STRING).toHaveLength(68);
+    expect(createHash("md5").update(EICAR_TEST_STRING, "latin1").digest("hex")).toBe("44d88612fea8a8f36de82e1278abb02f");
+  });
+
+  it("passes when clean data is clean and EICAR is infected, over the real scanner and the wire", async () => {
+    // A fake that replies by content needs the whole stream; reuse the fake's
+    // recorded chunks by answering per connection through a scanner wrapper.
+    const verdicts: Array<"clean" | "infected"> = [];
+    const scanner: MalwareScanner = {
+      scan: async (data) => {
+        const fake = await startFake({
+          kind: "reply",
+          parts: [data.includes(Buffer.from("EICAR-STANDARD-ANTIVIRUS-TEST-FILE")) ? EICAR_FOUND : OK],
+        });
+        const verdict = await scannerFor(fake).scan(data);
+        verdicts.push(verdict);
+        return verdict;
+      },
+    };
+    const lines: string[] = [];
+
+    await expect(runClamavSmoke(scanner, (line) => lines.push(line))).resolves.toBe(true);
+
+    expect(verdicts).toEqual(CLAMAV_SMOKE_CHECKS.map((check) => check.expected));
+    expect(lines).toHaveLength(CLAMAV_SMOKE_CHECKS.length);
+    expect(lines.every((line) => line.startsWith("PASS"))).toBe(true);
+  });
+
+  it("fails when EICAR is reported clean", async () => {
+    const lines: string[] = [];
+
+    await expect(runClamavSmoke({ scan: async () => "clean" }, (line) => lines.push(line))).resolves.toBe(false);
+
+    expect(lines.filter((line) => line.startsWith("FAIL"))).toHaveLength(1);
+    expect(lines.filter((line) => line.startsWith("PASS"))).toHaveLength(2);
+  });
+
+  it("fails when clean data is reported infected", async () => {
+    const lines: string[] = [];
+
+    await expect(runClamavSmoke({ scan: async () => "infected" }, (line) => lines.push(line))).resolves.toBe(false);
+
+    expect(lines.filter((line) => line.startsWith("FAIL"))).toHaveLength(2);
+    expect(lines.filter((line) => line.startsWith("PASS"))).toHaveLength(1);
+  });
+
+  it("fails, and says why, when the scanner throws", async () => {
+    const lines: string[] = [];
+    const scanner: MalwareScanner = {
+      scan: async () => {
+        throw new Error("Unexpected ClamAV response: UNKNOWN COMMAND");
+      },
+    };
+
+    await expect(runClamavSmoke(scanner, (line) => lines.push(line))).resolves.toBe(false);
+
+    expect(lines).toHaveLength(CLAMAV_SMOKE_CHECKS.length);
+    expect(lines.every((line) => line.startsWith("FAIL") && line.includes("UNKNOWN COMMAND"))).toBe(true);
   });
 });
