@@ -104,7 +104,7 @@ Exit codes: `0` done (or dry run), `1` refused or failed, `2` bad arguments.
 ### What makes it safe
 
 - Only event queues are replayed. The command refuses scheduled queues, queues missing from the ownership registry, and entries with no source queue.
-- Each entry can be replayed once. The replayed job's id is derived from the dead-letter entry's id, so a second run (or two people running it at once) is refused, or sends nothing.
+- Each entry can be replayed once. The replayed job's id is derived from the dead-letter entry's id, so a second run (or two people running it at once) is refused, or sends nothing. The replayed job is kept for 30 days (the dead-letter entry's own retention), so the guard lasts as long as the entry can be replayed.
 - Every event consumer already has to be safe to run up to 17 times (the README's retry section), so one more run is within that contract. The known exceptions are the retry hazards the README lists, and they apply to a replay too:
   - `settlement.open_ipo_escrow_campaign`: check on-chain whether the campaign is already open (or a transaction is still pending) before replaying, or the replay can broadcast another `openCampaign` and waste gas.
   - `case_timers.offering_reconfirmation_window_opened`: if the email went out and only the audit write failed, a replay sends the email again. It also does not re-check that the reservation still awaits reconfirmation.
