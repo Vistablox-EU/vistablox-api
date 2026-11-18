@@ -4,6 +4,7 @@ import type { ChainClients } from "../../../infrastructure/blockchain/chain-clie
 import type { OperatorKeyLock } from "../../../infrastructure/blockchain/operator-key-lock.js";
 import { fromEurcMicros } from "../../../shared/domain/currency.js";
 import { costBasisToUnitCount } from "../../../shared/domain/position.js";
+import { toSanitizedError } from "../../../shared/logging/log-redaction.js";
 import type { EscrowMintIntent, SettlementRepository } from "../repository/settlement.repository.js";
 import { recordObservedIpoEscrowCampaignState } from "./ipo-escrow-campaign-observation.js";
 
@@ -169,12 +170,10 @@ export class FinalizeIpoEscrowCampaignsService {
       try {
         await this.processCampaign(candidate, summary, traceId);
       } catch (error) {
-        summary.errors.push(
-          `piv_id=${candidate.pivId} token_id=${candidate.tokenId}: ` +
-            (error instanceof Error ? error.message : String(error)),
-        );
+        const sanitized = toSanitizedError(error);
+        summary.errors.push(`piv_id=${candidate.pivId} token_id=${candidate.tokenId}: ${sanitized.message}`);
         this.logger.error(
-          { err: error, trace_id: traceId, piv_id: candidate.pivId, token_id: candidate.tokenId },
+          { err: sanitized, trace_id: traceId, piv_id: candidate.pivId, token_id: candidate.tokenId },
           "escrow campaign finalization failed",
         );
       }

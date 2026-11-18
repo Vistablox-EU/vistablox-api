@@ -66,6 +66,7 @@ import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 import { WorkerHeartbeat } from "./shared/health/worker-heartbeat.js";
 import { WorkerMetrics } from "./shared/health/worker-metrics.js";
+import { toSanitizedError } from "./shared/logging/log-redaction.js";
 import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/staff/prisma-account-recovery.repository.js";
 
 const environment = loadEnvironment();
@@ -651,11 +652,12 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
         );
       }
     } catch (error) {
+      const sanitized = toSanitizedError(error);
       logger.error(
-        { err: error, trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns" },
+        { err: sanitized, trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns" },
         "case timer job failed",
       );
-      throw error;
+      throw sanitized;
     }
   });
 }
@@ -719,11 +721,12 @@ if (openIpoEscrowCampaign !== undefined) {
           "case timer job completed",
         );
       } catch (error) {
+        const sanitized = toSanitizedError(error);
         logger.error(
-          { err: error, trace_id: traceId, job: "settlement.open_ipo_escrow_campaign" },
+          { err: sanitized, trace_id: traceId, job: "settlement.open_ipo_escrow_campaign" },
           "case timer job failed",
         );
-        throw error;
+        throw sanitized;
       }
     }
   });
