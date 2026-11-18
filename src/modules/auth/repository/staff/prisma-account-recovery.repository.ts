@@ -172,15 +172,23 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
     allowMissingDidit?: boolean;
   }): Promise<AccountRecoveryCaseRecord | null> {
     return this.database.$transaction(async (transaction) => {
-      const updated = await transaction.accountRecoveryCase.updateMany({
-        where: {
-          id: input.caseId,
-          status: "open",
-          reviewedByPrimary: null,
-          ...(input.allowMissingDidit === true ? {} : { freshDiditVerificationRef: { not: null } }),
-        },
-        data: { reviewedByPrimary: input.reviewerAccountId },
+      const openUnreviewed = { id: input.caseId, status: "open", reviewedByPrimary: null } as const;
+      const data = { reviewedByPrimary: input.reviewerAccountId };
+      let updated = await transaction.accountRecoveryCase.updateMany({
+        where: { ...openUnreviewed, freshDiditVerificationRef: { not: null } },
+        data,
       });
+      // The gate is waived only when it was actually bypassed: staging allowed it
+      // and the case had no Didit session. Each branch is its own atomic guard,
+      // so the audit flag reflects the state the review was recorded against.
+      let diditGateWaived = false;
+      if (updated.count === 0 && input.allowMissingDidit === true) {
+        updated = await transaction.accountRecoveryCase.updateMany({
+          where: { ...openUnreviewed, freshDiditVerificationRef: null },
+          data,
+        });
+        diditGateWaived = updated.count > 0;
+      }
       if (updated.count === 0) return null;
 
       await transaction.auditLog.create({
@@ -193,6 +201,7 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
           changes: {
             trace_id: input.traceId,
             corroboration_category: input.corroborationCategory,
+            ...(diditGateWaived ? { didit_gate_waived: true } : {}),
           },
           createdAt: input.reviewedAt,
         },
