@@ -86,8 +86,6 @@ services:
       MINIO_KYC_BUCKET: ${MINIO_KYC_BUCKET:-vistablox-kyc}
       MINIO_DISCLOSURES_BUCKET: ${MINIO_DISCLOSURES_BUCKET:-vistablox-disclosures}
       MINIO_AUDIT_BUCKET: ${MINIO_AUDIT_BUCKET:-vistablox-audit}
-      CLAMAV_HOST: clamav
-      CLAMAV_PORT: "3310"
     depends_on:
       minio:
         condition: service_healthy
@@ -239,6 +237,8 @@ services:
       MINIO_KYC_BUCKET: ${MINIO_KYC_BUCKET:-vistablox-kyc}
       MINIO_DISCLOSURES_BUCKET: ${MINIO_DISCLOSURES_BUCKET:-vistablox-disclosures}
       MINIO_AUDIT_BUCKET: ${MINIO_AUDIT_BUCKET:-vistablox-audit}
+      CLAMAV_HOST: ${CLAMAV_HOST:-clamav}
+      CLAMAV_PORT: ${CLAMAV_PORT:-3310}
       SMTP_HOST: maildev
       SMTP_PORT: "1025"
       SMTP_SECURE: "false"
