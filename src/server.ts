@@ -715,11 +715,11 @@ const app = createApp({
       // D3: removing a device also cancels its pending/signed signing
       // requests (plan section 3.10). (jkt, device, requests) all live in
       // this process, so the cancel is a direct service call.
-      cancelPendingSigningRequestsForDevice: (dpopJkt) =>
+      cancelPendingSigningRequestsForDevice: (accountId, dpopJkt) =>
         new CancelPendingSigningRequestsForDeviceService(
           deviceRepository,
           new PrismaSigningRequestRepository(database),
-        ).execute(dpopJkt),
+        ).execute(accountId, dpopJkt),
     },
     kyc: {
       getStatus: getKycStatus,

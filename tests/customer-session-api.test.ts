@@ -36,6 +36,7 @@ function buildApp(
   repository: CustomerSessionRepository,
   revoker: SessionRevoker,
   freshAuthentication?: RequestHandler,
+  cancelSigningRequests?: (accountId: string, dpopJkt: string) => Promise<number>,
 ) {
   const app = express();
   const authenticated: RequestHandler = (_request, response, next) => {
@@ -55,7 +56,7 @@ function buildApp(
       new ListOwnSessionsService(repository, () => NOW),
       new RevokeOwnSessionService(repository, revoker),
       new RevokeAllOwnSessionsService(revoker),
-      new RevokeDeviceSessionsService(revoker),
+      new RevokeDeviceSessionsService(revoker, cancelSigningRequests),
     ),
   );
   app.use(errorHandler);
@@ -269,5 +270,21 @@ describe("customer session API", () => {
     expect(response.status).toBe(403);
     expect(response.body.code).toBe("authentication.fresh_auth_required");
     expect(revokeByDpopKey).not.toHaveBeenCalled();
+  });
+});
+
+describe("device revoke route signing-request cancellation", () => {
+  it("passes the caller's account and the key to the cancel hook", async () => {
+    const cancel = vi.fn().mockResolvedValue(0);
+    const revoker = fakeRevoker({ revokeByDpopKey: vi.fn().mockResolvedValue(0) });
+    const repository = { listForAccount: vi.fn() } as unknown as CustomerSessionRepository;
+
+    const response = await request(buildApp(repository, revoker, undefined, cancel))
+      .post("/v1/auth/sessions/devices/jkt_other_customers_key/revoke")
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual({ data: { revoked_count: 0 } });
+    expect(cancel).toHaveBeenCalledWith("acct_01", "jkt_other_customers_key");
   });
 });

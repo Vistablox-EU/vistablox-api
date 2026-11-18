@@ -57,10 +57,10 @@ export interface SigningRequestRepository {
   /** Atomically transitions `signed` -> `executed` (off-chain dispatch done). */
   markExecuted(input: { requestId: string; accountId: string }): Promise<SigningRequest | null>;
   /**
-   * D3 / recovery start: cancels every `pending`/`signed` request for a
-   * device. Returns the number cancelled.
+   * D3 / recovery start: cancels every `pending`/`signed` request of an
+   * account's device. Returns the number cancelled.
    */
-  cancelPendingAndSignedForDevice(deviceId: string): Promise<number>;
+  cancelPendingAndSignedForDevice(accountId: string, deviceId: string): Promise<number>;
   /**
    * Hourly prune: marks `pending`/`signed` requests whose `expires_at` has
    * passed `expired` on the database clock. Returns the number pruned.

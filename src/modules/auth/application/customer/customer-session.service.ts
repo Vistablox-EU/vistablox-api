@@ -97,14 +97,19 @@ export class RevokeAllOwnSessionsService {
 export class RevokeDeviceSessionsService {
   public constructor(
     private readonly revoker: SessionRevoker,
-    private readonly cancelSigningRequests?: (dpopJkt: string) => Promise<number>,
+    private readonly cancelSigningRequests?: (accountId: string, dpopJkt: string) => Promise<number>,
   ) {}
 
-  public async execute(jkt: string, headers: IncomingHttpHeaders): Promise<{ revokedCount: number }> {
+  public async execute(
+    accountId: string,
+    jkt: string,
+    headers: IncomingHttpHeaders,
+  ): Promise<{ revokedCount: number }> {
     const revokedCount = await this.revoker.revokeByDpopKey(jkt, headers);
-    // Unconditional: the named key is being removed, whatever its live
-    // sessions were (it may not have had any), so its requests go too.
-    await this.cancelSigningRequests?.(jkt);
+    // Unconditional on the revoked count (the caller's key may have had no
+    // live sessions), but scoped to the caller's own device: a key held by
+    // another account cancels nothing.
+    await this.cancelSigningRequests?.(accountId, jkt);
     return { revokedCount };
   }
 }
