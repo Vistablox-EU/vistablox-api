@@ -13,7 +13,9 @@ export class ClamAvScanner implements MalwareScanner {
       let response = "";
       const timer = setTimeout(() => { socket.destroy(); reject(new Error("ClamAV scan timed out")); }, this.timeoutMs);
       socket.on("connect", () => {
-        socket.write(Buffer.from("zINSTREAM\\0"));
+        // A "z" command ends at its first NUL byte (clamd's get_cmd), so the NUL
+        // must follow the name: "\0" here is one NUL byte, not backslash + "0".
+        socket.write(Buffer.from("zINSTREAM\0"));
         const chunkSize = 64 * 1024;
         for (let offset = 0; offset < data.length; offset += chunkSize) {
           const chunk = data.subarray(offset, Math.min(offset + chunkSize, data.length));
