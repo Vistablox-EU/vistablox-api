@@ -1,3 +1,4 @@
+import { HttpRequestError } from "viem";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -255,6 +256,33 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
     expect(errors).toHaveLength(1);
     expect(errors[0]?.fields).toMatchObject({ trace_id: TRACE_ID, piv_id: "piv_6", token_id: "6" });
     expect((errors[0]?.fields["err"] as Error).message).toContain("0xUnregistered");
+  });
+
+  it("strips the RPC URL from the summary and the logged error when a chain call fails", async () => {
+    const secret = "SECRETPROVIDERKEY123";
+    const h = harness({
+      campaigns: new Map([
+        ["1", { targetAmount: 100n, totalRaised: 100n, deadline: 1n, treasury: "0xTREASURY", state: CAMPAIGN_STATE_OPEN, swept: false }],
+      ]),
+      contributions: new Map([["1", new Map([["0xInvestorA", 100n]])]]),
+      contributors: new Map([["1", ["0xInvestorA"]]]),
+      candidates: [{ pivId: "piv_1", tokenId: "1" }],
+      wallets: { "0xInvestorA": "account_a" },
+    });
+    h.chain.ipoEscrow.write.finalize.mockRejectedValue(
+      new HttpRequestError({ url: `https://base.g.alchemy.com/v2/${secret}`, details: "fetch failed" }),
+    );
+
+    const summary = await h.run();
+
+    expect(summary.errors).toHaveLength(1);
+    expect(summary.errors[0]).toContain("[url]");
+    expect(JSON.stringify(summary)).not.toContain(secret);
+    const logged = h.entries.filter((entry) => entry.level === "error");
+    expect(logged).toHaveLength(1);
+    const err = logged[0]!.fields["err"] as Error;
+    expect(err.message).toContain("[url]");
+    expect(`${err.message}${err.stack}${JSON.stringify(err)}`).not.toContain(secret);
   });
 
   describe("recording the intent and the transaction hash", () => {
