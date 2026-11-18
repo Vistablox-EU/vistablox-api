@@ -340,6 +340,7 @@ type RepositoryMethod =
   | "createEscrowMintIntent"
   | "restartEscrowMintAttempt"
   | "recordEscrowMintSent"
+  | "adoptEscrowMintTransaction"
   | "recordEscrowMintedPosition";
 
 /**
@@ -509,6 +510,16 @@ export class InMemorySettlementRepository implements SettlementRepository {
       }
       if (intent !== undefined && intent.attempt === input.attempt && intent.mintTxHash === input.txHash) return;
       throw new Error(`intent ${input.intentId} is not at attempt ${input.attempt} in 'sending'`);
+    });
+  }
+
+  public async adoptEscrowMintTransaction(input: { intentId: string; attempt: number; txHash: string }): Promise<void> {
+    await this.run("adoptEscrowMintTransaction", () => {
+      const intent = this.intents.get(input.intentId);
+      if (intent === undefined || intent.attempt !== input.attempt || intent.status !== "mint_sent") {
+        throw new Error(`intent ${input.intentId} is not at attempt ${input.attempt} in 'mint_sent'`);
+      }
+      intent.mintTxHash = input.txHash;
     });
   }
 

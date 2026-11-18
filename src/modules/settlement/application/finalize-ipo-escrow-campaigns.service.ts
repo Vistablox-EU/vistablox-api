@@ -440,10 +440,15 @@ export class FinalizeIpoEscrowCampaignsService {
 
     const receipt = await this.findReceipt(hash);
     if (receipt === null) {
-      throw new Error(
-        `mint transaction ${hash} for wallet ${target.walletAddress} (token_id=${target.tokenId}) has no receipt ` +
-          "yet; not sending another mint while it may still be mined",
-      );
+      if (intent.mintNonce === null) {
+        throw new Error(
+          `mint transaction ${hash} for wallet ${target.walletAddress} (token_id=${target.tokenId}) has no receipt ` +
+            "yet; not sending another mint while it may still be mined",
+        );
+      }
+      // No receipt for the recorded hash: it is pending, dropped, or replaced
+      // by another transaction under its nonce. The chain decides which.
+      return this.resolvePinnedAttempt(target, intent, hash);
     }
     if (receipt.status === "success") {
       return { intentId: intent.id, txHash: hash, sentThisRun: false };
@@ -477,7 +482,19 @@ export class FinalizeIpoEscrowCampaignsService {
     if (intent.mintNonce === null) {
       return this.resolveLegacyInterruptedAttempt(target, intent, balance);
     }
-    const pinnedNonce = intent.mintNonce;
+    return this.resolvePinnedAttempt(target, intent, null);
+  }
+
+  // The intent pins the nonce its latest attempt was sent with, and that attempt
+  // is unresolved: it recorded no hash (`recordedHash` null), or the hash it
+  // recorded has no receipt. Reads the chain rather than a clock to decide
+  // whether a mint landed, can never land, or may still land.
+  private async resolvePinnedAttempt(
+    target: MintTarget,
+    intent: EscrowMintIntent,
+    recordedHash: string | null,
+  ): Promise<ConfirmedMint> {
+    const pinnedNonce = intent.mintNonce!;
 
     // The nonce before the logs: a mint mined at or below the nonce read here
     // is then in the logs read next, so "nonce passed, no log" cannot be a
@@ -521,10 +538,23 @@ export class FinalizeIpoEscrowCampaignsService {
           token_id: target.tokenId.toString(),
           wallet: target.walletAddress,
           mint_nonce: pinnedNonce.toString(),
+          ...(recordedHash === null ? {} : { tx_hash: recordedHash }),
         },
         "escrow mint attempt's nonce was used without a mint; starting a new attempt",
       );
       return this.restartMint(target, intent);
+    }
+    if (recordedHash !== null) {
+      // The recorded transaction may still be pending: give it a bounded time
+      // before the resend (an attempt that recorded no hash is resent at once).
+      const resendAt = intent.attemptedAt.getTime() + this.inFlightGraceMs;
+      if (this.clock().getTime() < resendAt) {
+        throw new Error(
+          `mint transaction ${recordedHash} for wallet ${target.walletAddress} (token_id=${target.tokenId}) has ` +
+            `no receipt yet and its nonce ${pinnedNonce} is not used yet, so it may still be mined; not sending ` +
+            `another mint before ${new Date(resendAt).toISOString()}`,
+        );
+      }
     }
     // The original may still be pending under this nonce: resend under the
     // same one, so the chain can mine at most one of them.
@@ -594,7 +624,12 @@ export class FinalizeIpoEscrowCampaignsService {
 
   // Records `hash`, a mint found in the chain logs, as the intent's mint.
   private async adoptMintLog(target: MintTarget, intent: EscrowMintIntent, hash: string): Promise<ConfirmedMint> {
-    await this.repository.recordEscrowMintSent({ intentId: intent.id, attempt: intent.attempt, txHash: hash });
+    const record = { intentId: intent.id, attempt: intent.attempt, txHash: hash };
+    if (intent.status === "mint_sent") {
+      await this.repository.adoptEscrowMintTransaction(record);
+    } else {
+      await this.repository.recordEscrowMintSent(record);
+    }
     this.logger.warn(
       {
         trace_id: target.traceId,

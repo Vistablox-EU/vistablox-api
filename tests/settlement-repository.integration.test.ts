@@ -39,6 +39,7 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
     "create",
     "constraints",
     "sent",
+    "adopt",
     "record",
     "restart",
     "atomic",
@@ -472,6 +473,25 @@ describe.skipIf(databaseUrl === undefined)("PrismaSettlementRepository PostgreSQ
       expect(await repository.findEscrowMintIntent(mintPivIds.sent, accountId)).toMatchObject({
         status: "mint_sent",
         mintTxHash: "0xsent",
+        attempt: 1,
+      });
+    });
+
+    it("replaces the hash of a mint_sent attempt only on that attempt, and never one still in sending", async () => {
+      const { intent } = await newIntent("adopt");
+      await expect(
+        repository.adoptEscrowMintTransaction({ intentId: intent.id, attempt: 1, txHash: "0xfound" }),
+      ).rejects.toThrow(/cannot adopt mint tx 0xfound/);
+
+      await repository.recordEscrowMintSent({ intentId: intent.id, attempt: 1, txHash: "0xrecorded" });
+      await expect(
+        repository.adoptEscrowMintTransaction({ intentId: intent.id, attempt: 2, txHash: "0xfound" }),
+      ).rejects.toThrow(/cannot adopt mint tx 0xfound/);
+      await repository.adoptEscrowMintTransaction({ intentId: intent.id, attempt: 1, txHash: "0xfound" });
+
+      expect(await repository.findEscrowMintIntent(mintPivIds.adopt, accountId)).toMatchObject({
+        status: "mint_sent",
+        mintTxHash: "0xfound",
         attempt: 1,
       });
     });

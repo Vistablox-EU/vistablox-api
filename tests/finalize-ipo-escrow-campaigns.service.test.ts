@@ -820,12 +820,22 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       expect(first.errors).toHaveLength(1);
       expect([...h.repository.intents.values()][0]).toMatchObject({ status: "mint_sent" });
 
-      h.advance(10 * ESCROW_MINT_IN_FLIGHT_GRACE_MS); // age alone must not make a recorded hash re-sendable
+      h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS - 1);
       const stillPending = await h.run();
 
       expect(stillPending.errors).toHaveLength(1);
       expect(stillPending.errors[0]).toContain("has no receipt yet");
+      expect(stillPending.errors[0]).toContain("may still be mined");
       expect(stillPending.errors[0]).toContain(h.chain.mints[0]!.hash);
+      expect(h.chain.mints).toHaveLength(1);
+
+      // Past the bounded wait the resend goes out under the same nonce, which
+      // the node rejects while the original is pending: still one mint.
+      h.advance(10 * ESCROW_MINT_IN_FLIGHT_GRACE_MS);
+      const resent = await h.run();
+
+      expect(resent.errors).toHaveLength(1);
+      expect(resent.errors[0]).toContain("replacement transaction underpriced");
       expect(h.chain.mints).toHaveLength(1);
 
       h.chain.mineNextPending();
@@ -854,13 +864,127 @@ describe("FinalizeIpoEscrowCampaignsService", () => {
       expect(h.chain.ipoEscrow.write.withdrawRaised).not.toHaveBeenCalled();
       expect([...h.repository.intents.values()][0]).toMatchObject({ status: "mint_sent", mintTxHash: mintHash });
 
-      // The next run does not send another mint over it either: the recorded hash still has no receipt.
+      // The replacement used the nonce and no mint log exists under it, so the mint can never
+      // land: the next run starts a new attempt under a fresh nonce and mints exactly once.
       const second = await h.run();
 
-      expect(second.errors).toHaveLength(1);
-      expect(h.chain.mints).toHaveLength(1);
-      expect(h.repository.recordedPositions).toHaveLength(0);
-      expect(h.chain.ipoEscrow.write.withdrawRaised).not.toHaveBeenCalled();
+      expect(second.errors).toEqual([]);
+      expect(h.chain.mints).toHaveLength(2);
+      expect(h.chain.mints[1]!.nonce).toBeGreaterThan(h.chain.mints[0]!.nonce!);
+      expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+      expect(h.repository.recordedPositions).toHaveLength(1);
+      expect(h.repository.recordedPositions[0]?.chainTxHash).toBe(h.chain.mints[1]!.hash);
+    });
+
+    describe("a recorded transaction that never gets a receipt (pinned nonce)", () => {
+      // The same-nonce resend H2 was recorded, and the original H1 was mined instead.
+      it("adopts the mint that landed under the nonce when its log and balance match, and sends nothing", async () => {
+        const h = singleContributor();
+        h.chain.mintModes.push("pending");
+        await h.run();
+        const original = h.chain.mints[0]!;
+        h.repository.intents.forEach((intent) => {
+          intent.mintTxHash = "0xrecorded-replacement"; // H2: recorded, never mined
+        });
+        h.chain.mineNextPending(); // H1 lands
+
+        const second = await h.run();
+
+        expect(second.errors).toEqual([]);
+        expect(h.chain.mints).toHaveLength(1);
+        expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+        expect(h.repository.recordedPositions).toHaveLength(1);
+        expect(h.repository.recordedPositions[0]?.chainTxHash).toBe(original.hash);
+        expect([...h.repository.intents.values()][0]).toMatchObject({ status: "recorded", mintTxHash: original.hash });
+      });
+
+      it("starts a new attempt under a fresh nonce when the recorded transaction was dropped and its nonce used", async () => {
+        const h = singleContributor();
+        h.chain.mintModes.push("pending");
+        await h.run();
+        const dropped = h.chain.mints[0]!;
+        h.chain.transactions.delete(dropped.hash); // dropped from the mempool
+        h.chain.consumeNonce(); // another operator transaction took the nonce
+
+        const second = await h.run();
+
+        expect(second.errors).toEqual([]);
+        expect(h.chain.mints).toHaveLength(2);
+        expect(h.chain.mints[1]!.nonce).toBeGreaterThan(dropped.nonce!);
+        expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+        expect(h.repository.recordedPositions).toHaveLength(1);
+        expect(h.entries.some((e) => e.level === "warn" && e.fields["tx_hash"] === dropped.hash)).toBe(true);
+      });
+
+      it("waits for a bounded time while the nonce is not used, then resends under the same nonce", async () => {
+        const h = singleContributor();
+        h.chain.mintModes.push("pending");
+        await h.run();
+        const dropped = h.chain.mints[0]!;
+        h.chain.transactions.delete(dropped.hash); // dropped; the nonce is still free
+
+        h.advance(ESCROW_MINT_IN_FLIGHT_GRACE_MS - 1);
+        const waiting = await h.run();
+
+        expect(waiting.errors).toHaveLength(1);
+        expect(waiting.errors[0]).toContain("may still be mined");
+        expect(h.chain.mints).toHaveLength(1);
+
+        h.advance(1);
+        const resent = await h.run();
+
+        expect(resent.errors).toEqual([]);
+        expect(h.chain.mints).toHaveLength(2);
+        expect(h.chain.mints[1]!.nonce).toBe(dropped.nonce);
+        expect(h.chain.balanceOf("0xInvestorA", 1n)).toBe(100n);
+        expect(h.repository.recordedPositions).toHaveLength(1);
+      });
+
+      it("keeps refusing when the mint log's balance does not match, and sends nothing", async () => {
+        const h = singleContributor();
+        h.chain.mintModes.push("pending");
+        await h.run();
+        h.chain.mineNextPending();
+        h.chain.transactions.delete(h.chain.mints[0]!.hash); // no receipt for the recorded hash
+        h.chain.balances.set("0xinvestora:1", 40n); // part of it moved away
+
+        const second = await h.run();
+
+        expect(second.errors).toHaveLength(1);
+        expect(second.errors[0]).toContain("manual reconciliation required");
+        expect(h.chain.mints).toHaveLength(1);
+        expect(h.repository.recordedPositions).toHaveLength(0);
+      });
+
+      it("keeps refusing when more than one mint log matches, and sends nothing", async () => {
+        const h = singleContributor();
+        h.chain.mintModes.push("pending");
+        await h.run();
+        h.chain.mineNextPending();
+        h.chain.seedUnrecordedMint("0xInvestorA", 1n, 100n);
+        h.chain.transactions.delete(h.chain.mints[0]!.hash);
+
+        const second = await h.run();
+
+        expect(second.errors).toHaveLength(1);
+        expect(second.errors[0]).toContain("found 2 mint logs");
+        expect(h.chain.mints).toHaveLength(2);
+        expect(h.repository.recordedPositions).toHaveLength(0);
+      });
+
+      it("does not say the transaction may still be mined once its nonce is used", async () => {
+        const h = singleContributor();
+        h.chain.mintModes.push("pending");
+        await h.run();
+        h.chain.transactions.delete(h.chain.mints[0]!.hash);
+        h.chain.consumeNonce();
+        h.chain.mintModes.push("reject"); // the new attempt fails to send
+
+        const second = await h.run();
+
+        expect(second.errors).toHaveLength(1);
+        expect(second.errors[0]).not.toContain("may still be mined");
+      });
     });
 
     it("accepts the receipt of the mint's own transaction regardless of the hash's letter case", async () => {
