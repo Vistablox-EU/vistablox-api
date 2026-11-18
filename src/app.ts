@@ -463,7 +463,7 @@ export function createApp(dependencies: AppDependencies): Express {
   if (dependencies.trustProxy !== undefined) {
     app.set("trust proxy", dependencies.trustProxy);
   }
-  const listPublicOfferings = new ListPublicOfferingsService(dependencies.offeringRepository);
+  const listPublicOfferings = new ListPublicOfferingsService(dependencies.offeringRepository, dependencies.logger);
   const baselineRateLimiter =
     dependencies.rateLimitStore === undefined
       ? undefined
@@ -647,6 +647,7 @@ export function createApp(dependencies: AppDependencies): Express {
           dependencies.offeringRepository,
           undefined,
           dependencies.reservationFundingRailEnabled ?? false,
+          dependencies.logger,
         ),
         dependencies.protectedApi.disclosureDocuments === undefined
           ? undefined
@@ -711,7 +712,7 @@ export function createApp(dependencies: AppDependencies): Express {
                 upload: new UploadOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store, offeringDocuments.scanner),
                 read: new GetOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store),
               },
-          offeringPresentation === undefined ? undefined : new UpdateOfferingPresentationService(offeringPresentation),
+          offeringPresentation === undefined ? undefined : new UpdateOfferingPresentationService(offeringPresentation, undefined, dependencies.logger),
         ),
       );
     }

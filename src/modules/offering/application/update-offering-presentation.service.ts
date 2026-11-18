@@ -1,8 +1,11 @@
+import type { Logger } from "pino";
+
 import { AppError } from "../../../shared/errors/app-error.js";
 import type {
   UpdateOfferingPresentationBody,
   UpdateOfferingPresentationResponse,
 } from "../api/offering-operations.schemas.js";
+import { sanitizeOfferingMedia } from "./sanitize-offering-media.js";
 import type { OfferingPresentationRepository } from "../repository/offering-presentation.repository.js";
 
 /**
@@ -16,6 +19,7 @@ export class UpdateOfferingPresentationService {
   public constructor(
     private readonly repository: OfferingPresentationRepository,
     private readonly clock: () => Date = () => new Date(),
+    private readonly logger?: Logger,
   ) {}
 
   public async execute(input: {
@@ -45,14 +49,17 @@ export class UpdateOfferingPresentationService {
       });
     }
 
+    // A featured-only change carries stored media through; a bad stored value
+    // must not turn an applied change into a 422.
+    const responseMedia = sanitizeOfferingMedia(input.offeringId, updated.media, this.logger);
     return {
       data: {
         offering_id: input.offeringId,
         featured: updated.featured,
         media:
-          updated.media === null
+          responseMedia === null
             ? null
-            : { hero_url: updated.media.heroUrl, gallery_urls: updated.media.galleryUrls },
+            : { hero_url: responseMedia.heroUrl, gallery_urls: responseMedia.galleryUrls },
       },
     };
   }
