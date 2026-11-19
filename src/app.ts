@@ -432,7 +432,7 @@ export interface AppDependencies {
        * signing requests (plan section 3.10). Optional so the mount compiles
        * even before the signing subsystem is wired.
        */
-      cancelPendingSigningRequestsForDevice?: (dpopJkt: string) => Promise<number>;
+      cancelPendingSigningRequestsForDevice?: (accountId: string, dpopJkt: string) => Promise<number>;
     };
     // Device-key auth, step 1: single-device enrolment/login only (see
     // docs/plans/device-bound-auth-backend.md). `auth` is the same

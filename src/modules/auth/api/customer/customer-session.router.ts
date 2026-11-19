@@ -74,9 +74,9 @@ export function createCustomerSessionRouter(
       requireAuthentication,
       requireFreshAuthentication,
       async (request, response) => {
-        requireAuthContext(response.locals.authContext);
+        const context = requireAuthContext(response.locals.authContext);
         const params = dpopKeyParamsSchema.parse(request.params);
-        const result = await revokeDeviceSessions.execute(params.jkt, request.headers);
+        const result = await revokeDeviceSessions.execute(context.accountId, params.jkt, request.headers);
         response.setHeader("Cache-Control", "no-store");
         response.json(
           revokeDeviceResponseSchema.parse({ data: { revoked_count: result.revokedCount } }),

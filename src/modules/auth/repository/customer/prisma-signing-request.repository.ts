@@ -170,11 +170,12 @@ export class PrismaSigningRequestRepository implements SigningRequestRepository 
     return rows[0] === undefined ? null : toSigningRequestFromRaw(rows[0]);
   }
 
-  public async cancelPendingAndSignedForDevice(deviceId: string): Promise<number> {
+  public async cancelPendingAndSignedForDevice(accountId: string, deviceId: string): Promise<number> {
     return this.database.$executeRaw`
       UPDATE auth.signing_requests
       SET status = 'cancelled'
-      WHERE device_id = ${deviceId}
+      WHERE account_id = ${accountId}
+        AND device_id = ${deviceId}
         AND status IN ('pending', 'signed')
     `;
   }

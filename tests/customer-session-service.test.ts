@@ -202,9 +202,21 @@ describe("RevokeDeviceSessionsService", () => {
     const service = new RevokeDeviceSessionsService(fakeRevoker({ revokeByDpopKey }));
     const headers = { authorization: "Bearer tok" };
 
-    const result = await service.execute("jkt_abc123", headers);
+    const result = await service.execute("acct_01", "jkt_abc123", headers);
 
     expect(revokeByDpopKey).toHaveBeenCalledWith("jkt_abc123", headers);
     expect(result).toEqual({ revokedCount: 2 });
+  });
+
+  it("hands the caller's account and the key to the signing-request cancel hook", async () => {
+    const cancel = vi.fn().mockResolvedValue(0);
+    const service = new RevokeDeviceSessionsService(
+      fakeRevoker({ revokeByDpopKey: vi.fn().mockResolvedValue(0) }),
+      cancel,
+    );
+
+    await service.execute("acct_01", "jkt_abc123", {});
+
+    expect(cancel).toHaveBeenCalledWith("acct_01", "jkt_abc123");
   });
 });

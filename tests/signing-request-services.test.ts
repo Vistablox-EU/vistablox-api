@@ -96,8 +96,8 @@ describe("CancelPendingSigningRequestsForDeviceService", () => {
       { cancelPendingAndSignedForDevice: cancel } as never,
     );
 
-    await expect(service.execute("dpop-jkt-1")).resolves.toBe(3);
-    expect(cancel).toHaveBeenCalledWith("dev_1");
+    await expect(service.execute("acc_1", "dpop-jkt-1")).resolves.toBe(3);
+    expect(cancel).toHaveBeenCalledWith("acc_1", "dev_1");
   });
 
   it("cancels nothing when the DPoP key no longer resolves to an active device", async () => {
@@ -107,7 +107,18 @@ describe("CancelPendingSigningRequestsForDeviceService", () => {
       { cancelPendingAndSignedForDevice: cancel } as never,
     );
 
-    await expect(service.execute("dpop-jkt-1")).resolves.toBe(0);
+    await expect(service.execute("acc_1", "dpop-jkt-1")).resolves.toBe(0);
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it("cancels nothing when the DPoP key belongs to another account's device", async () => {
+    const cancel = vi.fn();
+    const service = new CancelPendingSigningRequestsForDeviceService(
+      { findByDpopJkt: vi.fn().mockResolvedValue(DEVICE) } as never,
+      { cancelPendingAndSignedForDevice: cancel } as never,
+    );
+
+    await expect(service.execute("acc_other", "dpop-jkt-1")).resolves.toBe(0);
     expect(cancel).not.toHaveBeenCalled();
   });
 });

@@ -13,9 +13,12 @@ export class CancelPendingSigningRequestsForDeviceService {
     private readonly requests: Pick<SigningRequestRepository, "cancelPendingAndSignedForDevice">,
   ) {}
 
-  public async execute(dpopJkt: string): Promise<number> {
+  // Scoped to the caller: a key that is not the caller's own active device
+  // cancels nothing, exactly as an unknown key does, so the route can't be
+  // used to cancel or probe another account's requests.
+  public async execute(accountId: string, dpopJkt: string): Promise<number> {
     const device = await this.devices.findByDpopJkt(dpopJkt);
-    if (device === null) return 0;
-    return this.requests.cancelPendingAndSignedForDevice(device.deviceId);
+    if (device === null || device.accountId !== accountId) return 0;
+    return this.requests.cancelPendingAndSignedForDevice(accountId, device.deviceId);
   }
 }
