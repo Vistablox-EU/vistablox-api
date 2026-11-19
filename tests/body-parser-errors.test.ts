@@ -198,9 +198,12 @@ describe("request body parser errors through createApp", () => {
   it("answers an unsupported Content-Encoding with 415 request.unsupported_encoding", async () => {
     const { app, logs } = buildApp();
 
+    // Not zstd: body-parser 2.4.0 decodes it on a Node that has
+    // zlib.createZstdDecompress (22.15 and later), so it no longer stands for
+    // an encoding the parser cannot read.
     const response = await postJson(app, `{"password":"${secret}"}`).set(
       "content-encoding",
-      "zstd",
+      "compress",
     );
 
     const body = expectEnvelope(response, { status: 415, code: "request.unsupported_encoding" });
