@@ -38,6 +38,8 @@ The job's payload is never sent: it can hold personal data. `last_error` is cut 
 
 Set `DEAD_LETTER_ALERT_WEBHOOK_URL` in the worker's environment (`.env.staging` on staging; `docker-compose.staging.yml` passes it through). Unset or blank turns delivery off. It must be `https://` when `NODE_ENV=production` (which includes staging); plain `http://` is accepted only in development and tests, for a local receiver. The worker reads it at start, so restart the worker after changing it.
 
+Alerts are throttled per source queue. The first dead letter of a queue alerts at once; further ones within `DEAD_LETTER_ALERT_WINDOW_MINUTES` (default 60, `0` turns the throttle off) are counted, not sent. The next alert after the window carries a line `N more of <queue> since <time>`. Every dead letter still writes its `job.dead_lettered` error line. The windows live in the worker's memory, so a restart alerts again; an alert the receiver did not accept does not open a window.
+
 One URL receives every alert. Routing per owner (different channels for settlement and identity, say) is not built; a receiver can route on `dead_letter.owner` or `dead_letter.tier`.
 
 ## Ownership
