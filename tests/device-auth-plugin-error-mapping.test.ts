@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AndroidAttestationChallengeMismatchError,
   AndroidAttestationInvalidError,
+  PlayIntegrityDecodeError,
 } from "../src/modules/auth/application/customer/android-attestation-verifier.js";
 import {
   DeviceAlreadyEnrolledError,
@@ -83,6 +84,70 @@ describe("logAttestationRejection", () => {
         path: "/device/enrol/verify",
       }),
     );
+  });
+
+  it("adds no Play Integrity field to a rejection that has no decoder failure behind it", () => {
+    const warn = vi.fn();
+    const ctx = { context: { logger: { warn } }, path: "/device/enrol/verify" };
+
+    logAttestationRejection(ctx, new AndroidAttestationInvalidError("the app-signing certificate is not on the allowlist"));
+
+    expect(warn.mock.calls[0]![1]).not.toHaveProperty("playIntegrity");
+  });
+
+  it("logs the class, stage and status of a Play Integrity decoder failure, and nothing from its message or cause", () => {
+    const warn = vi.fn();
+    const ctx = { context: { logger: { warn } }, path: "/device/enrol/verify" };
+    const decoderFailure = new PlayIntegrityDecodeError("http_status", "decode", {
+      status: 503,
+      cause: new Error("cause-message-that-must-not-be-logged"),
+    });
+
+    logAttestationRejection(
+      ctx,
+      new AndroidAttestationInvalidError("Play Integrity token could not be decoded", { cause: decoderFailure }),
+    );
+
+    expect(warn).toHaveBeenCalledWith(
+      "device-auth attestation rejected",
+      expect.objectContaining({
+        code: "ATTESTATION_INVALID",
+        playIntegrity: { failureClass: "http_status", stage: "decode", status: 503 },
+      }),
+    );
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("cause-message-that-must-not-be-logged");
+  });
+
+  it("omits the status when the failure has none", () => {
+    const warn = vi.fn();
+    const ctx = { context: { logger: { warn } } };
+
+    logAttestationRejection(
+      ctx,
+      new AndroidAttestationInvalidError("Play Integrity token could not be decoded", {
+        cause: new PlayIntegrityDecodeError("timeout", "oauth_token"),
+      }),
+    );
+
+    expect(warn.mock.calls[0]![1]).toMatchObject({ playIntegrity: { failureClass: "timeout", stage: "oauth_token" } });
+    expect(warn.mock.calls[0]![1].playIntegrity).not.toHaveProperty("status");
+  });
+
+  it("logs only the error name for a decoder failure it cannot classify", () => {
+    const warn = vi.fn();
+    const ctx = { context: { logger: { warn } } };
+
+    logAttestationRejection(
+      ctx,
+      new AndroidAttestationInvalidError("Play Integrity token could not be decoded", {
+        cause: new TypeError("secret-bearing message"),
+      }),
+    );
+
+    expect(warn.mock.calls[0]![1]).toMatchObject({
+      playIntegrity: { failureClass: "unclassified", causeName: "TypeError" },
+    });
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("secret-bearing message");
   });
 
   it("does nothing for a non-attestation error", () => {

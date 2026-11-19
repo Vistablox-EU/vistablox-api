@@ -16,6 +16,7 @@ import { describe, expect, it } from "vitest";
 import {
   AndroidAttestationChallengeMismatchError,
   AndroidAttestationInvalidError,
+  PlayIntegrityDecodeError,
   verifyAndroidKeyAttestation,
   verifyPlayIntegrityToken,
   type AndroidAttestationRevocationList,
@@ -790,6 +791,27 @@ describe("verifyPlayIntegrityToken", () => {
         decoder: { decode: async () => { throw new Error("boom"); } },
       }),
     ).rejects.toBeInstanceOf(AndroidAttestationInvalidError);
+  });
+
+  it("keeps the decoder's own error as the cause of the rejection, without changing its code or message", async () => {
+    const decoderFailure = new PlayIntegrityDecodeError("timeout", "decode");
+
+    const error = await verifyPlayIntegrityToken({
+      policy: "strict",
+      token: "token",
+      challenge: CHALLENGE,
+      bioJkt: "bio",
+      certDigestAllowlist: [CERT_DIGEST_HEX],
+      decoder: { decode: async () => { throw decoderFailure; } },
+    }).then(
+      () => undefined,
+      (rejection: unknown) => rejection,
+    );
+
+    expect(error).toBeInstanceOf(AndroidAttestationInvalidError);
+    expect((error as AndroidAttestationInvalidError).code).toBe("ATTESTATION_INVALID");
+    expect((error as Error).message).toBe("Android key attestation rejected: Play Integrity token could not be decoded");
+    expect((error as Error).cause).toBe(decoderFailure);
   });
 
   it("accepts a well-formed strict-policy verdict with the correct requestHash", async () => {
