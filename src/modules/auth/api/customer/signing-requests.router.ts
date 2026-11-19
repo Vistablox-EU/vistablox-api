@@ -71,7 +71,7 @@ export function createSigningRequestsRouter(input: {
       const { accountId } = authContext(response);
       const status = query.status ?? SIGNING_REQUEST_STATUS_PENDING;
       const rows = await input.requests.listForAccount(accountId, status);
-      response.json(signingRequestsListResponseSchema.parse({ data: rows.map(toRequestObject) }));
+      sendValidated(response, signingRequestsListResponseSchema, { data: rows.map(toRequestObject) });
     } catch (error) {
       throw toAppError(error);
     }
@@ -86,7 +86,7 @@ export function createSigningRequestsRouter(input: {
       if (row === null) {
         throw new SigningRequestNotFoundError();
       }
-      response.json(signingRequestResponseSchema.parse({ data: toRequestObject(row) }));
+      sendValidated(response, signingRequestResponseSchema, { data: toRequestObject(row) });
     } catch (error) {
       throw toAppError(error);
     }
@@ -116,11 +116,9 @@ export function createSigningRequestsRouter(input: {
         deviceId: device.deviceId,
         ttlSeconds: TX_CHALLENGE_TTL_SECONDS,
       });
-      response.json(
-        signingChallengeResponseSchema.parse({
-          data: { challenge, expires_at: expiresAt.toISOString() },
-        }),
-      );
+      sendValidated(response, signingChallengeResponseSchema, {
+        data: { challenge, expires_at: expiresAt.toISOString() },
+      });
     } catch (error) {
       throw toAppError(error);
     }
@@ -142,11 +140,9 @@ export function createSigningRequestsRouter(input: {
         challenge: body.challenge,
         jws: body.jws,
       });
-      response.json(
-        signingSignResponseSchema.parse({
-          data: { status: signed.status as SigningRequestStatus },
-        }),
-      );
+      sendValidated(response, signingSignResponseSchema, {
+        data: { status: signed.status as SigningRequestStatus },
+      });
     } catch (error) {
       throw toAppError(error);
     }
@@ -196,6 +192,7 @@ function assertRequestChallengeable(row: { status: string; expiresAt: Date }): v
 }
 
 import type { TxDestination } from "../../domain/signing-request.policy.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 function toRequestObject(row: {
   id: string;

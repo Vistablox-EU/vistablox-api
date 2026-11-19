@@ -131,11 +131,12 @@ describe("GET /internal/v1/intake-cases/:case_id/readiness", () => {
     expect(response.body.code).toBe("intake.case_not_found");
   });
 
-  it("does not emit malformed repository data", async () => {
+  it("does not emit malformed repository data, and reports it as the server's fault (#72)", async () => {
     const response = await request(
       app({ record: { ...snapshot, stage: "not_a_case_stage" } }),
     ).get("/internal/v1/intake-cases/case_01/readiness");
-    expect(response.status).toBe(422);
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe("internal.response_invalid");
   });
 });
 

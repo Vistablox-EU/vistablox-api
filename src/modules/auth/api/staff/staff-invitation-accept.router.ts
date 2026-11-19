@@ -5,6 +5,7 @@ import {
   acceptStaffInvitationResponseSchema,
 } from "./staff-invitation-accept.schemas.js";
 import type { AcceptStaffInvitationService } from "../../application/staff/staff-invitation.service.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createPublicStaffInvitationRouter(
   acceptInvitation: AcceptStaffInvitationService,
@@ -16,7 +17,7 @@ export function createPublicStaffInvitationRouter(
       token: body.token,
       traceId: String(response.locals.traceId),
     });
-    response.json(acceptStaffInvitationResponseSchema.parse(result));
+    sendValidated(response, acceptStaffInvitationResponseSchema, result);
   });
   return router;
 }

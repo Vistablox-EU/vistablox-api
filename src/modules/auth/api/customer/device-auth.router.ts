@@ -16,6 +16,7 @@ import {
   loginVerifyRequestSchema,
   loginVerifyResponseSchema,
 } from "./device-auth.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 const ENROL_CHALLENGE_TTL_SECONDS = 300;
 const LOGIN_CHALLENGE_TTL_SECONDS = 120;
@@ -101,21 +102,19 @@ export function createAppConfigRouter(
 ): Router {
   const router = Router();
   router.get("/config", requireDpopOnly, (_request, response) => {
-    response.json(
-      appConfigResponseSchema.parse({
-        data: {
-          min_app_version: appConfig.minAppVersion,
-          features: appConfig.features,
-          mobile_auth_platforms: appConfig.mobileAuthPlatforms,
-          ...(appConfig.deploymentIdentity === undefined ? {} : { deployment_identity: {
-            environment: appConfig.deploymentIdentity.environment,
-            chain_id: appConfig.deploymentIdentity.chainId,
-            network: appConfig.deploymentIdentity.network,
-            registry_address: appConfig.deploymentIdentity.registryAddress,
-          } }),
-        },
-      }),
-    );
+    sendValidated(response, appConfigResponseSchema, {
+      data: {
+        min_app_version: appConfig.minAppVersion,
+        features: appConfig.features,
+        mobile_auth_platforms: appConfig.mobileAuthPlatforms,
+        ...(appConfig.deploymentIdentity === undefined ? {} : { deployment_identity: {
+          environment: appConfig.deploymentIdentity.environment,
+          chain_id: appConfig.deploymentIdentity.chainId,
+          network: appConfig.deploymentIdentity.network,
+          registry_address: appConfig.deploymentIdentity.registryAddress,
+        } }),
+      },
+    });
   });
   return router;
 }
@@ -168,11 +167,9 @@ export function createDeviceAuthRouter(
       deviceId: undefined,
       ttlSeconds: ENROL_CHALLENGE_TTL_SECONDS,
     });
-    response.json(
-      challengeResponseSchema.parse({
-        data: { challenge, expires_at: expiresAt.toISOString() },
-      }),
-    );
+    sendValidated(response, challengeResponseSchema, {
+      data: { challenge, expires_at: expiresAt.toISOString() },
+    });
   });
 
   router.post("/enrol/verify", requireDpopOnlyForVerify, ...deviceAuthRateLimiters, async (request, response) => {
@@ -193,16 +190,14 @@ export function createDeviceAuthRouter(
         returnHeaders: true,
       });
       relaySetAuthToken(response, headers);
-      response.json(
-        enrolVerifyResponseSchema.parse({
-          data: {
-            device_id: result.device_id,
-            status: result.status,
-            session_expires_at: result.session_expires_at,
-            authentication_level: result.authentication_level,
-          },
-        }),
-      );
+      sendValidated(response, enrolVerifyResponseSchema, {
+        data: {
+          device_id: result.device_id,
+          status: result.status,
+          session_expires_at: result.session_expires_at,
+          authentication_level: result.authentication_level,
+        },
+      });
     } catch (error) {
       throw toAppError(error);
     }
@@ -216,16 +211,14 @@ export function createDeviceAuthRouter(
       deviceId: body.device_id,
       ttlSeconds: LOGIN_CHALLENGE_TTL_SECONDS,
     });
-    response.json(
-      loginChallengeResponseSchema.parse({
-        data: {
-          challenge,
-          expires_at: expiresAt.toISOString(),
-          // Re-attestation isn't implemented in this PR -- always false.
-          attestation_required: false,
-        },
-      }),
-    );
+    sendValidated(response, loginChallengeResponseSchema, {
+      data: {
+        challenge,
+        expires_at: expiresAt.toISOString(),
+        // Re-attestation isn't implemented in this PR -- always false.
+        attestation_required: false,
+      },
+    });
   });
 
   router.post("/login/verify", requireDpopOnlyForVerify, ...deviceAuthRateLimiters, async (request, response) => {
@@ -244,15 +237,13 @@ export function createDeviceAuthRouter(
         returnHeaders: true,
       });
       relaySetAuthToken(response, headers);
-      response.json(
-        loginVerifyResponseSchema.parse({
-          data: {
-            device_id: result.device_id,
-            session_expires_at: result.session_expires_at,
-            authentication_level: result.authentication_level,
-          },
-        }),
-      );
+      sendValidated(response, loginVerifyResponseSchema, {
+        data: {
+          device_id: result.device_id,
+          session_expires_at: result.session_expires_at,
+          authentication_level: result.authentication_level,
+        },
+      });
     } catch (error) {
       throw toAppError(error);
     }

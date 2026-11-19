@@ -22,10 +22,16 @@ export function sendValidated<Schema extends z.ZodType>(
   payload: unknown,
   status?: number,
 ): void {
+  const parsed = parseResponse(schema, payload);
+  if (status !== undefined) response.status(status);
+  response.json(parsed);
+}
+
+/** The checking half of sendValidated, for a route that reads the checked body before it sends it. */
+export function parseResponse<Schema extends z.ZodType>(schema: Schema, payload: unknown): z.output<Schema> {
   const parsed = schema.safeParse(payload);
   if (!parsed.success) throw responseInvalidError(parsed.error);
-  if (status !== undefined) response.status(status);
-  response.json(parsed.data);
+  return parsed.data;
 }
 
 function responseInvalidError(error: z.ZodError): AppError {

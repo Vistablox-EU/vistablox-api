@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from "express";
 
 import type { GetKycAccountForOperationsService } from "../application/kyc.service.js";
 import { kycAccountIdParamsSchema, operationsKycAccountResponseSchema } from "./kyc.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 // Calls the concrete service directly, in-process. account_id from the path
 // param is fine here -- this route is staff-only (WebAuthn-gated), a
@@ -20,7 +21,7 @@ export function createKycOperationsRouter(
     const params = kycAccountIdParamsSchema.parse(request.params);
     const result = await getAccountForOperations.execute(params.account_id);
     response.setHeader("Cache-Control", "no-store");
-    response.json(operationsKycAccountResponseSchema.parse(result));
+    sendValidated(response, operationsKycAccountResponseSchema, result);
   });
 
   return router;

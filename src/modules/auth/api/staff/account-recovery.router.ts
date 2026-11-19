@@ -24,6 +24,7 @@ import {
   openAccountRecoveryCaseBodySchema,
   recordPrimaryRecoveryReviewBodySchema,
 } from "./account-recovery.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createAccountRecoveryRouter(
   requireAuthentication: RequestHandler,
@@ -48,22 +49,20 @@ export function createAccountRecoveryRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.status(201).json(accountRecoveryCaseResponseSchema.parse({ data: toCasePayload(result) }));
+    sendValidated(response, accountRecoveryCaseResponseSchema, { data: toCasePayload(result) }, 201);
   });
 
   router.get("/:case_id", ...authorization, async (request, response) => {
     const params = accountRecoveryCaseParamsSchema.parse(request.params);
     const result = await getCase.execute(params.case_id);
     response.setHeader("Cache-Control", "no-store");
-    response.json(
-      getAccountRecoveryCaseResponseSchema.parse({
-        data: {
-          case: toCasePayload(result.case),
-          fresh_didit_verification_status: result.freshDiditVerificationStatus,
-          corroboration_facts: toFactsPayload(result.corroborationFacts),
-        },
-      }),
-    );
+    sendValidated(response, getAccountRecoveryCaseResponseSchema, {
+      data: {
+        case: toCasePayload(result.case),
+        fresh_didit_verification_status: result.freshDiditVerificationStatus,
+        corroboration_facts: toFactsPayload(result.corroborationFacts),
+      },
+    });
   });
 
   router.post("/:case_id/didit-sessions", ...authorization, async (request, response) => {
@@ -76,11 +75,9 @@ export function createAccountRecoveryRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.status(201).json(
-      createRecoveryDiditSessionResponseSchema.parse({
-        data: { verification_url: result.verificationUrl, case: toCasePayload(result.case) },
-      }),
-    );
+    sendValidated(response, createRecoveryDiditSessionResponseSchema, {
+      data: { verification_url: result.verificationUrl, case: toCasePayload(result.case) },
+    }, 201);
   });
 
   router.post("/:case_id/primary-review", ...authorization, async (request, response) => {
@@ -94,7 +91,7 @@ export function createAccountRecoveryRouter(
       traceId: String(response.locals.traceId),
       corroborationCategory: body.corroboration_category,
     });
-    response.json(accountRecoveryCaseResponseSchema.parse({ data: toCasePayload(result) }));
+    sendValidated(response, accountRecoveryCaseResponseSchema, { data: toCasePayload(result) });
   });
 
   router.post("/:case_id/decision", ...authorization, async (request, response) => {
@@ -109,7 +106,7 @@ export function createAccountRecoveryRouter(
       decision: body.decision,
       reason: body.reason,
     });
-    response.json(accountRecoveryCaseResponseSchema.parse({ data: toCasePayload(result) }));
+    sendValidated(response, accountRecoveryCaseResponseSchema, { data: toCasePayload(result) });
   });
 
   router.post("/:case_id/complete", ...authorization, async (request, response) => {
@@ -122,7 +119,7 @@ export function createAccountRecoveryRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.status(202).json(accountRecoveryCaseResponseSchema.parse({ data: toCasePayload(result) }));
+    sendValidated(response, accountRecoveryCaseResponseSchema, { data: toCasePayload(result) }, 202);
   });
 
   return router;

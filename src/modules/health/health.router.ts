@@ -3,6 +3,7 @@ import { z } from "zod";
 
 import type { DatabaseProbe } from "../../infrastructure/database/database-probe.js";
 import { AppError } from "../../shared/errors/app-error.js";
+import { sendValidated } from "../../shared/http/send-validated.js";
 
 const healthResponseSchema = z.object({
   status: z.literal("ok"),
@@ -12,7 +13,7 @@ export function createHealthRouter(databaseProbe: DatabaseProbe): Router {
   const router = Router();
 
   router.get("/live", (_request, response) => {
-    response.json(healthResponseSchema.parse({ status: "ok" }));
+    sendValidated(response, healthResponseSchema, { status: "ok" });
   });
 
   router.get("/ready", async (_request, response) => {
@@ -28,7 +29,7 @@ export function createHealthRouter(databaseProbe: DatabaseProbe): Router {
       });
     }
 
-    response.json(healthResponseSchema.parse({ status: "ok" }));
+    sendValidated(response, healthResponseSchema, { status: "ok" });
   });
 
   return router;

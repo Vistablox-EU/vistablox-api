@@ -9,6 +9,7 @@ import {
   onrampLateEvidenceListResponseSchema,
   onrampLateEvidenceParamsSchema,
 } from "./onramp-late-evidence.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 /**
  * Staff view of late onramp funding evidence (AD-288, decided 2026-11-17; issue
@@ -30,7 +31,7 @@ export function createOnrampLateEvidenceRouter(
   router.get("/", ...staffOnly, async (request, response) => {
     const query = onrampLateEvidenceListQuerySchema.parse(request.query);
     const result = await listEvidence.execute(query);
-    response.json(onrampLateEvidenceListResponseSchema.parse(result));
+    sendValidated(response, onrampLateEvidenceListResponseSchema, result);
   });
 
   router.post("/:evidence_id/mark-reviewed", ...staffOnly, async (request, response) => {
@@ -49,7 +50,7 @@ export function createOnrampLateEvidenceRouter(
       evidenceId: params.evidence_id,
       traceId: String(response.locals.traceId),
     });
-    response.json(markOnrampLateEvidenceReviewedResponseSchema.parse(result));
+    sendValidated(response, markOnrampLateEvidenceReviewedResponseSchema, result);
   });
 
   return router;

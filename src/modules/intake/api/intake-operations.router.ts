@@ -75,6 +75,7 @@ import {
   reversalPreviewResponseSchema,
   reversalOperationResponseSchema,
 } from "./intake-operations.schemas.js";
+import { parseResponse, sendValidated } from "../../../shared/http/send-validated.js";
 
 export function createIntakeOperationsRouter(
   requireAuthentication: RequestHandler,
@@ -120,7 +121,7 @@ export function createIntakeOperationsRouter(
   router.get("/", ...staffOnly, async (request, response) => {
     const query = operationsCaseListQuerySchema.parse(request.query);
     const result = await listCases.execute({ query });
-    response.json(operationsCaseListResponseSchema.parse(result));
+    sendValidated(response, operationsCaseListResponseSchema, result);
   });
 
   router.post("/", ...staffOnly, async (request, response) => {
@@ -131,13 +132,13 @@ export function createIntakeOperationsRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.status(201).json(createStaffCaseResponseSchema.parse(result));
+    sendValidated(response, createStaffCaseResponseSchema, result, 201);
   });
 
   if (createStaffDraftCase !== undefined) router.post("/drafts", ...staffOnly, async (request, response) => {
     const body = createStaffDraftCaseBodySchema.parse(request.body);
     const result = await createStaffDraftCase.execute({ body, traceId: String(response.locals.traceId) });
-    response.status(201).json(createStaffDraftCaseResponseSchema.parse(result));
+    sendValidated(response, createStaffDraftCaseResponseSchema, result, 201);
   });
   if (submitStaffDraftCase !== undefined) router.post("/:case_id/submit", ...staffOnly, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
@@ -148,13 +149,14 @@ export function createIntakeOperationsRouter(
   router.get("/:case_id", ...staffOnly, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
     const result = await getCase.execute(params.case_id);
-    response.json(operationsCaseDetailResponseSchema.parse({ data: result }));
+    sendValidated(response, operationsCaseDetailResponseSchema, { data: result });
   });
 
   router.get("/:case_id/readiness", ...staffOnly, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
     const startedAt = performance.now();
-    const result = operationsReadinessResponseSchema.parse(
+    const result = parseResponse(
+      operationsReadinessResponseSchema,
       await readiness.execute(params.case_id),
     );
     response.locals.logger?.info(
@@ -173,19 +175,19 @@ export function createIntakeOperationsRouter(
 
   if (workflow !== undefined) router.get("/:case_id/workflow", ...staffOnly, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
-    response.json(intakeWorkflowResponseSchema.parse(await workflow.execute(params.case_id)));
+    sendValidated(response, intakeWorkflowResponseSchema, await workflow.execute(params.case_id));
   });
 
   if (history !== undefined) router.get("/:case_id/history", ...staffOnly, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
     const query = intakeHistoryQuerySchema.parse(request.query);
-    response.json(intakeCaseHistoryResponseSchema.parse(await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) })));
+    sendValidated(response, intakeCaseHistoryResponseSchema, await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) }));
   });
 
   if (reversalPreview !== undefined) router.get("/:case_id/reversal-preview", ...staffOnly, async (request, response) => {
     const params = reversalCommandParamsSchema.parse(request.params);
     const authContext = requireAuthContext(response.locals.authContext);
-    response.json(reversalPreviewResponseSchema.parse(await reversalPreview.execute(params.case_id, authContext.accountId)));
+    sendValidated(response, reversalPreviewResponseSchema, await reversalPreview.execute(params.case_id, authContext.accountId));
   });
 
   if (requestReversal !== undefined) {
@@ -203,24 +205,24 @@ export function createIntakeOperationsRouter(
       const expectedSequence = Number(request.header("if-match-workflow-sequence") ?? "NaN");
       const idempotencyKey = String(request.header("idempotency-key") ?? "").trim();
       if (expectedStage.length === 0 || !Number.isInteger(expectedSequence) || idempotencyKey.length === 0) throw new AppError({ code: "intake.reversal_headers_required", title: "Correction headers required", status: 422, detail: "If-Match-Stage, If-Match-Workflow-Sequence, and Idempotency-Key are required." });
-      response.json(reversalOperationResponseSchema.parse(await requestReversal.execute({ caseId: params.case_id, command, accountId: authContext.accountId, traceId: String(response.locals.traceId), idempotencyKey, expectedStage, expectedWorkflowEventSequence: expectedSequence, reasonCode: body.reason_code, reason: body.reason })));
+      sendValidated(response, reversalOperationResponseSchema, await requestReversal.execute({ caseId: params.case_id, command, accountId: authContext.accountId, traceId: String(response.locals.traceId), idempotencyKey, expectedStage, expectedWorkflowEventSequence: expectedSequence, reasonCode: body.reason_code, reason: body.reason }));
     });
   }
 
   if (approveReversal !== undefined) router.post("/:case_id/reversal-operations/:operation_id/approve", ...staffOnly, async (request, response) => {
     const params = reversalOperationParamsSchema.parse(request.params);
     const authContext = requireAuthContext(response.locals.authContext);
-    response.json(reversalOperationResponseSchema.parse(await approveReversal.execute({ caseId: params.case_id, operationId: params.operation_id, accountId: authContext.accountId, traceId: String(response.locals.traceId) })));
+    sendValidated(response, reversalOperationResponseSchema, await approveReversal.execute({ caseId: params.case_id, operationId: params.operation_id, accountId: authContext.accountId, traceId: String(response.locals.traceId) }));
   });
   if (cancelReversal !== undefined) router.post("/:case_id/reversal-operations/:operation_id/cancel", ...staffOnly, async (request, response) => {
     const params = reversalOperationParamsSchema.parse(request.params);
     const authContext = requireAuthContext(response.locals.authContext);
     const body = reversalCancelBodySchema.parse(request.body ?? {});
-    response.json(reversalOperationResponseSchema.parse(await cancelReversal.execute({ caseId: params.case_id, operationId: params.operation_id, accountId: authContext.accountId, traceId: String(response.locals.traceId), note: body.note })));
+    sendValidated(response, reversalOperationResponseSchema, await cancelReversal.execute({ caseId: params.case_id, operationId: params.operation_id, accountId: authContext.accountId, traceId: String(response.locals.traceId), note: body.note }));
   });
   if (getReversalOperation !== undefined) router.get("/:case_id/reversal-operations/:operation_id", ...staffOnly, async (request, response) => {
     const params = reversalOperationParamsSchema.parse(request.params);
-    response.json(reversalOperationResponseSchema.parse(await getReversalOperation.execute({ caseId: params.case_id, operationId: params.operation_id })));
+    sendValidated(response, reversalOperationResponseSchema, await getReversalOperation.execute({ caseId: params.case_id, operationId: params.operation_id }));
   });
 
   if (uploadDocument !== undefined) {
@@ -298,9 +300,7 @@ export function createIntakeOperationsRouter(
         traceId: String(response.locals.traceId),
         body,
       });
-      response
-        .status(201)
-        .json(publishInformationRequestResponseSchema.parse(result));
+      sendValidated(response, publishInformationRequestResponseSchema, result, 201);
     },
   );
 
@@ -313,7 +313,7 @@ export function createIntakeOperationsRouter(
         caseId: params.case_id,
         requestId: params.request_id,
       });
-      response.json(sendManualReminderResponseSchema.parse(result));
+      sendValidated(response, sendManualReminderResponseSchema, result);
     },
   );
 
@@ -331,7 +331,7 @@ export function createIntakeOperationsRouter(
         traceId: String(response.locals.traceId),
         body,
       });
-      response.json(forceExpireInformationRequestResponseSchema.parse(result));
+      sendValidated(response, forceExpireInformationRequestResponseSchema, result);
     },
   );
 
@@ -349,7 +349,7 @@ export function createIntakeOperationsRouter(
         traceId: String(response.locals.traceId),
         body,
       });
-      response.json(withdrawInformationRequestResponseSchema.parse(result));
+      sendValidated(response, withdrawInformationRequestResponseSchema, result);
     },
   );
 
@@ -366,7 +366,7 @@ export function createIntakeOperationsRouter(
         traceId: String(response.locals.traceId),
         body,
       });
-      response.json(founderDecisionResponseSchema.parse(result));
+      sendValidated(response, founderDecisionResponseSchema, result);
     },
   );
 
@@ -380,7 +380,7 @@ export function createIntakeOperationsRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.json(closeCaseResponseSchema.parse(result));
+    sendValidated(response, closeCaseResponseSchema, result);
   });
 
   router.post(
@@ -392,7 +392,7 @@ export function createIntakeOperationsRouter(
         caseId: params.case_id,
         traceId: String(response.locals.traceId),
       });
-      response.json(retryPostIpoStructuringHandoffResponseSchema.parse(result));
+      sendValidated(response, retryPostIpoStructuringHandoffResponseSchema, result);
     },
   );
 
@@ -415,7 +415,7 @@ export function createIntakeOperationsRouter(
         traceId: String(response.locals.traceId),
         body,
       });
-      response.json(reviewEvidenceResponseSchema.parse(result));
+      sendValidated(response, reviewEvidenceResponseSchema, result);
     },
   );
 
@@ -433,7 +433,7 @@ export function createIntakeOperationsRouter(
           traceId: String(response.locals.traceId),
           body,
         });
-        response.json(assignPartnerOrganizationResponseSchema.parse(result));
+        sendValidated(response, assignPartnerOrganizationResponseSchema, result);
       },
     );
   }
@@ -442,7 +442,7 @@ export function createIntakeOperationsRouter(
     const params = caseIdParamsSchema.parse(request.params);
     const query = listCaseMessagesQuerySchema.parse(request.query);
     const result = await listCaseMessages.execute(params.case_id, query.lane);
-    response.json(listCaseMessagesResponseSchema.parse(result));
+    sendValidated(response, listCaseMessagesResponseSchema, result);
   });
 
   router.post("/:case_id/messages", ...staffOnly, async (request, response) => {
@@ -455,7 +455,7 @@ export function createIntakeOperationsRouter(
       lane: body.lane,
       body: body.body,
     });
-    response.status(201).json(postCaseMessageResponseSchema.parse(result));
+    sendValidated(response, postCaseMessageResponseSchema, result, 201);
   });
 
   return router;
