@@ -6,6 +6,7 @@ import {
   issueStaffInvitationBodySchema,
   issueStaffInvitationResponseSchema,
 } from "./staff-invitation-issue.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createInternalStaffInvitationRouter(
   requireAuthentication: RequestHandler,
@@ -32,7 +33,7 @@ export function createInternalStaffInvitationRouter(
         legalPracticeId: body.legal_practice_id,
         appraisalFirmId: body.appraisal_firm_id,
       });
-      response.status(201).json(issueStaffInvitationResponseSchema.parse(result));
+      sendValidated(response, issueStaffInvitationResponseSchema, result, 201);
     },
   );
   return router;

@@ -2,6 +2,7 @@ import { Router, type RequestHandler } from "express";
 
 import type { SearchAccountsByEmailService } from "../application/search-accounts.service.js";
 import { searchAccountsQuerySchema, searchAccountsResponseSchema } from "./account.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 export function createAccountSearchRouter(
   requireAuthentication: RequestHandler,
@@ -15,7 +16,7 @@ export function createAccountSearchRouter(
   router.get("/", ...staffOnly, async (request, response) => {
     const query = searchAccountsQuerySchema.parse(request.query);
     const result = await searchAccounts.execute(query.email);
-    response.json(searchAccountsResponseSchema.parse(result));
+    sendValidated(response, searchAccountsResponseSchema, result);
   });
 
   return router;

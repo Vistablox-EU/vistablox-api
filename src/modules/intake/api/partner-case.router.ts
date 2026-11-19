@@ -20,6 +20,7 @@ import {
   partnerCaseHistoryQuerySchema,
   partnerCaseHistoryResponseSchema,
 } from "./partner-case.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 // Twin of partner-organization.router.ts's createLegalPracticeRouter /
 // createAppraisalFirmRouter split: legal and appraisal partners share the
@@ -45,19 +46,19 @@ export function createLegalPartnerCaseRouter(
     const authContext = requireAuthContext(response.locals.authContext);
     const query = partnerCaseListQuerySchema.parse(request.query);
     const result = await listCases.execute({ accountId: authContext.accountId, query });
-    response.json(partnerCaseListResponseSchema.parse(result));
+    sendValidated(response, partnerCaseListResponseSchema, result);
   });
 
   router.get("/:case_id", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
     const result = await getCase.execute(params.case_id);
-    response.json(partnerCaseDetailResponseSchema.parse(result));
+    sendValidated(response, partnerCaseDetailResponseSchema, result);
   });
 
   if (history !== undefined) router.get("/:case_id/history", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
     const query = partnerCaseHistoryQuerySchema.parse(request.query);
-    response.json(partnerCaseHistoryResponseSchema.parse(await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) })));
+    sendValidated(response, partnerCaseHistoryResponseSchema, await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) }));
   });
 
   router.patch("/:case_id", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
@@ -70,7 +71,7 @@ export function createLegalPartnerCaseRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.json(recordLegalStructuringResponseSchema.parse(result));
+    sendValidated(response, recordLegalStructuringResponseSchema, result);
   });
 
   return router;
@@ -93,19 +94,19 @@ export function createAppraisalPartnerCaseRouter(
     const authContext = requireAuthContext(response.locals.authContext);
     const query = partnerCaseListQuerySchema.parse(request.query);
     const result = await listCases.execute({ accountId: authContext.accountId, query });
-    response.json(partnerCaseListResponseSchema.parse(result));
+    sendValidated(response, partnerCaseListResponseSchema, result);
   });
 
   router.get("/:case_id", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
     const result = await getCase.execute(params.case_id);
-    response.json(partnerCaseDetailResponseSchema.parse(result));
+    sendValidated(response, partnerCaseDetailResponseSchema, result);
   });
 
   if (history !== undefined) router.get("/:case_id/history", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
     const params = caseIdParamsSchema.parse(request.params);
     const query = partnerCaseHistoryQuerySchema.parse(request.query);
-    response.json(partnerCaseHistoryResponseSchema.parse(await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) })));
+    sendValidated(response, partnerCaseHistoryResponseSchema, await history.execute({ caseId: params.case_id, limit: query.limit, ...(query.after === undefined ? {} : { after: query.after }) }));
   });
 
   router.patch("/:case_id", ...roleGated, requirePartnerCaseAssignment, async (request, response) => {
@@ -118,7 +119,7 @@ export function createAppraisalPartnerCaseRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.json(recordAppraisalResponseSchema.parse(result));
+    sendValidated(response, recordAppraisalResponseSchema, result);
   });
 
   return router;

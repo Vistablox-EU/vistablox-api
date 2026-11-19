@@ -23,6 +23,7 @@ import {
   updateOfferingPresentationResponseSchema,
   uploadOfferingDocumentResponseSchema,
 } from "./offering-operations.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 export interface OfferingDocumentServices {
   upload: UploadOfferingDocumentService;
@@ -59,7 +60,7 @@ export function createOfferingOperationsRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.json(finalizeOfferingResponseSchema.parse(result));
+    sendValidated(response, finalizeOfferingResponseSchema, result);
   });
 
   router.post("/:offering_id/materiality-records", ...staffOnly, async (request, response) => {
@@ -72,7 +73,7 @@ export function createOfferingOperationsRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.status(201).json(classifyMaterialityResponseSchema.parse(result));
+    sendValidated(response, classifyMaterialityResponseSchema, result, 201);
   });
 
   router.post("/:offering_id/disclosure-packs", ...staffOnly, async (request, response) => {
@@ -85,7 +86,7 @@ export function createOfferingOperationsRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.status(201).json(publishDisclosurePackResponseSchema.parse(result));
+    sendValidated(response, publishDisclosurePackResponseSchema, result, 201);
   });
 
   if (updatePresentation !== undefined) {
@@ -99,7 +100,7 @@ export function createOfferingOperationsRouter(
         traceId: String(response.locals.traceId),
         body,
       });
-      response.json(updateOfferingPresentationResponseSchema.parse(result));
+      sendValidated(response, updateOfferingPresentationResponseSchema, result);
     });
   }
 
@@ -118,7 +119,7 @@ export function createOfferingOperationsRouter(
         actorAccountId: authContext.accountId,
         traceId: String(response.locals.traceId),
       });
-      response.status(201).json(uploadOfferingDocumentResponseSchema.parse(result));
+      sendValidated(response, uploadOfferingDocumentResponseSchema, result, 201);
     });
 
     router.get("/:offering_id/documents", ...staffOnly, async (request, response) => {
@@ -129,7 +130,7 @@ export function createOfferingOperationsRouter(
           offeringId: params.offering_id,
           ...(query.document_type === undefined ? {} : { documentType: query.document_type }),
         });
-        response.json(listOfferingDocumentsResponseSchema.parse(result));
+        sendValidated(response, listOfferingDocumentsResponseSchema, result);
         return;
       }
       const download = await documents.read.download({ offeringId: params.offering_id, documentRef: query.document_ref });

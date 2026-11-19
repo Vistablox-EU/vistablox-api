@@ -12,6 +12,7 @@ import {
   decideAccountClosureRequestBodySchema,
   listPendingAccountClosureRequestsResponseSchema,
 } from "../shared/account-closure.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createAccountClosureOperationsRouter(
   requireAuthentication: RequestHandler,
@@ -26,9 +27,7 @@ export function createAccountClosureOperationsRouter(
   router.get("/", ...authorization, async (_request, response) => {
     const result = await listPending.execute();
     response.setHeader("Cache-Control", "no-store");
-    response.json(
-      listPendingAccountClosureRequestsResponseSchema.parse({ data: result.map(toPayload) }),
-    );
+    sendValidated(response, listPendingAccountClosureRequestsResponseSchema, { data: result.map(toPayload) });
   });
 
   router.post("/:request_id/decision", ...authorization, async (request, response) => {
@@ -42,7 +41,7 @@ export function createAccountClosureOperationsRouter(
       decision: body.decision,
       note: body.note ?? null,
     });
-    response.json(accountClosureRequestResponseSchema.parse({ data: toPayload(result) }));
+    sendValidated(response, accountClosureRequestResponseSchema, { data: toPayload(result) });
   });
 
   return router;

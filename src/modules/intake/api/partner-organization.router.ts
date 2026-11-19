@@ -21,6 +21,7 @@ import {
   updateAppraisalFirmStatusBodySchema,
   updateLegalPracticeStatusBodySchema,
 } from "./partner-organization.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 export function createLegalPracticeRouter(
   requireAuthentication: RequestHandler,
@@ -36,7 +37,7 @@ export function createLegalPracticeRouter(
   router.get("/", ...authorization, async (_request, response) => {
     const result = await listLegalPractices.execute();
     response.setHeader("Cache-Control", "no-store");
-    response.json(listLegalPracticesResponseSchema.parse(result));
+    sendValidated(response, listLegalPracticesResponseSchema, result);
   });
 
   router.post("/", ...authorization, async (request, response) => {
@@ -49,7 +50,7 @@ export function createLegalPracticeRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.status(201).json(legalPracticeResponseSchema.parse(result));
+    sendValidated(response, legalPracticeResponseSchema, result, 201);
   });
 
   router.patch("/:legal_practice_id/status", ...authorization, async (request, response) => {
@@ -63,7 +64,7 @@ export function createLegalPracticeRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.json(legalPracticeResponseSchema.parse(result));
+    sendValidated(response, legalPracticeResponseSchema, result);
   });
 
   return router;
@@ -83,7 +84,7 @@ export function createAppraisalFirmRouter(
   router.get("/", ...authorization, async (_request, response) => {
     const result = await listAppraisalFirms.execute();
     response.setHeader("Cache-Control", "no-store");
-    response.json(listAppraisalFirmsResponseSchema.parse(result));
+    sendValidated(response, listAppraisalFirmsResponseSchema, result);
   });
 
   router.post("/", ...authorization, async (request, response) => {
@@ -96,7 +97,7 @@ export function createAppraisalFirmRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.status(201).json(appraisalFirmResponseSchema.parse(result));
+    sendValidated(response, appraisalFirmResponseSchema, result, 201);
   });
 
   router.patch("/:appraisal_firm_id/status", ...authorization, async (request, response) => {
@@ -110,7 +111,7 @@ export function createAppraisalFirmRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.json(appraisalFirmResponseSchema.parse(result));
+    sendValidated(response, appraisalFirmResponseSchema, result);
   });
 
   return router;

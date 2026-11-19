@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 import express from "express";
@@ -13,7 +13,7 @@ import type {
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { createIdempotencyMiddleware } from "../src/shared/http/idempotency.js";
 import { requestContext } from "../src/shared/http/request-context.js";
-import { sendValidated } from "../src/shared/http/send-validated.js";
+import { parseResponse, sendValidated } from "../src/shared/http/send-validated.js";
 import { captureLogs } from "./support/capture-logs.js";
 
 const responseSchema = z.object({ data: z.object({ id: z.string().min(1), amount_eur: z.string() }) });
@@ -135,26 +135,47 @@ describe("sendValidated", () => {
   });
 });
 
-// The routers the mobile app's audit named (#72). Other routers still serialise
-// with a bare `schema.parse` and answer a server-side schema bug as a 422; moving
-// them over is a mechanical follow-up (add them here as they are converted).
-const convertedRouters = [
-  "src/modules/offering/api/offering.router.ts",
-  "src/modules/investor-activity/api/investor-activity.router.ts",
-  "src/modules/profile/api/profile.router.ts",
-  "src/modules/identity/api/kyc.router.ts",
-  "src/modules/wallet/api/wallet.router.ts",
-];
+describe("parseResponse", () => {
+  it("returns the parsed payload", () => {
+    expect(parseResponse(responseSchema, { data: { id: "thing_01", amount_eur: "1.00", extra: 1 } })).toEqual({
+      data: { id: "thing_01", amount_eur: "1.00" },
+    });
+  });
 
-describe("converted routers answer through sendValidated", () => {
-  // A raw `response.json(schema.parse(result))` turns a server-side
-  // serialisation bug into a 422 that looks like the client's mistake (#72).
-  it.each(convertedRouters)("%s serialises no response with a bare schema.parse", (path) => {
-    const source = readFileSync(join(import.meta.dirname, "..", path), "utf8");
-    // `response.json(xSchema.parse(...))`, or a response schema parsed into a
-    // variable that is sent afterwards.
-    expect(source).not.toMatch(/\.json\(\s*[A-Za-z0-9_$.]+\.parse\(/);
-    expect(source).not.toMatch(/\w*ResponseSchema\.parse\(/);
-    expect(source).toContain("sendValidated(");
+  it("throws a 500 internal.response_invalid for a payload that does not match", () => {
+    expect(() => parseResponse(responseSchema, { data: { id: "", amount_eur: secret } })).toThrow(
+      expect.objectContaining({ code: "internal.response_invalid", status: 500 }),
+    );
   });
 });
+
+describe("routers answer through sendValidated", () => {
+  // A raw `response.json(schema.parse(result))` turns a server-side
+  // serialisation bug into a 422 that looks like the client's mistake (#72).
+  it("no router parses a response schema outside sendValidated or parseResponse", () => {
+    const offenders: string[] = [];
+    for (const file of routerFiles(join(import.meta.dirname, "..", "src"))) {
+      const source = readFileSync(file, "utf8");
+      // `response.json(xSchema.parse(...))`, or a response schema parsed into a
+      // variable that is sent afterwards.
+      if (/\.json\(\s*[A-Za-z0-9_$.]+\.parse\(/.test(source) || /\w*ResponseSchema\.parse\(/.test(source)) {
+        offenders.push(file);
+      }
+    }
+    expect(offenders).toEqual([]);
+  });
+});
+
+function routerFiles(directory: string): string[] {
+  const found: string[] = [];
+  for (const entry of readdirSync(directory)) {
+    const path = join(directory, entry);
+    if (statSync(path).isDirectory()) {
+      if (entry === "generated") continue;
+      found.push(...routerFiles(path));
+    } else if (entry.endsWith(".router.ts")) {
+      found.push(path);
+    }
+  }
+  return found;
+}

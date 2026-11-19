@@ -10,6 +10,7 @@ import {
   accountClosureRequestResponseSchema,
   requestAccountClosureBodySchema,
 } from "../shared/account-closure.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createAccountClosureRouter(
   requireAuthentication: RequestHandler,
@@ -25,13 +26,13 @@ export function createAccountClosureRouter(
       accountId: context.accountId,
       reason: body.reason ?? null,
     });
-    response.status(201).json(accountClosureRequestResponseSchema.parse({ data: toPayload(result) }));
+    sendValidated(response, accountClosureRequestResponseSchema, { data: toPayload(result) }, 201);
   });
 
   router.post("/cancel", requireAuthentication, async (_request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
     const result = await cancelClosure.execute(context.accountId);
-    response.json(accountClosureRequestResponseSchema.parse({ data: toPayload(result) }));
+    sendValidated(response, accountClosureRequestResponseSchema, { data: toPayload(result) });
   });
 
   return router;

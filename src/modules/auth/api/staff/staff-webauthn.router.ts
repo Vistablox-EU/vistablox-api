@@ -9,6 +9,7 @@ import {
   startCeremonyResponseSchema,
   startRegistrationBodySchema,
 } from "./staff-webauthn.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createStaffWebAuthnRouter(
   requireAuthentication: RequestHandler,
@@ -26,7 +27,7 @@ export function createStaffWebAuthnRouter(
       providerSessionId: authContext.providerSessionId,
       credentialLabel: body.credential_label,
     });
-    response.json(startCeremonyResponseSchema.parse(result));
+    sendValidated(response, startCeremonyResponseSchema, result);
   });
 
   router.post("/registration/verify", ...staffSession, async (request, response) => {
@@ -39,7 +40,7 @@ export function createStaffWebAuthnRouter(
       challengeId: body.challenge_id,
       response: body.response,
     });
-    response.json(finishCeremonyResponseSchema.parse(result));
+    sendValidated(response, finishCeremonyResponseSchema, result);
   });
 
   router.post("/authentication/options", ...staffSession, async (_request, response) => {
@@ -48,7 +49,7 @@ export function createStaffWebAuthnRouter(
       accountId: authContext.accountId,
       providerSessionId: authContext.providerSessionId,
     });
-    response.json(startCeremonyResponseSchema.parse(result));
+    sendValidated(response, startCeremonyResponseSchema, result);
   });
 
   router.post("/authentication/verify", ...staffSession, async (request, response) => {
@@ -61,7 +62,7 @@ export function createStaffWebAuthnRouter(
       challengeId: body.challenge_id,
       response: body.response,
     });
-    response.json(finishCeremonyResponseSchema.parse(result));
+    sendValidated(response, finishCeremonyResponseSchema, result);
   });
 
   return router;

@@ -20,6 +20,7 @@ import {
   staffAccountLifecycleParamsSchema,
   staffRoleAssignmentParamsSchema,
 } from "./staff-account-lifecycle.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createStaffAccountLifecycleRouter(
   requireAuthentication: RequestHandler,
@@ -41,7 +42,7 @@ export function createStaffAccountLifecycleRouter(
   router.get("/", ...authorization, async (_request, response) => {
     const result = await listStaffAccounts.execute();
     response.setHeader("Cache-Control", "no-store");
-    response.json(listStaffAccountsResponseSchema.parse(result));
+    sendValidated(response, listStaffAccountsResponseSchema, result);
   });
 
   router.post("/:account_id/roles", ...authorization, async (request, response) => {
@@ -57,7 +58,7 @@ export function createStaffAccountLifecycleRouter(
       legalPracticeId: body.legal_practice_id,
       appraisalFirmId: body.appraisal_firm_id,
     });
-    response.status(201).json(grantStaffRoleResponseSchema.parse(result));
+    sendValidated(response, grantStaffRoleResponseSchema, result, 201);
   });
 
   router.post(
@@ -73,7 +74,7 @@ export function createStaffAccountLifecycleRouter(
         actorAccountId: authContext.accountId,
         traceId: String(response.locals.traceId),
       });
-      response.json(revokeStaffRoleResponseSchema.parse(result));
+      sendValidated(response, revokeStaffRoleResponseSchema, result);
     },
   );
 
@@ -87,7 +88,7 @@ export function createStaffAccountLifecycleRouter(
       actorAccountId: authContext.accountId,
       traceId: String(response.locals.traceId),
     });
-    response.status(202).json(recoverStaffAccountResponseSchema.parse(result));
+    sendValidated(response, recoverStaffAccountResponseSchema, result, 202);
   });
 
   router.post("/:account_id/offboard", ...authorization, async (request, response) => {
@@ -101,7 +102,7 @@ export function createStaffAccountLifecycleRouter(
       traceId: String(response.locals.traceId),
       reason: body.reason,
     });
-    response.json(offboardStaffAccountResponseSchema.parse(result));
+    sendValidated(response, offboardStaffAccountResponseSchema, result);
   });
 
   return router;

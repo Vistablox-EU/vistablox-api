@@ -13,6 +13,7 @@ import {
   revokeDeviceResponseSchema,
   sessionIdParamsSchema,
 } from "./customer-session.schemas.js";
+import { sendValidated } from "../../../../shared/http/send-validated.js";
 
 export function createCustomerSessionRouter(
   requireAuthentication: RequestHandler,
@@ -28,21 +29,19 @@ export function createCustomerSessionRouter(
     const context = requireAuthContext(response.locals.authContext);
     const sessions = await listOwnSessions.execute(context.accountId, context.providerSessionId);
     response.setHeader("Cache-Control", "no-store");
-    response.json(
-      listOwnSessionsResponseSchema.parse({
-        data: sessions.map((session) => ({
-          session_id: session.sessionId,
-          channel: session.channel,
-          device_label: session.deviceLabel,
-          auth_method_at_login: session.authMethodAtLogin,
-          created_at: session.createdAt.toISOString(),
-          last_seen_at: session.lastSeenAt.toISOString(),
-          status: session.status,
-          revocation_reason: session.revocationReason,
-          is_current: session.isCurrent,
-        })),
-      }),
-    );
+    sendValidated(response, listOwnSessionsResponseSchema, {
+      data: sessions.map((session) => ({
+        session_id: session.sessionId,
+        channel: session.channel,
+        device_label: session.deviceLabel,
+        auth_method_at_login: session.authMethodAtLogin,
+        created_at: session.createdAt.toISOString(),
+        last_seen_at: session.lastSeenAt.toISOString(),
+        status: session.status,
+        revocation_reason: session.revocationReason,
+        is_current: session.isCurrent,
+      })),
+    });
   });
 
   router.post(
@@ -78,9 +77,7 @@ export function createCustomerSessionRouter(
         const params = dpopKeyParamsSchema.parse(request.params);
         const result = await revokeDeviceSessions.execute(params.jkt, request.headers);
         response.setHeader("Cache-Control", "no-store");
-        response.json(
-          revokeDeviceResponseSchema.parse({ data: { revoked_count: result.revokedCount } }),
-        );
+        sendValidated(response, revokeDeviceResponseSchema, { data: { revoked_count: result.revokedCount } });
       },
     );
   }

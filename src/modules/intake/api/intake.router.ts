@@ -28,6 +28,7 @@ import {
   submitInitialCaseResponseSchema,
   resubmitCaseResponseSchema,
 } from "./intake.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 export function createIntakeRouter(
   requireAuthentication: RequestHandler,
@@ -50,21 +51,21 @@ export function createIntakeRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.status(201).json(createDraftIntakeResponseSchema.parse(result));
+    sendValidated(response, createDraftIntakeResponseSchema, result, 201);
   });
 
   router.get("/", requireAuthentication, async (request, response) => {
     const authContext = requireAuthContext(response.locals.authContext);
     const query = listOwnCasesQuerySchema.parse(request.query);
     const result = await listOwnCases.execute({ accountId: authContext.accountId, query });
-    response.json(listOwnCasesResponseSchema.parse(result));
+    sendValidated(response, listOwnCasesResponseSchema, result);
   });
 
   router.get("/:case_id", requireAuthentication, async (request, response) => {
     const authContext = requireAuthContext(response.locals.authContext);
     const params = caseIdParamsSchema.parse(request.params);
     const intakeCase = await getOwnCase.execute(authContext.accountId, params.case_id);
-    response.json(getOwnCaseResponseSchema.parse({ data: intakeCase }));
+    sendValidated(response, getOwnCaseResponseSchema, { data: intakeCase });
   });
 
   router.post("/:case_id/submit", requireAuthentication, async (request, response) => {
@@ -77,14 +78,14 @@ export function createIntakeRouter(
       traceId: String(response.locals.traceId),
       body,
     });
-    response.status(200).json(submitInitialCaseResponseSchema.parse(result));
+    sendValidated(response, submitInitialCaseResponseSchema, result, 200);
   });
 
   router.get("/:case_id/information-requests", requireAuthentication, async (request, response) => {
     const authContext = requireAuthContext(response.locals.authContext);
     const params = caseIdParamsSchema.parse(request.params);
     const result = await listInformationRequests.execute(authContext.accountId, params.case_id);
-    response.json(listInformationRequestsResponseSchema.parse(result));
+    sendValidated(response, listInformationRequestsResponseSchema, result);
   });
 
   router.post(
@@ -101,7 +102,7 @@ export function createIntakeRouter(
         traceId: String(response.locals.traceId),
         body,
       });
-      response.status(201).json(resubmitCaseResponseSchema.parse(result));
+      sendValidated(response, resubmitCaseResponseSchema, result, 201);
     },
   );
 
@@ -109,7 +110,7 @@ export function createIntakeRouter(
     const authContext = requireAuthContext(response.locals.authContext);
     const params = caseIdParamsSchema.parse(request.params);
     const result = await listOwnCaseMessages.execute(authContext.accountId, params.case_id);
-    response.json(listCaseMessagesResponseSchema.parse(result));
+    sendValidated(response, listCaseMessagesResponseSchema, result);
   });
 
   router.post("/:case_id/messages", requireAuthentication, async (request, response) => {
@@ -121,7 +122,7 @@ export function createIntakeRouter(
       caseId: params.case_id,
       body: body.body,
     });
-    response.status(201).json(postCaseMessageResponseSchema.parse(result));
+    sendValidated(response, postCaseMessageResponseSchema, result, 201);
   });
 
   return router;

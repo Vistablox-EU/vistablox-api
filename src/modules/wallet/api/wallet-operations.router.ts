@@ -8,6 +8,7 @@ import {
   reconcileWalletRegistrationBodySchema,
   reconcileWalletRegistrationResponseSchema,
 } from "./wallet.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 // Calls the concrete service directly, in-process, mirroring
 // kyc-operations.router.ts exactly: account_id from the path param is fine
@@ -27,7 +28,7 @@ export function createWalletOperationsRouter(
     const params = walletAccountIdParamsSchema.parse(request.params);
     const result = await getAccountForOperations.execute(params.account_id);
     response.setHeader("Cache-Control", "no-store");
-    response.json(operationsWalletAccountResponseSchema.parse(result));
+    sendValidated(response, operationsWalletAccountResponseSchema, result);
   });
   if (reconcile !== undefined) router.post("/:account_id/reconcile", ...staffOnly, async (request, response) => {
     const context = response.locals.authContext;
@@ -36,7 +37,7 @@ export function createWalletOperationsRouter(
     const body = reconcileWalletRegistrationBodySchema.parse(request.body);
     const result = await reconcile.execute({ accountId: params.account_id, txHash: body.transaction_hash, actorAccountId: context.accountId });
     response.setHeader("Cache-Control", "no-store");
-    response.json(reconcileWalletRegistrationResponseSchema.parse(result));
+    sendValidated(response, reconcileWalletRegistrationResponseSchema, result);
   });
 
   return router;
