@@ -4,7 +4,11 @@ import { deleteSessionCookie, setSessionCookie } from "better-auth/cookies";
 import { z } from "zod";
 
 import type { AccountRepository } from "../../../account/repository/account.repository.js";
-import { isAndroidAttestationError } from "../../application/customer/android-attestation-verifier.js";
+import {
+  isAndroidAttestationError,
+  PlayIntegrityDecodeError,
+  type AndroidAttestationError,
+} from "../../application/customer/android-attestation-verifier.js";
 import {
   DeviceAlreadyEnrolledError,
   DeviceChallengeExpiredError,
@@ -429,8 +433,38 @@ export function logAttestationRejection(ctx: MinimalContextLogger, error: unknow
       code: error.code,
       reason: error.message,
       path: ctx.path ?? "unknown",
+      ...playIntegrityFailureFields(error),
     });
   }
+}
+
+// A Play Integrity token that could not be decoded carries the decoder's
+// failure as its cause. Only its class, stage and HTTP status are logged --
+// the one thing that tells a Google outage or a refused service-account
+// credential (neither is the device's fault, all answer ATTESTATION_INVALID)
+// from a bad device token. Never the cause's message or stack, and never
+// anything of the request (integrity token, challenge, access token) or of
+// Google's response.
+function playIntegrityFailureFields(error: AndroidAttestationError): {
+  playIntegrity?: { failureClass: string; stage?: string; status?: number; causeName?: string };
+} {
+  const cause: unknown = error.cause;
+  if (cause === undefined) return {};
+  if (cause instanceof PlayIntegrityDecodeError) {
+    return {
+      playIntegrity: {
+        failureClass: cause.failureClass,
+        stage: cause.stage,
+        ...(cause.status === undefined ? {} : { status: cause.status }),
+      },
+    };
+  }
+  return {
+    playIntegrity: {
+      failureClass: "unclassified",
+      causeName: cause instanceof Error ? cause.name : typeof cause,
+    },
+  };
 }
 
 // HTTP status per contract section 3.6 -- not a blanket 401. Attacker-

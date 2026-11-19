@@ -84,8 +84,13 @@ const VERIFIED_BOOT_STATE_VERIFIED = 0;
 
 export class AndroidAttestationInvalidError extends Error {
   public readonly code = "ATTESTATION_INVALID" as const;
-  public constructor(reason: string) {
-    super(`Android key attestation rejected: ${reason}`);
+  /**
+   * `options.cause` is for the server's own diagnostics: it is never sent to
+   * a client (toApiError answers with a fixed message), and the log line
+   * built from it (logAttestationRejection) carries only the failure class.
+   */
+  public constructor(reason: string, options?: ErrorOptions) {
+    super(`Android key attestation rejected: ${reason}`, options);
     this.name = "AndroidAttestationInvalidError";
   }
 }
@@ -303,6 +308,57 @@ export interface PlayIntegrityVerdictDecoder {
 }
 
 /**
+ * Why a Play Integrity decoder could not produce a verdict:
+ * - `timeout`: no (complete) answer from Google within the decoder's budget;
+ * - `network`: the request failed before or while Google answered (DNS,
+ *   refused or reset connection, TLS, a body cut off);
+ * - `http_status`: Google answered with a non-2xx status (see `status`; 401
+ *   and 403 mean the service-account credentials were refused, 429 and 5xx
+ *   mean Google is limiting or failing);
+ * - `malformed_response`: a 2xx answer that is not the expected JSON;
+ * - `token_invalid`: the decode call answered 400, which Google uses for an
+ *   integrity token it cannot decode (malformed, expired, not for this app).
+ *   The only class where the device, not the platform, is at fault.
+ */
+export type PlayIntegrityDecodeFailureClass =
+  | "timeout"
+  | "network"
+  | "http_status"
+  | "malformed_response"
+  | "token_invalid";
+
+/** Which of the decoder's two Google calls failed. */
+export type PlayIntegrityDecodeStage = "oauth_token" | "decode";
+
+/**
+ * A decoder failure with its class. Safe to log as-is: the message is built
+ * only from the class, stage and status, never from Google's response body,
+ * the integrity token or the access token. The underlying error (if any) is
+ * the `cause`; it is for debugging and must not be logged wholesale.
+ */
+export class PlayIntegrityDecodeError extends Error {
+  public readonly failureClass: PlayIntegrityDecodeFailureClass;
+  public readonly stage: PlayIntegrityDecodeStage;
+  public readonly status: number | undefined;
+
+  public constructor(
+    failureClass: PlayIntegrityDecodeFailureClass,
+    stage: PlayIntegrityDecodeStage,
+    details: { status?: number; cause?: unknown } = {},
+  ) {
+    super(
+      `Play Integrity ${stage} call failed: ${failureClass}` +
+        (details.status === undefined ? "" : ` (HTTP ${details.status})`),
+      details.cause === undefined ? undefined : { cause: details.cause },
+    );
+    this.name = "PlayIntegrityDecodeError";
+    this.failureClass = failureClass;
+    this.stage = stage;
+    this.status = details.status;
+  }
+}
+
+/**
  * Verifies a Play Integrity standard-request token per the contract and
  * DevOps's interim policy table. `disabled` skips this entirely (staging,
  * no Play Console project yet) -- Android key attestation above is the
@@ -326,8 +382,11 @@ export async function verifyPlayIntegrityToken(input: {
   let verdict: Awaited<ReturnType<PlayIntegrityVerdictDecoder["decode"]>>;
   try {
     verdict = await input.decoder.decode(input.token);
-  } catch {
-    throw new AndroidAttestationInvalidError("Play Integrity token could not be decoded");
+  } catch (cause) {
+    // Still ATTESTATION_INVALID (400) on the wire -- the contract has no other
+    // code for it -- but the cause stays on the error, so the server-side log
+    // can tell an outage from a bad device token.
+    throw new AndroidAttestationInvalidError("Play Integrity token could not be decoded", { cause });
   }
   const expectedRequestHash = computeDeviceBinding(input.challenge, input.bioJkt);
   if (verdict.requestHash !== expectedRequestHash) {
