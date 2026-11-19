@@ -163,6 +163,7 @@ npm run check          # type checking, architecture rules, tests
 npm run build          # production TypeScript build
 npm run worker:dev     # run the pg-boss scheduled-job worker and Didit webhook consumer (watch mode)
 npm run worker:start   # run the built worker
+npm run clamav:smoke   # check the ClamAV scanner against a real clamd (CLAMAV_HOST/CLAMAV_PORT; not part of check)
 npm run db:validate    # validate Prisma schema
 npm run db:generate    # regenerate Prisma client
 npm run db:migrate:dev # create/apply a development migration

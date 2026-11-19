@@ -16,6 +16,7 @@
     "intake:backfill-events": "node dist/cli/backfill-intake-case-events.js",
     "jobs:replay-dead-letter": "node dist/cli/replay-dead-letter-job.js",
     "settlement:open-ipo-escrow-campaigns": "node dist/cli/open-ipo-escrow-campaigns.js",
+    "clamav:smoke": "node dist/cli/clamav-smoke.js",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
