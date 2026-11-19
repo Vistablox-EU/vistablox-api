@@ -65,6 +65,11 @@ import { registerDeadLetterConsumer } from "./shared/jobs/dead-letter-consumer.j
 import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
 import type { JobRunSummary } from "./shared/jobs/job-run-summary.js";
 import { WorkerHeartbeat } from "./shared/health/worker-heartbeat.js";
+import {
+  createGracefulShutdown,
+  installProcessFaultHandlers,
+  JOB_DRAIN_TIMEOUT_MS,
+} from "./shared/lifecycle/graceful-shutdown.js";
 import { WorkerMetrics } from "./shared/health/worker-metrics.js";
 import { toSanitizedError } from "./shared/logging/log-redaction.js";
 import { PrismaAccountRecoveryRepository } from "./modules/auth/repository/staff/prisma-account-recovery.repository.js";
@@ -899,19 +904,33 @@ await registerDeadLetterConsumer(
 logger.info("VistaBlox worker started");
 heartbeat.markReady();
 
-async function shutdown(signal: NodeJS.Signals): Promise<void> {
-  logger.info({ signal }, "worker shutting down");
-  await heartbeat.stop();
-  try {
-    await boss.stop();
-  } catch (error: unknown) {
-    logger.error({ err: error }, "pg-boss shutdown failed");
-  }
-  if (profileCacheClient?.isOpen === true) {
-    await profileCacheClient.close();
-  }
-  await database.$disconnect();
-}
+// Phases run in order, the steps inside one together. pg-boss stops first and
+// is given JOB_DRAIN_TIMEOUT_MS for the jobs already running (jobs still running
+// after that are failed back into the queue, so they are retried); only then
+// are the Prisma client and the cache closed, because those jobs use them. Each
+// step is allowed to fail without stopping the others, and the whole thing is
+// forced to exit at the deadline (docker-compose sets stop_grace_period above it).
+const shutdown = createGracefulShutdown({
+  logger,
+  phases: [
+    [
+      { name: "health probe", close: () => heartbeat.stop() },
+      { name: "pg-boss", close: () => boss.stop({ graceful: true, timeout: JOB_DRAIN_TIMEOUT_MS }) },
+    ],
+    [
+      {
+        name: "protected profile cache",
+        close: async () => {
+          if (profileCacheClient?.isOpen === true) await profileCacheClient.close();
+        },
+      },
+      { name: "prisma client", close: () => database.$disconnect() },
+    ],
+  ],
+});
 
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+// `on`, not `once`: a second signal while shutting down is ignored by
+// `shutdown`, not left to Node's default of exiting on the spot.
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+installProcessFaultHandlers({ logger, shutdown });
