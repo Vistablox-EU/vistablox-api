@@ -105,14 +105,57 @@ After the reservation is durably created, the CDP onramp session token call happ
 
 ### Retrying a reservation request (`Idempotency-Key`)
 
-The request requires an `Idempotency-Key` header of at most 128 characters (`400 idempotency.key_required` otherwise). The key is stored on the reservation (`client_idempotency_key`, unique per account, offering and key); a lookup under the same `offerings` row lock that guards capacity returns the existing reservation instead of creating a second hold, so a client that lost the response can retry safely. Keys are scoped to the account and the offering: another account, or the same key on another offering, is an unrelated request.
+The request requires an `Idempotency-Key` header of at most 128 characters (`400 idempotency.key_required` otherwise). Two layers deduplicate it, and which one answers a repeat depends on whether the shared table holds a row for the key.
+
+**1. The shared table (`audit.idempotency_keys`, endpoint `offering.reservation.create`, `AD-147`).** A repeat of the same request answers with the **stored first answer**, status and body, for the 48-hour retention window, without running the handler. `2xx` and `4xx` answers are stored; a `5xx` never is (#122), so a retry after a server-side failure runs the handler again. "The same request" is the body *and* its scope: the authenticated account and the offering in the path. The table's key is only `(idempotency_key, endpoint)`, so the scope is hashed together with the body: another account, or another offering, under the same key is `409 idempotency.body_mismatch`, exactly like another body, and never the first caller's stored answer (their `reservation_id` and onramp URL). Rows stored before this scoping was added have the old fingerprint, so a same-key retry of one of them within the 48-hour window answers `409 idempotency.body_mismatch` too (create, reconfirm and finalize alike); deploy it while no reservation funding is in flight (the funding rail is off, AD-285).
+
+A stored answer carries the onramp URL of the first attempt. **That URL is not to be re-opened later**: Coinbase session tokens are single-use and expire after five minutes (`docs/coinbase-cdp-onramp.md`), while the hold lasts fifteen. The URL in a `201` is for opening immediately; a client coming back to the payment asks for a new session (next section).
+
+**2. The reservation row (`client_idempotency_key`, unique per account, offering and key).** When the table holds no row for the key (the first attempt ended in a `5xx`, its answer could not be saved, or two identical requests raced), the request reaches the handler, and a lookup under the same `offerings` row lock that guards capacity returns the existing reservation instead of creating a second hold. The service looks the key up *before* its advisory capacity check: the offering's reserved capacity includes the hold itself, so the check would otherwise refuse the retry of a request that took the last capacity (`409 capacity_exhausted`) or more than what is left after it (`422 offering.reservation_amount_exceeds_capacity`). For an existing hold the capacity checks are skipped; every other blocker still applies, and the repository's atomic check still decides for a new hold.
 
 A retry is served only while the stored reservation is still what the client asked for and can still be paid. It gets a fresh onramp session for the original `reservation_id` and the original `expires_at`; a retry never creates a new hold, never extends an existing one, and never revives one that has ended:
 
 - `409 offering.idempotency_key_reused`: the key was already used for a different `amount_eur` (`AD-147`).
-- `409 offering.reservation_replay_unavailable`: the stored reservation is no longer payable through a new session: it is past its 15-minute hold, its `reservation_stage` is no longer `initiated` (`lapsed`, `cancelled`, `awaiting_reconfirmation`, ...), or its latest `capital_state` is already funded (`eurc_reserved`, `reconfirmation_pending`, `eurc_finalized`). The same `409` is returned when the reservation lapses or is funded while the onramp session is being created: the `eurc_purchase_pending` money event is then refused under the reservation lock and no onramp URL is handed out. The client should read its reservations for the current state instead of retrying again.
+- `409 offering.reservation_replay_unavailable`: the stored reservation is no longer payable through a new session: it has less than five minutes of its 15-minute hold left (a session lives five minutes, see below) or is past the hold, its `reservation_stage` is no longer `initiated` (`lapsed`, `cancelled`, `awaiting_reconfirmation`, ...), or its latest `capital_state` is already funded (`eurc_reserved`, `reconfirmation_pending`, `eurc_finalized`). The same `409` is returned when the reservation lapses (the sweeper flipped its stage) or is funded while the onramp session is being created: the `eurc_purchase_pending` money event is then refused under the reservation lock and no onramp URL is handed out. The hold's age is checked before the Coinbase call only; the repository's locked write does not look at it, and the five-minute margin above is what keeps a session from outliving the hold. The client should read its reservations for the current state instead of retrying again.
 
-If the onramp session call fails on a retry, the error is returned and no `purchase_failed` money event is recorded: only a first attempt marks a reservation failed, so the original reservation keeps its state and the client can retry again until the hold ends. The shared idempotency middleware never stores a `5xx` response (#122), so a retry after a server-side failure runs the request again instead of replaying the stored error; `2xx` and `4xx` responses are still stored and replayed for the same key.
+If the onramp session call fails on a retry, the error is returned and no `purchase_failed` money event is recorded: only a first attempt marks a reservation failed, so the original reservation keeps its state and the client can retry again until the hold ends.
+
+### Starting a new payment session for an existing hold
+
+`POST /v1/offerings/:offering_id/reservations/:reservation_id/payment-session` hands a client that comes back to the payment ("Continue to payment", "Try the payment again") a **new** Coinbase onramp session for a hold it already has, without a second hold. Customer-only, behind fresh authentication like the creating request. It requires an `Idempotency-Key` header, **one fresh key per user press** (shared table, endpoint `offering.reservation.payment_session`, scope: account, offering and reservation): a sequential retry of a press whose answer was lost gets that press's session back (two identical requests in flight at once can each be served a session, as for any request that reaches the handler before the first answer is stored), the next press, with a new key, gets a new session. No request body. Response (`200`, `Cache-Control: no-store`), the same shape as the creating request's `201`:
+
+```json
+{
+  "data": {
+    "reservation_id": "reservation_...",
+    "offering_id": "offering_...",
+    "amount_eur": "1000.00",
+    "status": "initiated",
+    "expires_at": "2026-09-02T10:15:00.000Z",
+    "onramp": { "url": "https://pay.coinbase.com/buy/select-asset?...", "channel_id": "..." }
+  }
+}
+```
+
+`expires_at` is the hold's original expiry; the session itself lives five minutes. The rules are the retry rules above: the hold must be `initiated`, unfunded and at least five minutes short of its end (the last session is issued ten minutes into the 15-minute hold, so a session never outlives the hold), otherwise `409 offering.reservation_replay_unavailable` (read the reservations instead of retrying); the account must still pass every blocker except capacity (`409 offering.reservation_not_available` with `field_errors`); a failed provider call returns the error and never marks the hold failed; and each success records a new `eurc_purchase_pending` money event (a hold whose last attempt failed is awaiting its purchase again). A reservation that does not exist, is not this account's, or belongs to another offering is `404 offering.reservation_not_found`, and no session is requested for it.
+
+**Why ten minutes.** A Coinbase session is valid for five minutes (`docs/coinbase-cdp-onramp.md`), so one requested at minute 13 would still be payable at minute 18, after the sweeper lapsed the hold at 15, and a purchase in between would be recorded as late evidence on a reservation that holds nothing (see [Late payments](#late-payments)). The same limit applies to a retry of the creating request that reaches the handler. The limit rests on the session lifetime the service is configured with (`sessionLifetimeMinutes`, 5): if Coinbase changes the token lifetime it has to change with it.
+
+One limit of a new session is not closed here: a new session does not cancel the earlier one. If the first session's purchase is still in flight when the investor asks again, both can complete, and the excess EURC (it lands in the investor's own wallet) is seen by the poll as `already_funded` or, after a lapse, as late evidence.
+
+### When the payment session cannot be started
+
+By the time the Coinbase call is made the reservation exists. Every failure of that call is therefore a `5xx`, which the idempotency middleware never stores, so the client keeps its key and a repeat resumes the same hold instead of creating a second one:
+
+| Provider outcome | Response | Meaning for the client |
+| --- | --- | --- |
+| Outage, timeout, `408`, `429`, `5xx` | `503 offering.coinbase_provider_unavailable` | Transient. Retry with backoff. |
+| Unusable response | `502 offering.coinbase_provider_response_invalid` | Transient. Retry with backoff. |
+| Any other `4xx` from Coinbase | `502 offering.coinbase_provider_request_rejected` (was `422`) | Retrying will not help soon. Say the payment cannot be started right now. |
+| `401`/`403` | `500 offering.coinbase_provider_auth_rejected` | Our configuration. Not retryable until an operator fixes it. |
+| Unusable API key secret | `500 offering.coinbase_provider_key_invalid` | Our configuration. Not retryable until an operator fixes it. |
+
+A first attempt that fails records `purchase_failed` on the new hold; the hold stays until it lapses (the capacity policy covers it like a purchase that was never completed). The creating request's other refusals (`400`, `404 offering.not_found`, `409 offering.reservation_not_available`, `409 offering.idempotency_key_reused`, `409 idempotency.body_mismatch`, `422`) all happen before a hold is created, or concern a hold that can no longer be paid, and are final for that key. `401`, `authentication.fresh_auth_required` and `429` come from middleware ahead of the idempotency layer, are never stored, and leave the key usable.
 
 ## Unfunded reservation expiry
 

@@ -34,7 +34,8 @@ export const COINBASE_CDP_ALERT_EVENTS = {
  * - `auth`: 401/403. Our API key is wrong, revoked or lacks the scope. No
  *   retry will fix it; an operator has to.
  * - `rejected`: any other 4xx. CDP refused this particular request; sending
- *   it again unchanged will not succeed.
+ *   it again unchanged will not succeed. Surfaced as a 502 (see
+ *   providerRequestRejectedError).
  */
 export type CoinbaseCdpFailureClass = "retryable" | "auth" | "rejected";
 
@@ -332,11 +333,18 @@ function providerAuthRejectedError(cause: unknown): AppError {
   });
 }
 
+// A 5xx, not a 4xx, although the provider's answer is a 4xx and retrying will
+// not help. The HTTP callers are reservation creation and starting a new
+// payment session, and in both the hold already exists: a 4xx would be stored by the idempotency middleware for 48 hours and
+// read by the client as "nothing was made" (it drops the key, and the next
+// press makes a second hold, #58), while a 5xx is never stored and tells the
+// client to keep its key. The code stays distinct so the client can tell this
+// apart from a transient outage.
 function providerRequestRejectedError(cause: unknown): AppError {
   return new AppError({
     code: "offering.coinbase_provider_request_rejected",
     title: "Onramp request rejected",
-    status: 422,
+    status: 502,
     detail: "The Coinbase CDP onramp provider rejected this request. Retrying it unchanged will not succeed.",
     cause,
   });

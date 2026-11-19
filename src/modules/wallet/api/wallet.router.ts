@@ -13,6 +13,7 @@ import {
   requestWalletTransferBodySchema,
   requestWalletTransferResponseSchema,
 } from "./wallet.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 // Whether the caller's session confirmed who is holding the device recently
 // enough. Defined here so the wallet module imports nothing from auth: app.ts
@@ -47,7 +48,7 @@ export function createWalletRouter(
       freshAuthentication,
     });
     response.setHeader("Cache-Control", "no-store");
-    response.status(201).json(registerWalletResponseSchema.parse(result));
+    sendValidated(response, registerWalletResponseSchema, result, 201);
   });
   // Address + registration status only -- a plain DB read, no chain access,
   // so this stays available regardless of whether CHAIN_* is configured.
@@ -57,14 +58,14 @@ export function createWalletRouter(
     const context = requireCustomerContext(response.locals.authContext);
     const result = await getStatus.execute(context.accountId);
     response.setHeader("Cache-Control", "no-store");
-    response.json(getWalletStatusResponseSchema.parse(result));
+    sendValidated(response, getWalletStatusResponseSchema, result);
   });
   if (getBalance !== undefined) {
     router.get("/balance", requireAuthentication, async (request, response) => {
       const context = requireCustomerContext(response.locals.authContext);
       const result = await getBalance.execute(context.accountId);
       response.setHeader("Cache-Control", "no-store");
-      response.json(getWalletBalanceResponseSchema.parse(result));
+      sendValidated(response, getWalletBalanceResponseSchema, result);
     });
   }
   if (requestTransfer !== undefined) {
@@ -78,7 +79,7 @@ export function createWalletRouter(
         amount: body.amount,
       });
       response.setHeader("Cache-Control", "no-store");
-      response.json(requestWalletTransferResponseSchema.parse(result));
+      sendValidated(response, requestWalletTransferResponseSchema, result);
     });
   }
   return router;

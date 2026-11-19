@@ -53,6 +53,8 @@ function repository(overrides: Partial<ReservationRepository> = {}): Reservation
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
     findReservationForOnrampReconciliation: vi.fn().mockResolvedValue(null),
     recordOnrampOutcome: vi.fn().mockResolvedValue(recorded),
+    findReservationByClientKey: vi.fn().mockResolvedValue(null),
+    findReservationForPaymentSession: vi.fn().mockResolvedValue(null),
     ...overrides,
   };
 }

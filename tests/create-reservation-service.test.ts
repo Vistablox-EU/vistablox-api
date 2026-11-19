@@ -105,6 +105,8 @@ function reservationRepository(
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
     findReservationForOnrampReconciliation: vi.fn().mockResolvedValue(null),
     recordOnrampOutcome: vi.fn().mockResolvedValue({ status: "unknown_reservation" }),
+    findReservationByClientKey: vi.fn().mockResolvedValue(null),
+    findReservationForPaymentSession: vi.fn().mockResolvedValue(null),
     ...overrides,
   } as ReservationRepository & { createReservation: ReturnType<typeof vi.fn> };
 }
@@ -523,12 +525,29 @@ describe("CreateReservationService", () => {
       expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
     });
 
-    it("serves a retry made exactly at the expiry boundary, matching the sweeper's strict comparison", async () => {
-      const reservations = replayedReservation({}, { createdAt: new Date(now.getTime() - 15 * 60_000) });
+    // A Coinbase session is valid for five minutes, so a session handed out
+    // with less than five minutes of hold left would outlive the hold: a
+    // purchase completed after the sweeper lapsed it lands as late evidence
+    // on a reservation that no longer exists. The last session is therefore
+    // issued exactly five minutes before the hold ends, ten minutes in.
+    it("serves a retry made exactly five minutes before the hold ends, so the session ends with the hold", async () => {
+      const reservations = replayedReservation({}, { createdAt: new Date(now.getTime() - 10 * 60_000) });
 
       await expect(replayService(reservations).execute(replayRequest)).resolves.toMatchObject({
         data: { reservation_id: "reservation_existing" },
       });
+    });
+
+    it("refuses a retry made less than five minutes before the hold ends, since its session would outlive the hold", async () => {
+      const reservations = replayedReservation({}, { createdAt: new Date(now.getTime() - 10 * 60_000 - 1) });
+      const cdp = coinbase();
+
+      await expect(replayService(reservations, cdp).execute(replayRequest)).rejects.toMatchObject({
+        code: "offering.reservation_replay_unavailable",
+        status: 409,
+      });
+      expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+      expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
     });
 
     it("refuses a retry, handing out no onramp URL, when the reservation lapsed or was funded during the Coinbase call (#122)", async () => {
@@ -576,3 +595,326 @@ describe("CreateReservationService", () => {
     });
   });
 });
+
+// The hold this account made with replayRequest's key: 1000.00 EUR, still payable.
+const holdOf = (overrides: Record<string, unknown> = {}) => ({
+  reservationId: "reservation_existing",
+  offeringId: "offering_01",
+  accountId: "account_01",
+  amountEur: "1000.00",
+  createdAt: now,
+  reservationStage: "initiated",
+  latestCapitalState: "eurc_purchase_pending",
+  ...overrides,
+});
+
+describe("CreateReservationService replay of an existing hold", () => {
+  // The offering's advisory capacity figures include the hold itself, so a
+  // retry of the request that took the last capacity used to be refused as
+  // "no capacity left" before the key lookup was ever reached.
+  it("resumes the hold even when the hold itself took the last capacity", async () => {
+    const reservations = replayedReservation();
+    reservations.findReservationByClientKey = vi.fn().mockResolvedValue({ reservationId: "reservation_existing" });
+    const service = new CreateReservationService(
+      offeringRepository(detail({ targetRaiseEur: "1000.00", reservedCapacityEur: "1000.00" })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    const result = await service.execute(replayRequest);
+
+    expect(result.data.reservation_id).toBe("reservation_existing");
+    expect(reservations.findReservationByClientKey).toHaveBeenCalledWith({
+      accountId: "account_01",
+      offeringId: "offering_01",
+      clientIdempotencyKey: "operation_01",
+    });
+  });
+
+  it("resumes the hold when less than its own amount remains after it", async () => {
+    const reservations = replayedReservation();
+    reservations.findReservationByClientKey = vi.fn().mockResolvedValue({ reservationId: "reservation_existing" });
+    const service = new CreateReservationService(
+      offeringRepository(detail({ targetRaiseEur: "1500.00", reservedCapacityEur: "1200.00" })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(service.execute(replayRequest)).resolves.toMatchObject({
+      data: { reservation_id: "reservation_existing" },
+    });
+  });
+
+  it("still refuses a new request that does not fit the remaining capacity", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(
+      offeringRepository(detail({ targetRaiseEur: "1500.00", reservedCapacityEur: "1200.00" })),
+      reservations,
+      coinbase(),
+      { clock: () => now, fundingRailAvailable: true },
+    );
+
+    await expect(service.execute(replayRequest)).rejects.toMatchObject({
+      code: "offering.reservation_amount_exceeds_capacity",
+      status: 422,
+    });
+    expect(reservations.createReservation).not.toHaveBeenCalled();
+  });
+
+  it("still applies every other blocker to a replay", async () => {
+    const reservations = replayedReservation();
+    reservations.findReservationByClientKey = vi.fn().mockResolvedValue({ reservationId: "reservation_existing" });
+    const restricted = detail({
+      accountReadiness: { ...detail().accountReadiness, status: "suspended_restricted" },
+    });
+    const cdp = coinbase();
+    const service = new CreateReservationService(offeringRepository(restricted), reservations, cdp, {
+      clock: () => now,
+      fundingRailAvailable: true,
+    });
+
+    await expect(service.execute(replayRequest)).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      fieldErrors: [{ code: "account_restricted" }],
+    });
+    expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+  });
+
+  it("does not look for a hold when the request carries no key", async () => {
+    const reservations = reservationRepository();
+    const service = new CreateReservationService(offeringRepository(detail()), reservations, coinbase(), {
+      clock: () => now,
+      generateReservationId: () => "reservation_01",
+      fundingRailAvailable: true,
+    });
+
+    await service.execute({ ...replayRequest, clientIdempotencyKey: null });
+
+    expect(reservations.findReservationByClientKey).not.toHaveBeenCalled();
+  });
+});
+
+describe("CreateReservationService.startPaymentSession", () => {
+  const sessionRequest = {
+    offeringId: "offering_01",
+    reservationId: "reservation_existing",
+    accountId: "account_01",
+  };
+
+  function sessionService(
+    hold: ReturnType<typeof holdOf> | null,
+    options: { cdp?: CoinbaseCdpClient; detailOverrides?: Partial<InvestorOfferingDetailRecord>; clockAt?: Date } = {},
+  ) {
+    const reservations = reservationRepository({
+      findReservationForPaymentSession: vi.fn().mockResolvedValue(hold),
+    });
+    const cdp = options.cdp ?? coinbase();
+    const service = new CreateReservationService(
+      offeringRepository(detail(options.detailOverrides)),
+      reservations,
+      cdp,
+      {
+        clock: () => options.clockAt ?? now,
+        generateReservationId: () => "reservation_never_persisted",
+        fundingRailAvailable: true,
+        buildRedirectUrl: (reservationId) => `https://app.example.test/reservations/${reservationId}`,
+      },
+    );
+    return { service, reservations, cdp };
+  }
+
+  it("mints a new session for the original hold and keeps the original expiry", async () => {
+    const createdAt = new Date(now.getTime() - 5 * 60_000);
+    const { service, reservations, cdp } = sessionService(holdOf({ createdAt }));
+
+    const result = await service.startPaymentSession(sessionRequest);
+
+    expect(result).toEqual({
+      data: {
+        reservation_id: "reservation_existing",
+        offering_id: "offering_01",
+        amount_eur: "1000.00",
+        status: "initiated",
+        expires_at: new Date(createdAt.getTime() + 15 * 60_000).toISOString(),
+        onramp: {
+          url: "https://pay.coinbase.com/buy/select-asset?sessionToken=session-token-01&partnerUserRef=reservation_existing",
+          channel_id: "channel-01",
+        },
+      },
+    });
+    expect(reservations.findReservationForPaymentSession).toHaveBeenCalledWith({
+      reservationId: "reservation_existing",
+      offeringId: "offering_01",
+      accountId: "account_01",
+    });
+    expect(cdp.createOnrampSessionToken).toHaveBeenCalledWith({ walletAddress, blockchain: "base" });
+    expect(reservations.recordMoneyEvent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        reservationId: "reservation_existing",
+        capitalState: "eurc_purchase_pending",
+        amountEur: "1000.00",
+        providerReference: "channel-01",
+      }),
+    );
+    expect(reservations.createReservation).not.toHaveBeenCalled();
+  });
+
+  it("hands out a different session each time it is called", async () => {
+    const cdp = coinbase({
+      createOnrampSessionToken: vi
+        .fn()
+        .mockResolvedValueOnce({ token: "token-a", channelId: "channel-a" })
+        .mockResolvedValueOnce({ token: "token-b", channelId: "channel-b" }),
+    });
+    const { service } = sessionService(holdOf(), { cdp });
+
+    const first = await service.startPaymentSession(sessionRequest);
+    const second = await service.startPaymentSession(sessionRequest);
+
+    expect(first.data.onramp.url).toContain("sessionToken=token-a");
+    expect(second.data.onramp.url).toContain("sessionToken=token-b");
+    expect(second.data.reservation_id).toBe(first.data.reservation_id);
+  });
+
+  it("answers 404 for a reservation that does not exist or is not this account's, before any Coinbase call", async () => {
+    const { service, cdp } = sessionService(null);
+
+    await expect(service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.reservation_not_found",
+      status: 404,
+    });
+    expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+  });
+
+  it("answers 404 when the offering does not exist", async () => {
+    const reservations = reservationRepository({
+      findReservationForPaymentSession: vi.fn().mockResolvedValue(holdOf()),
+    });
+    const service = new CreateReservationService(offeringRepository(null), reservations, coinbase(), {
+      clock: () => now,
+      fundingRailAvailable: true,
+    });
+
+    await expect(service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.not_found",
+      status: 404,
+    });
+  });
+
+  it.each(["lapsed", "cancelled", "awaiting_reconfirmation", "reconfirmed", "finalized"])(
+    "refuses a hold whose stage is %s, handing out no session",
+    async (reservationStage) => {
+      const { service, cdp, reservations } = sessionService(holdOf({ reservationStage }));
+
+      await expect(service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+        code: "offering.reservation_replay_unavailable",
+        status: 409,
+      });
+      expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+      expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(FUNDED_CAPITAL_STATES)("refuses a hold that is already funded (%s)", async (latestCapitalState) => {
+    const { service, cdp } = sessionService(holdOf({ latestCapitalState }));
+
+    await expect(service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.reservation_replay_unavailable",
+    });
+    expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+  });
+
+  it("refuses a hold past its 15 minutes even before the sweeper has lapsed it", async () => {
+    const past = sessionService(holdOf({ createdAt: new Date(now.getTime() - 15 * 60_000 - 1) }));
+
+    await expect(past.service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.reservation_replay_unavailable",
+    });
+    expect(past.cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+  });
+
+  // A session lives five minutes (Coinbase, single-use), the hold fifteen: a
+  // session requested at minute 13 would still be payable at minute 18, after
+  // the sweeper lapsed the hold at 15.
+  it("serves a hold exactly five minutes before it ends, and refuses one a millisecond later", async () => {
+    const atBoundary = sessionService(holdOf({ createdAt: new Date(now.getTime() - 10 * 60_000) }));
+    await expect(atBoundary.service.startPaymentSession(sessionRequest)).resolves.toBeDefined();
+
+    const tooLate = sessionService(holdOf({ createdAt: new Date(now.getTime() - 10 * 60_000 - 1) }));
+    await expect(tooLate.service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.reservation_replay_unavailable",
+      status: 409,
+    });
+    expect(tooLate.cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+    expect(tooLate.reservations.recordMoneyEvent).not.toHaveBeenCalled();
+  });
+
+  it("refuses a session that would outlive the hold at minute 13", async () => {
+    const { service, cdp } = sessionService(holdOf({ createdAt: new Date(now.getTime() - 13 * 60_000) }));
+
+    await expect(service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.reservation_replay_unavailable",
+    });
+    expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+  });
+
+  it("resumes a hold whose last purchase attempt failed, re-arming it with a new pending event", async () => {
+    const { service, reservations } = sessionService(holdOf({ latestCapitalState: "purchase_failed" }));
+
+    await service.startPaymentSession(sessionRequest);
+
+    expect(reservations.recordMoneyEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ capitalState: "eurc_purchase_pending" }),
+    );
+  });
+
+  it("resumes the hold when it took the last capacity, since capacity is not a reason to refuse an existing hold", async () => {
+    const { service } = sessionService(holdOf(), {
+      detailOverrides: { targetRaiseEur: "1000.00", reservedCapacityEur: "1000.00" },
+    });
+
+    await expect(service.startPaymentSession(sessionRequest)).resolves.toMatchObject({
+      data: { reservation_id: "reservation_existing" },
+    });
+  });
+
+  it("reports every other blocker as a 409 and calls Coinbase for none of them", async () => {
+    const { service, cdp } = sessionService(holdOf(), {
+      detailOverrides: {
+        accountReadiness: { ...detail().accountReadiness, status: "suspended_restricted" },
+      },
+    });
+
+    await expect(service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.reservation_not_available",
+      status: 409,
+      fieldErrors: [{ code: "account_restricted" }],
+    });
+    expect(cdp.createOnrampSessionToken).not.toHaveBeenCalled();
+  });
+
+  it("never marks the hold failed when the session cannot be issued, and rethrows the provider error", async () => {
+    const cdp = coinbase({
+      createOnrampSessionToken: vi.fn().mockRejectedValue(new Error("coinbase unavailable")),
+    });
+    const { service, reservations } = sessionService(holdOf(), { cdp });
+
+    await expect(service.startPaymentSession(sessionRequest)).rejects.toThrow("coinbase unavailable");
+
+    expect(reservations.recordMoneyEvent).not.toHaveBeenCalled();
+  });
+
+  it("refuses, handing out no URL, when the hold lapsed or was funded during the Coinbase call", async () => {
+    const { service, reservations, cdp } = sessionService(holdOf());
+    reservations.recordMoneyEvent = vi.fn().mockResolvedValue(false);
+
+    await expect(service.startPaymentSession(sessionRequest)).rejects.toMatchObject({
+      code: "offering.reservation_replay_unavailable",
+      status: 409,
+    });
+    expect(cdp.buildOnrampUrl).not.toHaveBeenCalled();
+  });
+});
+

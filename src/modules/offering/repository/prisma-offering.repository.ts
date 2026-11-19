@@ -42,6 +42,7 @@ import type {
   PendingPurchaseReservationForTimer,
   RecordOnrampOutcomeInput,
   ReservationForOnrampReconciliation,
+  ReservationForPaymentSession,
   ReservationRepository,
 } from "./reservation.repository.js";
 import { decideOnrampRecording, recordedAtAfterLatest } from "../domain/onramp-outcome-recording.policy.js";
@@ -785,6 +786,52 @@ export class PrismaOfferingRepository
         reused: false,
       };
     });
+  }
+
+  public async findReservationByClientKey(input: {
+    accountId: string;
+    offeringId: string;
+    clientIdempotencyKey: string;
+  }): Promise<{ reservationId: string } | null> {
+    const row = await this.database.reservation.findUnique({
+      where: {
+        accountId_offeringId_clientIdempotencyKey: {
+          accountId: input.accountId,
+          offeringId: input.offeringId,
+          clientIdempotencyKey: input.clientIdempotencyKey,
+        },
+      },
+      select: { id: true },
+    });
+    return row === null ? null : { reservationId: row.id };
+  }
+
+  public async findReservationForPaymentSession(input: {
+    reservationId: string;
+    offeringId: string;
+    accountId: string;
+  }): Promise<ReservationForPaymentSession | null> {
+    const row = await this.database.reservation.findFirst({
+      where: { id: input.reservationId, offeringId: input.offeringId, accountId: input.accountId },
+      select: { id: true, offeringId: true, accountId: true, amountEur: true, createdAt: true, reservationStage: true },
+    });
+    if (row === null) return null;
+    // The latest money event decides the capital state, in the same order the
+    // funded-amount and expiry queries use.
+    const latestMoneyEvent = await this.database.moneyEvent.findFirst({
+      where: { reservationId: row.id },
+      orderBy: [{ recordedAt: "desc" }, { id: "desc" }],
+      select: { capitalState: true },
+    });
+    return {
+      reservationId: row.id,
+      offeringId: row.offeringId,
+      accountId: row.accountId,
+      amountEur: row.amountEur.toFixed(2),
+      createdAt: row.createdAt,
+      reservationStage: row.reservationStage,
+      latestCapitalState: latestMoneyEvent?.capitalState ?? null,
+    };
   }
 
   public async recordMoneyEvent(input: AdvanceReservationCapitalStateInput): Promise<boolean> {

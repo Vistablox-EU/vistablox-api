@@ -17,6 +17,7 @@ import {
   startKycSessionBodySchema,
   startKycSessionResponseSchema,
 } from "./kyc.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 // Calls the concrete application services directly, in-process. This
 // router's own job: enforce the customer session, validate the request
@@ -37,7 +38,7 @@ export function createKycRouter(
     const context = requireCustomerContext(response.locals.authContext);
     const result = await getStatus.execute(context.accountId);
     response.setHeader("Cache-Control", "no-store");
-    response.json(kycStatusResponseSchema.parse(result));
+    sendValidated(response, kycStatusResponseSchema, result);
   });
   router.post("/sessions", requireAuthentication, async (request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
@@ -50,7 +51,7 @@ export function createKycRouter(
       ...(body.language === undefined ? {} : { language: body.language }),
     });
     response.setHeader("Cache-Control", "no-store");
-    response.status(201).json(startKycSessionResponseSchema.parse(result));
+    sendValidated(response, startKycSessionResponseSchema, result, 201);
   });
   // Always mounted, matching the pre-reversal behavior: an unconfigured
   // deployment (no DIDIT_POA_WORKFLOW_ID) reports a structured error from
@@ -74,9 +75,7 @@ export function createKycRouter(
         ...(body.language === undefined ? {} : { language: body.language }),
       });
       response.setHeader("Cache-Control", "no-store");
-      response
-        .status(201)
-        .json(startProofOfAddressSessionResponseSchema.parse(result));
+      sendValidated(response, startProofOfAddressSessionResponseSchema, result, 201);
     },
   );
   return router;
@@ -116,7 +115,7 @@ export function createDiditWebhookRouter(
       createdAt: body.created_at,
       traceId: String(response.locals.traceId),
     });
-    response.json(diditWebhookResponseSchema.parse(result));
+    sendValidated(response, diditWebhookResponseSchema, result);
   });
   return router;
 }
