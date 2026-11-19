@@ -78,6 +78,9 @@ import { PrismaWalletRepository } from "./modules/wallet/repository/prisma-walle
 import { PrismaDpopReplayRepository } from "./modules/auth/repository/shared/prisma-dpop-replay.repository.js";
 import { jktFingerprint, type DpopLogger } from "./modules/auth/application/shared/dpop-proof-verifier.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
+import { createPublicClient, http } from "viem";
+import { base, baseSepolia } from "viem/chains";
+import { verifyChainDeployment, type DeployedContract } from "./infrastructure/blockchain/chain-deployment-check.js";
 import { createChainReader } from "./infrastructure/blockchain/chain-client.js";
 import { ViemWalletChainReader } from "./infrastructure/blockchain/chain-wallet-reader.js";
 import { ViemWalletRegistrationVerifier } from "./infrastructure/blockchain/wallet-registration-verifier.js";
@@ -544,6 +547,25 @@ const documentDownloadService =
     : undefined;
 
 const walletRepository = new PrismaWalletRepository(database);
+// Fail closed before serving: a CHAIN_RPC_URL on another chain, or a contract
+// address with no code, would otherwise surface as misleading wallet errors.
+if (environment.CHAIN_NETWORK !== undefined && environment.CHAIN_RPC_URL !== undefined) {
+  const configuredContracts: DeployedContract[] = [
+    ["VISTABLOX_PROPERTY_CONTRACT_ADDRESS", environment.VISTABLOX_PROPERTY_CONTRACT_ADDRESS],
+    ["EURC_TOKEN_ADDRESS", environment.EURC_TOKEN_ADDRESS],
+    ["VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS", environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS],
+  ].flatMap(([setting, address]) =>
+    address === undefined ? [] : [{ setting: setting as string, address: address as `0x${string}` }],
+  );
+  await verifyChainDeployment({
+    network: environment.CHAIN_NETWORK,
+    rpc: createPublicClient({
+      chain: environment.CHAIN_NETWORK === "base" ? base : baseSepolia,
+      transport: http(environment.CHAIN_RPC_URL),
+    }),
+    contracts: configuredContracts,
+  });
+}
 // Dormant unless the CHAIN_* env group is configured -- same all-or-none
 // gate as the write-side ChainClients worker.ts constructs, minus the
 // operator private key: this is a read-only client (eth_call only, no

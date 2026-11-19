@@ -56,6 +56,7 @@ import { RunWalletRegistryWatcherService } from "./modules/settlement/applicatio
 import { WalletRegistryAlertReporter } from "./modules/settlement/application/wallet-registry-alert-reporter.js";
 import { PrismaSettlementRepository } from "./modules/settlement/repository/prisma-settlement.repository.js";
 import { PrismaWalletRegistryHealthRepository } from "./modules/settlement/repository/prisma-wallet-registry-health.repository.js";
+import { verifyChainDeployment } from "./infrastructure/blockchain/chain-deployment-check.js";
 import { createChainClients } from "./infrastructure/blockchain/chain-client.js";
 import { PostgresOperatorKeyLock } from "./infrastructure/blockchain/operator-key-lock.js";
 import { isSettlementBundleConfigured } from "./infrastructure/blockchain/settlement-bundle.js";
@@ -256,6 +257,23 @@ const chainClients =
                 environment.VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS as `0x${string}`,
             }),
       });
+// Fail closed before consuming any job: wrong-chain RPC or an address with no
+// code would otherwise fail every chain job with a misleading error.
+if (chainClients !== undefined) {
+  const { config } = chainClients;
+  await verifyChainDeployment({
+    network: config.network,
+    rpc: chainClients.publicClient,
+    contracts: [
+      ["VISTABLOX_PROPERTY_CONTRACT_ADDRESS", config.propertyContractAddress],
+      ["VISTABLOX_IPO_ESCROW_CONTRACT_ADDRESS", config.ipoEscrowContractAddress],
+      ["EURC_TOKEN_ADDRESS", config.eurcTokenAddress],
+      ["VISTABLOX_WALLET_REGISTRY_CONTRACT_ADDRESS", config.walletRegistryContractAddress],
+    ].flatMap(([setting, address]) =>
+      address === undefined ? [] : [{ setting: setting as string, address: address as `0x${string}` }],
+    ),
+  });
+}
 // The property/IPO-escrow settlement bundle (AD-163/AD-256), still
 // all-configured-together-or-none per environment.ts's own refine --
 // separate from chainClients's own base-connectivity gate above, since
