@@ -45,7 +45,10 @@ import { CalculateOperatingDistributionService } from "./modules/rental/applicat
 import { RunOperatingDistributionSweepService } from "./modules/rental/application/run-operating-distribution-sweep.service.js";
 import { PrismaOperatingDistributionRepository } from "./modules/rental/repository/prisma-operating-distribution.repository.js";
 import { OpenIpoEscrowCampaignService } from "./modules/settlement/application/open-ipo-escrow-campaign.service.js";
-import { FinalizeIpoEscrowCampaignsService } from "./modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
+import {
+  assertNoCampaignErrors,
+  FinalizeIpoEscrowCampaignsService,
+} from "./modules/settlement/application/finalize-ipo-escrow-campaigns.service.js";
 import {
   ConfirmWalletRegistrationsService,
   WALLET_REGISTRY_RESCAN_OVERLAP_BLOCKS,
@@ -638,19 +641,14 @@ if (finalizeIpoEscrowCampaigns !== undefined) {
       const summary = await finalizeIpoEscrowCampaigns.execute(traceId);
       // The service swallows per-campaign failures into summary.errors (one
       // bad campaign must not stop the others) and has already logged each at
-      // error level with its piv_id/token_id; a run that had any is not
-      // "completed" cleanly, so it must not be logged as if it were.
-      if (summary.errors.length > 0) {
-        logger.error(
-          { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
-          "case timer job completed with campaign errors",
-        );
-      } else {
-        logger.info(
-          { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
-          "case timer job completed",
-        );
-      }
+      // error level with its piv_id/token_id. Once all were tried, a run with
+      // any must fail the job so pg-boss records and retries it; the catch
+      // below logs it and rethrows.
+      assertNoCampaignErrors(summary);
+      logger.info(
+        { trace_id: traceId, job: "settlement.finalize_ipo_escrow_campaigns", ...summary },
+        "case timer job completed",
+      );
     } catch (error) {
       const sanitized = toSanitizedError(error);
       logger.error(
