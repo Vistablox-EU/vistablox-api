@@ -1,7 +1,6 @@
 import "dotenv/config";
 
 import { toNodeHandler } from "better-auth/node";
-import { Pool } from "pg";
 import { PgBoss } from "pg-boss";
 import { createClient } from "redis";
 
@@ -12,12 +11,14 @@ import {
   resolveWebAuthnSettings,
 } from "./config/environment.js";
 import { PrismaDatabaseProbe } from "./infrastructure/database/database-probe.js";
+import { createPgPool } from "./infrastructure/database/pg-pool.js";
 import { createPrismaClient } from "./infrastructure/database/prisma.js";
 import { PrismaIdempotencyStore } from "./infrastructure/idempotency/prisma-idempotency-store.js";
 import { RedisRateLimitStore } from "./infrastructure/rate-limit/redis-rate-limit-store.js";
 import { RedisProtectedProfileCache } from "./infrastructure/cache/redis-protected-profile-cache.js";
 import { SmtpEmailSender } from "./infrastructure/email/smtp-email-sender.js";
 import { ensureDeadLetterQueue, ensureJobQueue } from "./shared/jobs/job-queues.js";
+import { createGracefulShutdown, installProcessFaultHandlers } from "./shared/lifecycle/graceful-shutdown.js";
 import { createLogger } from "./infrastructure/logging/logger.js";
 import { AccountProvisioner } from "./modules/account/application/account-provisioner.js";
 import { PrismaAccountRepository } from "./modules/account/repository/prisma-account.repository.js";
@@ -98,7 +99,9 @@ import { PrismaPartnerOrganizationRepository } from "./modules/intake/repository
 const environment = loadEnvironment();
 const logger = createLogger(environment.LOG_LEVEL);
 const database = createPrismaClient(environment.DATABASE_URL);
-const authDatabase = new Pool({ connectionString: environment.DATABASE_URL });
+// Better Auth's own pool. createPgPool logs an idle client's connection error
+// (the database restarting, say) instead of letting it end the process.
+const authDatabase = createPgPool({ connectionString: environment.DATABASE_URL }, logger, "better-auth");
 const jobQueue = new PgBoss(environment.DATABASE_URL);
 jobQueue.on("error", (error) => {
   logger.error({ err: error }, "pg-boss error");
@@ -758,27 +761,44 @@ const server = app.listen(environment.PORT, environment.HOST, () => {
   );
 });
 
-async function shutdown(signal: NodeJS.Signals): Promise<void> {
-  logger.info({ signal }, "shutting down");
-  server.close(async (error) => {
-    const shutdownTasks: Promise<unknown>[] = [
-      database.$disconnect(),
-      authDatabase.end(),
-      jobQueue.stop(),
-    ];
-    if (rateLimitCacheClient?.isOpen === true) {
-      shutdownTasks.push(rateLimitCacheClient.close());
-    }
-    if (profileCacheClient?.isOpen === true) {
-      shutdownTasks.push(profileCacheClient.close());
-    }
-    await Promise.all(shutdownTasks);
-    if (error !== undefined) {
-      logger.error({ err: error }, "HTTP server shutdown failed");
-      process.exitCode = 1;
-    }
-  });
-}
+// Phases run in order, the steps inside one together: stop taking requests and
+// let the running ones finish first, then close what they used. Each step is
+// allowed to fail without stopping the others, and the whole thing is forced to
+// exit at the deadline (docker-compose sets stop_grace_period above it).
+const shutdown = createGracefulShutdown({
+  logger,
+  phases: [
+    [
+      {
+        name: "http server",
+        close: () =>
+          new Promise<void>((resolve, reject) => {
+            server.close((error) => (error === undefined ? resolve() : reject(error)));
+          }),
+      },
+    ],
+    [
+      { name: "prisma client", close: () => database.$disconnect() },
+      { name: "better-auth database pool", close: () => authDatabase.end() },
+      { name: "pg-boss", close: () => jobQueue.stop() },
+      {
+        name: "rate limit cache",
+        close: async () => {
+          if (rateLimitCacheClient?.isOpen === true) await rateLimitCacheClient.close();
+        },
+      },
+      {
+        name: "protected profile cache",
+        close: async () => {
+          if (profileCacheClient?.isOpen === true) await profileCacheClient.close();
+        },
+      },
+    ],
+  ],
+});
 
-process.once("SIGINT", () => void shutdown("SIGINT"));
-process.once("SIGTERM", () => void shutdown("SIGTERM"));
+// `on`, not `once`: a second signal while shutting down is ignored by
+// `shutdown`, not left to Node's default of exiting on the spot.
+process.on("SIGINT", () => void shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+installProcessFaultHandlers({ logger, shutdown });

@@ -255,6 +255,11 @@ services:
       clamav:
         condition: service_healthy
     restart: unless-stopped
+    # Must stay above DEFAULT_SHUTDOWN_DEADLINE_MS (25 s, in
+    # src/shared/lifecycle/graceful-shutdown.ts), the time the process gives
+    # itself to close down before it forces its own exit with a log line.
+    # Docker's default is 10 s, after which it sends SIGKILL.
+    stop_grace_period: 30s
     healthcheck:
       test:
         [
@@ -282,6 +287,10 @@ services:
       migrate:
         condition: service_completed_successfully
     restart: unless-stopped
+    # Same relationship as the api's: above DEFAULT_SHUTDOWN_DEADLINE_MS (25 s),
+    # which includes up to JOB_DRAIN_TIMEOUT_MS (15 s) for jobs still running when
+    # pg-boss is told to stop.
+    stop_grace_period: 30s
     # The worker has no public listener. Its internal loopback-only probe is
     # ready only after pg-boss has started, every queue exists, schedules are
     # registered, and consumers are attached; its heartbeat then detects a
