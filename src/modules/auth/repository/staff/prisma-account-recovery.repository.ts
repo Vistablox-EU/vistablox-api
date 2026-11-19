@@ -220,12 +220,10 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
     reason: string;
     traceId: string;
     decidedAt: Date;
-    allowSameReviewer?: boolean;
   }): Promise<AccountRecoveryCaseRecord | null> {
     return this.database.$transaction(async (transaction) => {
-      // Dual control is enforced atomically by default. Staging's explicitly
-      // configured single-reviewer test mode may relax only the reviewer
-      // identity comparison; the Didit and primary-review gates remain.
+      // Dual control is enforced atomically: the deciding reviewer must differ
+      // from the primary reviewer (AD-209).
       // Rejection deliberately leaves the account in recovery_review — access
       // is not restored that way, and no further restriction is added beyond
       // what opening the case already applied; a human follows up out of band.
@@ -234,9 +232,7 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
           id: input.caseId,
           status: "open",
           reviewedByPrimary: { not: null },
-          ...(input.allowSameReviewer === true
-            ? {}
-            : { NOT: { reviewedByPrimary: input.reviewerAccountId } }),
+          NOT: { reviewedByPrimary: input.reviewerAccountId },
         },
         data: {
           status: input.decision,
@@ -260,7 +256,6 @@ export class PrismaAccountRecoveryRepository implements AccountRecoveryRepositor
             trace_id: input.traceId,
             reason: input.reason,
             primary_reviewer_account_id: current.reviewedByPrimary,
-            single_reviewer_mode: input.allowSameReviewer === true,
           },
           createdAt: input.decidedAt,
         },

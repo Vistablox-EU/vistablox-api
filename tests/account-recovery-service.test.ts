@@ -450,37 +450,6 @@ describe("DecideAccountRecoveryCaseService", () => {
     expect(sendAccountRecoveryRejectedEmail).toHaveBeenCalledWith({ to: "investor@example.com" });
   });
 
-  it("allows the primary reviewer to decide in explicitly enabled single-reviewer mode", async () => {
-    const decideCase = vi.fn().mockResolvedValue(
-      caseRecord({ status: "approved", reviewedByPrimary: "acct_reviewer_01", reviewedBySecondary: "acct_reviewer_01" }),
-    );
-    const service = new DecideAccountRecoveryCaseService(
-      repository({
-        findCase: vi.fn().mockResolvedValue(caseRecord({ reviewedByPrimary: "acct_reviewer_01" })),
-        decideCase,
-      }),
-      emailSender(),
-      () => now,
-      true,
-    );
-
-    await expect(
-      service.execute({
-        caseId,
-        actorAccountId: "acct_reviewer_01",
-        traceId: "trace_01",
-        decision: "approved",
-        reason: "Staging verification completed.",
-      }),
-    ).resolves.toMatchObject({ status: "approved" });
-    expect(decideCase).toHaveBeenCalledWith(
-      expect.objectContaining({
-        reviewerAccountId: "acct_reviewer_01",
-        allowSameReviewer: true,
-      }),
-    );
-  });
-
   it("rejects when the deciding reviewer is the same as the primary reviewer", async () => {
     const decideCase = vi.fn();
     const service = new DecideAccountRecoveryCaseService(

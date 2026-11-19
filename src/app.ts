@@ -399,7 +399,6 @@ export interface AppDependencies {
       workflowId: string;
       callbackUrl: string;
       recoveryRedirectUrl: string;
-      singleReviewerMode: boolean;
       skipDiditInStaging: boolean;
       // Sent synchronously from the request, mirroring RecoverStaffAccountService's
       // and IssueStaffInvitationService's precedent for staff-initiated admin
@@ -1010,7 +1009,6 @@ export function createApp(dependencies: AppDependencies): Express {
             recovery.repository,
             recovery.emailSender,
             () => new Date(),
-            recovery.singleReviewerMode,
           ),
           new CompleteAccountRecoveryService(
             recovery.repository,

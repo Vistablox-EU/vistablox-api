@@ -75,7 +75,6 @@ export interface AccountRecoveryRepository {
     reason: string;
     traceId: string;
     decidedAt: Date;
-    allowSameReviewer?: boolean;
   }): Promise<AccountRecoveryCaseRecord | null>;
   completeCase(input: {
     caseId: string;

@@ -66,28 +66,6 @@ describe("PLAY_INTEGRITY_POLICY vs. the deployment tier", () => {
     expect(() => loadEnvironment({ ...base, NODE_ENV: "production", APP_ENV: "prod" })).toThrow();
   });
 
-  it("accepts single-reviewer recovery mode only on staging", () => {
-    const result = loadEnvironment({
-      ...base,
-      NODE_ENV: "production",
-      APP_ENV: "staging",
-      ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: "true",
-    });
-    expect(result.ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE).toBe(true);
-  });
-
-  it("rejects single-reviewer recovery mode outside staging", () => {
-    expect(() =>
-      loadEnvironment({
-        ...base,
-        NODE_ENV: "production",
-        APP_ENV: "production",
-        PLAY_INTEGRITY_POLICY: "strict",
-        ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE: "true",
-      }),
-    ).toThrow(/ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE/);
-  });
-
   it("accepts skipping the recovery Didit check only on staging", () => {
     const result = loadEnvironment({
       ...base,
