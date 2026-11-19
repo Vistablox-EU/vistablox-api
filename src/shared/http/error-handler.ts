@@ -5,6 +5,13 @@ import { AppError } from "../errors/app-error.js";
 import { translateBodyParserError } from "./body-parser-error.js";
 import { errorResponseSchema, type ErrorResponse } from "./error-schema.js";
 
+// What a client is told about a server-side failure (#72). AppError.detail on a
+// 5xx is written for the log: it can name configuration, keys or providers,
+// so the response carries one fixed sentence per kind of failure and the real
+// message goes to the log under the same trace_id.
+const SERVER_ERROR_DETAIL = "An unexpected error occurred.";
+const SERVICE_UNAVAILABLE_DETAIL = "The service is temporarily unavailable. Please try again later.";
+
 export const errorHandler: ErrorRequestHandler = (error, _request, response, next) => {
   if (response.headersSent) {
     next(error);
@@ -14,14 +21,15 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
   const normalized = rejectedBody?.error ?? normalizeError(error);
   const traceId = String(response.locals.traceId ?? "unknown");
 
+  const serverFault = normalized.status >= 500;
   const payload: ErrorResponse = {
     type: normalized.type,
     code: normalized.code,
     title: normalized.title,
     status: normalized.status,
-    detail: normalized.message,
+    detail: serverFault ? serverErrorDetail(normalized.status) : normalized.message,
     trace_id: traceId,
-    ...(normalized.fieldErrors === undefined ? {} : { field_errors: normalized.fieldErrors }),
+    ...(serverFault || normalized.fieldErrors === undefined ? {} : { field_errors: normalized.fieldErrors }),
   };
 
   if (rejectedBody !== undefined) {
@@ -36,8 +44,11 @@ export const errorHandler: ErrorRequestHandler = (error, _request, response, nex
       },
       "request body rejected",
     );
-  } else if (normalized.status >= 500) {
-    response.locals.logger?.error({ err: error, trace_id: traceId }, "request failed");
+  } else if (serverFault) {
+    response.locals.logger?.error(
+      { err: error, trace_id: traceId, code: normalized.code, status: normalized.status },
+      "request failed",
+    );
   }
 
   response.status(normalized.status).json(errorResponseSchema.parse(payload));
@@ -70,4 +81,8 @@ function normalizeError(error: unknown): AppError {
     detail: "An unexpected error occurred.",
     cause: error,
   });
+}
+
+function serverErrorDetail(status: number): string {
+  return status === 503 ? SERVICE_UNAVAILABLE_DETAIL : SERVER_ERROR_DETAIL;
 }

@@ -107,6 +107,16 @@ describe("idempotency middleware", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 
+  it("marks a replayed response no-store: a stored answer can carry a payment URL", async () => {
+    const app = appFor(memoryStore(), vi.fn());
+
+    await request(app).post("/orders").set("Idempotency-Key", "key-1").send({ amount: 100 });
+    const replay = await request(app).post("/orders").set("Idempotency-Key", "key-1").send({ amount: 100 });
+
+    expect(replay.status).toBe(201);
+    expect(replay.headers["cache-control"]).toBe("no-store");
+  });
+
   it("rejects the same key reused with a different body as a 409 conflict", async () => {
     const handler = vi.fn();
     const app = appFor(memoryStore(), handler);
@@ -192,3 +202,88 @@ describe("idempotency middleware", () => {
     expect(handler).toHaveBeenCalledTimes(1);
   });
 });
+
+// The shared table's key is (idempotency_key, endpoint), so by itself a key
+// reused by another account, or on another resource, with an identical body
+// would be answered with the first caller's stored response: their
+// reservation_id and onramp URL. The mount can name what makes two requests
+// the same one; a request from a different scope is a conflict, never a replay.
+describe("idempotency middleware request scope", () => {
+  function scopedApp(store: IdempotencyStore, handler: () => void) {
+    const app = express();
+    app.use(requestContext);
+    app.use(express.json());
+    app.use((request, response, next) => {
+      response.locals.authContext = {
+        accountId: request.header("x-account") ?? "account_01",
+        providerSessionId: "session_01",
+        population: "customer",
+      };
+      next();
+    });
+    app.post(
+      "/offerings/:offering_id/orders",
+      createIdempotencyMiddleware(store, "test.scoped_order", undefined, {
+        scope: (request, response) =>
+          [response.locals.authContext?.accountId ?? "", String(request.params["offering_id"] ?? "")].join("|"),
+      }),
+      async (_request, response) => {
+        handler();
+        response.status(201).json({ order_id: "order_01", owner: response.locals.authContext?.accountId });
+      },
+    );
+    app.use(errorHandler);
+    return app;
+  }
+
+  it("still replays the stored response for the same scope", async () => {
+    const handler = vi.fn();
+    const app = scopedApp(memoryStore(), handler);
+
+    await request(app).post("/offerings/offering_01/orders").set("Idempotency-Key", "key-1").send({ amount: 100 });
+    const replay = await request(app)
+      .post("/offerings/offering_01/orders")
+      .set("Idempotency-Key", "key-1")
+      .send({ amount: 100 });
+
+    expect(replay.status).toBe(201);
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers another account's same key and body with a 409, never with the first account's stored response", async () => {
+    const handler = vi.fn();
+    const app = scopedApp(memoryStore(), handler);
+
+    await request(app)
+      .post("/offerings/offering_01/orders")
+      .set("x-account", "account_01")
+      .set("Idempotency-Key", "key-1")
+      .send({ amount: 100 });
+    const other = await request(app)
+      .post("/offerings/offering_01/orders")
+      .set("x-account", "account_02")
+      .set("Idempotency-Key", "key-1")
+      .send({ amount: 100 });
+
+    expect(other.status).toBe(409);
+    expect(other.body).toMatchObject({ code: "idempotency.body_mismatch", status: 409 });
+    expect(JSON.stringify(other.body)).not.toContain("order_01");
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers the same key and body on another resource with a 409", async () => {
+    const handler = vi.fn();
+    const app = scopedApp(memoryStore(), handler);
+
+    await request(app).post("/offerings/offering_01/orders").set("Idempotency-Key", "key-1").send({ amount: 100 });
+    const other = await request(app)
+      .post("/offerings/offering_02/orders")
+      .set("Idempotency-Key", "key-1")
+      .send({ amount: 100 });
+
+    expect(other.status).toBe(409);
+    expect(other.body).toMatchObject({ code: "idempotency.body_mismatch" });
+    expect(handler).toHaveBeenCalledTimes(1);
+  });
+});
+

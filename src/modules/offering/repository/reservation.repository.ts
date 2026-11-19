@@ -32,6 +32,18 @@ export interface ReusedReservationState {
   latestCapitalState: string | null;
 }
 
+/** A reservation as the payment-session route needs it: whose it is, how much, how old, and where it stands. */
+export interface ReservationForPaymentSession {
+  reservationId: string;
+  offeringId: string;
+  accountId: string;
+  amountEur: string;
+  createdAt: Date;
+  reservationStage: string;
+  /** The latest money_events.capital_state, or null if it has none. */
+  latestCapitalState: string | null;
+}
+
 export interface CreateReservationResult {
   reservation: CreatedReservation | null;
   conflict: CreateReservationConflict | null;
@@ -154,6 +166,28 @@ export interface OnrampWebhookReceiver {
  */
 export interface ReservationRepository {
   createReservation(input: CreateReservationInput): Promise<CreateReservationResult>;
+  /**
+   * Whether this account already holds a reservation under this client
+   * Idempotency-Key on this offering: a plain read, so the service can tell a
+   * retry of an existing hold from a new request before it applies the
+   * advisory capacity check, which counts the hold against itself.
+   * createReservation still decides under the offering lock.
+   */
+  findReservationByClientKey(input: {
+    accountId: string;
+    offeringId: string;
+    clientIdempotencyKey: string;
+  }): Promise<{ reservationId: string } | null>;
+  /**
+   * The reservation, only when it belongs to this account and offering (null
+   * otherwise, whether it does not exist or is somebody else's), with its
+   * stage and latest money state.
+   */
+  findReservationForPaymentSession(input: {
+    reservationId: string;
+    offeringId: string;
+    accountId: string;
+  }): Promise<ReservationForPaymentSession | null>;
   /**
    * Records a money event under the reservation's row lock, the same lock
    * expireReservation takes, so the two serialise. Returns false (writes

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { RequestHandler } from "express";
+import type { Request, RequestHandler, Response } from "express";
 
 import type { IdempotencyStore } from "../../infrastructure/idempotency/idempotency-store.js";
 import { AppError } from "../errors/app-error.js";
@@ -10,6 +10,21 @@ const IDEMPOTENCY_KEY_HEADER = "idempotency-key";
 // fixed policy" — long enough to outlive any plausible client retry.
 const RETENTION_HOURS = 48;
 
+export interface IdempotencyMiddlewareOptions {
+  /**
+   * What makes two requests under one key the same request besides their body:
+   * typically the authenticated account and the resource ids in the path. The
+   * table's key is only (key, endpoint), so without this a key reused by
+   * another account, or on another offering or reservation, with an equal body
+   * would be answered with the first caller's stored response (their
+   * reservation id and onramp URL). The scope is hashed together with the
+   * body, so a request from another scope is the same conflict as another
+   * body: 409 idempotency.body_mismatch, never a replay. Called after
+   * authentication, so `response.locals.authContext` is available.
+   */
+  scope?: (request: Request, response: Response) => string;
+}
+
 // AD-057/AD-147: every Idempotency-Key-guarded high-risk write deduplicates
 // through this one shared audit.idempotency_keys mechanism. `endpoint` is an
 // explicit, stable operation identifier supplied by the mount site — not
@@ -18,6 +33,7 @@ export function createIdempotencyMiddleware(
   store: IdempotencyStore,
   endpoint: string,
   clock: () => Date = () => new Date(),
+  options: IdempotencyMiddlewareOptions = {},
 ): RequestHandler {
   return (request, response, next) => {
     const idempotencyKey = request.header(IDEMPOTENCY_KEY_HEADER);
@@ -33,7 +49,7 @@ export function createIdempotencyMiddleware(
       return;
     }
 
-    const requestBodyHash = hashRequestBody(request.body);
+    const requestBodyHash = hashRequest(request.body, options.scope?.(request, response));
 
     // Whether this key has been seen before must be resolved before the
     // handler runs a high-risk write, so a lookup failure here fails
@@ -84,10 +100,13 @@ export function createIdempotencyMiddleware(
             code: "idempotency.body_mismatch",
             title: "Duplicate idempotent operation",
             status: 409,
-            detail: `This ${IDEMPOTENCY_KEY_HEADER} was already used with a different request body.`,
+            detail: `This ${IDEMPOTENCY_KEY_HEADER} was already used for a different request.`,
           });
         }
 
+        // A stored answer can carry a payment URL; the handler's own
+        // Cache-Control is not part of what is stored, so it is set again here.
+        response.setHeader("Cache-Control", "no-store");
         response.status(existing.responseStatus).json(existing.responseBody);
       })
       .catch(next);
@@ -114,8 +133,9 @@ function interceptResponse(
   }) as typeof response.json;
 }
 
-function hashRequestBody(body: unknown): string {
-  return createHash("sha256").update(stableStringify(body)).digest("hex");
+function hashRequest(body: unknown, scope: string | undefined): string {
+  const fingerprint = scope === undefined ? stableStringify(body) : stableStringify({ body, scope });
+  return createHash("sha256").update(fingerprint).digest("hex");
 }
 
 function stableStringify(value: unknown): string {

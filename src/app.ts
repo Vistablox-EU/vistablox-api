@@ -249,7 +249,7 @@ import {
   createRateLimiter,
   dpopKeyRateLimitSubject,
 } from "./shared/http/rate-limit.js";
-import { createIdempotencyMiddleware } from "./shared/http/idempotency.js";
+import { createOfferingIdempotency } from "./modules/offering/api/offering-idempotency.js";
 import type { RateLimitStore } from "./infrastructure/rate-limit/rate-limit-store.js";
 import type { IdempotencyStore } from "./infrastructure/idempotency/idempotency-store.js";
 
@@ -480,25 +480,12 @@ export function createApp(dependencies: AppDependencies): Express {
       ? undefined
       : createRateLimiter(dependencies.rateLimitStore, TIGHTENED_RATE_LIMIT, dpopKeyRateLimitSubject);
 
-  // AD-057/AD-147: the high-risk writes that exist are reservation funding
-  // initiation, investor reconfirmation submission, and the finalization-batch
-  // action. Each mounts the shared Idempotency-Key middleware with a stable
-  // endpoint identifier of its own, supplied here (the mount site), keyed on
-  // the same audit.idempotency_keys table. Refunds, payouts, reservation
-  // cancellation and legal direct-contact release are future work and will
-  // mount the same middleware when they land.
-  const reservationCreateIdempotency =
-    dependencies.idempotencyStore === undefined
-      ? undefined
-      : createIdempotencyMiddleware(dependencies.idempotencyStore, "offering.reservation.create");
-  const reconfirmIdempotency =
-    dependencies.idempotencyStore === undefined
-      ? undefined
-      : createIdempotencyMiddleware(dependencies.idempotencyStore, "offering.reservation.reconfirm");
-  const finalizeIdempotency =
-    dependencies.idempotencyStore === undefined
-      ? undefined
-      : createIdempotencyMiddleware(dependencies.idempotencyStore, "offering.finalize");
+  // AD-057/AD-147: the shared Idempotency-Key middleware on the high-risk
+  // writes that exist; the endpoint identifiers and request scopes are in
+  // offering-idempotency.ts.
+  const offeringIdempotency =
+    dependencies.idempotencyStore === undefined ? undefined : createOfferingIdempotency(dependencies.idempotencyStore);
+  const finalizeIdempotency = offeringIdempotency?.finalize;
 
   app.disable("x-powered-by");
   app.use(requestContext);
@@ -670,11 +657,12 @@ export function createApp(dependencies: AppDependencies): Express {
           ? undefined
           : new ReconfirmReservationService(dependencies.protectedApi.offeringOperations.repository),
         requireFreshAuthentication,
-        reservationCreateIdempotency === undefined || reconfirmIdempotency === undefined
+        offeringIdempotency === undefined
           ? undefined
           : {
-              createReservation: reservationCreateIdempotency,
-              reconfirmReservation: reconfirmIdempotency,
+              createReservation: offeringIdempotency.createReservation,
+              reconfirmReservation: offeringIdempotency.reconfirmReservation,
+              paymentSession: offeringIdempotency.paymentSession,
             },
       ),
     );

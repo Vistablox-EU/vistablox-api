@@ -186,6 +186,7 @@ function buildReservationApp(options?: {
   requireIdempotency?: {
     createReservation: RequestHandler;
     reconfirmReservation: RequestHandler;
+    paymentSession: RequestHandler;
   };
 }) {
   const offerings: OfferingRepository = {
@@ -205,6 +206,8 @@ function buildReservationApp(options?: {
     listPendingPurchaseReservationsForTimers: vi.fn().mockResolvedValue([]),
     findReservationForOnrampReconciliation: vi.fn().mockResolvedValue(null),
     recordOnrampOutcome: vi.fn().mockResolvedValue({ status: "unknown_reservation" }),
+    findReservationByClientKey: vi.fn().mockResolvedValue(null),
+    findReservationForPaymentSession: vi.fn().mockResolvedValue(null),
   };
   const coinbase: CoinbaseCdpClient = {
     createOnrampSessionToken: vi.fn().mockResolvedValue({ token: "session-token-01", channelId: "channel-01" }),
@@ -371,6 +374,7 @@ function buildReconfirmApp(options?: {
         : {
             createReservation: options.requireIdempotency,
             reconfirmReservation: options.requireIdempotency,
+            paymentSession: options.requireIdempotency,
           },
     ),
   );
@@ -529,6 +533,7 @@ describe("idempotency on reservation writes", () => {
       requireIdempotency: {
         createReservation: requireIdempotencyFor(store, "offering.reservation.create"),
         reconfirmReservation: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+        paymentSession: requireIdempotencyFor(store, "offering.reservation.payment_session"),
       },
     });
 
@@ -547,6 +552,7 @@ describe("idempotency on reservation writes", () => {
       requireIdempotency: {
         createReservation: requireIdempotencyFor(store, "offering.reservation.create"),
         reconfirmReservation: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+        paymentSession: requireIdempotencyFor(store, "offering.reservation.payment_session"),
       },
     });
 
@@ -571,6 +577,7 @@ describe("idempotency on reservation writes", () => {
       requireIdempotency: {
         createReservation: requireIdempotencyFor(store, "offering.reservation.create"),
         reconfirmReservation: requireIdempotencyFor(store, "offering.reservation.reconfirm"),
+        paymentSession: requireIdempotencyFor(store, "offering.reservation.payment_session"),
       },
     });
 

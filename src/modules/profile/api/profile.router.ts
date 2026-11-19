@@ -8,6 +8,7 @@ import {
   updateAccountPreferencesBodySchema,
   updateAccountPreferencesResponseSchema,
 } from "./profile.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 export function createProfileRouter(
   requireAuthentication: RequestHandler,
@@ -19,7 +20,7 @@ export function createProfileRouter(
     const context = requireCustomerContext(response.locals.authContext);
     const result = await getProfile.execute(context.accountId);
     response.setHeader("Cache-Control", "no-store");
-    response.json(profileResponseSchema.parse(result));
+    sendValidated(response, profileResponseSchema, result);
   });
   router.patch("/preferences", requireAuthentication, async (request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
@@ -32,7 +33,7 @@ export function createProfileRouter(
       ...(body.timezone === undefined ? {} : { timezone: body.timezone }),
     });
     response.setHeader("Cache-Control", "no-store");
-    response.json(updateAccountPreferencesResponseSchema.parse(result));
+    sendValidated(response, updateAccountPreferencesResponseSchema, result);
   });
   return router;
 }

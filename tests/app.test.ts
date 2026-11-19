@@ -307,7 +307,8 @@ describe("VistaBlox API", () => {
       code: "infrastructure.database_unavailable",
       title: "Service unavailable",
       status: 503,
-      detail: "The database dependency is unavailable.",
+      // A 5xx carries a fixed sentence; the specific cause is in the log (#72).
+      detail: "The service is temporarily unavailable. Please try again later.",
     });
     expect(response.body.trace_id).toMatch(/^req_/);
   });

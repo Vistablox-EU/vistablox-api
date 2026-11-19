@@ -280,7 +280,11 @@ describe("Coinbase CDP HTTP client", () => {
     );
 
     it.each([400, 404, 409, 422])(
-      "maps HTTP %i to a non-retryable client-facing 422 and logs a warning",
+      // A 5xx, not a 4xx: by the time this runs the reservation row exists, and
+      // a 4xx is stored by the idempotency middleware and read by the app as
+      // "nothing was made" (#58). The code stays distinct so a client can tell
+      // that retrying will not help.
+      "maps HTTP %i to a non-retryable 502 (never a stored 4xx) and logs a warning",
       async (status) => {
         const { client, logger } = buildLoggingClient(
           vi.fn().mockResolvedValue(new Response("sensitive upstream error", { status })),
@@ -288,7 +292,7 @@ describe("Coinbase CDP HTTP client", () => {
 
         await expect(createToken(client)).rejects.toMatchObject({
           code: "offering.coinbase_provider_request_rejected",
-          status: 422,
+          status: 502,
         });
         expect(logger.error).not.toHaveBeenCalled();
         expect(logger.warn).toHaveBeenCalledWith(

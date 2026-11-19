@@ -10,6 +10,7 @@ import {
   investorCurrentPositionsResponseSchema,
   investorReservationHistoryResponseSchema,
 } from "./investor-activity.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 export function createInvestorActivityRouter(
   requireAuthentication: RequestHandler,
@@ -25,7 +26,7 @@ export function createInvestorActivityRouter(
       query,
     });
     response.setHeader("Cache-Control", "no-store");
-    response.json(investorReservationHistoryResponseSchema.parse(result));
+    sendValidated(response, investorReservationHistoryResponseSchema, result);
   });
   router.get("/positions", requireAuthentication, async (request, response) => {
     const context = requireCustomerContext(response.locals.authContext);
@@ -35,7 +36,7 @@ export function createInvestorActivityRouter(
       query,
     });
     response.setHeader("Cache-Control", "no-store");
-    response.json(investorCurrentPositionsResponseSchema.parse(result));
+    sendValidated(response, investorCurrentPositionsResponseSchema, result);
   });
   return router;
 }

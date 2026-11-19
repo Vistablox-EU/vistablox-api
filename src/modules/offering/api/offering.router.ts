@@ -19,6 +19,7 @@ import {
   reconfirmReservationResponseSchema,
   reservationParamsSchema,
 } from "./offering.schemas.js";
+import { sendValidated } from "../../../shared/http/send-validated.js";
 
 export function createOfferingRouter(service: ListPublicOfferingsService): Router {
   const router = Router();
@@ -26,7 +27,7 @@ export function createOfferingRouter(service: ListPublicOfferingsService): Route
   router.get("/", async (request, response) => {
     const query = listOfferingsQuerySchema.parse(request.query);
     const result = await service.execute(query);
-    response.json(listOfferingsResponseSchema.parse(result));
+    sendValidated(response, listOfferingsResponseSchema, result);
   });
 
   return router;
@@ -42,6 +43,7 @@ export function createInvestorOfferingRouter(
   requireIdempotency?: {
     createReservation: RequestHandler;
     reconfirmReservation: RequestHandler;
+    paymentSession: RequestHandler;
   },
 ): Router {
   const router = Router();
@@ -54,7 +56,7 @@ export function createInvestorOfferingRouter(
       accountId: context.accountId,
     });
     response.setHeader("Cache-Control", "no-store");
-    response.json(investorOfferingDetailResponseSchema.parse(result));
+    sendValidated(response, investorOfferingDetailResponseSchema, result);
   });
 
   if (createReservation !== undefined) {
@@ -82,8 +84,33 @@ export function createInvestorOfferingRouter(
         traceId: String(response.locals.traceId),
       });
       response.setHeader("Cache-Control", "no-store");
-      response.status(201).json(createReservationResponseSchema.parse(result));
+      sendValidated(response, createReservationResponseSchema, result, 201);
       });
+
+    // A new Coinbase session for a hold that already exists. The first
+    // answer's onramp URL is single-use and good for five minutes, so a client
+    // that comes back to the payment later (or after a failed attempt) asks
+    // here instead of re-opening it. Behind the same Idempotency-Key
+    // middleware as the other funding writes, one key per user press: a retry
+    // of a press whose answer was lost gets that press's session, the next
+    // press (a new key) gets a new one.
+    router.post(
+      "/:offering_id/reservations/:reservation_id/payment-session",
+      requireAuthentication,
+      ...(requireFreshAuthentication === undefined ? [] : [requireFreshAuthentication]),
+      ...(requireIdempotency === undefined ? [] : [requireIdempotency.paymentSession]),
+      async (request, response) => {
+        const context = requireCustomerContext(response.locals.authContext);
+        const params = reservationParamsSchema.parse(request.params);
+        const result = await createReservation.startPaymentSession({
+          offeringId: params.offering_id,
+          reservationId: params.reservation_id,
+          accountId: context.accountId,
+        });
+        response.setHeader("Cache-Control", "no-store");
+        sendValidated(response, createReservationResponseSchema, result);
+      },
+    );
   }
 
   if (reconfirmReservation !== undefined) {
@@ -101,7 +128,7 @@ export function createInvestorOfferingRouter(
           traceId: String(response.locals.traceId),
         });
         response.setHeader("Cache-Control", "no-store");
-        response.json(reconfirmReservationResponseSchema.parse(result));
+        sendValidated(response, reconfirmReservationResponseSchema, result);
       },
     );
   }
