@@ -10,6 +10,7 @@ import {
   SmtpEmailSender,
   type SmtpEmailSenderOptions,
 } from "../src/infrastructure/email/smtp-email-sender.js";
+import { logMailDeliveryFailure, type MailFailureLogger } from "../src/shared/logging/mail-failure.js";
 
 // A hung or dead SMTP server must cost a bounded wait, not nodemailer's own
 // defaults (2 minutes to connect, 10 of silence on the socket). The servers
@@ -181,5 +182,49 @@ describe("SmtpEmailSender timeouts", () => {
     await sendCode(senderFor(healthy.port, { timeouts: { socketMs: 2_000, greetingMs: 2_000, connectionMs: 2_000 } }));
 
     expect(received.join("\n")).toContain("482913");
+  }, 15_000);
+});
+
+describe("a recipient rejected by a real SMTP exchange", () => {
+  it("quotes the address in nodemailer's error, and the log line built from it does not", async () => {
+    const rejecting = await startServer((socket) => {
+      socket.write("220 fake ESMTP ready\r\n");
+      lineReader(socket, (line) => {
+        if (/^EHLO/i.test(line)) socket.write("250-fake\r\n250 AUTH PLAIN\r\n");
+        else if (/^AUTH/i.test(line)) socket.write("235 2.7.0 ok\r\n");
+        else if (/^MAIL/i.test(line)) socket.write("250 ok\r\n");
+        else if (/^RCPT/i.test(line)) socket.write(`550 5.1.1 <${RECIPIENT}>: Recipient address rejected: User unknown\r\n`);
+        else if (/^(RSET|QUIT)/i.test(line)) socket.write("250 ok\r\n");
+      });
+    });
+
+    const failure = await sendCode(senderFor(rejecting.port, { timeouts: { socketMs: 2_000, greetingMs: 2_000 } })).then(
+      () => null,
+      (error: unknown) => error as Error & { code?: string },
+    );
+
+    // The premise: the unscrubbed error really does carry the address.
+    expect(failure).not.toBeNull();
+    expect(failure?.message).toContain(RECIPIENT);
+
+    const warn = vi.fn();
+    logMailDeliveryFailure({ warn } as MailFailureLogger, {
+      kind: "device_replacement_code",
+      traceId: "trace_1",
+      accountId: "acct_1",
+      error: failure,
+      withhold: [RECIPIENT, "482913"],
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const logged = JSON.stringify(warn.mock.calls[0]);
+    expect(logged).not.toContain(RECIPIENT);
+    expect(logged).not.toContain("482913");
+    expect(warn.mock.calls[0]?.[0]).toMatchObject({
+      event: "email.delivery_failed",
+      mail_kind: "device_replacement_code",
+      account_id: "acct_1",
+      error_code: "EENVELOPE",
+    });
   }, 15_000);
 });

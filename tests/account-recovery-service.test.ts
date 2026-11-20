@@ -16,6 +16,7 @@ import type {
 } from "../src/modules/auth/repository/staff/account-recovery.repository.js";
 import type { DiditClient } from "../src/modules/identity/application/didit-client.js";
 import type { EmailSender } from "../src/infrastructure/email/smtp-email-sender.js";
+import type { MailFailureLogger } from "../src/shared/logging/mail-failure.js";
 
 const accountId = "acct_customer_01";
 const caseId = "recovery_case_01";
@@ -101,6 +102,10 @@ function administrator(overrides: Partial<CustomerAccountAdministrator> = {}): C
   };
 }
 
+function silentLogger(): MailFailureLogger {
+  return { warn: vi.fn() };
+}
+
 function emailSender(overrides: Partial<EmailSender> = {}): EmailSender {
   return {
     sendPasskeyRecoveryEmail: vi.fn().mockResolvedValue(undefined),
@@ -153,6 +158,7 @@ describe("OpenAccountRecoveryCaseService", () => {
       repository({ openCase }),
       administrator({ revokeAllSessions }),
       emailSender({ sendAccountRecoveryCaseOpenedEmail }),
+      silentLogger(),
       () => now,
     );
 
@@ -178,6 +184,7 @@ describe("OpenAccountRecoveryCaseService", () => {
       repository({ findTargetForRecovery: vi.fn().mockResolvedValue(null) }),
       administrator(),
       emailSender(),
+      silentLogger(),
     );
 
     await expect(
@@ -190,6 +197,7 @@ describe("OpenAccountRecoveryCaseService", () => {
       repository({ findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: true })) }),
       administrator(),
       emailSender(),
+      silentLogger(),
     );
 
     await expect(
@@ -204,6 +212,7 @@ describe("OpenAccountRecoveryCaseService", () => {
       }),
       administrator(),
       emailSender(),
+      silentLogger(),
     );
 
     await expect(
@@ -216,6 +225,7 @@ describe("OpenAccountRecoveryCaseService", () => {
       repository({ findOpenCaseForAccount: vi.fn().mockResolvedValue(caseRecord()) }),
       administrator(),
       emailSender(),
+      silentLogger(),
     );
 
     await expect(
@@ -230,6 +240,7 @@ describe("OpenAccountRecoveryCaseService", () => {
       emailSender({
         sendAccountRecoveryCaseOpenedEmail: vi.fn().mockRejectedValue(new Error("smtp down")),
       }),
+      silentLogger(),
     );
 
     await expect(
@@ -408,6 +419,7 @@ describe("DecideAccountRecoveryCaseService", () => {
     const service = new DecideAccountRecoveryCaseService(
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ reviewedByPrimary: "acct_reviewer_01" })) }),
       emailSender({ sendAccountRecoveryApprovedEmail, sendAccountRecoveryRejectedEmail }),
+      silentLogger(),
       () => now,
     );
 
@@ -434,6 +446,7 @@ describe("DecideAccountRecoveryCaseService", () => {
         decideCase,
       }),
       emailSender({ sendAccountRecoveryRejectedEmail }),
+      silentLogger(),
     );
 
     await service.execute({
@@ -460,6 +473,7 @@ describe("DecideAccountRecoveryCaseService", () => {
         decideCase,
       }),
       emailSender(),
+      silentLogger(),
       () => now,
       true,
     );
@@ -489,6 +503,7 @@ describe("DecideAccountRecoveryCaseService", () => {
         decideCase,
       }),
       emailSender(),
+      silentLogger(),
     );
 
     await expect(
@@ -530,6 +545,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ sendRecoveryCompletionEmail, revokeSessionsForRecoveryCompletion, clearRecoveryRequired }),
       emailSender({ sendAccountRecoveryCompletedEmail }),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
@@ -591,6 +607,7 @@ describe("CompleteAccountRecoveryService", () => {
         clearRecoveryRequired,
       }),
       emailSender(),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
@@ -612,6 +629,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator(),
       emailSender({ sendAccountRecoveryCompletedEmail: vi.fn().mockRejectedValue(new Error("smtp down")) }),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
@@ -637,6 +655,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ revokeSessionsForRecoveryCompletion, clearRecoveryRequired }),
       emailSender(),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
@@ -676,6 +695,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender({ sendAccountRecoveryCompletedEmail }),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
@@ -712,6 +732,7 @@ describe("CompleteAccountRecoveryService", () => {
       repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ status: "open" })) }),
       administrator(),
       emailSender(),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
     );
 
@@ -730,6 +751,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender(),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
     );
 
@@ -749,6 +771,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender(),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
     );
 
@@ -773,6 +796,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ sendRecoveryCompletionEmail: vi.fn().mockRejectedValue(new Error("smtp down")) }),
       emailSender({ sendAccountRecoveryCompletedEmail }),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
@@ -814,6 +838,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender({ sendAccountRecoveryCompletedEmail }),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
       () => now,
     );
@@ -848,6 +873,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator({ sendRecoveryCompletionEmail }),
       emailSender(),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
     );
 
@@ -864,6 +890,7 @@ describe("CompleteAccountRecoveryService", () => {
       }),
       administrator(),
       emailSender(),
+      silentLogger(),
       "https://app.vistablox.io/recover-account",
     );
 
@@ -872,4 +899,199 @@ describe("CompleteAccountRecoveryService", () => {
     ).rejects.toMatchObject({ code: "authentication.account_recovery_case_not_approved" });
   });
 
+});
+
+// A mail failure is swallowed on purpose (the case, the decision or the
+// completion is already durable, and the response must not depend on whether
+// an address received anything). These tests pin both halves: the outcome is
+// exactly the one the swallow always gave, and the failure is no longer
+// invisible: one warn line with the ids and the shape of the error, and never
+// the address the error quoted.
+describe("recovery mails that fail to send", () => {
+  const address = "investor@example.com";
+
+  function smtpRejection(): Error {
+    return Object.assign(
+      new Error(`Can't send mail - all recipients were rejected: 550 5.1.1 <${address}>: Recipient address rejected`),
+      { code: "EENVELOPE" },
+    );
+  }
+
+  function recordingLogger() {
+    const warn = vi.fn();
+    return { logger: { warn } as MailFailureLogger, warn };
+  }
+
+  function onlyLine(warn: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string];
+    // The whole call, message included, carries no trace of the recipient.
+    expect(JSON.stringify([fields, message])).not.toContain(address);
+    return fields;
+  }
+
+  const failureFields = {
+    event: "email.delivery_failed",
+    severity: "warn",
+    trace_id: "trace_01",
+    error_class: "Error",
+    error_code: "EENVELOPE",
+    error_message: "Can't send mail - all recipients were rejected: 550 5.1.1 <[withheld]>: Recipient address rejected",
+  };
+
+  it("case opened: still opens the case, and logs the failure with both ids", async () => {
+    const { logger, warn } = recordingLogger();
+    const service = new OpenAccountRecoveryCaseService(
+      repository(),
+      administrator(),
+      emailSender({ sendAccountRecoveryCaseOpenedEmail: vi.fn().mockRejectedValue(smtpRejection()) }),
+      logger,
+      () => now,
+    );
+
+    await expect(
+      service.execute({ accountId, actorAccountId: "acct_staff_01", traceId: "trace_01" }),
+    ).resolves.toEqual(caseRecord());
+
+    expect(onlyLine(warn)).toEqual({
+      ...failureFields,
+      mail_kind: "account_recovery_case_opened",
+      account_id: accountId,
+      case_id: caseId,
+    });
+  });
+
+  it.each([
+    ["approved", "account_recovery_approved"],
+    ["rejected", "account_recovery_rejected"],
+  ] as const)("decision %s: still records the decision, and logs which notice failed", async (decision, mailKind) => {
+    const { logger, warn } = recordingLogger();
+    const decideCase = vi.fn().mockResolvedValue(
+      caseRecord({ status: decision, reviewedByPrimary: "acct_reviewer_01", reviewedBySecondary: "acct_reviewer_02" }),
+    );
+    const failing = vi.fn().mockRejectedValue(smtpRejection());
+    const service = new DecideAccountRecoveryCaseService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ reviewedByPrimary: "acct_reviewer_01" })),
+        decideCase,
+      }),
+      emailSender({ sendAccountRecoveryApprovedEmail: failing, sendAccountRecoveryRejectedEmail: failing }),
+      logger,
+      () => now,
+    );
+
+    const result = await service.execute({
+      caseId,
+      actorAccountId: "acct_reviewer_02",
+      traceId: "trace_01",
+      decision,
+      reason: "Reviewed.",
+    });
+
+    expect(result.status).toBe(decision);
+    expect(onlyLine(warn)).toEqual({
+      ...failureFields,
+      mail_kind: mailKind,
+      account_id: accountId,
+      case_id: caseId,
+    });
+  });
+
+  it("staff completion notice: the completed case is still returned, and the failure is logged", async () => {
+    const { logger, warn } = recordingLogger();
+    const recordRecoveryAuditEvent = vi.fn().mockResolvedValue(undefined);
+    const service = new CompleteAccountRecoveryService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: true })),
+        recordRecoveryAuditEvent,
+      }),
+      administrator(),
+      emailSender({ sendAccountRecoveryCompletedEmail: vi.fn().mockRejectedValue(smtpRejection()) }),
+      logger,
+      "https://app.vistablox.io/recover-account",
+      () => now,
+    );
+
+    const result = await service.execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" });
+
+    expect(result.status).toBe("completed");
+    // The link itself went out and was audited as before.
+    expect(recordRecoveryAuditEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ action: "authentication.account_recovery_link_sent" }),
+    );
+    expect(onlyLine(warn)).toEqual({
+      ...failureFields,
+      mail_kind: "account_recovery_completed",
+      account_id: accountId,
+      case_id: caseId,
+    });
+  });
+
+  it("customer re-enrolment notice: still audited as failed, and the failure is logged under the case", async () => {
+    const { logger, warn } = recordingLogger();
+    const recordRecoveryAuditEvent = vi.fn().mockResolvedValue(undefined);
+    const service = new CompleteAccountRecoveryService(
+      repository({
+        findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+        findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff: false })),
+        recordRecoveryAuditEvent,
+      }),
+      administrator(),
+      emailSender({ sendAccountRecoveryCompletedEmail: vi.fn().mockRejectedValue(smtpRejection()) }),
+      logger,
+      "https://app.vistablox.io/recover-account",
+      () => now,
+    );
+
+    const result = await service.execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" });
+
+    expect(result.status).toBe("completed");
+    expect(recordRecoveryAuditEvent.mock.calls.at(-1)?.[0]).toMatchObject({
+      action: "authentication.account_recovery_reenrolment_notice",
+      changes: { outcome: "failed" },
+    });
+    expect(onlyLine(warn)).toEqual({
+      ...failureFields,
+      mail_kind: "account_recovery_reenrolment_notice",
+      case_id: caseId,
+    });
+  });
+
+  it("logs nothing when the mails go out", async () => {
+    const { logger, warn } = recordingLogger();
+    const decision = {
+      caseId,
+      actorAccountId: "acct_reviewer_02",
+      traceId: "trace_01",
+      decision: "approved" as const,
+      reason: "Reviewed.",
+    };
+    await new OpenAccountRecoveryCaseService(repository(), administrator(), emailSender(), logger, () => now).execute({
+      accountId,
+      actorAccountId: "acct_staff_01",
+      traceId: "trace_01",
+    });
+    await new DecideAccountRecoveryCaseService(
+      repository({ findCase: vi.fn().mockResolvedValue(caseRecord({ reviewedByPrimary: "acct_reviewer_01" })) }),
+      emailSender(),
+      logger,
+      () => now,
+    ).execute(decision);
+    for (const isStaff of [false, true]) {
+      await new CompleteAccountRecoveryService(
+        repository({
+          findCase: vi.fn().mockResolvedValue(caseRecord({ status: "approved" })),
+          findTargetForRecovery: vi.fn().mockResolvedValue(target({ isStaff })),
+        }),
+        administrator(),
+        emailSender(),
+        logger,
+        "https://app.vistablox.io/recover-account",
+        () => now,
+      ).execute({ caseId, actorAccountId: "acct_staff_01", traceId: "trace_01" });
+    }
+
+    expect(warn).not.toHaveBeenCalled();
+  });
 });

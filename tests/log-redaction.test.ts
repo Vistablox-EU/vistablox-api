@@ -1,7 +1,13 @@
 import { HttpRequestError } from "viem";
 import { describe, expect, it } from "vitest";
 
-import { maskHexIdentifier, maskLongHexValues, stripUrls, toSanitizedError } from "../src/shared/logging/log-redaction.js";
+import {
+  maskHexIdentifier,
+  maskLongHexValues,
+  stripEmailAddresses,
+  stripUrls,
+  toSanitizedError,
+} from "../src/shared/logging/log-redaction.js";
 
 const RPC_SECRET = "SECRETPROVIDERKEY123";
 const RPC_URL = `https://base-sepolia.g.alchemy.com/v2/${RPC_SECRET}`;
@@ -80,6 +86,27 @@ describe("stripUrls", () => {
     expect(stripUrls("no urls here")).toBe("no urls here");
     const once = stripUrls(`x ${RPC_URL} y`);
     expect(stripUrls(once)).toBe(once);
+  });
+});
+
+describe("stripEmailAddresses", () => {
+  it("replaces an address wherever an SMTP reply or an envelope error quotes it", () => {
+    expect(stripEmailAddresses("550 5.1.1 <jane.doe+tag@mail.example.co.uk>: Recipient address rejected")).toBe(
+      "550 5.1.1 <[email]>: Recipient address rejected",
+    );
+    expect(stripEmailAddresses('Invalid recipient "jane@example.test"')).toBe('Invalid recipient "[email]"');
+    expect(stripEmailAddresses("from a@x.test to b@y.test, c@z.test")).toBe("from [email] to [email], [email]");
+  });
+
+  it("matches regardless of case, and leaves text without an address alone", () => {
+    expect(stripEmailAddresses("Jane@Example.TEST")).toBe("[email]");
+    expect(stripEmailAddresses("Greeting never received")).toBe("Greeting never received");
+    expect(stripEmailAddresses("host smtp.example.test:587")).toBe("host smtp.example.test:587");
+  });
+
+  it("is idempotent", () => {
+    const once = stripEmailAddresses("550 <jane@example.test> rejected");
+    expect(stripEmailAddresses(once)).toBe(once);
   });
 });
 

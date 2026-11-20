@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { AppError } from "../../../../shared/errors/app-error.js";
 import type { EmailSender } from "../../../../infrastructure/email/smtp-email-sender.js";
+import { logMailDeliveryFailure, type MailFailureLogger } from "../../../../shared/logging/mail-failure.js";
 import type { DiditClient } from "../../../identity/application/didit-client.js";
 import type {
   AccountRecoveryCaseRecord,
@@ -20,6 +21,7 @@ export class OpenAccountRecoveryCaseService {
     private readonly repository: AccountRecoveryRepository,
     private readonly administrator: CustomerAccountAdministrator,
     private readonly emailSender: EmailSender,
+    private readonly logger: MailFailureLogger,
     private readonly clock: () => Date = () => new Date(),
   ) {}
 
@@ -50,10 +52,18 @@ export class OpenAccountRecoveryCaseService {
     if (target.contactEmail !== null) {
       try {
         await this.emailSender.sendAccountRecoveryCaseOpenedEmail({ to: target.contactEmail });
-      } catch {
+      } catch (error) {
         // Best-effort: this is a security FYI, not the recovery mechanism
         // itself — access is already revoked and the case is already open
-        // regardless of whether this notification lands.
+        // regardless of whether this notification lands. Logged, not thrown.
+        logMailDeliveryFailure(this.logger, {
+          kind: "account_recovery_case_opened",
+          accountId: input.accountId,
+          caseId: created.id,
+          traceId: input.traceId,
+          error,
+          withhold: [target.contactEmail],
+        });
       }
     }
 
@@ -154,6 +164,7 @@ export class DecideAccountRecoveryCaseService {
   public constructor(
     private readonly repository: AccountRecoveryRepository,
     private readonly emailSender: EmailSender,
+    private readonly logger: MailFailureLogger,
     private readonly clock: () => Date = () => new Date(),
     private readonly singleReviewerMode = false,
   ) {}
@@ -190,8 +201,16 @@ export class DecideAccountRecoveryCaseService {
         } else {
           await this.emailSender.sendAccountRecoveryRejectedEmail({ to: target.contactEmail });
         }
-      } catch {
+      } catch (error) {
         // Best-effort notification — the decision itself is already durable.
+        logMailDeliveryFailure(this.logger, {
+          kind: input.decision === "approved" ? "account_recovery_approved" : "account_recovery_rejected",
+          accountId: updated.accountId,
+          caseId: input.caseId,
+          traceId: input.traceId,
+          error,
+          withhold: [target.contactEmail],
+        });
       }
     }
 
@@ -204,6 +223,7 @@ export class CompleteAccountRecoveryService {
     private readonly repository: AccountRecoveryRepository,
     private readonly administrator: CustomerAccountAdministrator,
     private readonly emailSender: EmailSender,
+    private readonly logger: MailFailureLogger,
     private readonly recoveryRedirectUrl: string,
     private readonly clock: () => Date = () => new Date(),
   ) {}
@@ -367,8 +387,16 @@ export class CompleteAccountRecoveryService {
           to: input.target.contactEmail,
           cooldownEndsAt: input.cooldownEndsAt,
         });
-      } catch {
+      } catch (error) {
         // Best-effort: completion and the cooldown are already durable.
+        logMailDeliveryFailure(this.logger, {
+          kind: "account_recovery_completed",
+          accountId: input.target.accountId,
+          caseId: input.caseId,
+          traceId: input.traceId,
+          error,
+          withhold: [input.target.contactEmail],
+        });
       }
     }
   }
@@ -460,8 +488,15 @@ export class CompleteAccountRecoveryService {
           deviceReenrolmentRequired: true,
         });
         outcome = "sent";
-      } catch {
+      } catch (error) {
         outcome = "failed";
+        logMailDeliveryFailure(this.logger, {
+          kind: "account_recovery_reenrolment_notice",
+          caseId: input.caseId,
+          traceId: input.traceId,
+          error,
+          withhold: [input.contactEmail],
+        });
       }
     }
     try {

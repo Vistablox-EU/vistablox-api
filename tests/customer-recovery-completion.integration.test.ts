@@ -33,6 +33,7 @@ import { PrismaAccountRecoveryRepository } from "../src/modules/auth/repository/
 import { PrismaDeviceChallengeRepository } from "../src/modules/auth/repository/customer/prisma-device-challenge.repository.js";
 import { PrismaDeviceRepository } from "../src/modules/auth/repository/customer/prisma-device.repository.js";
 import { PrismaDpopReplayRepository } from "../src/modules/auth/repository/shared/prisma-dpop-replay.repository.js";
+import { createLogger } from "../src/infrastructure/logging/logger.js";
 import { errorHandler } from "../src/shared/http/error-handler.js";
 import { requestContext } from "../src/shared/http/request-context.js";
 
@@ -236,7 +237,7 @@ describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, 
     // Staff open the case through the real service: the recovery flag is
     // set on the customer (this CHECK used to refuse it for customers), the
     // account is restricted, and every session ends.
-    const opened = await new OpenAccountRecoveryCaseService(recoveryRepository, administrator, emailSender).execute({
+    const opened = await new OpenAccountRecoveryCaseService(recoveryRepository, administrator, emailSender, createLogger("silent")).execute({
       accountId: customerAccountId,
       actorAccountId,
       traceId: `trace_${suffix}`,
@@ -277,6 +278,7 @@ describe.skipIf(databaseUrl === undefined)("customer recovery case, completion, 
       recoveryRepository,
       administrator,
       emailSender,
+      createLogger("silent"),
       "https://app.example.test/recover-account",
     ).execute({ caseId: opened.id, actorAccountId, traceId: `trace_${suffix}` });
     expect(completed.status).toBe("completed");

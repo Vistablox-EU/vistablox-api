@@ -2,6 +2,7 @@ import { createHash, randomInt, timingSafeEqual } from "node:crypto";
 
 import { AppError } from "../../../../shared/errors/app-error.js";
 import type { EmailSender } from "../../../../infrastructure/email/smtp-email-sender.js";
+import { logMailDeliveryFailure, type MailFailureLogger } from "../../../../shared/logging/mail-failure.js";
 import type { DeviceReplacementRepository } from "../../repository/customer/device-replacement.repository.js";
 
 // A six-digit decimal code: 10^6 possibilities, bounded by the attempt cap and
@@ -26,6 +27,7 @@ export class RequestDeviceReplacementService {
   public constructor(
     private readonly repository: DeviceReplacementRepository,
     private readonly emailSender: EmailSender,
+    private readonly logger: MailFailureLogger,
     private readonly config: DeviceReplacementConfig,
     private readonly clock: () => Date = () => new Date(),
   ) {}
@@ -106,9 +108,17 @@ export class RequestDeviceReplacementService {
         code,
         expiresInMinutes: Math.round(this.config.codeTtlMs / 60_000),
       });
-    } catch {
-      // Ignored: issuance is durable; the delivery failure is not the customer's
-      // error to fix. A subsequent request (within rate limits) re-sends.
+    } catch (error) {
+      // Not the customer's error to fix: issuance is durable and a subsequent
+      // request (within rate limits) re-sends. Logged so an operator can see
+      // that codes are not going out; the response stays the same either way.
+      logMailDeliveryFailure(this.logger, {
+        kind: "device_replacement_code",
+        accountId: input.accountId,
+        traceId: input.traceId,
+        error,
+        withhold: [target.contactEmail, code],
+      });
     }
 
     return;

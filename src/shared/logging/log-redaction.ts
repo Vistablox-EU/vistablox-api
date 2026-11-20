@@ -23,6 +23,25 @@ export function stripUrls(text: string): string {
   return text.replace(URL_PATTERN, URL_PLACEHOLDER);
 }
 
+const EMAIL_PLACEHOLDER = "[email]";
+
+// local-part@domain.tld, with the characters that delimit an address in an SMTP
+// reply or a header ("<", ">", quotes, commas, colons) kept out of the match so
+// the text around it survives. A bare local part, which a server may echo on its
+// own, is not recognised.
+const EMAIL_ADDRESS_PATTERN = /[^\s@<>()"',;:]+@[^\s@<>()"',;:]+\.[a-z]{2,}/gi;
+
+/**
+ * Replaces every email address in `text` with "[email]". For error text an SMTP
+ * server or nodemailer produced: a rejection reply quotes the recipient
+ * ("550 5.1.1 <address>: Recipient address rejected") and an envelope error
+ * repeats it, so a message logged as-is would put a customer's address in the
+ * log. Idempotent.
+ */
+export function stripEmailAddresses(text: string): string {
+  return text.replace(EMAIL_ADDRESS_PATTERN, EMAIL_PLACEHOLDER);
+}
+
 const MASKABLE_HEX = /^0x[0-9a-f]{8,}$/;
 
 /**
