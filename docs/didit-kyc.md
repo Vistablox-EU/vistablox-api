@@ -34,7 +34,7 @@ A session start can get permanently wedged with no self-service recovery path, s
 
 The renewal-reminder timer (`maintenance.kyc_renewal`, `RunKycRenewalTimerService`, daily) runs in the same worker process for the same reason — see [`README.md`](../README.md)'s worker description.
 
-Deliberately not built: alerting. `AD-089`'s alert-source list scopes `pg-boss` observability hooks (dead-letter count, stuck job age) to the `money_ops`/`settlement` queues specifically; neither of these jobs' `maintenance` queue is in that scope, so a stuck session that this reconciliation still can't resolve (Didit itself never transitions it) is currently only visible via the worker's own structured logs, not paged to anyone.
+Alerting: a run of these jobs (or of `maintenance.kyc_renewal`) that fails every retry is dead-lettered like any other queue and is reported through the dead-letter alert when `DEAD_LETTER_ALERT_WEBHOOK_URL` is set, as `[tier_2]` with owner `identity` (see [`dead-letter-jobs.md`](dead-letter-jobs.md)). A run that completes without resolving a stuck session (Didit itself never transitions it) does not fail, so it is never dead-lettered; that case is still only visible via the worker's own structured logs, and nothing pages anyone on it.
 
 ## Configuration
 
