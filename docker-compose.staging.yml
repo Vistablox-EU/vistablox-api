@@ -20,13 +20,17 @@ services:
       retries: 10
 
   # Email catcher: staging should never send to real inboxes, so SMTP_* below
-  # points here instead of a real provider. Web UI at http://<host>:1080.
+  # points here instead of a real provider. The mail it holds carries staff
+  # invitation links, recovery links and device-replacement codes, and the UI
+  # has no login, so it is published on the host's loopback interface only
+  # (SMTP stays unpublished). Reach it from your machine with an SSH tunnel:
+  #   ssh -L 1080:127.0.0.1:1080 <staging-host>   then open http://localhost:1080
   maildev:
     build:
       context: .
       dockerfile: infrastructure/maildev/Dockerfile
     ports:
-      - "1080:1080"
+      - "127.0.0.1:1080:1080"
 
   # Private, persistent S3-compatible storage for disclosure and operational
   # documents. No host port is published: only services on this Compose
