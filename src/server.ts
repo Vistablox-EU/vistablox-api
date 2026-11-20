@@ -536,6 +536,7 @@ const documentUploadService =
         }),
         environment.MINIO_PRIVATE_BUCKET,
         malwareScanner,
+        logger,
       )
     : undefined;
 const documentDownloadService =

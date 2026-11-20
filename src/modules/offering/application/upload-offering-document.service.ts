@@ -1,8 +1,11 @@
 import { createHash, randomUUID } from "node:crypto";
 
+import type { Logger } from "pino";
+
 import type { MalwareScanner } from "../../../infrastructure/antivirus/clamav-scanner.js";
 import { objectKey } from "../../../infrastructure/storage/storage-buckets.js";
 import { AppError } from "../../../shared/errors/app-error.js";
+import { logObjectDeleteFailure } from "../../../shared/logging/object-delete-failure.js";
 import type { UploadOfferingDocumentResponse } from "../api/offering-operations.schemas.js";
 import { disclosureDocumentTypes, type DisclosureDocumentType } from "../domain/disclosure-pack.policy.js";
 import type { OfferingDocumentRepository } from "../repository/offering-document.repository.js";
@@ -37,6 +40,7 @@ export class UploadOfferingDocumentService {
     private readonly store: WritableDisclosureDocumentStore,
     private readonly scanner: MalwareScanner,
     private readonly clock: () => Date = () => new Date(),
+    private readonly logger?: Pick<Logger, "warn">,
   ) {}
 
   public async execute(input: {
@@ -153,8 +157,21 @@ export class UploadOfferingDocumentService {
       });
     } catch (error) {
       // No metadata row means nothing can ever reference the object; take it
-      // back out rather than leave an orphan behind. Best effort only.
-      await this.store.delete(documentRef).catch(() => undefined);
+      // back out rather than leave an orphan behind. Best effort: if the delete
+      // fails it is logged (the bucket is the store's, so the line has none)
+      // and nothing retries it, so the object stays. The error thrown is still
+      // the one from the metadata write.
+      try {
+        await this.store.delete(documentRef);
+      } catch (deleteError) {
+        logObjectDeleteFailure(this.logger, {
+          operation: "offering.document_upload_rollback",
+          objectKey: documentRef,
+          documentId,
+          traceId: input.traceId,
+          error: deleteError,
+        });
+      }
       throw error;
     }
 

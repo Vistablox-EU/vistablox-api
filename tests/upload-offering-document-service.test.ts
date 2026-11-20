@@ -11,6 +11,8 @@ import {
   asciiMetadataValue,
 } from "../src/modules/offering/application/upload-offering-document.service.js";
 import type { OfferingDocumentRepository } from "../src/modules/offering/repository/offering-document.repository.js";
+import { OBJECT_DELETE_FAILED } from "../src/shared/logging/object-delete-failure.js";
+import { createMemoryLogger } from "./support/memory-logger.js";
 
 const now = new Date("2026-11-13T10:00:00.000Z");
 const offeringId = "offering_01M7AGKPB4F22YKF7Y3SJFB4W1";
@@ -193,6 +195,76 @@ describe("UploadOfferingDocumentService", () => {
     expect(objects.put).toHaveBeenCalledOnce();
     const putInput = vi.mocked(objects.put).mock.calls[0]![0];
     expect(objects.delete).toHaveBeenCalledWith(putInput.documentReference);
+  });
+
+  describe("when the stored object cannot be removed after the metadata row failed", () => {
+    it("logs one warning with the object key and document id and still throws the database error", async () => {
+      const failure = new Error("database down");
+      const objects = store({
+        delete: vi.fn().mockRejectedValue(new Error("connect ECONNREFUSED http://minio.internal:9000/vistablox-disclosures/offerings/x")),
+      });
+      const documents = repository({ createOfferingDocument: vi.fn().mockRejectedValue(failure) });
+      const { logger, lines } = createMemoryLogger();
+      const service = new UploadOfferingDocumentService(documents, objects, scanner(), () => now, logger);
+
+      await expect(service.execute(input())).rejects.toBe(failure);
+
+      const putInput = vi.mocked(objects.put).mock.calls[0]![0];
+      expect(objects.delete).toHaveBeenCalledOnce();
+      expect(objects.delete).toHaveBeenCalledWith(putInput.documentReference);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).toMatchObject({
+        level: 40,
+        event: OBJECT_DELETE_FAILED,
+        operation: "offering.document_upload_rollback",
+        object_key: putInput.documentReference,
+        document_id: putInput.documentReference.split("/").at(-1),
+        trace_id: "req_01",
+        err: { message: expect.stringContaining("ECONNREFUSED") },
+      });
+      // The store owns the bucket, so the service does not claim one; the
+      // storage endpoint and the document's own details stay out of the line.
+      expect(lines[0]).not.toHaveProperty("bucket");
+      const text = JSON.stringify(lines[0]);
+      expect(text).not.toContain("minio.internal");
+      expect(text).not.toContain("Final terms");
+      expect(text).not.toContain("final terms");
+      expect(text).not.toContain("application/pdf");
+    });
+
+    it("logs nothing when the object is removed", async () => {
+      const failure = new Error("database down");
+      const objects = store();
+      const documents = repository({ createOfferingDocument: vi.fn().mockRejectedValue(failure) });
+      const { logger, lines } = createMemoryLogger();
+      const service = new UploadOfferingDocumentService(documents, objects, scanner(), () => now, logger);
+
+      await expect(service.execute(input())).rejects.toBe(failure);
+
+      expect(objects.delete).toHaveBeenCalledOnce();
+      expect(lines).toEqual([]);
+    });
+
+    it("logs nothing on a successful upload", async () => {
+      const objects = store({ delete: vi.fn().mockRejectedValue(new Error("minio down")) });
+      const { logger, lines } = createMemoryLogger();
+      const service = new UploadOfferingDocumentService(repository(), objects, scanner(), () => now, logger);
+
+      await expect(service.execute(input())).resolves.toMatchObject({ data: { document_type: "final_terms_sheet" } });
+
+      expect(objects.delete).not.toHaveBeenCalled();
+      expect(lines).toEqual([]);
+    });
+
+    it("still throws the database error when no logger was given", async () => {
+      const failure = new Error("database down");
+      const objects = store({ delete: vi.fn().mockRejectedValue(new Error("minio down")) });
+      const documents = repository({ createOfferingDocument: vi.fn().mockRejectedValue(failure) });
+      const service = new UploadOfferingDocumentService(documents, objects, scanner(), () => now);
+
+      await expect(service.execute(input())).rejects.toBe(failure);
+      expect(objects.delete).toHaveBeenCalledOnce();
+    });
   });
 
   it("propagates a storage write failure without touching the database", async () => {

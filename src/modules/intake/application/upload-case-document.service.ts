@@ -1,7 +1,9 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DeleteObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import type { Logger } from "pino";
 import type { DatabaseClient } from "../../../infrastructure/database/prisma.js";
 import { AppError } from "../../../shared/errors/app-error.js";
+import { logObjectDeleteFailure } from "../../../shared/logging/object-delete-failure.js";
 import { objectKey } from "../../../infrastructure/storage/storage-buckets.js";
 import type { MalwareScanner } from "../../../infrastructure/antivirus/clamav-scanner.js";
 import { submissionEvidenceTypes } from "../domain/case-submission.policy.js";
@@ -16,7 +18,17 @@ const ALLOWED_DOCUMENT_TYPES = new Set<string>(submissionEvidenceTypes);
 ALLOWED_DOCUMENT_TYPES.add("room_photo");
 
 export class UploadCaseDocumentService {
-  public constructor(private readonly database: DatabaseClient, private readonly storage: S3Client, private readonly bucket: string, private readonly scanner: MalwareScanner) {}
+  public constructor(private readonly database: DatabaseClient, private readonly storage: S3Client, private readonly bucket: string, private readonly scanner: MalwareScanner, private readonly logger?: Pick<Logger, "warn">) {}
+
+  /**
+   * Best-effort removal of one object. A failure never changes the outcome of
+   * the caller, but it is logged at warn: nothing retries the delete, so the
+   * line is the only trace that the object is still in the bucket.
+   */
+  private async deleteObject(key: string, context: { operation: string; documentId?: string; traceId?: string | undefined }): Promise<void> {
+    try { await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })); }
+    catch (error) { logObjectDeleteFailure(this.logger, { ...context, bucket: this.bucket, objectKey: key, error }); }
+  }
 
   public async setRepresentative(input: { caseId: string; roomId: string; documentId: string; actorAccountId: string; traceId?: string }): Promise<void> {
     await this.database.$transaction(async (transaction) => {
@@ -43,9 +55,10 @@ export class UploadCaseDocumentService {
       return photo;
     });
     if (documents !== null) {
-      // Metadata is retained for audit; object deletion is best-effort and can be retried by the purge job.
-      await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: documents.objectKey })).catch(() => undefined);
-      for (const variant of documents.variants) await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: variant.objectKey })).catch(() => undefined);
+      // Metadata is retained for audit. Object deletion is best-effort: a failure is logged at warn and nothing retries it (no purge job exists), so the object stays in the bucket.
+      const context = { operation: "intake.room_photo_delete", traceId: input.traceId };
+      await this.deleteObject(documents.objectKey, { ...context, documentId: input.documentId });
+      for (const variant of documents.variants) await this.deleteObject(variant.objectKey, context);
     }
   }
 
@@ -74,10 +87,12 @@ export class UploadCaseDocumentService {
       return roomDocuments;
     });
 
+    // Best-effort, as in deletePhoto: a failed delete is logged and not retried.
+    const context = { operation: "intake.room_delete", traceId: input.traceId };
     for (const document of documents) {
-      if (document.deletedAt === null) await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: document.objectKey })).catch(() => undefined);
+      if (document.deletedAt === null) await this.deleteObject(document.objectKey, { ...context, documentId: document.id });
       for (const variant of document.variants) {
-        if (variant.deletedAt === null) await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: variant.objectKey })).catch(() => undefined);
+        if (variant.deletedAt === null) await this.deleteObject(variant.objectKey, { ...context, documentId: variant.id });
       }
     }
   }
@@ -134,8 +149,10 @@ export class UploadCaseDocumentService {
         }
       });
     } catch (error) {
-      if (thumbnailRef !== null) await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: thumbnailRef })).catch(() => undefined);
-      await this.storage.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key })).catch(() => undefined);
+      // No stored_documents row was kept, so nothing can reference these objects; take them back out. A failed delete is logged and the original error is still the one thrown.
+      const context = { operation: "intake.document_upload_rollback", traceId: input.traceId };
+      if (thumbnailRef !== null) await this.deleteObject(thumbnailRef, { ...context, documentId: `${documentId}_thumbnail` });
+      await this.deleteObject(key, { ...context, documentId });
       throw error;
     }
     return { document_id: documentId, document_type: input.documentType, document_ref: key, thumbnail_ref: thumbnailRef, upload_status: "accepted", content_type: input.contentType, size_bytes: size, sha256_checksum: checksum, original_filename: input.originalFilename.slice(0, 255) };
