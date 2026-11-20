@@ -3,7 +3,7 @@
 API-only backend for VistaBlox. This repository is being implemented from the architecture record in `../Docs/Backend`; when code and those documents disagree, the current design record and `03-Database/CORE_TABLES.md` take precedence.
 
 ## Implemented foundation
-
+Full documentation: [docs/README.md](docs/README.md).
 - Express 5 and TypeScript API runtime
 - Zod validation for requests, responses, environment variables, and errors
 - stable error envelope with a trace ID
