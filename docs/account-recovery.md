@@ -18,6 +18,24 @@ If the target account gained a staff role after its case was opened, completion 
 
 The send outcome is audited (`authentication.account_recovery_link_sent` or `authentication.account_recovery_link_delivery_failed`). A failed send answers `503 authentication.account_recovery_completion_delivery_failed`. Retrying the same `complete` call on that already-completed case sends a fresh link without re-completing it, and is allowed only while no `account_recovery_link_sent` audit exists for the case. After that it answers `409 authentication.account_recovery_case_not_approved`, so a retry cannot hand out duplicate links. An undelivered link's bootstrap expires on its own after 15 minutes. Two narrow windows remain and are accepted: if the `link_sent` audit write itself fails after a successful send, a later retry can send a second link, and two concurrent retries can each send one. Every send is audited in both cases.
 
+## Notices that fail to send
+
+The case-opened notice, the approval or rejection notice, the completion notice and the customer's device-replacement code (`RequestDeviceReplacementService`) are best-effort: the case, the decision or the code is already stored when the mail goes out, and the response is the same whether or not it was delivered (the device-replacement request in particular never reveals whether an address is bound or reachable). A send that fails is therefore not an error to the caller, but it is no longer silent: it leaves one `warn` line in the API log.
+
+```json
+{"level":40,"event":"email.delivery_failed","severity":"warn","mail_kind":"device_replacement_code","trace_id":"...","account_id":"...","error_class":"Error","error_code":"ETIMEDOUT","error_message":"Greeting never received","msg":"email delivery failed; the request carried on without it"}
+```
+
+- `mail_kind` is `account_recovery_case_opened`, `account_recovery_approved`, `account_recovery_rejected`, `account_recovery_completed` (the staff-target notice), `account_recovery_reenrolment_notice` (the customer-target notice) or `device_replacement_code`.
+- The line carries `case_id` and/or `account_id`, whichever the code has at that point, and the `trace_id` of the request. Never the recipient address, the code, a link or any part of the mail: the message is scrubbed of the recipient, of any other email address and of URLs. A server that echoes only the local part of an address is not caught by that.
+- `error_code` is what separates the causes, because nodemailer's own errors are plain `Error`s: `ETIMEDOUT` (connection, greeting or silence on the socket), `ECONNECTION` and `ESOCKET` (refused or dropped), `EAUTH` (credentials), `EENVELOPE` (a recipient or the sender was refused).
+- The transport gives up on an unreachable server after 10 seconds, on one that accepts the connection but sends no greeting after 10, and on a connected one that goes silent for 30 (`SMTP_CONNECTION_TIMEOUT_MS`, `SMTP_GREETING_TIMEOUT_MS`, `SMTP_SOCKET_TIMEOUT_MS` in `src/infrastructure/email/smtp-email-sender.ts`; not configurable by environment). A dead or silent mail host so costs a request one of those waits instead of minutes. There is no overall deadline for a whole send: a server that answers every step just inside 30 seconds can still hold it longer.
+- To look for them:
+
+      docker compose --env-file .env.staging -f docker-compose.staging.yml logs --no-log-prefix --since 1h vistablox-api | grep '"event":"email\.delivery_failed"'
+
+Nothing alerts on these lines yet (the same gap `docs/wallet-registration-operations.md` names): someone has to read the log. A run of them with the same `error_code` means the mail host, not one customer, is the problem. The staff recovery link itself is not covered here: its failure is the `503` above.
+
 ## What the 72-hour cooldown does and does not cover
 
 `ACCOUNT_RECOVERY_POLICY.md`'s Restricted Recovery State freezes five things: new investments/deposits, login-method changes, payout-destination changes, redemption/cash-out, and other sensitive actions. Only the first is enforced here:

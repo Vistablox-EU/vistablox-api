@@ -72,6 +72,21 @@ export interface EmailSender {
   sendDeviceReplacementCodeEmail(email: DeviceReplacementCodeEmail): Promise<void>;
 }
 
+// Every send is awaited inside a request or a job, so none may wait on nodemailer's
+// own defaults (2 minutes to connect, 10 minutes of silence on the socket).
+// The socket timeout is the time a connected server may stay silent between two
+// protocol steps (including the reply after the message body), so it is the
+// longest of the three.
+export const SMTP_CONNECTION_TIMEOUT_MS = 10_000;
+export const SMTP_GREETING_TIMEOUT_MS = 10_000;
+export const SMTP_SOCKET_TIMEOUT_MS = 30_000;
+
+export interface SmtpTimeouts {
+  connectionMs: number;
+  greetingMs: number;
+  socketMs: number;
+}
+
 export interface SmtpEmailSenderOptions {
   host: string;
   port: number;
@@ -79,17 +94,35 @@ export interface SmtpEmailSenderOptions {
   user: string;
   password: string;
   from: string;
+  /** Replaces the defaults above; for tests, which cannot wait seconds. */
+  timeouts?: Partial<SmtpTimeouts>;
 }
 
 export class SmtpEmailSender implements EmailSender {
   private readonly transporter: Transporter;
 
   public constructor(private readonly options: SmtpEmailSenderOptions) {
+    const timeouts: SmtpTimeouts = {
+      connectionMs: SMTP_CONNECTION_TIMEOUT_MS,
+      greetingMs: SMTP_GREETING_TIMEOUT_MS,
+      socketMs: SMTP_SOCKET_TIMEOUT_MS,
+      ...options.timeouts,
+    };
+    for (const [name, value] of Object.entries(timeouts)) {
+      // nodemailer treats 0 (and NaN) as "use my default", which would put back
+      // the very wait this removes.
+      if (!Number.isInteger(value) || value <= 0) {
+        throw new RangeError(`SMTP ${name} timeout must be a positive whole number of milliseconds`);
+      }
+    }
     this.transporter = nodemailer.createTransport({
       host: options.host,
       port: options.port,
       secure: options.secure,
       auth: { user: options.user, pass: options.password },
+      connectionTimeout: timeouts.connectionMs,
+      greetingTimeout: timeouts.greetingMs,
+      socketTimeout: timeouts.socketMs,
     });
   }
 

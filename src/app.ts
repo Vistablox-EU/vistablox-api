@@ -818,6 +818,7 @@ export function createApp(dependencies: AppDependencies): Express {
           new RequestDeviceReplacementService(
             replacement.repository,
             replacement.emailSender,
+            dependencies.logger,
             replacement.config,
           ),
           new VerifyDeviceReplacementService(replacement.repository, replacement.config),
@@ -995,6 +996,7 @@ export function createApp(dependencies: AppDependencies): Express {
             recovery.repository,
             recovery.administrator,
             recovery.emailSender,
+            dependencies.logger,
           ),
           new CreateRecoveryDiditSessionService(recovery.repository, recovery.didit, {
             workflowId: recovery.workflowId,
@@ -1009,6 +1011,7 @@ export function createApp(dependencies: AppDependencies): Express {
           new DecideAccountRecoveryCaseService(
             recovery.repository,
             recovery.emailSender,
+            dependencies.logger,
             () => new Date(),
             recovery.singleReviewerMode,
           ),
@@ -1016,6 +1019,7 @@ export function createApp(dependencies: AppDependencies): Express {
             recovery.repository,
             recovery.administrator,
             recovery.emailSender,
+            dependencies.logger,
             recovery.recoveryRedirectUrl,
           ),
         ),
