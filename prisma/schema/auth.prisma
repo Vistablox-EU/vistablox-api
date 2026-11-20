@@ -311,7 +311,8 @@ model DeviceReplacementCode {
 // the client fetches it (T1), requests a purpose-bound challenge (T2), then
 // signs (T3). Off-chain request types ("reservation_create" etc.) verify a
 // compact ES256 device-auth JWS over the tx claims; the request_id is the
-// canonical reference the device signs over (AD-097), amounts are decimal
+// canonical reference the device signs over (AD-258; the `tx` row of the
+// claims table in docs/plans/device-bound-auth-backend.md), amounts are decimal
 // strings, and the tx claims are compared to this row field by field --
 // any difference is TX_FIELD_MISMATCH. Status transitions:
 // pending -> signed -> executed, with pending/signed -> expired by the

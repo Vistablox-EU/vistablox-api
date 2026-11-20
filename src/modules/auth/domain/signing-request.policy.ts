@@ -6,12 +6,14 @@
 // infrastructure -- pure decision logic, as the layering rules require of
 // domain/.
 //
-// Status machine (off-chain request types, this phase):
+// Status machine (off-chain request types):
 //   pending -> signed -> executed
 // with `expired` (past expires_at) and `cancelled` (device revoked /
 // recovery started / action aborted) as absorbing stops from pending or
-// signed. For off-chain types execution is synchronous with T3, so the
-// terminal stored status is `executed` (matching the T3 response literal).
+// signed. This phase registers no request-type executors, so a request stops
+// at `signed` and T3 answers `signed` (authorize-signing-request.service.ts,
+// signing-requests.router.ts); `executed` is the terminal stored status once
+// executors exist, and nothing calls markExecuted yet.
 //
 // Design-record note: the plan's `auth.signing_requests` section enumerates
 // stored statuses as pending/signed/submitted/included/expired/cancelled

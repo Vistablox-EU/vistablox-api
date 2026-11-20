@@ -17,18 +17,18 @@ Use prefixes within a bucket, for example `intake/{case_id}/revisions/{revision}
 
 ## Runtime configuration
 
-Configure all of these values together:
+`src/config/environment.ts` accepts the storage settings only as a group: `MINIO_ENDPOINT`, `MINIO_ACCESS_KEY`, `MINIO_SECRET_KEY` and `MINIO_DISCLOSURES_BUCKET` must all be set or all be unset, and the process refuses to start otherwise. The other variables are optional there, and that schema gives no bucket variable a default. The bucket defaults below are applied only by the startup initializer (`src/infrastructure/storage/ensure-minio-bucket.ts`); the API takes bucket names from its own environment and falls back to nothing.
 
 - `MINIO_ENDPOINT`
-- `MINIO_PORT`
-- `MINIO_USE_SSL`
+- `MINIO_PORT` (default `9000`)
+- `MINIO_USE_SSL` (default `false`)
 - `MINIO_ACCESS_KEY`
-- `MINIO_SECRET_KEY`
-- `MINIO_QUARANTINE_BUCKET` (default `vistablox-quarantine`)
-- `MINIO_PRIVATE_BUCKET` (default `vistablox-private`)
-- `MINIO_KYC_BUCKET` (default `vistablox-kyc`)
-- `MINIO_DISCLOSURES_BUCKET` (default `vistablox-disclosures`)
-- `MINIO_AUDIT_BUCKET` (default `vistablox-audit`)
+- `MINIO_SECRET_KEY` (at least 8 characters)
+- `MINIO_QUARANTINE_BUCKET` (initializer default `vistablox-quarantine`; used only by the initializer)
+- `MINIO_PRIVATE_BUCKET` (initializer default `vistablox-private`; the API mounts intake case-document upload and download only when it is set, and it is not part of the group above)
+- `MINIO_KYC_BUCKET` (initializer default `vistablox-kyc`; used only by the initializer)
+- `MINIO_DISCLOSURES_BUCKET` (initializer default `vistablox-disclosures`; in the group above, and the API mounts disclosure-document storage only when it is set)
+- `MINIO_AUDIT_BUCKET` (initializer default `vistablox-audit`; used only by the initializer)
 
 If storage is not configured, disclosure metadata remains readable but a download attempt fails closed with `infrastructure.document_storage_unavailable` (`503`). Both local and staging Compose stacks start MinIO, create all configured buckets through a one-shot initializer, enable versioning on mutable/private buckets, enable object locking on disclosure/audit buckets, and apply quarantine lifecycle rules. Staging overrides `MINIO_ENDPOINT` to the internal `minio` service name; credentials belong in `.env.staging` (or the deployment secret store).
 
