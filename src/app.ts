@@ -708,7 +708,7 @@ export function createApp(dependencies: AppDependencies): Express {
           offeringDocuments === undefined
             ? undefined
             : {
-                upload: new UploadOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store, offeringDocuments.scanner),
+                upload: new UploadOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store, offeringDocuments.scanner, undefined, dependencies.logger),
                 read: new GetOfferingDocumentService(offeringDocuments.repository, offeringDocuments.store),
               },
           offeringPresentation === undefined ? undefined : new UpdateOfferingPresentationService(offeringPresentation),
