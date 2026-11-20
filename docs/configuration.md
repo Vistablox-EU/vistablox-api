@@ -56,9 +56,13 @@ An empty string is a value, not an absence, unless the schema says otherwise. A 
 
 A value of only spaces is refused for `DEAD_LETTER_ALERT_WEBHOOK_URL` and `TRUST_PROXY` and treated as unset for `WEBAUTHN_ORIGIN` (probe). The staging anchor protects the variables it lists with `${NAME:-default}` entries (`docker-compose.staging.yml:140-247`); a variable that reaches a container only through `.env.staging` has no such protection (section 6).
 
-### 1.4 Why the count is 97 and an earlier inventory has 106 rows
+### 1.4 Why the count is 97 and more names appear in this chapter
 
-The environment schema has 97 variables. An earlier read-only inventory of the repository had 106 rows: the 97 plus nine names that are not in the schema (`DIRECT_DATABASE_URL`, `TEST_DATABASE_URL`, `EMAIL_VERIFICATION_ENABLED`, `POSTGRES_PASSWORD`, `DEPLOYER_PRIVATE_KEY`, `BASE_SEPOLIA_RPC_URL`, `BASE_MAINNET_RPC_URL`, `VISTABLOX_BASE_URI`, `VITEST_JSON_REPORT`). Reading the repository again found further names outside the schema, listed with the nine in section 2.19. Of the 97, two are absent from `.env.example` (`CLAMAV_HOST`, `CLAMAV_PORT`), and `.env.example` itself carries two names that are not in the schema (`DIRECT_DATABASE_URL`, `TEST_DATABASE_URL`) (`.env.example:285`, `:292`).
+The environment schema has 97 variables. The 97 are the keys of the object passed to `z.object` in `src/config/environment.ts:6-390` (97 keys, counted by script, none repeated). Nine further names are not in the schema (`DIRECT_DATABASE_URL`, `TEST_DATABASE_URL`, `EMAIL_VERIFICATION_ENABLED`, `POSTGRES_PASSWORD`, `DEPLOYER_PRIVATE_KEY`, `BASE_SEPOLIA_RPC_URL`, `BASE_MAINNET_RPC_URL`, `VISTABLOX_BASE_URI`, `VITEST_JSON_REPORT`). Further names outside the schema (names that exist only in the compose files, the Dockerfiles, `tests/`, `contracts/` or the design record) are listed with the nine in section 2.19. Of the 97, two are absent from `.env.example` (`CLAMAV_HOST`, `CLAMAV_PORT`), and `.env.example` itself carries two names that are not in the schema (`DIRECT_DATABASE_URL`, `TEST_DATABASE_URL`) (`.env.example:285`, `:292`).
+
+> Pending #238: removes `ACCOUNT_RECOVERY_SINGLE_REVIEWER_MODE` from the schema, so the count of 97 variables and the counts of variables with a schema default (section 1.3; L13 and L14 in section 8) change.
+
+> Pending #241: adds `DEAD_LETTER_ALERT_WINDOW_MINUTES` to the schema with a default of 60, so the same counts change.
 
 ## 2. Variable reference by group
 
@@ -295,7 +299,7 @@ The mobile-facing feature flags in the app configuration are not variables: `dev
 
 ### 2.19 Variables outside the schema
 
-These names are read or set by something other than `loadEnvironment()`. The nine names that the earlier inventory counted beyond the 97 are all in this table; the other names were found by reading the compose files, the Dockerfiles, `tests/` and `contracts/`.
+These names are read or set by something other than `loadEnvironment()`. The nine names listed in section 1.4 are all in this table; the other names were found by reading the compose files, the Dockerfiles, `tests/` and `contracts/`.
 
 | Name | Read or set by | Purpose and notes |
 | --- | --- | --- |

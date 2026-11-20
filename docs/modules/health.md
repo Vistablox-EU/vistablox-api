@@ -95,7 +95,7 @@ No issue in the issue map covers these.
 
 ## 12. Known gaps between the code and the design record
 
-None found for this module. Not verified: the record's expectations for probe semantics were not read for this page.
+Not compared with the record: the record's expectations for probe semantics were not read for this page, so this chapter claims no gap and excludes none.
 
 ## 13. Not verified
 

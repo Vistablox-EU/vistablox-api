@@ -116,7 +116,7 @@ The file runs top to bottom as an ES module with top-level `await`; there is no 
 
 > Pending #240: after step 10 the api verifies the chain id and the code at the contract addresses, and ends the process when the RPC is unreachable.
 
-An invalid or incomplete environment therefore ends the process before it listens. An earlier audit run observed exit code 1, a list of the failed settings and a stack trace, and no secret values; this pass did not re-run it. Not verified: the output of a failed start in this pass.
+An invalid or incomplete environment therefore ends the process before it listens. Observed in this pass: `npx tsx src/server.ts` with `NODE_ENV=production` and a few missing or invalid settings exited with code 1 and printed a stack trace and a ZodError that names each failed setting and none of the supplied values (probe and wording in [security.md](security.md#16-secrets-in-configuration)). Not verified: the output of a failed start of the compiled image.
 
 ### 2.2 API shutdown
 
@@ -172,7 +172,7 @@ The staging api container's health check calls `/health/ready` every 10 s with a
 | `src/config/environment.ts` | The one Zod schema for every environment variable, its object-level refinements, `loadEnvironment`, and the derivations that depend on it (`resolveWebAuthnSettings`, `resolveStaffInvitationAcceptUrl`). Only `better-auth.cli.ts` and `ensure-minio-bucket.ts` read `process.env` outside this folder (grep). |
 | `src/modules/<module>/` | Product code, one folder per bounded context (section 3.2). |
 | `src/shared/` | Code that every module may import and that knows no module: `errors/` (`AppError`, `ChainStateUnavailableError`, `freshAuthenticationRequiredError`), `http/` (trace id, error handler, rate limiter, idempotency middleware, body-parser error translation, not-found handler), `jobs/` (enqueue helper, queue creation, ownership registry, dead-letter consumer, alert webhook, replay), `logging/` (URL and hex masking), `health/` (worker heartbeat and metrics), `domain/` (cent and micro arithmetic, wallet address spelling, position unit rule, wallet registration evidence type). |
-| `src/infrastructure/` | Adapters to the outside world that more than one module uses: `antivirus/`, `blockchain/` (viem clients, ABIs, operator-key lock, transfer snapshot), `cache/` (profile cache), `database/` (Prisma client, probe, unique-violation helper), `email/` (SMTP sender), `idempotency/` (store), `logging/` (pino setup, request redaction), `profile/` (display profile provider), `rate-limit/` (store), `storage/` (S3 store, bucket init, bucket names and object keys). |
+| `src/infrastructure/` | Adapters to the outside world that more than one module uses: `antivirus/`, `blockchain/` (viem clients, ABIs, operator-key lock, transfer snapshot), `cache/` (profile cache), `database/` (`prisma.ts`, the Prisma client; `database-probe.ts`, the probe; `unique-violation.ts`, the helper `isUniqueViolation(error, constraintName)`), `email/` (SMTP sender), `idempotency/` (`idempotency-store.ts`, the `IdempotencyStore` interface; `prisma-idempotency-store.ts`, its only adapter `PrismaIdempotencyStore`), `logging/` (pino setup; `request-log-redaction.ts`, with `redactQueryString`, `redactUrl`, `redactQueryObject` and `requestLogSerializer`, see [security.md](security.md#112-redaction)), `profile/` (`identity-display-profile.provider.ts`, the class `IdentityDisplayProfileProvider`, see [integrations.md](integrations.md#5-redis)), `rate-limit/` (store), `storage/` (S3 store, bucket init, bucket names and object keys). |
 | `src/types/express.d.ts` | Declares `response.locals`: `traceId`, `logger`, `authContext`, `dpopJkt`. |
 | `src/generated/prisma/` | The generated Prisma client. Not in Git (`.gitignore:7`); created by `npm run db:generate`. |
 
@@ -205,6 +205,7 @@ Per-module reference pages are in [modules/](modules/) (`account.md`, `auth.md`,
 | `contracts/` | The Solidity contracts and their tests; `scripts/export-contract-abis.mjs` copies the ABIs into `src/infrastructure/blockchain/abis/`. |
 | `infrastructure/` | Container build files and configuration: `clamav/clamd.conf`, `maildev/Dockerfile`, `minio/Dockerfile`. |
 | `scripts/deploy/staging.sh` | Validates `.env.staging` and starts the staging compose stack. |
+| `app.json` | A file whose whole content is `{"expo": {}}` (`app.json:1-3`). No source file, script, compose file or document outside `docs/` and the lock file names it (`git grep app.json`), and the `Dockerfile` does not copy it into an image (`Dockerfile:9-16`, `:21`, `:34-36`, `:45-47`). What it is for is not stated anywhere in the repository. |
 | `docs/` | This documentation, the existing guides and `docs/plans/`. |
 | `.github/workflows/` | `ci.yml` (typecheck, architecture, tests against PostgreSQL 18, contracts), and two workflows that run an automated assistant on pull requests and issues (not part of the build). |
 | `output/`, `tmp/` | Development fixtures (intake photos and PDFs, a fixture script); not used by the runtime. |
@@ -400,7 +401,7 @@ Four mounts refuse a bad composition at startup instead of mounting without a ga
 | `requireFreshAuthentication` (`:36`) and the probe `createFreshAuthenticationProbe` (`:19`) | `src/modules/auth/api/customer/require-fresh-authentication.ts` | A customer device session created in the last 5 minutes; for other sessions a recorded fresh login in the session mirror (`src/modules/auth/domain/fresh-authentication.ts:10`, `isFreshDeviceSession`). |
 | `requireDpopOnly` | `src/modules/auth/api/customer/require-dpop-only.ts` | A valid, unreplayed DPoP proof and no session, for the device-auth endpoints. |
 | Idempotency middleware | `src/shared/http/idempotency.ts` | `Idempotency-Key` handling (see [security.md](security.md) section 4). |
-| Customer population check | inline `requireCustomerContext` in six routers | `population === "customer"` in `src/modules/auth/api/customer/account-closure.router.ts:64`, `src/modules/identity/api/kyc.router.ts:135`, `src/modules/investor-activity/api/investor-activity.router.ts:54`, `src/modules/offering/api/offering.router.ts:156`, `src/modules/profile/api/profile.router.ts:51`, `src/modules/wallet/api/wallet.router.ts:98`. Other customer routers (`/v1/intake-cases`, `/v1/auth/sessions`, `/v1/auth/login-methods`, `/v1/auth/mobile/replacement`) do not check it. |
+| Customer population check | inline `requireCustomerContext` in six routers | `population === "customer"` in `src/modules/auth/api/customer/account-closure.router.ts:64`, `src/modules/identity/api/kyc.router.ts:135`, `src/modules/investor-activity/api/investor-activity.router.ts:54`, `src/modules/offering/api/offering.router.ts:156`, `src/modules/profile/api/profile.router.ts:51`, `src/modules/wallet/api/wallet.router.ts:98`. Four other mounted customer routers (`/v1/intake-cases`, `/v1/auth/sessions`, `/v1/auth/login-methods`, `/v1/auth/mobile/replacement`) do not check it, and neither does the signing-request router (`src/modules/auth/api/customer/signing-requests.router.ts`), which main does not mount. |
 
 ### 5.5 Finding which file serves a path
 
@@ -711,9 +712,9 @@ Where the code and the design record or this repository's own guide (`AGENTS.md`
 ## Not verified
 
 - The contents of `.env.staging` and any production configuration: which optional dependencies are present in a deployment is unknown, so every "when absent" statement describes the code, not a deployment.
-- Behaviour on PostgreSQL 18: the checks of an earlier audit ran on 16.15, and this pass ran no database at all. CI uses `postgres:18-alpine` (`.github/workflows/ci.yml:28-29`).
+- Behaviour on PostgreSQL 18: no database was run in this pass. CI uses `postgres:18-alpine` (`.github/workflows/ci.yml:28-29`).
 - Real Coinbase CDP and real clamd 1.4.6 behaviour. The ClamAV statement in 1.1 follows the code and the descriptions in #205 and #225, not a run.
-- Process exit output and exit codes of a failed start (the audit run is cited, not repeated).
+- Process exit output and exit codes of a failed start of the compiled image and of the worker: only `src/server.ts` was started, with an invalid environment, under `tsx`.
 - Library behaviour was observed in scratch processes outside the repository with the versions locked in `package-lock.json` (express 5.2.1, helmet 8.1.0, cors 2.8.5, body-parser 2.3.0, pino-http 11.0.0) or read from `node_modules` at those versions (pg-boss 12.29.0, pg-pool 3.14.0, better-auth 1.7.2, better-call 1.4.0). None of that ran against `createApp` itself.
 - The dependency-check counts (397 and 398 modules, 783 and 1307 dependencies, 32 violations) come from running `depcruise` from another checkout's `node_modules` against the worktree without `src/generated/prisma/`; the repository's own `npm run architecture` was not run in this pass.
 - Node's default keep-alive timeout (5 s) against the reverse proxy's idle timeout: `src/server.ts` sets no `keepAliveTimeout` (grep), and a mismatch can cause sporadic 502 answers; not checked.

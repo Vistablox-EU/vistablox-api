@@ -634,7 +634,7 @@ Defects and sharp edges found while reading the code. They are stated as found a
 * **Staging and production configuration.** `.env.staging` is not in the repository, and no production configuration was seen. Which of `APPLE_*`, `AUTH_TRUSTED_ORIGINS`, `RATE_LIMIT_CACHE_URL`, `TRUST_PROXY` and the Play Integrity values are set where is unknown.
 * **Behaviour on PostgreSQL 18.** The local checks ran on 16.15.
 * **Real Play Integrity, Google and Apple behaviour.** The decoder's own comment says it was never run against the real API; no real Google or Apple ID token was verified.
-* **The dependency advisory.** An earlier audit reported open critical and high advisories for the pinned `better-auth` 1.7.2 and others (`npm audit`); the advisory text was not read and `npm audit` was not run, so whether the condition applies here is not known.
+* **The dependency advisory.** `npm audit --package-lock-only` on 2026-11-20 listed `better-auth` 1.7.2, the version `package.json:42` pins, as critical ([security.md](security.md#18-dependency-posture)); the advisory text was read as a title and a version range only, so whether the condition applies to the plugins and options this repository enables is not known.
 * **The mobile app.** The `vistablox-mobile` repository was not available; its copy of section 3 of the plan was not compared, and what the app actually sends was not checked.
 
 ## Related documents

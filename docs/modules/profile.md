@@ -134,7 +134,7 @@ The full list is in [../configuration.md](../configuration.md).
 
 ## 12. Known gaps between the code and the design record
 
-None established for this module. Not verified: the design record's profile and preferences definitions were not compared with the response.
+Not compared with the record: the design record's profile and preferences definitions were not compared with the response, so this chapter claims no gap and excludes none.
 
 ## 13. Not verified
 

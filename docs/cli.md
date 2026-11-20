@@ -12,6 +12,8 @@ Contents: [1 Overview](#1-overview) · [2 Safety by environment](#2-safety-by-en
 
 `package.json` defines 21 scripts (`package.json:9-31`). Four of them start an operator command that is compiled into `dist/cli/`; the others run the servers, the checks, the database tooling or the contracts package. Arguments reach a script after a `--`: `npm run jobs:replay-dead-letter -- --dead-letter-job-id <uuid>`.
 
+> Pending #225: adds one script, `clamav:smoke`, to `package.json`, so the count of 21 changes.
+
 ```mermaid
 flowchart LR
   subgraph checkout["repository checkout with dev dependencies"]
@@ -267,7 +269,7 @@ CI runs the same three steps against a throwaway PostgreSQL 18 service container
 | `db:migrate:dev` | `prisma migrate dev` | a new migration in `prisma/migrations` and the changes in the database it names | local databases only (`AGENTS.md`) |
 | `db:migrate:deploy` | `prisma migrate deploy` | applies the migrations in `prisma/migrations` that the database has not seen | `AGENTS.md`: only against a local database |
 
-`prisma.config.ts` points Prisma at the schema directory `prisma/schema`, the migrations directory `prisma/migrations` and the connection `DIRECT_DATABASE_URL`, with the local default `postgresql://prisma:prisma@localhost:5432/vistablox` when it is unset (`prisma.config.ts:1-18`). `DIRECT_DATABASE_URL` is the migration connection; `DATABASE_URL` is the runtime one (`README.md`, "Local setup"). The `pgboss` schema is not created by any Prisma migration; pg-boss creates it itself when a process starts ([jobs-and-workers.md](jobs-and-workers.md) section 3.1).
+`prisma.config.ts` points Prisma at the schema directory `prisma/schema`, the migrations directory `prisma/migrations` and the connection `DIRECT_DATABASE_URL`, with the local default `postgresql://prisma:prisma@localhost:5432/vistablox` when it is unset (`prisma.config.ts:1-16`). `DIRECT_DATABASE_URL` is the migration connection; `DATABASE_URL` is the runtime one (`README.md`, "Local setup"). The `pgboss` schema is not created by any Prisma migration; pg-boss creates it itself when a process starts ([jobs-and-workers.md](jobs-and-workers.md) section 3.1).
 
 The compose stacks apply migrations through a one-shot `migrate` service built from the `migrate` image; `api` and `worker` start only after it completed successfully (`docker-compose.yml:87-95`, `docker-compose.staging.yml:96-111`, `:248-252`, `:279-283`). The staging service takes its connection from `DIRECT_DATABASE_URL` pointing at the compose-local database container (`docker-compose.staging.yml:108`). The local sequence in the README is `createdb`, `cp .env.example .env`, `npm install`, `npm run db:generate`, `npm run db:migrate:dev`, `npm run dev`.
 
