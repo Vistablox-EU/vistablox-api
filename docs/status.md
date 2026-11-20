@@ -735,4 +735,4 @@ When a pull request listed in section 3 merges, or when main moves for any other
 
 A new pull request that changes documented behaviour adds its `> Pending #N:` lines under the statements it changes and a row in section 3, before it is merged.
 
-The repository `README.md` carries one added line, `Full documentation: [docs/README.md](docs/README.md).`, in a paragraph of its own. Open pull request #203 changes line 3 of the same file; the two changes do not overlap and merge without a conflict in either order (checked with `git merge-file` on the file at `origin/main`, at this branch and at `origin/pr-203`).
+The repository `README.md` carries one added line, `Full documentation: [docs/README.md](docs/README.md).`, on line 6, which is blank on main (under the heading `## Implemented foundation`). It replaces a blank line, so the file keeps its 258 lines and no `README.md:N` citation in the chapters moves. Open pull request #203 changes line 3 of the same file; lines 4 and 5 lie between the two changes, and they merge without a conflict in either order (checked with `git merge-file` on the file at `origin/main`, at this branch and at `origin/pr-203`).
